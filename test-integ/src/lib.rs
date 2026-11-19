@@ -90,6 +90,8 @@ use regex::Regex;
 
 mod runtime;
 
+pub use process::host_output;
+
 pub use runtime::{
     NATIVE_PROBE_SEARCH_PATH, NativePython, PY_IDENTITY_QUERY, PyIdentity, framework_root,
     git_only_spawn_policy, git_tool_config, is_apple_shim, macos_developer_tool,

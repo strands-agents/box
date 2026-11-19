@@ -1187,6 +1187,7 @@ mod linked_command_mutation_tests {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: "linked-command-reach".to_string(),
@@ -1213,6 +1214,7 @@ mod linked_command_mutation_tests {
             mcp: Default::default(),
             contained_mcp: Default::default(),
             telemetry: Default::default(),
+            secret_source: Default::default(),
         };
         let commands = ConfiguredCommands::load(&record).expect("linked command is admitted");
         let reach = Reach::over(&home, None, None)
@@ -1231,6 +1233,60 @@ mod linked_command_mutation_tests {
                 format!("{reported_as}: {reason}")
             );
         }
+    }
+
+    /// **Stated limit: policy alone decides a read or a change of a `reads` or `deny` path of a
+    /// secret source through an interpreter**, and the program of the source keeps its refusal.
+    #[test]
+    fn the_interpreters_leave_a_path_of_a_secret_source_to_policy() {
+        let temporary = tempfile::tempdir().expect("fixture directory");
+        let home = temporary.path().canonicalize().expect("canonical fixture");
+        std::fs::create_dir_all(home.join(".config/op")).expect("the folder of the vault");
+        // The folder of a socket that is not there yet.
+        for folder in ["tools", ".op"] {
+            std::fs::create_dir(home.join(folder)).expect("a folder");
+        }
+        std::fs::write(home.join(".config/op/config"), "").expect("the settings of the vault");
+        let program = home.join("tools/op");
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").expect("the program of the source");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("executable program");
+        let entries = BTreeMap::from([(
+            "op".to_string(),
+            crate::record::config::secret_source::SecretSourceEntry {
+                command: vec![program.display().to_string(), "{ref}".to_string()],
+                reads: vec![home.join(".config/op").display().to_string()],
+                deny: vec![home.join(".op/socket").display().to_string()],
+                ..Default::default()
+            },
+        )]);
+        let commands =
+            ConfiguredCommands::of_secret_sources(&entries).expect("the source is admitted");
+        let reach = Reach::over(&home, None, None)
+            .expect("reachable fixture")
+            .with_commands(Arc::new(commands));
+        // The program is refused, so the passes below are not for want of the commands.
+        mutation_refused_for(
+            &reach,
+            &program,
+            "tools/op",
+            "is a configured tool command or its ancestor, which this run does not allow to change",
+        );
+        for relative in [".config/op/config", ".config/op", ".op/socket", ".op"] {
+            reach
+                .approve_mutation(&home.join(relative), relative)
+                .unwrap_or_else(|refusal| {
+                    panic!("{relative}: a floor refuses the change: {refusal}")
+                });
+            reach
+                .refuse_forbidden(&home.join(relative), relative, true)
+                .unwrap_or_else(|refusal| {
+                    panic!("{relative}: a floor refuses the change: {refusal}")
+                });
+        }
+        reach
+            .approve(&home.join(".config/op/config"), ".config/op/config")
+            .expect("a read stays with policy");
     }
 
     #[test]

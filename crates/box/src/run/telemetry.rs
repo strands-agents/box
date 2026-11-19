@@ -633,16 +633,21 @@ fn mcp_resource(frame: &McpFrame<'_>) -> String {
 /// The box-owned sink for final policy enforcement point decisions.
 pub(crate) struct DecisionRecorder {
     collector: Option<Arc<Collector>>,
+    decisions: Option<Arc<super::decisions::PolicyDecisionSender>>,
     correlation: Option<telemetry::Correlation>,
     #[cfg(test)]
     recorded: Arc<std::sync::Mutex<Vec<EffectiveDecision>>>,
 }
 
 impl DecisionRecorder {
-    /// Bind effective decision recording to this box's collector.
-    pub(crate) fn over(collector: Arc<Collector>) -> Arc<Self> {
+    /// Bind effective decision recording to this box's collector and the caller's decision channel.
+    pub(crate) fn over(
+        collector: Arc<Collector>,
+        decisions: Option<super::decisions::PolicyDecisionSender>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             collector: Some(collector),
+            decisions: decisions.map(Arc::new),
             correlation: None,
             #[cfg(test)]
             recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -652,6 +657,7 @@ impl DecisionRecorder {
     pub(crate) fn for_request(&self, correlation: telemetry::Correlation) -> Arc<Self> {
         Arc::new(Self {
             collector: self.collector.clone(),
+            decisions: self.decisions.clone(),
             correlation: Some(correlation),
             #[cfg(test)]
             recorded: Arc::clone(&self.recorded),
@@ -673,8 +679,12 @@ impl DecisionRecorder {
         if let Ok(mut recorded) = self.recorded.lock() {
             recorded.push(decision.clone());
         }
+        let record = decision.into_record();
+        if let Some(decisions) = &self.decisions {
+            decisions.send(&record);
+        }
         if let Some(collector) = &self.collector {
-            collector.record(decision.into_record());
+            collector.record(record);
         }
     }
 
@@ -690,6 +700,7 @@ impl DecisionRecorder {
     pub(crate) fn discarding() -> Arc<Self> {
         Arc::new(Self {
             collector: None,
+            decisions: None,
             correlation: None,
             recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
@@ -806,21 +817,34 @@ fn operator_resource_attributes(value: Option<std::ffi::OsString>) -> Result<Str
     }
 }
 
-/// Open this box's collector from its stored record.
+/// Open this box's collector from its stored record, with each target's secret read through
+/// `secrets`.
 pub(crate) fn open(
     layout: &crate::record::layout::BoxRoot,
     stored: &crate::record::config::Record,
+    secrets: &crate::run::secret_sources::TelemetrySecrets,
 ) -> Result<Arc<Collector>, BoxError> {
     let directory = layout.telemetry_directory();
     layout.create_child_directory(&directory)?;
 
-    let request =
-        crate::record::config::telemetry::config_for(&stored.box_id, &stored.telemetry, layout)?
-            .with_resource_attributes(operator_resource_attributes(std::env::var_os(
-                RESOURCE_ATTRIBUTES,
-            ))?);
+    let mut request = crate::record::config::telemetry::config_for(
+        &stored.box_id,
+        &stored.telemetry,
+        layout,
+        &stored.declared_sources()?,
+        secrets.backend(),
+    )?;
+    if std::env::var_os(FAILURE_REPORT_VARIABLE).is_some_and(|value| !value.is_empty()) {
+        request = request.reporting_failures();
+    }
+    request = request.with_resource_attributes(operator_resource_attributes(std::env::var_os(
+        RESOURCE_ATTRIBUTES,
+    ))?);
     Ok(Arc::new(telemetry::open(request)?))
 }
+
+/// The operator's variable that prints each failed telemetry batch to stderr with its full cause.
+const FAILURE_REPORT_VARIABLE: &str = "STRANDS_BOX_TELEMETRY_DEBUG";
 
 #[cfg(test)]
 mod tests {
@@ -829,6 +853,37 @@ mod tests {
     use policy::{EgressPolicyInterceptor, GovernedBox, Policy, PolicyEngine, Principal};
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    #[test]
+    fn a_request_recorder_sends_to_the_callers_channel() {
+        let (sender, receiver) = crate::policy_decisions(4);
+        let recorder = DecisionRecorder {
+            collector: None,
+            decisions: Some(Arc::new(sender)),
+            correlation: None,
+            recorded: Arc::new(Mutex::new(Vec::new())),
+        };
+        recorder
+            .for_request(telemetry::Correlation::current())
+            .record(EffectiveDecision::enforcement_deny(
+                r#"Box::Action::"net:connect""#,
+                "example.net:443",
+                "egress",
+                "refused",
+            ));
+        let decision = receiver
+            .try_recv()
+            .expect("the per-request recorder kept the channel");
+        assert_eq!(
+            (
+                decision.permitted,
+                decision.action.as_str(),
+                decision.rule.as_str(),
+                decision.cause.as_str()
+            ),
+            (false, "net:connect", "enforcement:egress", "enforcement")
+        );
+    }
 
     #[test]
     fn empty_attribution_keeps_policy_denial_classes_distinct() {

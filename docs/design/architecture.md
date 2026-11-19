@@ -266,11 +266,23 @@ interpreters are part of the code the operator must trust.
 1. It [hardens the trusted process](decisions.md#the-trusted-processs-memory-is-a-defended-asset)
    against memory access by other processes running as the same user. This adds protection but
    does not guarantee it. Root can bypass it.
-2. It reads `box.toml`, prepares the box directory, and takes the run lock. It records the
-   canonical path and filesystem identity of each source file it opens.
+2. It reads `box.toml` and locks the box directory. It records the canonical path and filesystem
+   identity of each source file it opens.
    [Later steps use the validated identities](decisions.md#a-run-validates-once-then-acts-on-the-identity-it-approved),
    so replacing a source file cannot substitute a new configuration.
-3. It opens the collector to record the steps that follow.
+   Before it stores anything in the box directory, it chooses each `[tool.<name>]` to leave out,
+   because its program is not installed. It then checks the program file of each declared secret
+   source and prints one line for each on stderr. Before that line, it refuses a write grant that
+   covers a program and a grant that reaches a path that a source protects.
+   The check reads no table of a left-out tool. A run that
+   this check stops leaves a new box directory empty. It then stores the box record, prepares
+   the box directory, and takes the run lock.
+   It then prints a `left out` line on stderr for each tool that it left out. No later step sees
+   a left-out tool, so it gets no grants, no file of its own, and no tool selection. Its grammar
+   stays in the policy and still decides another table with the same program name.
+3. It runs the programs of the declared secret sources to read the secrets of telemetry targets,
+   and opens the collector to record the steps that follow. A read that fails here is on stderr
+   alone.
 4. It installs the policy. Parsing or validation errors stop startup. Box also
    [rejects rules it can prove will never match](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns).
    It warns when it finds a rule that may never match but cannot prove it.
@@ -279,7 +291,9 @@ interpreters are part of the code the operator must trust.
    For each `[tool]` or stdio `[mcp.<name>]` entry covered by a grammar, Box prints a line on stderr.
    Rules for `shell:spawn` do not apply to a spawn of those programs by the bound name.
    Box also prints, for each bare name a `[tool]` answers to, the file the Shell runs for it.
-5. It resolves bound secrets and starts the gateway with its own certificate authority.
+5. It runs the programs of the declared secret sources to read every other secret, and records
+   each read. It resolves bound secrets and starts the gateway with its own certificate authority.
+   It refuses a write grant that covers a configured tool program or the program of a secret source.
    It checks each process specification's filesystem grants, then binds the broker socket.
    A grant it cannot check stops startup.
 6. It builds and discloses the sandbox grants for each tool, then for the agent.
@@ -287,15 +301,21 @@ interpreters are part of the code the operator must trust.
    because those accesses do not produce `fs:*` decisions. If Box cannot build a tool's sandbox
    grants, startup fails before the agent starts. On macOS, `file-attributes` adds a line for each
    sandbox that states which attributes its write grants can set.
-   A process that selects `file-watching` gets a line that FSEvents can expose denied names
-   and event metadata. A selected stdio MCP server gets it before the agent starts, and again when
-   the server starts.
+   A process that selects `file-watching` gets a line that FSEvents can expose denied names,
+   event metadata, the host-wide event count, and each volume's history identifier, and that a
+   root process can delete any volume's event history. A selected stdio MCP server gets it before
+   the agent starts, and again when the server starts.
 
    On Linux, `interpreter aliases for configured access` lists preserved interpreter spellings
    before the runtime-minimum section. Each line maps a spelling to a file the process's existing
    grants authorize. These mappings add no executable or library access. The
    [configuration reference](../user/config.md#agentfilesystem-and-toolnamefilesystem) shows the output.
 7. It starts the trampoline, which becomes the agent, and waits for the workload to end.
+
+Before a selected Linux workload starts, native filesystem setup probes whether the kernel can transfer path-only file handles.
+When that optional transfer is unsupported, Box reports the limit on stderr and refuses those opens.
+Other supported native operations remain available. Unexpected probe errors stop startup.
+The [native policy guide](../user/native-filesystem-policy.md#linux-arm64) explains this distinction.
 
 During shutdown, Box stops and reaps the workload before closing the broker and gateway.
 It then removes the record that identifies the running box and releases the run lock.

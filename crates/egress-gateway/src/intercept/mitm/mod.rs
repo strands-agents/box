@@ -14,7 +14,6 @@ pub(crate) mod tls;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use rustls::ClientConfig;
 
@@ -271,7 +270,7 @@ impl MitmInterceptor {
             )),
         });
 
-        let stop = Arc::new(AtomicBool::new(false));
+        let connections = Arc::new(listener::Connections::new(config.max_connections));
 
         // Bind exactly one transport. `unix_socket_path: Some(path)` binds ONLY an AF_UNIX
         // socket — no `TcpListener` is created in that mode — since a workload contained by the
@@ -288,9 +287,9 @@ impl MitmInterceptor {
                     .port();
                 let accept_thread = {
                     let state = state.clone();
-                    let stop = stop.clone();
+                    let connections = connections.clone();
                     std::thread::spawn(move || {
-                        listener::accept_loop(listener.incoming(), state, stop, false)
+                        listener::accept_loop(listener.incoming(), state, connections, false)
                     })
                 };
                 (BoundTransport::Tcp(port), accept_thread)
@@ -317,15 +316,20 @@ impl MitmInterceptor {
                 )?;
                 let accept_thread = {
                     let state = state.clone();
-                    let stop = stop.clone();
+                    let connections = connections.clone();
                     std::thread::spawn(move || {
-                        listener::accept_loop(listener.incoming(), state, stop, true)
+                        listener::accept_loop(listener.incoming(), state, connections, true)
                     })
                 };
                 (BoundTransport::Unix(path.clone()), accept_thread)
             }
         };
 
-        Ok(MitmHandle::new(transport, ca_path, stop, accept_thread))
+        Ok(MitmHandle::new(
+            transport,
+            ca_path,
+            connections,
+            accept_thread,
+        ))
     }
 }

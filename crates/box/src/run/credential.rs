@@ -7,21 +7,33 @@ use std::sync::Arc;
 use credentials::{Backend, Vault, VaultConfig};
 
 use crate::error::{BoxError, Internal};
-use crate::record::config::egress::{EgressEntry, EgressRoute, credsd_environments};
+use crate::record::config::Record;
+use crate::record::config::egress::{
+    EgressEntry, EgressRoute, SIGNING_PLACEHOLDER_VARIABLES, credsd_environments,
+};
+use crate::record::config::telemetry::TelemetryEntry;
+use crate::run::secret_sources::RouteSecrets;
 
 /// Validate every declared `credsd` credential before the workload starts.
 ///
 /// A box that names no `credsd` source contacts no daemon. Otherwise this confirms the daemon is
 /// reachable and speaks the protocol, and that each named environment holds a usable session; any
 /// gap is a hard failure that stops the run before it spawns the workload.
-/// Both maps are passed by construction: remote MCP is stored in its own map (`record.remote_mcp`),
-/// so a credsd source declared only on a `[mcp.<name>] type = "http"` server is covered here rather
-/// than deferred to the first request — the failure this preflight exists to prevent.
+/// Every map is passed by construction: remote MCP is stored in its own map (`record.remote_mcp`),
+/// and telemetry in another, so a credsd source declared only on a `[mcp.<name>] type = "http"`
+/// server or a `[telemetry.<label>]` target is covered here rather than deferred to the first
+/// request — the failure this preflight exists to prevent.
 pub(crate) fn preflight_credsd(
     egress: &BTreeMap<String, EgressEntry>,
     remote_mcp: &BTreeMap<String, EgressEntry>,
+    telemetry: &BTreeMap<String, TelemetryEntry>,
 ) -> Result<(), BoxError> {
-    let environments = credsd_environments(egress, remote_mcp);
+    let mut environments = credsd_environments(egress, remote_mcp);
+    for environment in crate::record::config::telemetry::credsd_environments(telemetry) {
+        if !environments.contains(&environment) {
+            environments.push(environment);
+        }
+    }
     if environments.is_empty() {
         return Ok(());
     }
@@ -49,9 +61,9 @@ pub(crate) struct ProvisionedVariable {
 
 /// Placeholder AWS credentials for a workload whose destination is a signed route.
 const SIGNING_PLACEHOLDERS: [(&str, &str); 2] = [
-    ("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE"),
+    (SIGNING_PLACEHOLDER_VARIABLES[0], "AKIAIOSFODNN7EXAMPLE"),
     (
-        "AWS_SECRET_ACCESS_KEY",
+        SIGNING_PLACEHOLDER_VARIABLES[1],
         "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
     ),
 ];
@@ -81,8 +93,9 @@ fn open_vault<'a>(
     label: &str,
     subject: &str,
     routes: impl IntoIterator<Item = &'a EgressRoute>,
+    backend: &Backend,
 ) -> Result<credentials::Opened, BoxError> {
-    let mut config = VaultConfig::new(Backend::local(), format!("{label}-{}", std::process::id()))
+    let mut config = VaultConfig::new(backend.clone(), format!("{label}-{}", std::process::id()))
         .require_every_route();
     for route in routes {
         config = config.route(route.to_route_spec()?);
@@ -101,8 +114,9 @@ fn open_vault<'a>(
 /// are attached at the gateway and placed in no workload environment. An absent credential is hard
 /// here. A backend entry keeps its routes in ONE vault, so this groups per entry rather than by
 /// provisioned variable the way [`workspace`] does.
-pub(crate) fn backend_capabilities(
+fn backend_capabilities(
     groups: &[(credentials::DestinationPattern, Vec<EgressRoute>)],
+    backend: &Backend,
 ) -> Result<Projection, BoxError> {
     let mut capabilities = Vec::with_capacity(groups.len());
     let mut workload_environment = Vec::new();
@@ -110,7 +124,7 @@ pub(crate) fn backend_capabilities(
         let Some(first) = routes.first() else {
             continue;
         };
-        let opened = open_vault("strands-box-backend", first.host(), routes)?;
+        let opened = open_vault("strands-box-backend", first.host(), routes, backend)?;
         // A strip-phantom destination secret mints one phantom, provisioned to the workload under the
         // destination secret's variable name. The box-owned token and a signed `aws://` auth mint none.
         let provisioned_name = routes.iter().find_map(EgressRoute::provisioned_name);
@@ -152,8 +166,19 @@ pub(crate) fn merge_workload_environment(
     merged
 }
 
-/// Resolve every declared binding, minting one phantom per provisioned variable.
-pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError> {
+/// Open each vault of `record` through the one backend of `secrets`, which this call consumes,
+/// so the declared sources close when it returns.
+pub(crate) fn project(
+    record: &Record,
+    secrets: RouteSecrets,
+) -> Result<(Projection, Projection), BoxError> {
+    let ordinary = workspace(&record.egress_routes()?, secrets.backend())?;
+    let backends = backend_capabilities(&record.backend_credentials()?, secrets.backend())?;
+    Ok((ordinary, backends))
+}
+
+/// Resolve every declared binding through `backend`, minting one phantom per provisioned variable.
+fn workspace(bindings: &[EgressRoute], backend: &Backend) -> Result<Projection, BoxError> {
     let mut capabilities = Vec::with_capacity(bindings.len());
     let mut workload_environment: Vec<ProvisionedVariable> = Vec::new();
     for group in credential_groups(bindings) {
@@ -163,7 +188,7 @@ pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError
             .map(|binding| binding.host())
             .collect::<Vec<_>>()
             .join(", ");
-        let opened = open_vault("strands-box", &hosts, group.iter().copied())?;
+        let opened = open_vault("strands-box", &hosts, group.iter().copied(), backend)?;
 
         // A signed binding mints no phantom (nothing is placed for the proxy to
         // match); the routes of one variable share exactly one.
@@ -194,8 +219,9 @@ pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError
             // box-owned token has this shape, but it opens through `backend_capabilities`, not here
             // (`to_bindings` skips a backend entry), so no route reaches this arm in practice.
             (None, []) => {}
-            // A minted phantom this crate cannot deliver. Unreachable today — `validate` admits
-            // only `env://` (which names a variable) and `aws://` (which mints none), so the two
+            // A minted phantom this crate cannot deliver. Unreachable today: `validate` admits
+            // only a secret that names a variable (`env://`, or a declared scheme with
+            // `secret.env`) and a signed secret (which mints none), so the two
             (None, phantoms) => {
                 return Err(Internal::CredentialProjection(format!(
                     "credential for {} minted {} phantom binding(s) the box cannot place: a \
@@ -256,7 +282,7 @@ mod tests {
         .to_bindings()
         .expect("an env locator whose variable is set must bind");
 
-        let projection = workspace(&binding).expect("the locator resolves");
+        let projection = workspace(&binding, &Backend::local()).expect("the locator resolves");
 
         assert_eq!(projection.capabilities.len(), 1);
         let variable = &projection.workload_environment[0];
@@ -299,7 +325,7 @@ mod tests {
         .flat_map(|toml| target(toml).to_bindings().unwrap())
         .collect();
 
-        let projection = workspace(&bindings).expect("both locators resolve");
+        let projection = workspace(&bindings, &Backend::local()).expect("both locators resolve");
 
         assert_eq!(
             projection.capabilities.len(),
@@ -353,7 +379,7 @@ mod tests {
                 .flat_map(|toml| target(toml).to_bindings().unwrap())
                 .collect();
 
-            let projection = workspace(&bindings).expect("the locator resolves");
+            let projection = workspace(&bindings, &Backend::local()).expect("the locator resolves");
 
             let [variable] = projection.workload_environment.as_slice() else {
                 panic!(
@@ -418,8 +444,8 @@ mod tests {
             .primary_destination()
             .expect("pattern builds")
             .expect("a backend entry has one destination");
-        let projection =
-            backend_capabilities(&[(original, routes)]).expect("the backend vault opens");
+        let projection = backend_capabilities(&[(original, routes)], &Backend::local())
+            .expect("the backend vault opens");
         assert_eq!(
             projection.capabilities.len(),
             1,
@@ -466,7 +492,7 @@ mod tests {
             .primary_destination()
             .expect("pattern builds")
             .expect("a backend entry has one destination");
-        let projection = backend_capabilities(&[(original, routes)])
+        let projection = backend_capabilities(&[(original, routes)], &Backend::local())
             .expect("the backend vault opens with the var unset");
         assert_eq!(projection.capabilities.len(), 1);
         assert_eq!(
@@ -520,7 +546,7 @@ mod tests {
     /// A box that declares no egress resolves nothing.
     #[test]
     fn a_box_with_no_declared_egress_resolves_nothing() {
-        let projection = workspace(&[]).expect("no bindings is not a failure");
+        let projection = workspace(&[], &Backend::local()).expect("no bindings is not a failure");
 
         assert!(projection.capabilities.is_empty());
         assert!(projection.workload_environment.is_empty());
@@ -540,7 +566,7 @@ mod tests {
         .to_bindings()
         .expect("an aws locator binds as a signed route");
 
-        let Ok(projection) = workspace(&bindings) else {
+        let Ok(projection) = workspace(&bindings, &Backend::local()) else {
             // Resolving the profile needs an ambient AWS identity, which CI may not have. The
             // shape below is what this test is about, so skip rather than assert on the host.
             eprintln!("skipping: no ambient AWS identity to open a signed route with");
@@ -579,8 +605,8 @@ mod tests {
         .to_bindings()
         .expect("an untyped credsd locator binds as a signed route");
 
-        let projection =
-            workspace(&bindings).expect("a credsd route opens without contacting the daemon");
+        let projection = workspace(&bindings, &Backend::local())
+            .expect("a credsd route opens without contacting the daemon");
 
         let names: Vec<&str> = projection
             .workload_environment
@@ -591,5 +617,155 @@ mod tests {
             names.contains(&"AWS_ACCESS_KEY_ID") && names.contains(&"AWS_SECRET_ACCESS_KEY"),
             "the workload receives placeholder credentials: {names:?}"
         );
+    }
+
+    /// **A route in a declared scheme opens through the given backend**: its program supplies the
+    /// secret, and the placeholder goes under `secret.env`, which the operator did not set.
+    #[test]
+    fn a_route_in_a_declared_scheme_opens_through_the_given_backend() {
+        use crate::run::secret_sources::tests::{PRINTER, StandIn, printer_sources};
+        // SAFETY: the variable is namespaced to this test, and no test sets it.
+        unsafe { std::env::remove_var("STRANDS_BOX_DECLARED_FOR_TESTS") };
+        let program = StandIn::new(PRINTER);
+        let secrets = printer_sources(&program);
+        let bindings = target(
+            r#"
+            destinations = ["api.github.com"]
+            secret.ref = "op://Personal/GitHub/token"
+            secret.env = "STRANDS_BOX_DECLARED_FOR_TESTS"
+            "#,
+        )
+        .to_bindings()
+        .expect("a route in a declared scheme binds with no operator value");
+
+        let projection = workspace(&bindings, secrets.backend()).expect("the program runs");
+
+        assert_eq!(program.runs(), 1);
+        let [variable] = projection.workload_environment.as_slice() else {
+            panic!(
+                "one variable is provisioned: {:?}",
+                projection.workload_environment
+            );
+        };
+        assert_eq!(variable.name, "STRANDS_BOX_DECLARED_FOR_TESTS");
+        assert!(variable.value.starts_with("strands_box_"), "{variable:?}");
+        let [(_, vault)] = projection.capabilities.as_slice() else {
+            panic!("one capability for the one host");
+        };
+        let headers = vec![(
+            "Authorization".to_string(),
+            format!("Bearer {}", variable.value),
+        )];
+        let attachment = vault
+            .attach_for(credentials::Outbound {
+                destination: credentials::Destination {
+                    host: "api.github.com",
+                    port: 443,
+                    path: "/",
+                },
+                method: "GET",
+                url: "https://api.github.com/",
+                query: "",
+                headers: &headers,
+                body: b"",
+            })
+            .expect("the placeholder is accepted");
+        assert!(attachment.is_some(), "the vault attaches the secret");
+    }
+
+    /// **Only `project` opens a route vault for another module**: no other visible function
+    /// takes a backend.
+    #[test]
+    fn only_project_opens_a_route_vault_for_another_module() {
+        let visible: Vec<&str> = include_str!("credential.rs")
+            .lines()
+            .filter(|line| line.starts_with("pub(crate) fn "))
+            .collect();
+        assert_eq!(
+            visible,
+            [
+                "pub(crate) fn preflight_credsd(",
+                "pub(crate) fn merge_workload_environment(",
+                "pub(crate) fn project(",
+            ]
+        );
+    }
+
+    /// **Each vault of a record opens through the secrets that the run read, and takes them**:
+    /// a route and a backend token share one run of the program, and no later read starts it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn each_vault_opens_through_the_secrets_of_the_run_and_then_they_close() {
+        use crate::record::config::secret_source::tests::entries;
+        use crate::run::secret_sources::SecretSources;
+        use crate::run::secret_sources::tests::{PRINTER, StandIn};
+        let program = StandIn::new(PRINTER);
+        let route = |name: &str, toml: &str| (name.to_string(), target(toml));
+        let record = Record {
+            version: crate::record::config::RECORD_VERSION,
+            experimental_features: crate::record::config::ExperimentalFeatures {
+                secret_sources: true,
+                ..Default::default()
+            },
+            file_attributes: false,
+            gateway: Default::default(),
+            limits: Default::default(),
+            monty: true,
+            box_id: "box-0123456789abcdef".to_string(),
+            box_dir: std::path::PathBuf::from("/var/lib/boxes/probe"),
+            name: "probe".to_string(),
+            policy: None,
+            agent: None,
+            tool: BTreeMap::new(),
+            egress: BTreeMap::from([
+                route(
+                    "github",
+                    r#"
+                    destinations = ["api.github.com"]
+                    secret.ref = "op://object#A"
+                    secret.env = "STRANDS_BOX_DECLARED_FOR_TESTS"
+                    "#,
+                ),
+                route(
+                    "rerouted",
+                    r#"
+                    destinations = ["api.internal.example.com"]
+                    [[backends]]
+                    url = "https://gateway.example.com"
+                    auth.ref = "op://object#B"
+                    "#,
+                ),
+            ]),
+            remote_mcp: BTreeMap::new(),
+            mcp: Vec::new(),
+            contained_mcp: BTreeMap::new(),
+            telemetry: BTreeMap::new(),
+            secret_source: entries(&program.table("op", std::path::Path::new("/bin/sh"))),
+        };
+        let checked = SecretSources::check_for_tests(&record, std::io::sink())
+            .expect("the program is checked");
+        // A clone that a later step kept shares the one set of sources.
+        let kept = checked.backend().clone();
+        let (_, telemetry) = checked.fetch_telemetry(std::io::sink());
+        let (read, secrets) = telemetry
+            .expect("no telemetry secret")
+            .fetch_routes(std::io::sink());
+        assert_eq!(read.len(), 2, "the route and the backend token");
+        assert_eq!(program.runs(), 1, "the two entries share one run");
+
+        let (ordinary, backends) =
+            project(&record, secrets.expect("the program returns the secret"))
+                .expect("each vault opens");
+
+        assert_eq!(ordinary.capabilities.len(), 1);
+        assert_eq!(backends.capabilities.len(), 1);
+        assert_eq!(program.runs(), 1, "each vault takes the held secret");
+        let locator = credentials::Locator::parse_uri("op://object#A").expect("the reference");
+        let refusal = kept
+            .resolve(&locator)
+            .expect_err("the first read after the vaults open is refused")
+            .to_string();
+        assert!(refusal.contains("is closed"), "{refusal}");
+        assert_eq!(program.runs(), 1);
     }
 }

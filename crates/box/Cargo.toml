@@ -35,7 +35,7 @@ policy = { package = "strands-box-policy", path = "../policy", features = [
 ] }
 telemetry = { package = "strands-box-telemetry", path = "../telemetry" }
 box-shell = { package = "strands-box-shell", path = "../shell" }
-strands-shell = { git = "https://github.com/strands-agents/shell", rev = "20c642b0634e9f1a752fa884d9b21d0aadf40b33", default-features = false }
+strands-shell = { git = "https://github.com/strands-agents/shell", rev = "39daa83d7f155d5b164f794f783e35598f49064e", default-features = false }
 # The interpreter behind the `python3`/`python` aliases
 # (docs/design/decisions.md#interpreters-are-brokered-aliases). Published crates, not
 # a fork: `monty` drives the run loop and `monty-types` carries the OS-call vocabulary the
@@ -66,7 +66,8 @@ bytes = "1"
 tempfile = "3"
 thiserror = "2"
 toml = "1"
-# The parsed host the Shell's SSRF floor reads, as the egress client parses it.
+# The parsed host the Shell's SSRF floor reads, as the egress client parses it, and the host and
+# port a telemetry destination's credential is bound to.
 url = "2"
 
 # Test-only, enabled by `test-support`: a TLS client for `box-egress-probe` and a TLS
@@ -85,7 +86,9 @@ tokio = { version = "1", features = [
 ] }
 
 [features]
-native-filesystem-policy = []
+default = ["experimental-idle-flush"]
+experimental-idle-flush = ["policy/experimental-idle-flush"]
+native-filesystem-policy = ["containment/native-filesystem-policy"]
 # Builds `box-egress-probe` and the credential end-to-end tests. The probe is a real
 # binary, so its TLS deps are optional dependencies this feature enables rather than
 # dev-dependencies (a `[[bin]]` cannot see those).
@@ -111,6 +114,16 @@ name = "box-inherited-handles-probe"
 path = "tests/support/inherited_handles_probe.rs"
 required-features = ["test-support"]
 
+# Drives `close_inherited_descriptors` and its fallbacks
+# (`crates/box/src/bin/strands-box-sock-alias/close_descriptors.rs`, included here by path) from a
+# freshly spawned process, so wiping the descriptor table above stderr -- the very thing under
+# test -- cannot disturb this probe's own caller the way running it in-process or in a forked
+# `cargo test` worker would.
+[[bin]]
+name = "box-close-range-probe"
+path = "tests/support/close_range_probe.rs"
+required-features = ["test-support"]
+
 # A stdio MCP server (`reach` tool; proxy-unaware direct + proxy-aware $HTTPS_PROXY modes) and the
 # transport client that drives it. Test-only fixtures for the native-egress / gateway MCP tests, so
 # they carry the same gate and never ship as product binaries.
@@ -127,6 +140,11 @@ required-features = ["test-support"]
 [[test]]
 name = "box_library"
 harness = false
+
+[[test]]
+name = "linux_native_root"
+harness = false
+required-features = ["native-filesystem-policy", "test-support"]
 
 # Each end-to-end suite below spawns a test-only binary, so each carries the same gate: without it
 # a plain `cargo test` would build the suite while its probe is absent and fail on a missing binary.
@@ -148,6 +166,11 @@ required-features = ["test-support"]
 [[test]]
 name = "box_inherited_handles"
 path = "tests/box_inherited_handles.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "box_close_range"
+path = "tests/box_close_range.rs"
 required-features = ["test-support"]
 
 [[test]]

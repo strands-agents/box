@@ -131,6 +131,7 @@ struct AgentTable {
     metadata: Vec<String>,
     exec: Vec<String>,
     deny: Vec<String>,
+    deny_write: Vec<String>,
     env: Vec<(String, String)>,
 }
 
@@ -145,6 +146,8 @@ pub struct Request {
     policy: PathBuf,
     /// Extra tables appended after `[agent]`: `[egress.*]`, `[mcp.*]`, `[tool.*]`, `[telemetry.*]`.
     config_body: Option<String>,
+    /// Raw `box.toml` lines written before `[agent]`, such as `monty = false`.
+    top_level: Vec<String>,
     /// What the creating run should see in its environment.
     ///
     /// Carried rather than set on this process: an `env://` locator dereferences in
@@ -257,6 +260,7 @@ impl Request {
             name: format!("{name}-{}", std::process::id()),
             policy: PathBuf::new(),
             config_body: None,
+            top_level: Vec::new(),
             environment: Vec::new(),
             agent: AgentTable::default(),
             with_agent_home: true,
@@ -294,6 +298,7 @@ impl Request {
             "metadata" => self.agent.metadata.extend(entries),
             "exec" => self.agent.exec.extend(entries),
             "deny" => self.agent.deny.extend(entries),
+            "deny_write" => self.agent.deny_write.extend(entries),
             other => panic!("{other} is not a filesystem list"),
         }
         self
@@ -310,6 +315,13 @@ impl Request {
     /// Declare no agent home: `HOME` is the operator's, and nothing under it is granted.
     pub fn without_agent_home(mut self) -> Self {
         self.with_agent_home = false;
+        self
+    }
+
+    /// Add one top-level `box.toml` line, such as `monty = false`. It goes before `[agent]`,
+    /// because a key written after a table header belongs to that table.
+    pub fn top_level(mut self, line: &str) -> Self {
+        self.top_level.push(line.to_string());
         self
     }
 
@@ -340,6 +352,10 @@ impl Request {
         if !self.policy.as_os_str().is_empty() {
             toml.push_str("policy = \"policy.dw\"\n");
         }
+        for line in &self.top_level {
+            toml.push_str(line);
+            toml.push('\n');
+        }
         toml.push_str(&format!(
             "\n[agent]\ncommand = {{command}}\nworkspace = {}\n",
             quoted(&workspace.display().to_string())
@@ -362,7 +378,7 @@ impl Request {
                 .collect();
             toml.push_str(&format!("env = {{ {} }}\n", pairs.join(", ")));
         }
-        let lists: [(&str, &[String]); 8] = [
+        let lists: [(&str, &[String]); 9] = [
             ("read", &table.read),
             ("write", &table.write),
             ("read_file", &table.read_file),
@@ -371,6 +387,7 @@ impl Request {
             ("metadata", &table.metadata),
             ("exec", &table.exec),
             ("deny", &table.deny),
+            ("deny_write", &table.deny_write),
         ];
         if lists.iter().any(|(_, entries)| !entries.is_empty()) {
             toml.push_str("\n[agent.filesystem]\n");

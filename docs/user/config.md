@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries twelve keys. `name` and `box_dir` are required.
+The file carries fourteen keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -78,14 +78,16 @@ The file carries twelve keys. `name` and `box_dir` are required.
 | `[agent]` | table | The one process the box runs. |
 | `[tool.<name>]` | tables | One process each, which the agent selects by invocation. The label takes the same characters as `name`. |
 | `[egress.<name>]` | tables | Which secret attaches to which outbound destination. |
+| `[secret-source.<scheme>]` | tables | Experimental: the host program that reads the secret of a reference in `<scheme>://`. See [`[secret-source.<scheme>]`](#secret-sourcescheme). |
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
-| `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, and ingress. Each is disabled by default. |
+| `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, ingress, and secret sources. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
+| `monty` | boolean | Whether a bare `python3` or `python` in the Shell runs Monty, Box's built-in Python subset. `true` by default. With `false`, both names resolve like any other program: a `[tool.python3]` or `[tool.python]`, else the host's `PATH`. |
 | `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
 
-The example uses five of the twelve: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the fourteen: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -93,10 +95,15 @@ telemetry. `box_dir` selects the box: one directory is one box. A `name` outside
 its limits is refused with ``box name "<name>" is invalid: <reason>; use one component of letters,
 digits, '.', '_', or '-'``.
 
-Box creates the directory `box_dir` names, with mode `0700`, and creates **no** directory above it.
-Create the parent yourself, or the run is refused with ``the box directory's parent does not exist;
-create it, because Box creates no directory above the one `box_dir` names``. Everything Box writes
-for a box is under `box_dir`, or under a path the file names. The example's
+If the directory named by `box_dir` does not exist, Box creates it with mode `0700` (owner-only
+access). Its parent must already exist and be writable. Box creates **no** directory above
+`box_dir`; a missing parent causes the run to fail with ``the box directory's parent does not exist;
+create it, because Box creates no directory above the one `box_dir` names``.
+
+If `box_dir` already exists, it must be owned by the user running Box and have mode `0700`.
+Box refuses to use an existing directory with a different owner or permissions. These requirements
+apply on both Linux and macOS. Everything Box writes for a box is under `box_dir` or another path
+specified in `box.toml`. The example's
 `box_dir` is `my-box/state`, under the `my-box` directory the operator made for the two files.
 
 `box_dir` may not be the agent's workspace or lie below it, and neither `box.toml` nor `policy.dw`
@@ -152,7 +159,9 @@ A native `filesystem.deny` entry does not restrict these requests through the bo
 On macOS, a write folder refuses most calls that set a file's times: `utimensat`, which `touch`
 calls, and `setattrlist`, which `cp -p` and `rsync -t` use. Only `utimes` works. So `touch`,
 `cp -p`, and `rsync -t` fail with `Operation not permitted`. The `file-attributes` switch lets a
-write folder set them. The key goes at the top of the file, above the first table:
+write folder set them. This applies to programs that run in a sandbox. The Shell's built-in `touch`
+runs outside the sandbox and doesn't need the switch. The key goes at the top of the file, above
+the first table:
 
 ```toml
 file-attributes = true
@@ -184,8 +193,8 @@ group, the owner, and access control lists on files in its writable grants`. Lin
 |---|---|---|---|
 | `shell.timeout` | positive integer or `false` | `30` | Seconds allowed for one submitted Strands Shell call, including its commands and pipelines. `false` disables the Shell and broker execution deadlines. |
 | `shell.max_input` | nonnegative integer | `262144` | Bytes of command text submitted to Strands Shell. `0` disables this limit. |
-| `shell.max_output` | nonnegative integer | `65536` | Bytes in each Shell output buffer, including command substitution. Shell also applies this limit when loading script files with `source`. `0` disables this limit. |
-| `shell.max_stdin` | positive integer | `65536` | Bytes of standard input that one command run through the `zsh`, `bash`, or `sh` alias receives from outside the Shell. Past it, the rest is discarded and the command gets no end of input, so a command that reads past it fails at the Shell timeout; a command that acts as its input arrives has acted on the first part by then. `0` is a load error. |
+| `shell.max_output` | nonnegative integer | `1048576` | Bytes in each Shell output buffer, including command substitution. Shell also applies it to each input that a command reads whole, such as a script loaded with `source`, a `python3` or `lua` script, the standard input of `xargs`, the standard input or each file that `jq` reads, each file that `sed -i` edits, and the file of `curl --json @file`. `jq` applies the limit to each file separately, so it can hold more than `max_output` in total. Box applies it to each `curl` response body. `0` disables this limit. |
+| `shell.max_stdin` | positive integer | `1048576` | Bytes of standard input that one command run through the `zsh`, `bash`, or `sh` alias receives from outside the Shell. Past it, the rest is discarded and the command gets no end of input, so a command that reads past it fails at the Shell timeout; a command that acts as its input arrives has acted on the first part by then. `0` is a load error. |
 
 To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
 `[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
@@ -199,7 +208,7 @@ are load errors.
 Size limits accept a positive integer byte count or `0` to disable that limit. Negative numbers,
 booleans (including `false`), strings, fractions, and values the platform cannot represent are load
 errors. Omission preserves each default independently.
-For a larger source file, set `[limits.shell] max_output = 262144` to allow up to 256 KiB.
+For a larger source file, set `[limits.shell] max_output = 4194304` to allow up to 4 MiB.
 This also enlarges Shell's output buffers. A larger `max_input` alone does not enlarge source-file reads.
 Stdout and stderr captures have separate buffers; `max_output` is not a combined output or
 total memory budget. Oversized command text is refused with `input too large`, but the current
@@ -244,6 +253,64 @@ it. A box that sets the list stores its record at version 32, and an older build
 [Upgrade plain HTTP to HTTPS](egress.md#upgrade-plain-http-to-https) describes the behaviour and
 its limits.
 
+## `monty`
+
+`monty` decides what a bare `python3` or `python` in the Shell runs. It is `true` by default: both
+names run Monty, Box's built-in Python subset ([Python in a box](monty.md)), even when a
+`[tool.python3]` is declared or the host's `PATH` has a Python. Startup names a Python table that
+Monty leaves unused.
+
+```toml
+monty = false
+```
+
+With `false`, Box installs no Monty, and both names resolve like any other program the Shell
+starts. A tool whose command file is named `python3` or `python` answers that name, and otherwise
+the host's `PATH` decides. Each spawn needs a `shell:spawn` permit, and nothing falls back to Monty.
+Startup says which file each name runs, or that neither a tool nor `PATH` has it.
+
+Box treats the Python tool like any other tool. It adds no grants and doesn't inspect the install,
+so the tool's table lists what Python reads and writes. Python's own reads and writes take no
+`fs:read` or `fs:write` decision: they meet only these lists, which startup prints under
+`[tool.python3] runs <file> with no policy decision over these paths`. Policy still decides the
+spawn of `python3` itself, and each command the agent's shell runs. A working setup:
+
+```toml
+monty = false
+
+[tool.python3]
+command = ["/opt/runtime/.venv/bin/python3"]
+
+[tool.python3.filesystem]
+read = ["/path/to/project", "/opt/runtime/.venv", "/opt/homebrew/Cellar", "/opt/homebrew/opt"]
+write = ["/path/to/project"]
+```
+
+```cedar
+permit (principal, action == Box::Action::"shell:spawn", resource)
+when {
+  context.input.program_path == "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14" &&
+  ["python3", "python"].contains(context.input.program)
+};
+```
+
+`program_path` is the file the venv's `python3` resolves to, with every link followed. The `read`
+list covers the venv, Python's own install, and the libraries its modules load; on macOS with
+Homebrew those are under `/opt/homebrew/Cellar`, reached through `/opt/homebrew/opt`. A bare
+`python` needs a `[tool.python]` too, and a versioned name such as `python3.14` is a separate
+program that needs its own permit.
+
+Keep the venv and Python's install out of every write grant and every `fs:write` rule. A file
+written into `site-packages`, such as a `.pth`, runs at every Python start, later also outside the
+box. Box refuses a write grant that can change the tool's command or its path
+([Configured command integrity](#configured-command-integrity)), but not one that reaches the rest
+of the venv. A program the Shell starts receives no standard input yet, so a piped
+`printf x | python3 -c '...'` reads an empty stdin. A `python3` that would read its program from
+stdin, such as `python3 <<'EOF'` or `printf 'print(1)' | python3`, exits 2 with
+`reading a program from stdin is not supported` instead of running an empty program.
+
+A box that sets `monty = false` stores its record at version 37, and an older build refuses it.
+
 ## `[experimental-features]`
 
 Native filesystem policy checks require a compatible, signed build and explicit selection:
@@ -258,11 +325,19 @@ Signed macOS releases include the adapter, but leave it disabled until you selec
 An unsupported build refuses `true` before the workload starts.
 See [native filesystem policy](native-filesystem-policy.md) for build requirements, coverage, and recovery behavior.
 
+On Linux, startup can report `this kernel cannot transfer O_PATH handles; path-only opens are refused`.
+`O_PATH` handles identify a file or directory without granting content access.
+This warning disables path-only opens. Other supported native operations remain available.
+See [Linux coverage and limits](native-filesystem-policy.md#linux-arm64) for the probe and its failure behavior.
+
 `tool-grammars = true` turns on [tool grammars](#toolnamegrammar), which are experimental and off
 by default.
 
 `ingress = true` turns on [`[[agent.ingress]]`](#agentingress), which is experimental and off by
 default.
+
+`secret-sources = true` turns on [`[secret-source.<scheme>]`](#secret-sourcescheme) and the
+`secret.env` key of a route or a remote MCP server, which are experimental and off by default.
 
 ## `[agent]` and `[tool.<name>]`
 
@@ -275,7 +350,7 @@ Both tables hold one process, in one shape:
 | `env` | table | The literal environment. `HOME` and `PATH` default to the operator's own; every other variable is present only when `env` names it. |
 | `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Eight for `[agent]`; six for a `[tool.<name>]`, which has no `metadata` or `exec` list. |
 | `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
-| `file-watching` | boolean | `false` by default. On macOS, permit FSEvents for this process and its descendants, with the [metadata limitation](#file-watching). Linux ignores this setting. |
+| `file-watching` | boolean | `false` by default. On macOS, permit FSEvents for this process and its descendants, with the [limitations](#file-watching). Linux ignores this setting. |
 | `[tool.<name>.grammar]` | table | Experimental, and `[tool.<name>]` only. The tool grammar for the program this tool runs. See [`[tool.<name>.grammar]`](#toolnamegrammar). |
 | `[[agent.ingress]]` | list of tables | `[agent]` only. Where callers reach the agent's servers, one entry per port. See [`[[agent.ingress]]`](#agentingress). |
 
@@ -374,11 +449,12 @@ The process still needs the filesystem grants required by its runtime and applic
 **FSEvents can disclose names and event metadata for denied paths.**
 This includes removed or renamed paths and some historical events.
 A subscription to an accessible ancestor can disclose paths outside the workspace.
+FSEvents also discloses the host-wide event count and each volume's history identifier.
 Filesystem `deny` entries do not fully filter this event stream.
-Direct file-content access and write restrictions still apply.
+Direct file-content access and write restrictions still apply, except that a root process can delete any volume's event history.
 FSEvents events do not pass through `fs:*` policy decisions, including experimental native filesystem policy checks.
 
-Use this option only when that metadata disclosure is acceptable.
+Use this option only when these limitations are acceptable.
 Keep it disabled when denied filenames or activity must remain confidential, and use the application's polling mode if available.
 Node directory watchers can report `EMFILE` when FSEvents is unavailable; this error does not necessarily mean that file descriptors are exhausted.
 
@@ -386,13 +462,26 @@ On macOS, the startup disclosure names each selected process before the agent st
 This includes stdio MCP servers that remain unstarted; Box repeats their disclosure when they start.
 
 ```text
-strands-box: [tool.dev] file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events; file-content and write restrictions still apply
+strands-box: [tool.dev] file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events, as well as the host-wide event count and each volume's history identifier; file-content and write restrictions still apply, except that a root process can delete any volume's event history
 ```
 
 A record with any selected process requires version 35.
 For rollback, remove the key from every process table, then follow the
 [rollback steps](native-filesystem-policy.md#stored-configuration-and-rollback).
 Older builds do not recognize the key, even when its value is `false`.
+
+### Executable memory
+
+On Linux, every process in a box can write code into memory and run it. A JIT runtime such as Node,
+Java, or Bun needs this, and so does Python `ctypes` when libffi writes a callback into memory. There
+is no setting. macOS has no such restriction.
+
+**A process can run any bytes it writes into memory**, not only the programs its grants let it
+start. `memfd_create`, `pkey_mprotect`, descriptor `execveat`, and the `noexec` mounts stay refused,
+so the kernel never maps or starts a file outside the process's `exec` grants. But a runtime that
+calls native code, such as Python through `ctypes`, can copy a readable program into memory and run
+it. For such a runtime, a `read` grant on a program works like an `exec` grant. The system-call
+filter, filesystem grants, and network policy still apply to that code.
 
 ### Script commands on Linux
 
@@ -452,6 +541,14 @@ Box checks the original grants before preserving any additional path spelling ne
 Preserving a spelling adds no authority over a different file.
 On macOS, Box grants a declared command's interpreter chain automatically.
 A workload-selected program without a tool table requires its interpreter chain to have existing `exec` coverage on either platform.
+
+A script that a process writes or downloads at run time, such as a `#!/bin/sh` command in
+`node_modules/.bin`, names its interpreter by the host's spelling. On a Linux host where `/bin`,
+`/sbin`, `/lib`, `/lib32`, `/lib64` or `/libx32` is a link into `/usr`, as on Debian, Ubuntu,
+Fedora and Amazon Linux, each sandbox has the same link at its top level. With
+`read_file = ["/usr/bin/sh"]`, `/bin/sh` then resolves to the granted file, and the script starts.
+A link reaches only what the sandbox already shows, so it grants nothing. A grant or deny written
+with the link's name, such as `/bin/bash`, applies to the same file, at `/usr/bin/bash`.
 
 ## `[[agent.ingress]]`
 
@@ -514,8 +611,8 @@ one line until a caller is served again.
 
 ## `[agent.filesystem]` and `[tool.<name>.filesystem]`
 
-Each list, and what one entry in it grants. `[agent.filesystem]` takes all eight;
-`[tool.<name>.filesystem]` takes six, and a `metadata` or `exec` list there is refused by name at
+Each list, and what one entry in it grants. `[agent.filesystem]` takes all nine;
+`[tool.<name>.filesystem]` takes seven. A `metadata` or `exec` list there is refused by name at
 load. [A tool's sandbox](../design/containment.md#a-tools-leaf-box) states what a tool reaches in
 their place.
 
@@ -526,16 +623,40 @@ mounted aliases, and enclosing directories.
 | List | What each entry grants |
 |---|---|
 | `read` | Read the path. A directory entry covers everything below it. |
-| `write` | Write the path. On macOS, add `read` to permit reads, and setting a file's times needs [`file-attributes`](#file-attributes). Linux requires explicit read access across the entire write scope. |
+| `write` | Write the path. On macOS, add `read` to permit reads, and a sandboxed program that sets a file's times needs [`file-attributes`](#file-attributes). Linux requires explicit read access across the entire write scope. |
 | `read_file` | Read one exact file. The entry names a file. |
 | `write_file` | Write one exact file. Linux requires explicit read access to that file. The entry names an existing file. |
 | `list` | List the directory without content access on macOS. Linux refuses this list. |
 | `metadata` | Inspect file properties below a directory without content access on macOS. Linux omits this grant without an error. **`[agent.filesystem]` only.** |
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
+| `deny_write` | Refuse every write below an existing directory inside a `write` directory. Reads and `exec` grants there still apply. The box stores its record at version 38. The agent, a tool, and a local MCP server take it. |
+
+Use `deny_write` for a directory that the agent runs code from, such as a Python virtual
+environment in a writable project. Create and fill the directory before the box starts. The agent
+can then run its programs but cannot change them:
+
+```toml
+[agent.filesystem]
+read = ["/work/project"]
+write = ["/work/project"]
+exec = ["/work/project/.venv"]
+deny_write = ["/work/project/.venv"]
+```
+
+The agent cannot create, change, rename, link, or remove anything below the directory. Like the other lists, `deny_write` governs the agent's own processes. A Shell or Python request through Box is decided by policy, so pair the entry with `forbid` rules on `fs:write`, `fs:delete`, and `fs:move` for the directory. A file below it that also has a hard link in a writable directory can still be changed through that link. Install with copies, such as `UV_LINK_MODE=copy`, or keep the installer's cache outside every write grant. The box does not
+warn that a program below a `deny_write` directory is writable. The startup disclosure lists each
+entry as `deny_write  <path>  (read-only)`. A `[tool.<name>] command` below a `deny_write`
+directory is still refused, as every tool command inside a write grant is.
+
+A tool or a local MCP server that writes the directory's parent can still change the directory
+unless its own `[tool.<name>.filesystem]` or `[mcp.<name>.filesystem]` also lists it in
+`deny_write`. A tool's leaf box keeps the protection with broad exec: it can run programs from the
+directory but cannot change them.
 
 On macOS, opting into [file watching](#file-watching) permits an event stream that can
 disclose denied names and activity despite these direct-access restrictions.
+A root process can also delete any volume's event history.
 
 On Linux, root and non-root launches support directory writes with explicit read and write grants.
 Permitted file creation retains the launcher's underlying file identity.
@@ -668,12 +789,17 @@ happen after the box directory is created and before the workload starts.
 | A writable grant at or above a directory on the operator's `PATH` | `<path> is at or above <path>, which is on the search path this box resolves a bare-name MCP program against` (excerpt). Keep the directory and its parents outside write grants. |
 | A writable grant can change an installed Box program, a hard-link name, or an enclosing directory | `this write grant can change trusted Box executable <path> or its path. Keep the Box installation outside every process's write grants` |
 | A system directory or a credential store the box always refuses | `<path> is refused beneath every grant: <reason>` |
+| A path that a [`[secret-source.<scheme>]`](#what-box-protects) table lists in `reads` or `deny`, a path inside it, or a folder that holds it | ``this grant reaches <path>, which the secret source `<scheme>` keeps from each workload (its `reads` entry "<entry>"). Keep each grant outside the paths that a secret source names in `reads` and `deny` `` |
 
-Create the path first, or name the existing directory above it. The same rule holds for a
-`[tool.<name>] command` that names a file the workload has not built yet, which is refused with
-`containment config failed: path does not exist: <path>`. In the example, the CLI install,
+Create the path first, or name the existing directory above it. A `[tool.<name>] command` that names
+a file the workload has not built yet is not refused: Box
+[leaves that tool out](#a-tool-whose-program-is-not-installed) for the whole run, so build the file
+before `run`. In the example, the CLI install,
 `strands-home`, the preload file, and the project all exist before the first `run`, because the
 tutorial's earlier steps made them.
+
+On Linux, `filesystem grant object changed while loading config` means a granted path selected a different object during that launch's preparation.
+Let the filesystem update finish, then retry the launch.
 
 **A `write` grant alone is not runnable.** The agent's sandbox refuses to map code from a writable
 grant. When the agent's `command` or one of its interpreters lies inside a writable grant, the
@@ -701,7 +827,46 @@ Their filesystem tables reject `exec`; only `[agent.filesystem]` accepts that li
 A tool table applies when a program the agent's shell starts begins with the tool's `command`: the
 same program, then the same fixed arguments. Box resolves each configured tool program before the
 workload starts and keeps that file identity for the run. The longest matching prefix wins.
-Every declared tool is selectable, and a program under one of the agent's own `exec` entries needs no table of its own.
+Every declared tool is selectable, unless Box leaves it out, and a program under one of the agent's
+own `exec` entries needs no table of its own.
+
+### A tool whose program is not installed
+
+When a tool's program is not installed, Box leaves that tool out and the box still starts. The
+program is not installed when:
+
+- nothing with a bare name's spelling exists in any directory on the tool's search path, or
+- nothing exists at an absolute path.
+
+A search-path entry that is a file, or that Box cannot search, holds nothing.
+
+A symbolic link to a file that doesn't exist counts as nothing. A symbolic link that loops does not
+count as nothing, so Box refuses to start.
+
+`run` prints one line for each tool it leaves out, before the workload starts:
+
+```text
+strands-box: [tool.tsx] left out: tsx not found
+```
+
+A left-out tool gets no filesystem grants, and Box does not check its lists. It runs nothing for
+the agent. Its grammar stays, so a policy that names its actions still loads. A grammar decides
+spawns by program name, so it still decides another `[tool]` or stdio `[mcp.<name>]` with the same
+program name. The startup line for that table says so:
+
+```text
+strands-box: [tool.system_git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
+```
+
+The set of tools is fixed when the run starts. A program installed
+during the run, or a file that appears later at the tool's path, does not run with the tool's
+grants.
+
+Box still refuses to start when the program exists and fails a check: it is not executable, it is
+not a regular file, or a write grant reaches it. A bare name counts as existing when any directory
+on the search path holds something with that name. Box also refuses a program that holds `${`,
+because a program is never expanded, and a `command` argument that names no value Box can expand in
+`${NAME}`. So a typo in a `command` path does not stop the box; check the `left out` lines.
 
 The example box declares no tool, so a program its shell names is a `shell:spawn` decision with no
 table behind it, and the example policy permits none. A git tool for the CLI's shell, with git from
@@ -729,12 +894,15 @@ tool's `env` for non-secret literals.
 
 ### Configured command integrity
 
-Each configured tool program must exist before the run starts. Box checks grants in `[agent]`,
-every `[tool.<name>]`, and every local `[mcp.<name>]` table against those programs.
+Box checks grants in `[agent]`, every `[tool.<name>]` it does not
+[leave out](#a-tool-whose-program-is-not-installed), and every local `[mcp.<name>]` table against
+those programs. The program of each [`[secret-source.<scheme>]`](#secret-sourcescheme) table gets
+the same checks. The write-grant refusal names that table. The hard-link refusals and the
+refusals through Strands Shell and Monty say `configured tool command` for it too.
 
 | Condition | Refusal text | Next action |
 |---|---|---|
-| A command file is absent, or a bare command name has no executable match on its search path. | `path does not exist` or `cannot resolve bare executable` | Install the command before startup, or correct its path or `env.PATH`. |
+| A command path exists but is not an executable regular file. | `executable is not an executable regular file` | Correct the file's mode or the command's path. |
 | A writable grant can overwrite the command or replace its path, including a symbolic-link route or enclosing directory. | `this write grant can change` the command `or its path` | Keep configured tools outside every process's write grants. |
 | A writable directory contains another name for an operator-writable configured command. | `this write grant contains a hard link to a configured tool command` | Narrow the writable directory to exclude the command's hard-link names. |
 | Box cannot finish scanning a writable directory for configured-command hard links. | `cannot be inspected for configured command hard links` | Restore access to the directory, or narrow the writable grant. |
@@ -884,13 +1052,14 @@ requests out. The current reference for this table is
 |---|---|---|
 | `destinations` | string array | A host, `host:port`, a path prefix or `/*` suffix, or a `*.` wildcard. A pattern that matches every host is refused, and two entries may not overlap. |
 | `protocol` | string | `http`, the default and the only accepted value. |
-| `secret.ref` | string | `env://NAME` for a variable on the operator's side, `aws://PROFILE` to SigV4-sign as a named profile (resolved through the AWS SDK), or a bare `aws://` to sign with the AWS SDK default credential provider chain (the host's ambient identity). Required. A literal value, or any other scheme, is refused. |
+| `secret.ref` | string | `env://NAME` for a variable on the operator's side, `aws://PROFILE` to SigV4-sign as a named profile (resolved through the AWS SDK), a bare `aws://` to sign with the AWS SDK default credential provider chain (the host's ambient identity), or a reference in a scheme that a [`[secret-source.<scheme>]`](#secret-sourcescheme) table declares, such as `op://Personal/GitHub/token`. Required. A literal value, or any other scheme, is refused. |
+| `secret.env` | string | Experimental: needs `secret-sources = true` in [`[experimental-features]`](#experimental-features). The variable that holds the placeholder in the workload. Required with a reference in a declared scheme. Optional with `env://NAME`, where it must equal `NAME`. Refused with `aws://`. |
 | `secret.placement` | string | `header` (default), `basic_auth`, or `query_param`. |
 | `secret.header` | string | The header the secret lands in. Defaults to `Authorization`. |
 | `secret.prefix` | string | Text before the secret in the header value. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |
 | `secret.param` | string | The query-parameter name. Required by, and only valid for, `placement = "query_param"`. |
-| `secret.inject` | string | `phantom` (default) or `always`. `phantom` attaches the real secret only to a request that presents the box's placeholder, and rejects any other. `always` attaches the real secret to every request to the destinations, with or without a placeholder, and the decision record carries an advisory note. Valid only for an `env://` route. |
-| `secret.phantom_prefix` | string | The literal prefix of the minted placeholder, before its random suffix. Defaults to `strands_box_`. Set it, such as `sk-ant-`, so a harness that checks its key format accepts the placeholder. At most 64 characters from `A-Z`, `a-z`, `0-9`, `-`, `_`, `.`, `~`. Valid only for an `env://` route. |
+| `secret.inject` | string | `phantom` (default) or `always`. `phantom` attaches the real secret only to a request that presents the box's placeholder, and rejects any other. `always` attaches the real secret to every request to the destinations, with or without a placeholder, and the decision record carries an advisory note. Valid only for an `env://` route or a route in a declared scheme. |
+| `secret.phantom_prefix` | string | The literal prefix of the minted placeholder, before its random suffix. Defaults to `strands_box_`. Set it, such as `sk-ant-`, so a harness that checks its key format accepts the placeholder. At most 64 characters from `A-Z`, `a-z`, `0-9`, `-`, `_`, `.`, `~`. Valid only for an `env://` route or a route in a declared scheme. |
 
 The example takes every default: the key lands in the `Authorization` header with a `Bearer `
 prefix, and only a request that carries the placeholder gets it.
@@ -907,9 +1076,11 @@ An `aws://` route signs inside the box, so it takes no `header`, `prefix`, `plac
 not resolve (AWS SSO), the warning, and the writable-`~/.aws` rule.
 
 An entry re-routes to a backend with one `[[egress.<name>.backends]]` table, holding a `url`
-(`scheme://host[:port][/prefix]`, `https` or `http`) and an optional `auth` — the backend's own
-credential, an `env://` token or an `aws://` profile SigV4-signed over the backend host (with an
+(`scheme://host[:port][/prefix]`, `https` or `http`) and an optional `auth`, which is the backend's own
+credential: an `env://` token, a token in a declared scheme, or an `aws://` profile SigV4-signed
+over the backend host (with an
 explicit `auth.aws.service` and `auth.aws.region`, since a gateway host carries no derivable scope).
+An `auth` takes no `env` key, because the workload holds no placeholder for it.
 The backend `url`'s path prefix joins in front of the agent's request path. An entry may keep its own
 `env://` `secret` beside a backend, phantom-only: the box provisions the placeholder and strips it,
 never injecting the real destination credential, so the named variable need not be set. The loader
@@ -918,10 +1089,225 @@ another entry also names (on any port), a `url` with a query,
 fragment, or a non-`http(s)` scheme, a `credsd://` `auth`, an `aws://` `auth` without a valid
 `auth.aws.service`/`auth.aws.region` (each non-empty and only lowercase `[a-z0-9-]`, or those keys on
 a non-`aws://` auth), a signed (`aws://` or `credsd://`) destination `secret`, a destination `secret`
+in a declared scheme, a destination `secret`
 beside an `http` backend, a destination `secret.inject` beside a backend (the re-routed secret is
 phantom-only, so `inject` has no effect), and an `auth` on an `http` backend.
 [The egress table](egress.md#backends) describes the backend, and
 [egress design](../design/egress.md) describes how the box dials it.
+
+One placeholder variable holds one secret. Two entries that place a placeholder in one variable
+must name the same reference, and an `env://NAME` entry counts under `NAME`. Otherwise the load is
+refused, and the message names both tables: `` `[egress.b]` and `[egress.a]` both hold a
+placeholder in the variable TOKEN, and they name different secrets; one placeholder variable holds
+one secret, so give one of them another variable``. An `aws://` route fills `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` with its own placeholders, so beside one, no other route can hold a
+placeholder in either variable. The own `secret` of an entry with a backend is not such a route,
+because Box strips that placeholder.
+
+## `[secret-source.<scheme>]`
+
+> **Status.** Experimental, and macOS only.
+
+Each table declares one host program that reads a secret, and the table's name is the scheme of
+the references that the program serves. Box runs the program itself, outside every sandbox, with
+your rights. A route, a remote MCP server, a backend `auth`, or a telemetry target then names a
+secret in that scheme, and the workload gets a placeholder. Set `secret-sources = true` in
+[`[experimental-features]`](#experimental-features) to load the table.
+
+```toml
+[experimental-features]
+secret-sources = true
+
+[secret-source.op]
+protocol        = "box.secret-source.v1"
+command         = ["/opt/homebrew/bin/op", "read", "op://{ref}"]
+pass-env        = ["OP_ACCOUNT", "TMPDIR"]
+pass-secret-env = ["OP_SERVICE_ACCOUNT_TOKEN", "OP_SESSION_*"]
+reads           = ["~/.config/op"]
+
+[egress.github]
+destinations = ["api.github.com"]
+secret.ref   = "op://Personal/GitHub/token"
+secret.env   = "GH_TOKEN"
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `protocol` | string | The version of the contract between Box and the program. Required, and `box.secret-source.v1` is the only value. |
+| `command` | string array | The program, then its arguments. Required. The program is an absolute path. One argument or more holds `{ref}`, which stands for the text after `<scheme>://` in a reference, without `#FIELD`. |
+| `output` | string | How Box reads the program's stdout: `text` (default) or `json`, where stdout is one JSON string. |
+| `pass-env` | string array | Plain settings from your environment that the program receives when they are set, such as `AWS_REGION`. An entry that ends with `*` names each variable with that prefix. |
+| `pass-secret-env` | string array | Credentials from your environment that the program receives when they are set, such as `OP_SERVICE_ACCOUNT_TOKEN`. An entry that ends with `*` names each variable with that prefix. No `env://` or `secret://` reference can read one of these variables. |
+| `reads` | string array | The paths that the program reads, such as its configuration directory. Each is absolute, is `~`, or begins with `~/`. No grant can reach them, and each sandbox denies them. See [what Box protects](#what-box-protects). |
+| `deny` | string array | Other paths to the vault, such as the directory of an authentication socket. Each is absolute, is `~`, or begins with `~/`. No grant can reach them, and each sandbox denies them. |
+
+The scheme is a lowercase letter, then lowercase letters, digits, `+`, `.`, or `-`. A table can
+declare `op`, and no table can declare a scheme that Box reserves: `env`, `file`, `aws`, `credsd`,
+`secret`, `cmd`, `oauth2`, `aws-signed`, and `strip-phantom`.
+
+A reference in a declared scheme can end with `#FIELD`, such as
+`aws-secretsmanager://box/telemetry#OTLP_KEY`, to name one field of a secret that is a JSON object.
+
+Each of these is refused when the configuration loads:
+
+- A table while `secret-sources` is off: ``invalid `[secret-source.op]` table: a secret source is
+  experimental: set `secret-sources = true` in `[experimental-features]` to load it``.
+- A table on Linux: ``invalid `[secret-source.op]` table: a secret source loads on macOS only:
+  protection of its program and its files from the workload is not built for Linux yet``.
+- A reserved scheme, an absent `protocol`, another `protocol`, an empty `command`, a program that
+  is not an absolute path, a `command` with no `{ref}` in its arguments, an `output` other than
+  `text` or `json`, and an unknown key.
+- A `pass-env` or `pass-secret-env` entry that is empty, is `*`, is `PATH` or `HOME`, holds `=`, or
+  holds a `*` before its end. The program always gets your `HOME` and a fixed `PATH`.
+- A `reads` or `deny` entry that is not absolute, is not `~`, and does not begin with `~/`.
+- A `reads` or `deny` entry that holds `..`, a control character, a second `/` after `~`, or one
+  of the characters `*`, `?`, `[`, `]`, `{`, and `}`: ``invalid `[secret-source.op]` table:
+  `reads` entry "~/.config/op*" is not a path that Box can protect; Box reads no pattern, so
+  write each path without `*`, `?`, `[`, `]`, `{`, or `}` ``. Each entry names one path. A path
+  that is absent is fine.
+- A reference in a scheme that no table declares: ``secret scheme "op" has no `[secret-source.op]`
+  table``.
+- A reference in a scheme that a table can declare, with nothing after `://`, such as `op://`. A
+  route, a remote MCP server, and a backend `auth` get ``credential locator "op://" is invalid``,
+  and a telemetry target gets ``names no scheme this box reads``. Name the secret after `://`.
+- A route or a remote MCP server in a declared scheme with no `secret.env`.
+- A `secret.env` key while `secret-sources` is off, on each operating system. With `env://NAME`
+  the key has no effect, so you can also remove it: ``secret.env is experimental: set
+  `secret-sources = true` in `[experimental-features]` to load it, or remove secret.env, because
+  an env:// reference already names its variable``.
+- An `env://NAME` or `secret://NAME` reference whose `NAME` a `pass-secret-env` entry names, on a
+  route, a remote MCP server, a backend `auth`, or a telemetry target: ``the variable
+  OP_SERVICE_ACCOUNT_TOKEN is a credential of the secret source `op` (its `pass-secret-env` names
+  it), so no env:// or secret:// reference can read it``.
+  A bare `aws://` route is not such a reference. It signs with the AWS identity of your
+  environment, even when a `pass-secret-env` list names the AWS keys. So a request that policy
+  permits to that route's destinations is signed as the identity that reads the vault.
+
+A box that declares a source stores its record at version 39, and so does a box with a
+`secret.env` key. An older build refuses that record.
+
+### How a run reads the secrets
+
+When the box starts, it checks the program file of each table and prints one line for each on
+stderr:
+
+```text
+strands-box: [secret-source.op]: reads each op:// secret with /opt/homebrew/bin/op, which runs outside every sandbox
+```
+
+Box then runs the program once for each secret that the configuration names, before the workload
+starts. Two references that differ only in `#FIELD` name one secret, so they share one run. Box
+reads the secrets of telemetry targets first and opens its records. Then it reads the others. It
+keeps each secret in memory for the run and writes none to disk. It reads no secret again during
+the run, so a secret that changes in the vault takes effect at the next start.
+
+The program gets no stdin. Its environment is your `HOME`, the `PATH` `/usr/bin:/bin`, and each
+variable that `pass-env` and `pass-secret-env` name. It must exit with status 0 within 30 seconds
+and print at most 1 MiB. Box removes one trailing newline from what it prints.
+
+A program that keeps a file under your temporary folder needs `TMPDIR` in `pass-env`, because it
+gets no other variable. The example passes it for `op`, which keeps the session of
+`eval "$(op signin)"` in `$TMPDIR/com.agilebits.op.<uid>`. Without `TMPDIR`, `op` says that no
+session is active. That folder is not in the `reads` of the example, so a workload with a grant on
+your temporary folder can reach it. To close that, add the full path of the folder to `deny`.
+
+`policy generate-schema` reads the secret of a remote MCP server in the same way. It checks the
+program files and prints the lines only when a server names a secret in a declared scheme. It
+does both before it starts a stdio MCP server.
+
+Each of these stops the box before the workload starts:
+
+- The program file is missing or is not an executable file: ``invalid `[secret-source.op]` table:
+  its program cannot run: executable is not an executable regular file: /opt/homebrew/bin/op``.
+- The program returns no secret: it exits with another status, runs too long, or prints a value
+  that Box can't use. Box prints two lines. The first holds the reason and the last words of the
+  program on its stderr. The second names the entry that holds the reference:
+
+  ```text
+  strands-box: [egress.github] secret.ref: credential error: the secret source "op" ("/opt/homebrew/bin/op") for op://[REDACTED] exited unsuccessfully (exit status: 1): [ERROR] "GitHub" isn't an item in the "Personal" vault
+  strands-box: error: `[egress.github] secret.ref` names a secret that the secret source `op` (/opt/homebrew/bin/op) did not return, so the box does not start
+  ```
+
+  Sign in to the vault or correct the reference, then start the box again. When the entry is a
+  `[telemetry.<name>]` target and the run is the first one of a new box directory, also remove
+  the box directory before you start the box again. Box stores the box record before it reads
+  that secret, so the next run otherwise stops and says that
+  [the history is absent](policy.md#a-reused-box-whose-history-and-record-disagree).
+- A write grant covers the program, a symbolic link on the way to it, or a folder that holds
+  one of them: ``this write grant can change
+  [secret-source.op] command /opt/homebrew/Caskroom/1password-cli/2.42.0/op or its path. Keep the
+  program of each secret source outside every process's write grants``. Narrow the grant.
+- A `reads` or `deny` entry passes through symbolic links that don't end, or through a folder
+  that Box can't search: ``invalid
+  `[secret-source.op]` table: `deny` entry "~/.op/socket" cannot be inspected: the path passes
+  through too many symbolic links``.
+- A write grant covers the folder that holds a symbolic link on the way to a `reads` or `deny`
+  path, such as `~/dotfiles` when `~/.aws` names `~/dotfiles/aws`: ``this write grant can change
+  /Users/me/dotfiles/aws, a symbolic link on the way to /Users/me/keys/aws, which the secret
+  source `aws-secretsmanager` keeps from each workload (its `reads` entry "~/.aws"). Keep each
+  write grant outside the folders that hold a link on the way to a path that a secret source
+  names in `reads` and `deny` ``. Narrow the grant.
+- A grant reaches a `reads` or `deny` path: ``this grant reaches /Users/me/.aws, which the secret
+  source `aws-secretsmanager` keeps from each workload (its `reads` entry "~/.aws"). Keep each
+  grant outside the paths that a secret source names in `reads` and `deny` ``. Remove the grant.
+- A reference that the program can't take: the text after `<scheme>://` starts with `-`, names
+  no secret, or ends with an empty `#FIELD`. Box starts no program for it.
+- A secret that is a JSON object, on a reference with no `#FIELD`. Name one field.
+- The program path names another file than the one Box checked when the run started: ``did not
+  start: its program file changed after the box checked it``. Start the box again.
+
+### What Box protects
+
+A workload must not go around Box to the vault. So Box protects the files and the paths that the
+table names, in `[agent]`, each `[tool.<name>]` table that the run does not
+[leave out](#a-tool-whose-program-is-not-installed), and each local `[mcp.<name>]` table. It
+checks each one before it starts a program for the first time, in `box run` and in
+`policy generate-schema`, so a box that fails a check never runs the program.
+`policy generate-schema` leaves no tool out, so it checks each `[tool.<name>]` table.
+
+**The program file.** Box keeps the program file away from the workload as it does for a
+[configured tool program](#configured-command-integrity). The program file is element 0 of
+`command`. A write grant can't cover that path, the file that it resolves to, a symbolic link on
+the way, or a folder that holds one of them. The Shell and Monty can't change them.
+
+**The arguments.** The program file is the one file of `command` that Box protects. Box doesn't protect a file that a later element names, such as the script in `command = ["/bin/sh", "/Users/me/tools/vault.sh", "{ref}"]`. A workload that can write that script changes what runs outside the sandbox. So make a script the program: give it a `#!` line and the execute bit, and write `command = ["/Users/me/tools/vault.sh", "{ref}"]`. Box also doesn't know about a file that the program loads by itself, such as a library, a module, or a settings file. Keep each of those outside every write grant yourself, or list it in `reads`.
+
+**The `reads` and `deny` paths.** No grant can reach one of these paths. Box refuses a
+filesystem entry in any list except `deny` and `deny_write` that names the path, a path inside
+it, or a folder that holds it. That includes a credential store that a grant can otherwise name
+exactly: with `reads = ["~/.aws"]`, a tool can't take `read = ["~/.aws"]`. A `deny_write` entry
+at such a path grants nothing, and Box refuses the `write` entry that it needs around it. Each
+sandbox also denies these
+paths, as it denies an entry of its own `deny` list. So a path that is absent when the box starts
+stays closed if it appears later. An entry that is a symbolic link protects the link and the path
+that it names, also when nothing is there yet, such as a socket that an app makes when it starts.
+No write grant can reach the folder that holds a symbolic link on the way to the path, because a
+change to the link writes that folder. This protection is for the sandboxes. Strands Shell and
+Monty run outside every sandbox, and the first limit below is about them.
+
+**The `pass-secret-env` variables.** Box gives your value of each of these variables to the program, and to no workload. The environment of a workload holds what the `env` of its table states and what Box adds. But for `HOME` and `PATH`, nothing comes from your shell. No `env://` or `secret://` reference can read one of these variables, so no route and no telemetry target can send the credential out. An entry that ends with `*` covers each of your variables with that prefix. A `pass-env` variable has no such rule.
+
+These limits remain:
+
+- Strands Shell and Monty don't protect a `reads` or `deny` path, or a symbolic link on the way to one. Policy alone decides a read or a change there. A rule that permits `fs:read` on such a path lets the workload read the vault's files through the Shell or Python. A rule that permits `fs:write`, `fs:delete`, or `fs:move` there lets it change them, and a changed settings file can change what the program of the source runs. So give each `fs:*` permit a path condition that holds no path of the vault, and add a `forbid` for those paths:
+
+  ```cedar
+  @id("vault_files")
+  forbid (
+    principal,
+    action in [
+      Box::Action::"fs:read", Box::Action::"fs:write",
+      Box::Action::"fs:delete", Box::Action::"fs:move"
+    ],
+    resource
+  )
+  when { context.input.path == "~/.config/op" || context.input.path like "~/.config/op/*" };
+  ```
+
+  The rule names the path and each path inside it. It compares each letter exactly, so it doesn't match another case of a name. The path conditions of your `fs:*` permits protect the vault, and this rule is a second check. From Strands Shell, [policy reads a path](policy/actions.md#filesystem) with each symbolic link resolved. So when the path is a symbolic link or passes through one, write the rule for the path that it resolves to, and for each link on the way. The rule doesn't match a move or a deletion of a folder above the path or above a link on the way, so don't permit those on your home, on `~/.config`, or on a folder that holds such a link. No check beneath policy refuses these paths in the Shell or Monty. The [limits page](../design/limitations.md#a-secret-source-runs-outside-every-sandbox) says more.
+- Box doesn't compare the `env` or the `command` of a table with your values of the `pass-secret-env` variables. A workload holds one of those values only when you write the value in a table of `box.toml` or type it after `box run`. Don't do either. A workload can use the same name for a value of its own, such as the placeholder of a signed `aws://` route in `AWS_ACCESS_KEY_ID`.
+- Each check covers one box. Keep each program and each `reads` path outside every folder that
+  any other box can write.
 
 ## `[mcp.<name>]`
 
@@ -960,9 +1346,10 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | `argument_wildcards` | bool | For `stdio`: `false` by default. `true` lets this server's whole-argument `*` entries match and forward caller-supplied values. See [argument wildcards](mcp.md#argument-wildcards). |
 | `network.contain_egress` | bool | For `stdio`: `true` by default. `false` gives this one server direct network access, with no gateway, no policy decision per request, and no credential injection. |
 | `native-filesystem-policy` | boolean | For `stdio`: override the global experimental filesystem policy setting. Remote `http` entries refuse this field. See [workload selection](native-filesystem-policy.md#select-workloads). |
-| `file-watching` | boolean | For `stdio`: `false` by default. Permit macOS FSEvents with the [metadata limitation](#file-watching). Linux ignores this setting. Remote `http` entries refuse this field. |
+| `file-watching` | boolean | For `stdio`: `false` by default. Permit macOS FSEvents with the [limitations](#file-watching). Linux ignores this setting. Remote `http` entries refuse this field. |
 | `destinations` | string array | For `http`: the hosts the server answers on. |
 | `secret.ref` | string | For `http`: the credential the gateway attaches on the way out. |
+| `secret.env` | string | For `http`, and experimental: needs `secret-sources = true` in [`[experimental-features]`](#experimental-features). The variable that holds the placeholder in the workload. Required with a reference in a [declared scheme](#secret-sourcescheme). |
 | `backends` | table array | For `http`: a backend to re-route the server's requests to, at most one. The same shape and rules as an `[egress.<name>]` backend; a `stdio` table refuses it. See [Backends](mcp.md#backends). |
 
 Without native filesystem mediation, no `fs:*` decision covers a `stdio` server's direct file operations.
@@ -980,11 +1367,73 @@ started reads with `jq`.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `kind` | string | `file` or `otlp`. |
-| `destination` | string | For `file`, an absolute or `~/`-relative path. Inside this box's `box_dir` it must lie under `private/`; outside the box any path is accepted. For `otlp`, the collector endpoint. |
+| `kind` | string | `file`, `otlp`, or a vendor: `langfuse`, `langsmith`, `cloudwatch_logs`, or `cloudwatch_traces`. Required. |
+| `destination` | string | For `file`, an absolute or `~/`-relative path. Inside this box's `box_dir` it must lie under `private/`; outside the box any path is accepted. For `otlp`, the collector endpoint. For `langfuse` and `langsmith`, the base address, which defaults to the vendor's cloud. A CloudWatch kind takes `region` instead, and refuses `destination`. |
 | `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, or `metrics`. `trace` names the agent's own spans and the box's control-plane records. `logs` includes unmatched MCP routing diagnostics. **Absent means every signal**, so write `include` only to narrow the target. An empty list is refused, and so is a repeated word. |
-| `secret.ref` | string | `env://NAME` or `secret://NAME`, attached on the way out. |
-| `secret.header` | string | Defaults to `Authorization` with a `Bearer ` prefix. |
+| `accepts` | string array | For `otlp`: which OTLP payloads the endpoint takes, from `traces`, `logs`, and `metrics`. Absent means all three. The box sends no batch of a payload the list leaves out. |
+| `headers` | table | For `otlp`: fixed headers sent on every request. A header that carries a credential or a signature is refused here. |
+| `secret.ref` | string | `env://NAME`, `secret://NAME`, `aws://PROFILE`, `credsd://ENVIRONMENT`, or a reference in a [declared scheme](#secret-sourcescheme). `aws://` and `credsd://` sign each request with SigV4. A literal value is refused. The box attaches this secret itself, so the target takes no `secret.env`. |
+| `secret.placement` | string | For `otlp`: `header` (default) or `basic_auth`. `basic_auth` sends a `user:password` secret as `Authorization: Basic`. |
+| `secret.header` | string | For `otlp`: the header the secret lands in. Defaults to `Authorization`. |
+| `secret.prefix` | string | For `otlp`: text before the secret in the header. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |
+| `project` | string | For `langsmith`: the project the spans go to. |
+| `region` | string | For a CloudWatch kind: the AWS region, such as `us-west-2`. Required. |
+| `log_group`, `log_stream` | string | For `cloudwatch_logs`: where the log records go. Both are required. |
+
+A vendor kind sets the vendor's path, headers, payloads, and credential placement itself. Write
+only what is yours:
+
+```toml
+[telemetry.langfuse]
+kind = "langfuse"
+destination = "https://us.cloud.langfuse.com"
+secret.ref = "env://LANGFUSE_AUTH"            # public-key:secret-key
+
+[telemetry.langsmith]
+kind = "langsmith"
+project = "my-project"
+secret.ref = "env://LANGSMITH_API_KEY"
+
+[telemetry.cloudwatch_logs]
+kind = "cloudwatch_logs"
+region = "us-west-2"
+log_group = "my-group"
+log_stream = "my-stream"
+secret.ref = "aws://my-profile"
+
+[telemetry.cloudwatch_traces]
+kind = "cloudwatch_traces"
+region = "us-west-2"
+secret.ref = "aws://my-profile"
+```
+
+| Kind | Sends | Credential |
+|---|---|---|
+| `langfuse` | spans, to `<destination>/api/public/otel`, with `x-langfuse-ingestion-version: 4` | Basic auth, from a `public-key:secret-key` secret |
+| `langsmith` | spans, to `<destination>/otel`, with `Langsmith-Project` when `project` is set | `x-api-key` |
+| `cloudwatch_logs` | log records, to `https://logs.<region>.amazonaws.com`, with `x-aws-log-group` and `x-aws-log-stream` | SigV4 for `logs`, from `aws://` or `credsd://` |
+| `cloudwatch_traces` | spans, to `https://xray.<region>.amazonaws.com` | SigV4 for `xray`, from `aws://` or `credsd://` |
+
+A `langfuse` or `langsmith` target also takes a reference in a
+[declared scheme](#secret-sourcescheme), such as
+`secret.ref = "aws-secretsmanager://box/telemetry#LANGSMITH_API_KEY"`. A CloudWatch kind takes only
+`aws://` or `credsd://`.
+
+A vendor kind refuses each key it sets itself: `headers`, `accepts`, `secret.header`,
+`secret.prefix`, and `secret.placement`. The message is ``a `<kind>` target sets `<key>` itself, so
+leave it out``. A key that belongs to another kind is refused with
+`` `<key>` does not apply to a `<kind>` target ``. Box stores each vendor target as the `otlp`
+target it stands for. For a vendor Box does not know, write `kind = "otlp"` with `accepts`,
+`headers`, and `secret` yourself.
+
+A secret needs an `https://` destination unless the destination is loopback. Box checks each
+`aws://` and `credsd://` telemetry credential before the workload starts, so a profile that cannot
+sign or a daemon that does not answer stops the run.
+
+When the run ends, Box prints one stderr line if an export to a configured target failed, or if the
+final export did not finish in time. Set `STRANDS_BOX_TELEMETRY_DEBUG` to any non-empty value in the
+environment of `strands-box run` to also print each failed export as it happens, with its full cause
+and the start of the endpoint's answer, with each credential Box attached redacted.
 
 A file destination inside the box directory and outside `private/` is refused: `"<path>" is inside
 the box directory <path> but outside its private tree, where a process could truncate it; name a
@@ -997,7 +1446,8 @@ more of: deny, permit, trace, logs, metrics`, and a repeated word with `the targ
 ### Agent logs and metrics are unconditional
 
 Every target receives the agent's log records and metrics. `include = ["deny"]` delivers the
-refusals, the agent's log records, and the agent's metrics.
+refusals, the agent's log records, and the agent's metrics. `accepts` is the exception: an endpoint
+that takes only `traces`, such as a `langfuse` target, is sent no log or metric batch.
 
 `logs` also selects the box's unmatched MCP routing diagnostics. A target with an explicit
 `include` list receives these diagnostics only when the list names `logs`.
@@ -1071,6 +1521,7 @@ absent or invalid `name`, an absent or relative `box_dir`, an empty or relative 
 relative `workspace`, an `env` name the box owns, a relative `env.HOME` or `env.TMPDIR`, a patterned
 or relative `filesystem` path, a `filesystem` path carrying `..`, a duplicated `filesystem` path, an
 overlapping or all-hosts egress destination, a secretless egress entry, a literal egress secret,
+each [`[secret-source.<scheme>]`](#secret-sourcescheme) refusal,
 each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal, an `ingress` outside `[agent]`, an
 `[[agent.ingress]]` while `ingress` is off in `[experimental-features]`, more than
 five `[[agent.ingress]]` entries, an `[[agent.ingress]] listen` that is not an IP address and port, a
@@ -1082,9 +1533,10 @@ A `box_dir` whose parent does not exist is refused before anything is created. E
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload
 starts: a `workspace` that does not exist, an `env.HOME` inside or enclosing `box_dir`, a telemetry
 file destination inside the box directory and outside `private/`, a `filesystem` entry whose path
-does not exist or is a symbolic link, a `[tool.<name>] command` that names a missing file, an
-`[[agent.ingress]] listen` address that cannot be bound, and on macOS a `workload_port` that another
-process already listens on. The
+does not exist or is a symbolic link, a `deny_write` entry that is not a directory inside a `write`
+directory, an `[[agent.ingress]] listen` address that cannot be bound, and on macOS a
+`workload_port` that another process already listens on. A `[tool.<name>]` whose program is not
+installed is [left out](#a-tool-whose-program-is-not-installed) rather than refused. The
 box directory stays behind. It is empty when the refusal came before the record was written, and it
 holds the record when the refusal came after. The next `run` against it judges the file again and
 reports the same refusal until the file is fixed.

@@ -1363,13 +1363,14 @@ dependencies = [
 
 [[package]]
 name = "dogwood-language"
-version = "1.0.0"
+version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6996ef17ca5d06cea0e53bbffb177690e8e4a7f3bbcdb5bf67ad59603f2bf079"
+checksum = "74c90639521bd33d9527b992ecca02fd8ee821d4aae4a439db89e20191a9b13d"
 dependencies = [
  "cedar-policy",
  "cedar-policy-core",
  "cedar-policy-mcp-schema-generator",
+ "dogwood-syntax",
  "mcp-tools-sdk",
  "miette",
  "nonempty",
@@ -1387,9 +1388,9 @@ dependencies = [
 
 [[package]]
 name = "dogwood-local-engine"
-version = "1.0.0"
+version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02d82f08653e0090010cfa076bcec582d3aa31e1dc3f0574e4e929c63253878b"
+checksum = "a01a72add38d2ef40db61257dbfe0e172ab0d9366ec9bfb5954971368f32829e"
 dependencies = [
  "dogwood-language",
  "getrandom 0.3.4",
@@ -1397,6 +1398,16 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "dogwood-syntax"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "420158054e5b09b4119621cbc2c0e9d58e84948fe958ac4b87b369271e98e22c"
+dependencies = [
+ "pest",
+ "pest_derive",
 ]
 
 [[package]]
@@ -4395,6 +4406,7 @@ name = "strands-box-telemetry"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.23.1",
  "libc",
  "opentelemetry",
  "opentelemetry-proto",
@@ -4403,6 +4415,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "strands-box-credentials",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -4414,7 +4427,7 @@ dependencies = [
 [[package]]
 name = "strands-shell"
 version = "0.0.0"
-source = "git+https://github.com/strands-agents/shell?rev=20c642b0634e9f1a752fa884d9b21d0aadf40b33#20c642b0634e9f1a752fa884d9b21d0aadf40b33"
+source = "git+https://github.com/strands-agents/shell?rev=39daa83d7f155d5b164f794f783e35598f49064e#39daa83d7f155d5b164f794f783e35598f49064e"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4423,6 +4436,7 @@ dependencies = [
  "jaq-json",
  "jaq-std",
  "lexopt",
+ "libc",
  "mlua",
  "regex",
  "reqwest",
@@ -4438,7 +4452,7 @@ dependencies = [
 [[package]]
 name = "strands-shell-macros"
 version = "0.1.0"
-source = "git+https://github.com/strands-agents/shell?rev=20c642b0634e9f1a752fa884d9b21d0aadf40b33#20c642b0634e9f1a752fa884d9b21d0aadf40b33"
+source = "git+https://github.com/strands-agents/shell?rev=39daa83d7f155d5b164f794f783e35598f49064e#39daa83d7f155d5b164f794f783e35598f49064e"
 dependencies = [
  "proc-macro2",
  "quote",

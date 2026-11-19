@@ -209,6 +209,12 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   `below_trace_an_agent_span_is_answered_and_discarded`, and
   `a_narrowed_target_still_receives_the_agents_own_logs_and_metrics`, which asserts in one test that
   the two relayed signals arrive and a span does not.
+  **`accepts` is the one narrowing, and it is by payload, not by signal.** An `Otlp` target that
+  names `accepts` is sent no batch of a payload the list leaves out (the `accepts` field of
+  `TargetExporter`), because Langfuse and LangSmith answer `404` on `/v1/logs` and `/v1/metrics`,
+  and a target that sent one would count a dropped batch every second. So a `langfuse` target
+  receives no agent log record, whatever the union above puts in its lane.
+  `a_traces_only_target_is_sent_no_other_payload` is the pin.
 - **`Target` has TWO constructors and the default signal set must be in both.** `Target::new` and
   `Target::opened_file` each state their own set, and the box's *default* target — the one a box with
   no `[telemetry]` table gets — is built by `opened_file`, because `config_for` hands it an already
@@ -401,10 +407,10 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
 
 ## Public surface
 
-Sixteen names: `Collector`, `Target`, `TargetKind`, `TargetSecret`, `TelemetryConfig`, `Result`,
+Seventeen names: `Collector`, `Target`, `TargetKind`, `TargetSecret`, `TelemetryConfig`, `Result`,
 `TelemetryError`, `DecisionRecord`, `DecisionCause`, `DeterminingPolicy`, `Subject`, `Correlation`,
-`ControlRecord`, `ControlOperation`, `Signal`, and `McpUnmatched`, reached through `telemetry::open`,
-then:
+`ControlRecord`, `ControlOperation`, `Signal`, `McpUnmatched`, and `Payload`, reached through
+`telemetry::open`, then:
 
 **Three of those carry one decision's context, and each exists because a caller holds the value and
 this crate must not re-derive it.** `Correlation` is the request's W3C parent, the transport request
@@ -439,6 +445,12 @@ copies it unchanged.
 - `Collector::record` never blocks, never fails and never awaits. Strands Box calls it from a policy
   enforcement point before the effect or refusal. A record no target's signal set accepts is not
   built at all.
+- **`DecisionRecord`'s readers return the values its attributes state, by construction.**
+  `attributes` builds `strands.box.policy.action`, `category`, `resource`, `verdict`, `cause`,
+  `reason`, and `rule` from the readers of the same names (`verdict` from `permitted`), so Strands
+  Box's in-memory `PolicyDecision` and the record cannot disagree. `time` is the timestamp
+  `Collector::record` stamps on the record. Do not compute one of those attributes apart from its
+  reader.
 - `Collector::control` is the same contract for the other plane. Strands Box calls it where the
   authority itself changes — a policy install, a schema install, discovery completing, a box starting
   or stopping. **Each operation also reaches a span**, under `strands-box.control`, named

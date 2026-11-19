@@ -33,6 +33,11 @@ on:
         required: false
         type: boolean
         default: true
+      containment_macos:
+        description: "Run the deterministic containment suite on the macOS unit-test runner, so a push holds one macOS runner. Linux runs the suite in containment-deterministic.yml."
+        required: false
+        type: boolean
+        default: false
 
 env:
   # Colorize cargo output in Actions logs (from the starter template).
@@ -47,14 +52,122 @@ env:
   RUSTFLAGS: "-C debuginfo=0"
 
 jobs:
+  history-persistence:
+    name: History persistence (${{ matrix.mode }}, ${{ matrix.os }})
+    # Exercise the batched default and the per-event opt-out independently of all-feature builds.
+    if: ${{ inputs.filter == '' }}
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    # Dispatched runs can select a different revision; deny cache writes from that code.
+    cache-mode: read
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_FEATURE_ARGS: ${{ matrix.mode == 'per-event' && '--no-default-features' || '' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os) }}
+        mode: [default, per-event]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Enable experimental x86 runtime tests
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: echo "EXPERIMENTAL_X86_SUPPORT=TRUE" >> "$GITHUB_ENV"
+
+      - name: Require Linux namespace support
+        if: runner.os == 'Linux'
+        run: |
+          case "$(uname -m)" in
+            aarch64|x86_64) ;;
+            *) echo "Unsupported Linux test architecture" >&2; exit 1 ;;
+          esac
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$knob" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount --pid --fork --mount-proc true
+
+      - name: Build Box and launcher binaries for the selected persistence mode
+        run: cargo build --locked -p strands-box -p strands-box-containment --bins $CARGO_FEATURE_ARGS
+
+      - name: Install launcher images beside test binaries (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          install -m 0755 target/debug/strands-box-sock-alias target/debug/deps/strands-box-sock-alias
+          install -m 0755 target/debug/strands-box-contain-trampoline target/debug/deps/strands-box-contain-trampoline
+
+      - name: Test crash recovery for the selected persistence mode
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+          cargo test --locked -p strands-box $CARGO_FEATURE_ARGS --test box_killed_run -- --show-output \
+            2>&1 | tee crash-recovery.log
+          test_status=$?
+          set -e
+          if [ "$test_status" -ne 0 ]; then
+            exit "$test_status"
+          fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            python3 scripts/check-linux-test-output.py crash-recovery.log | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import re
+
+          output = Path("crash-recovery.log").read_text()
+          output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+          results = re.findall(r"^test result:.*$", output, re.MULTILINE)
+          expected = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;"
+          if len(results) != 1 or not results[0].startswith(expected):
+              raise SystemExit("Expected one passing crash-recovery test with no ignored or filtered cases.")
+          PYTHON
+
+      - name: Test the default idle history timer
+        if: matrix.mode == 'default'
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p strands-box --lib \
+            run::hosted::tests::hosted_idle_timer_flushes_pending_history_without_shutdown \
+            -- --exact --show-output 2>&1 | tee default-idle-history.log
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import re
+
+          output = Path("default-idle-history.log").read_text()
+          output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+          expected = "test run::hosted::tests::hosted_idle_timer_flushes_pending_history_without_shutdown ... ok"
+          if expected not in output or not re.search(r"^test result: ok\. 1 passed; 0 failed; 0 ignored;", output, re.MULTILINE):
+              raise SystemExit("Expected the default build to execute and pass the idle history test.")
+          PYTHON
+
+      - name: Upload history persistence output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: history-persistence-${{ matrix.mode }}-${{ matrix.os }}
+          path: |
+            crash-recovery.log
+            default-idle-history.log
+          if-no-files-found: warn
+
   unit-test:
     name: Unit Tests (${{ matrix.os }})
     permissions:
       contents: read
     runs-on: ${{ matrix.os }}
-    # Cargo test on the full workspace typically finishes in a few minutes;
-    # 30 min caps a hung step instead of running to the 6-hour default.
-    timeout-minutes: 30
+    # Allow a cold build and the complete workspace suite on slower runners.
+    # The x86 runner can still be making progress after 30 minutes. The macOS
+    # runner also runs the deterministic containment suite when asked to.
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && inputs.containment_macos && 70 || 45 }}
     strategy:
       # Report every OS's outcome even if one fails. A single Linux failure
       # is not a reason to hide the macOS one.
@@ -72,10 +185,6 @@ jobs:
         if: runner.os == 'Linux'
         # Free space for the all-targets build on the disposable Ubuntu runner.
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
-
-      - name: Enable experimental x86 runtime tests
-        if: runner.os == 'Linux' && runner.arch == 'X64'
-        run: echo "EXPERIMENTAL_X86_SUPPORT=TRUE" >> "$GITHUB_ENV"
 
       - name: Require Linux namespace support
         if: runner.os == 'Linux'
@@ -98,6 +207,18 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Cache cargo for the deterministic suite (macOS only)
+        if: ${{ matrix.os == 'macos-latest' && inputs.containment_macos }}
+        # A distinct shared-key keeps the release target and the standalone
+        # test-integ crate apart from the unit-test cache above.
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: containment-deterministic
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          workspaces: |
+            .
+            test-integ
 
       - name: Fetch locked dependencies for offline metadata
         run: cargo fetch --locked
@@ -152,6 +273,10 @@ jobs:
         env:
           FAIL_FAST_FLAG: ${{ !inputs.fail_fast && '--no-fail-fast' || '' }}
           FILTER: ${{ inputs.filter }}
+          # ubuntu-latest is a stock GitHub-hosted runner (kernel well above 5.9, no seccomp
+          # block), so close_range is available and the fast-path test must exercise it rather
+          # than skip. Setting this makes a skip there a hard failure instead of a quiet pass.
+          BOX_REQUIRE_CLOSE_RANGE: "1"
         run: |
           set -o pipefail
           set +e
@@ -162,12 +287,24 @@ jobs:
           python3 scripts/check-linux-test-output.py linux-workspace-tests.log | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$test_status"
 
-      - name: Upload Linux workspace test output
+      - name: Test Linux native filesystem forwarding
+        if: ${{ !cancelled() && runner.os == 'Linux' && inputs.filter == '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p strands-box-containment --lib --all-features \
+            backend::linux::namespace::filesystem_queries::forwarding_tests:: \
+            -- --test-threads=1 2>&1 | tee linux-native-forwarding-tests.log
+          grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' linux-native-forwarding-tests.log
+
+      - name: Upload Linux test output
         if: ${{ always() && runner.os == 'Linux' }}
         uses: actions/upload-artifact@v7
         with:
           name: workspace-tests-${{ matrix.os }}
-          path: linux-workspace-tests.log
+          path: |
+            linux-workspace-tests.log
+            linux-native-forwarding-tests.log
           if-no-files-found: warn
 
       - name: Run tests (macos)
@@ -193,9 +330,11 @@ jobs:
           cargo fmt --manifest-path test-native-filesystem/Cargo.toml --check
           cargo clippy --manifest-path test-native-filesystem/Cargo.toml --locked --all-targets --all-features -- -D warnings
 
-      - name: Test native startup without the Cargo feature (macOS only)
+      - name: Test native startup without native enforcement in both history modes (macOS only)
         if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.filter == '' }}
-        run: cargo test --locked -p strands-box --no-default-features --test macos_file_enforcement
+        run: |
+          cargo test --locked -p strands-box --test macos_file_enforcement
+          cargo test --locked -p strands-box --no-default-features --test macos_file_enforcement
 
       - name: Test signed receipt checker (macOS only)
         if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.filter == '' }}
@@ -214,6 +353,53 @@ jobs:
         run: |
           echo "Native adapter, configuration, and startup tests passed. The full signed native enforcement suite did not run." >> "$GITHUB_STEP_SUMMARY"
           echo "Signed receipt freshness: ${RECEIPT_OUTCOME} (informational only)." >> "$GITHUB_STEP_SUMMARY"
+
+      # The deterministic containment suite (test-integ/) on macOS. These steps
+      # are the macOS leg of containment-deterministic.yml, run here so a push
+      # holds one macOS runner. They run after a unit-test failure, and each
+      # one waits for the one before it, as in a job of their own.
+      - name: Build strands-box and the containment trampoline (macOS only)
+        id: det_build
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment_macos }}
+        run: cargo build -p strands-box -p strands-box-containment --release --locked --features test-support
+
+      - name: Check downloader behavior (macOS only)
+        id: det_download
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment_macos && steps.det_build.outcome == 'success' }}
+        run: python3 -m unittest discover -s scripts -p 'test_download.py' -v
+
+      - name: Test filesystem modes on a supported backend (macOS only)
+        id: det_filesystem_modes
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment_macos && steps.det_download.outcome == 'success' }}
+        run: cargo test -p strands-box --release --locked --all-features --test filesystem_modes -- --nocapture
+
+      - name: Run the deterministic suite (macOS only)
+        id: det_suite
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment_macos && steps.det_filesystem_modes.outcome == 'success' }}
+        env:
+          DET_RESULTS_DIR: ${{ github.workspace }}/det-results
+          PLATFORM: macos
+        run: |
+          echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
+          export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
+          command -v strands-box
+          bash test-integ/run.sh
+
+      - name: Summarize the verdict (macOS only)
+        if: ${{ always() && matrix.os == 'macos-latest' && inputs.containment_macos }}
+        run: python3 test-integ/tools/summarize-verdict.py "$GITHUB_WORKSPACE/det-results/verdict.json"
+
+      - name: Upload verdict and logs (macOS only)
+        if: ${{ always() && matrix.os == 'macos-latest' && inputs.containment_macos }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: deterministic-${{ matrix.os }}
+          path: |
+            det-results/verdict.json
+            det-results/cargo-test.log
+            det-results/*.jsonl
+          if-no-files-found: warn
+          retention-days: 14
 
   lint:
     name: Lint

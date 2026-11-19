@@ -10,7 +10,7 @@ use crate::sources::uri_reference;
 use crate::{CredentialError, Locator, Result, Secret, redact_credential_ref};
 
 /// The scheme this source claims.
-const SCHEME: &str = "file";
+pub(crate) const SCHEME: &str = "file";
 
 /// Reads secrets from local files (`file:///path`).
 #[derive(Debug, Default, Clone, Copy)]

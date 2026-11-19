@@ -39,6 +39,7 @@ fn render(effect: &EffectAttempt<'_>) -> String {
                 FsOperation::RemoveDir => "remove_dir".to_string(),
                 FsOperation::CreateDir => "create_dir".to_string(),
                 FsOperation::SetPermissions { mode } => format!("chmod({mode:o})"),
+                FsOperation::SetTimes => "set_times".to_string(),
                 FsOperation::ChangeDir => "change_dir".to_string(),
                 FsOperation::ReadLink => "read_link".to_string(),
                 _ => "other".to_string(),
@@ -1640,4 +1641,38 @@ fn a_sleep_the_deadline_cuts_short_records_a_nonzero_status() {
     let events = events.lock().unwrap().clone();
     assert_eq!(events.len(), 1, "{events:?}");
     assert_ne!(events[0], "#1 status 0", "{events:?}");
+}
+
+/// `touch` on an existing file presents one time change, and a denial leaves the times alone.
+#[test]
+fn touch_presents_a_time_change_and_a_denial_keeps_the_times() {
+    let (interceptor, admitted) = Recorder::allowing_everything();
+    let mut shell = shell_with(interceptor);
+    run(async {
+        let out = shell
+            .run("printf x > /home/lash/t.txt && touch -d @0 /home/lash/t.txt")
+            .await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+    });
+    let admitted = admitted.lock().expect("record").clone();
+    assert!(
+        admitted.contains(&"set_times /home/lash/t.txt".to_string()),
+        "{admitted:?}"
+    );
+
+    let (interceptor, _) = Recorder::denying(|e| e.starts_with("set_times "));
+    let mut shell = shell_with(interceptor);
+    let (out, listed) = run(async {
+        let setup = shell.run("printf x > /home/lash/t.txt").await;
+        assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
+        let out = shell.run("touch -d @0 /home/lash/t.txt").await;
+        let listed = shell.run("ls -l /home/lash/t.txt").await;
+        (out, listed)
+    });
+    assert_eq!(out.status, 1, "a denied time change fails: {}", out.stderr);
+    assert!(
+        !listed.stdout.contains("1970"),
+        "the time is unchanged: {}",
+        listed.stdout
+    );
 }

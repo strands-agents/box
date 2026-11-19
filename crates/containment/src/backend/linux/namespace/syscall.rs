@@ -199,6 +199,13 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "chdir",
         number: libc::SYS_chdir,
     },
+    // `fchdir` enters a folder the workload already holds open, so it reaches nothing `chdir`
+    // cannot. Go's `testing.T.Chdir` returns to the saved folder with it when a test ends, and
+    // a refusal there panics the test.
+    PermittedSyscall {
+        name: "fchdir",
+        number: libc::SYS_fchdir,
+    },
     PermittedSyscall {
         name: "fchmod",
         number: libc::SYS_fchmod,
@@ -549,6 +556,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
     },
     #[cfg(target_arch = "x86_64")]
     PermittedSyscall {
+        name: "fork",
+        number: libc::SYS_fork,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
         name: "vfork",
         number: libc::SYS_vfork,
     },
@@ -652,30 +664,15 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
         reason: "execveat with AT_EMPTY_PATH execs an inherited descriptor rather than \
                  a path, so the mount view never sees the bytes that run",
     },
-    // Route 3 of W^X: writable memory becoming executable.
-    MediatedSyscall {
-        name: "mmap",
-        number: libc::SYS_mmap,
-        disposition: Disposition::ArgumentScoped,
-        reason: "a mapping that is writable and executable at once is attacker-authored \
-                 code the mount view cannot govern",
-    },
-    MediatedSyscall {
-        name: "mprotect",
-        number: libc::SYS_mprotect,
-        disposition: Disposition::ArgumentScoped,
-        reason: "adding PROT_EXEC turns a page the workload has already written into \
-                 code, which is route 3 of W^X",
-    },
-    // `pkey_mprotect` reaches the same effect with a protection key argument, so denying only
-    // `mprotect` would be the same shape of fail-open that denying only `mount` and only `unshare`
-    // each turned out to be.
+    // `pkey_mprotect` is `mprotect` with a protection key. It stays refused together with
+    // `pkey_alloc`, so protection keys are admitted or refused as one decision; a JIT runtime with
+    // no key uses the permitted `mprotect` instead.
     MediatedSyscall {
         name: "pkey_mprotect",
         number: libc::SYS_pkey_mprotect,
         disposition: Disposition::ArgumentScoped,
-        reason: "pkey_mprotect adds PROT_EXEC exactly as mprotect does, and denying only \
-                 mprotect would leave the same route open under a second spelling",
+        reason: "pkey_mprotect pairs with pkey_alloc, which is unpermitted, so protection keys \
+                 stay refused as one unit and a runtime uses mprotect instead",
     },
     // The new mount API reaches the same effect as `mount(2)` without calling it.
     MediatedSyscall {
@@ -944,17 +941,38 @@ pub(crate) struct SyscallFilters {
 
 /// The static system-call policy for one containment request.
 #[derive(Debug)]
-pub(crate) struct SyscallPolicy;
+pub(crate) struct SyscallPolicy {
+    #[cfg(feature = "native-filesystem-policy")]
+    native_filesystem: bool,
+}
 
 impl SyscallPolicy {
     /// Derive the policy from one request.
     pub(crate) fn for_config(_network: &Network) -> Self {
-        Self
+        Self {
+            #[cfg(feature = "native-filesystem-policy")]
+            native_filesystem: false,
+        }
+    }
+
+    #[cfg(feature = "native-filesystem-policy")]
+    pub(crate) fn with_native_filesystem(mut self, enabled: bool) -> Self {
+        self.native_filesystem = enabled;
+        self
     }
 
     /// Compile both filters before containment starts.
     pub(crate) fn compile(&self) -> Result<SyscallFilters, ContainmentError> {
         let permit_rules = build_permit_rules(WORKLOAD_PERMITTED, true)?;
+        #[cfg(feature = "native-filesystem-policy")]
+        let permit_rules = {
+            let mut rules = permit_rules;
+            if self.native_filesystem {
+                // The notification filter must mediate this path-based call before it can run.
+                rules.insert(libc::SYS_truncate, Vec::new());
+            }
+            rules
+        };
         let permit = compile_filter(
             permit_rules,
             SeccompAction::Errno(libc::EPERM as u32),
@@ -979,8 +997,19 @@ impl SyscallPolicy {
             SeccompAction::Errno(libc::EPERM as u32),
         )?;
 
+        let notification_rules = BTreeMap::from([(libc::SYS_statfs, Vec::new())]);
+        #[cfg(feature = "native-filesystem-policy")]
+        let notification_rules = {
+            let mut rules = notification_rules;
+            if self.native_filesystem {
+                for number in super::native_filesystem::OPERATIONS {
+                    rules.insert(*number, Vec::new());
+                }
+            }
+            rules
+        };
         let mut filesystem_queries = compile_filter(
-            BTreeMap::from([(libc::SYS_statfs, Vec::new())]),
+            notification_rules,
             SeccompAction::Allow,
             SeccompAction::Trace(0),
         )?;
@@ -1036,10 +1065,7 @@ impl SyscallPolicy {
         if entry.number == libc::SYS_execveat {
             return execveat_rules();
         }
-        if entry.number == libc::SYS_mmap {
-            return write_execute_mmap_rules();
-        }
-        if entry.number == libc::SYS_mprotect || entry.number == libc::SYS_pkey_mprotect {
+        if entry.number == libc::SYS_pkey_mprotect {
             return add_execute_rules();
         }
         if entry.number == libc::SYS_setpgid {
@@ -1216,6 +1242,12 @@ fn build_permit_rules(
         libc::SYS_setresgid,
         setresgid_rules()?,
     )?;
+    insert_permitted_scoped(
+        &mut rules,
+        "renameat2",
+        libc::SYS_renameat2,
+        renameat2_rules()?,
+    )?;
     #[cfg(target_arch = "x86_64")]
     insert_permitted_scoped(
         &mut rules,
@@ -1262,6 +1294,24 @@ fn x86_thread_setup_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
         ])
         .map_err(filter_error)?,
     ])
+}
+
+/// `renameat2` with no flags is the permitted `renameat`, and `RENAME_NOREPLACE` only adds "fail if
+/// the new name exists". The `tempfile` crate creates a name with `RENAME_NOREPLACE` and falls back
+/// to a hard link only on `ENOSYS` or `EINVAL`, so the permit table's `EPERM` failed every
+/// `tempfile` persist, such as uv's cache lock. `RENAME_EXCHANGE` and `RENAME_WHITEOUT` stay refused.
+fn renameat2_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
+    [0, u64::from(libc::RENAME_NOREPLACE)]
+        .into_iter()
+        .map(|flags| {
+            SeccompRule::new(vec![
+                // The kernel reads the flags as an unsigned int, so match their low 32 bits.
+                SeccompCondition::new(4, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, flags)
+                    .map_err(filter_error)?,
+            ])
+            .map_err(filter_error)
+        })
+        .collect()
 }
 
 fn setresuid_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
@@ -1326,24 +1376,7 @@ fn execveat_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
     ])
 }
 
-/// Deny `mmap` only when the mapping is writable **and** executable at once.
-fn write_execute_mmap_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
-    let mask = (libc::PROT_WRITE | libc::PROT_EXEC) as u64;
-    Ok(vec![
-        SeccompRule::new(vec![
-            SeccompCondition::new(
-                2,
-                SeccompCmpArgLen::Dword,
-                SeccompCmpOp::MaskedEq(mask),
-                mask,
-            )
-            .map_err(filter_error)?,
-        ])
-        .map_err(filter_error)?,
-    ])
-}
-
-/// Deny `mprotect`/`pkey_mprotect` when the new protection adds `PROT_EXEC`.
+/// Deny `pkey_mprotect` when the new protection adds `PROT_EXEC`.
 fn add_execute_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
     let mask = libc::PROT_EXEC as u64;
     Ok(vec![
@@ -1415,13 +1448,15 @@ mod tests {
     #[test]
     fn permit_filter_has_the_expected_workload_and_installer_entries() {
         let x86_entries = usize::from(cfg!(target_arch = "x86_64"));
-        assert_eq!(WORKLOAD_PERMITTED.len(), 117 + 18 * x86_entries);
+        assert_eq!(WORKLOAD_PERMITTED.len(), 118 + 19 * x86_entries);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 120 + 19 * x86_entries);
+        assert_eq!(rules.len(), 122 + 20 * x86_entries);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
+        // No flags, or RENAME_NOREPLACE; RENAME_EXCHANGE and RENAME_WHITEOUT match neither.
+        assert_eq!(rules[&libc::SYS_renameat2].len(), 2);
         assert!(
             !WORKLOAD_PERMITTED
                 .iter()

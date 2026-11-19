@@ -17,8 +17,9 @@
 //!
 //! A write cell ends with one executable-mapping allow per exec grant it reaches, so the pair the
 //! floor warns about renders as stated. A refusal renders as `subpath` for a tree and as `literal`
-//! for one file. A write protection or a refusal strictly inside a write root fixes each directory
-//! between the two with the root's own identity pair, after the root's leaf allows.
+//! for one file. A write protection renders as `literal` for one file and as `subpath` for a
+//! write-protected tree. A write protection or a refusal strictly inside a write root fixes each
+//! directory between the two with the root's own identity pair, after the root's leaf allows.
 //!
 //! Two blocks are not cells. One refuses the existence test across the operator's home, allows it
 //! back on each granted path and its ancestor chain — over the subtree when the path is inside the
@@ -291,21 +292,6 @@ fn other_spelling_metadata(granted: &PathGrant) -> Result<String> {
     Ok(rules)
 }
 
-/// One `file-read-metadata` rule per symbolic link among the directories a requested spelling
-/// traverses, which a load through a linked directory needs beside the file's own spellings.
-fn linked_directory_metadata(requested: &std::path::Path) -> Result<String> {
-    let mut rules = String::new();
-    for ancestor in requested.ancestors().skip(1) {
-        if std::fs::symlink_metadata(ancestor).is_ok_and(|metadata| metadata.is_symlink()) {
-            let route = escaped(ancestor)?;
-            rules.push_str(&format!(
-                "(allow file-read-metadata (literal \"{route}\"))\n"
-            ));
-        }
-    }
-    Ok(rules)
-}
-
 /// One executable-mapping allow per exec grant this write grant reaches, after the cell's own deny.
 ///
 /// Empty unless an exec grant overlaps this write grant, which is the pair `floors::warnings`
@@ -463,6 +449,7 @@ fn descriptor_path(descriptor: libc::c_int) -> Option<std::path::PathBuf> {
 }
 
 /// The profile for one request, naming no inherited stream.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn render_profile(config: &ContainmentConfig) -> Result<String> {
     render_profile_with_streams(config, &InheritedStreams::default())
 }
@@ -492,15 +479,16 @@ pub(crate) fn render_profile_with_streams(
                 // The images the program loads from outside the shared cache are read-file cells:
                 // `file-read*` on each identity, and metadata on the spelling the load requests.
                 for loaded in super::macho::collect_dylibs(&granted.resolved, config, &mut missing)? {
-                    let image = &loaded.original;
+                    // The grant's traversal walk holds the linked folders on the spelling the load
+                    // requests, so `other_spelling_metadata` renders each one once, judged like the
+                    // other nodes.
                     if !loaded_images.insert(loaded.resolved.clone()) {
                         continue;
                     }
                     cells.entry(READ_FILE).or_default().push_str(&format!(
-                        "(allow file-read* (literal \"{}\"))\n{}{}",
+                        "(allow file-read* (literal \"{}\"))\n{}",
                         escaped(&loaded.resolved)?,
-                        other_spelling_metadata(&loaded)?,
-                        linked_directory_metadata(image)?
+                        other_spelling_metadata(&loaded)?
                     ));
                 }
             }
@@ -624,6 +612,22 @@ pub(crate) fn render_profile_with_streams(
             fixed_ancestors.extend(
                 directories_between(protected.path(), &root.resolved)
                     .map(std::path::Path::to_path_buf),
+            );
+        }
+    }
+    for tree in config.write_protected_trees() {
+        let path = escaped(tree)?;
+        cells
+            .entry(WRITE_PROTECTION)
+            .or_default()
+            .push_str(&format!(
+                "(deny file-write* (subpath \"{path}\"))\n\
+                 {}(deny file-link (subpath \"{path}\"))\n",
+                write_leaf_denies("subpath", &path)
+            ));
+        for root in &write_roots {
+            fixed_ancestors.extend(
+                directories_between(tree, &root.resolved).map(std::path::Path::to_path_buf),
             );
         }
     }
@@ -828,7 +832,9 @@ pub(crate) fn render_profile_with_streams(
         .iter()
         .chain(config.write_protections())
         .chain(config.command_identities())
-        .flat_map(|required| required.path().ancestors())
+        .map(|required| required.path())
+        .chain(config.write_protected_trees())
+        .flat_map(std::path::Path::ancestors)
         .collect();
     for path in identity_paths {
         let path = escaped(path)?;
@@ -1612,6 +1618,130 @@ mod tests {
                 root.join("opt").display()
             )),
             "the linked directory gets metadata, never its contents: {profile}"
+        );
+    }
+
+    /// **A file read spelled the way Homebrew names a library renders every link on the way**:
+    /// `opt/<formula>` is a link to the keg, and `lib/libmpdec.4.dylib` in the keg is a link to the
+    /// versioned file. The read gets `file-read*` on the file, and metadata on the linked folder and
+    /// on the keg's file link, the same rules a program's own library gets.
+    #[test]
+    fn a_file_read_spelled_through_homebrew_links_renders_metadata_on_each_link() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical");
+        let keg = root.join("Cellar/mpdecimal/4.0.1/lib");
+        std::fs::create_dir_all(&keg).expect("keg");
+        std::fs::create_dir_all(root.join("opt")).expect("opt");
+        let file = keg.join("libmpdec.4.0.1.dylib");
+        std::fs::write(&file, b"image").expect("library");
+        std::os::unix::fs::symlink("libmpdec.4.0.1.dylib", keg.join("libmpdec.4.dylib"))
+            .expect("the file link");
+        std::os::unix::fs::symlink("../Cellar/mpdecimal/4.0.1", root.join("opt/mpdecimal"))
+            .expect("the folder link");
+        let requested = root.join("opt/mpdecimal/lib/libmpdec.4.dylib");
+        let program = root.join("agent");
+        std::fs::write(&program, "agent").expect("program fixture");
+        let config = ContainmentConfig::new()
+            .set_network(Network::Localhost {
+                connect: vec![41080],
+                listen: Vec::new(),
+            })
+            .expect("localhost")
+            .allow(&program, Operation::Exec, Scope::File)
+            .expect("exec grant")
+            .allow(&requested, Operation::Read, Scope::File)
+            .expect("a read under the requested name");
+
+        let profile = render_profile(&config).expect("the profile renders");
+
+        for rule in [
+            format!("(allow file-read* (literal \"{}\"))", file.display()),
+            format!(
+                "(allow file-read-metadata (literal \"{}\"))",
+                keg.join("libmpdec.4.dylib").display()
+            ),
+            format!(
+                "(allow file-read-metadata (literal \"{}\"))",
+                root.join("opt/mpdecimal").display()
+            ),
+        ] {
+            assert!(profile.contains(&rule), "{rule} is missing: {profile}");
+        }
+        assert!(
+            !profile.contains(&format!(
+                "(allow file-read* (literal \"{}\"))",
+                root.join("opt/mpdecimal").display()
+            )),
+            "the linked folder gets metadata, never its contents: {profile}"
+        );
+    }
+
+    /// **An exec chain whose link target passes through a linked folder renders that link.** A
+    /// Homebrew venv's chain: `venv/bin/python3 -> python3.14 -> <prefix>/opt/py/bin/python3.14`,
+    /// with `opt/py` a link to the keg and the keg's `bin/python3.14` a link to the framework's
+    /// file. The lookup reads the `opt/py` folder link, which none of the chain's own file nodes
+    /// names, so the exec cell renders metadata on it.
+    #[test]
+    fn an_exec_chain_through_a_linked_folder_renders_metadata_on_the_folder_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical");
+        let framework = root.join("Cellar/py/1.0/Frameworks/bin");
+        std::fs::create_dir_all(&framework).expect("framework");
+        std::fs::create_dir_all(root.join("Cellar/py/1.0/bin")).expect("keg bin");
+        std::fs::create_dir_all(root.join("opt")).expect("opt");
+        std::fs::create_dir_all(root.join("venv/bin")).expect("venv bin");
+        let program = framework.join("python3.14");
+        std::fs::write(&program, "python").expect("the program");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        std::os::unix::fs::symlink(
+            "../Frameworks/bin/python3.14",
+            root.join("Cellar/py/1.0/bin/python3.14"),
+        )
+        .expect("the keg's link");
+        std::os::unix::fs::symlink("../Cellar/py/1.0", root.join("opt/py")).expect("folder link");
+        std::os::unix::fs::symlink(
+            root.join("opt/py/bin/python3.14"),
+            root.join("venv/bin/python3.14"),
+        )
+        .expect("the venv's link into opt");
+        std::os::unix::fs::symlink("python3.14", root.join("venv/bin/python3"))
+            .expect("the venv's python3");
+        let config = ContainmentConfig::new()
+            .set_network(Network::Localhost {
+                connect: vec![41080],
+                listen: Vec::new(),
+            })
+            .expect("localhost")
+            .allow(root.join("venv/bin/python3"), Operation::Exec, Scope::File)
+            .expect("exec grant through the chain");
+
+        let profile = render_profile(&config).expect("the profile renders");
+
+        for rule in [
+            format!("(allow process-exec (literal \"{}\"))", program.display()),
+            format!(
+                "(allow file-read-metadata (literal \"{}\"))",
+                root.join("venv/bin/python3.14").display()
+            ),
+            format!(
+                "(allow file-read-metadata (literal \"{}\"))",
+                root.join("Cellar/py/1.0/bin/python3.14").display()
+            ),
+            format!(
+                "(allow file-read-metadata (literal \"{}\"))",
+                root.join("opt/py").display()
+            ),
+        ] {
+            assert!(profile.contains(&rule), "{rule} is missing: {profile}");
+        }
+        assert!(
+            !profile.contains(&format!(
+                "(allow file-read* (literal \"{}\"))",
+                root.join("opt/py").display()
+            )),
+            "the linked folder gets metadata, never its contents: {profile}"
         );
     }
 

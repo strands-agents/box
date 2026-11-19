@@ -4,10 +4,15 @@ This page records the reasons for Box's design. Each entry states a decision and
 residual risks, or required precautions. It also names a rejected alternative when that explains the
 decision.
 
-> This is a historical record of design choices. An entry explains the reasoning at the time of the
-> decision and can fall behind the code. The code owns current behaviour. Use an entry to understand
-> the reasoning, then read its named tests or crate to check current behaviour. Correct an entry if
-> it disagrees with the code.
+> An entry explains the reasoning at the time of the decision. The log can lag the code, and the
+> code owns current behaviour. Use an entry to understand the reasoning, then read the code and its
+> tests to check current behaviour. A change that goes against an entry either fits the code to the
+> entry or rewrites the entry, and a human approves the rewrite. A pull request that changes what
+> an entry says fixes that entry.
+
+An entry belongs here only when the user decided a choice that refuses or redirects a later change to a
+different part of Box. New and rewritten entries have a paragraph, then **Rejected.**, then
+**Cost.**, and name no test.
 
 Each entry has a stable anchor. Code and other documents link an entry by that anchor, so do not
 rename one.
@@ -77,28 +82,28 @@ configuration. The cost is that the variable no longer prevents accidental Linux
 requirements, process hardening, filesystem grants, and containment checks still apply. A missing or
 invalid configuration still fails before a workload starts.
 
-Stable releases can include Linux ARM64, and `publish_linux=false` retains a macOS-only stable
-release without a workflow revert. Keeping Linux in preview only would prevent an accepted Linux
-build from using the stable channel. The release owner must establish Linux readiness before
-publishing its archive. Linux previews always include ARM64 Linux and leave the latest stable
-release unchanged. Removing the startup flag does not authorize a release or establish security
+Every release, stable or Linux preview, includes macOS and Linux ARM64. The release workflow has no
+input that omits Linux ARM64, and only the Linux x86-64 archive is optional, through `publish_linux_x86`. An input
+that omits ARM64 would let a release drop a supported platform by accident.
+`test_stable_and_preview_publish_arm64_with_x86_off_by_default` pins the release contents. The
+release owner must establish Linux readiness before each release. Linux previews leave the latest
+stable release unchanged. Removing the startup flag does not authorize a release or establish security
 acceptance. The native filesystem policy experiment retains its separate configuration and Cargo
 feature controls.
 
 <a id="linux-x86-startup-requires-explicit-consent"></a>
-### Linux x86-64 startup requires an explicit experimental opt-in
+### Linux x86-64 startup does not require an environment opt-in
 
-Box requires `EXPERIMENTAL_X86_SUPPORT=TRUE` in its operator environment before executing a command
-on Linux x86-64. When the variable is missing or has any other value, Box refuses `run` and
-`policy generate-schema` before configuration reads, host callbacks, process hardening, or workload
-startup. The same check applies to the Rust library functions `run` and `generate_policy_schema`.
-Help and version output remain available.
+The Linux x86-64 command line and library use configuration-driven startup without a separate
+consent variable. `EXPERIMENTAL_X86_SUPPORT` has no effect, including when an existing script sets
+it to `TRUE`. Filesystem grants, syscall restrictions, and operating system prerequisites still apply.
 
-We accept the separate consent step for x86-64 callers and tests while support remains experimental.
-Enabling it by default would run workloads on x86-64 before the remaining compatibility and release
-checks are complete. This gate does not change filesystem grants, syscall permissions, or release
-readiness. It does not apply to ARM64, macOS, or the standalone containment library. The retired
-`EXPERIMENTAL_LINUX_SUPPORT` variable remains inactive.
+**Rejected.** The former experimental startup variable required a separate step for each caller
+and test without changing what the sandbox permits.
+
+**Cost.** The variable no longer prevents accidental x86-64 execution. Operators must qualify their
+environment and workloads; removing the gate does not authorize publication or establish security
+acceptance. The release workflow keeps its separate `publish_linux_x86` archive selector.
 
 <a id="native-filesystem-policy-requires-explicit-selection"></a>
 ### Native filesystem policy requires explicit selection
@@ -380,7 +385,7 @@ access to it.
 one translator takes that type with a launch role. A spec holds four fields. `command` names the
 program and its fixed leading arguments. `workspace` sets the initial working directory and grants
 nothing. `env` supplies the literal environment with no inheritance from the surrounding OS.
-`filesystem` lists the paths the process's own syscalls can reach. It has eight lists for `[agent]`
+`filesystem` lists the paths the process's own syscalls can reach. It has nine lists for `[agent]`
 and six for `[tool.<name>]`. A tool refuses `metadata` and `exec` by name because its sandbox
 already discovers metadata and runs its toolchain through broad exec. Before this, the agent table
 and the tool table had grown apart, each with its own grant keys and its own translation. With one
@@ -413,8 +418,8 @@ the operator's home, because it runs as the operator and looks for its session t
 <a id="direct-filesystem-reach-is-declared-and-disclosed"></a>
 ### Direct filesystem reach is declared in the configuration and disclosed at startup
 
-`[agent.filesystem]` carries eight lists: `read`, `write`, `read_file`, `write_file`, `list`,
-`metadata`, `exec`, and `deny`. Each entry names one path on the surrounding OS that the process's
+`[agent.filesystem]` carries nine lists: `read`, `write`, `read_file`, `write_file`, `list`,
+`metadata`, `exec`, `deny`, and `deny_write`. Each entry names one path on the surrounding OS that the process's
 own syscalls can reach. Directory entries are recursive and file entries are exact. Paths are
 absolute or `~`-relative, with no wildcard syntax. `write` does not imply `read`. These keys let an
 unmodified coding agent edit files in a box. Its native file tools issue direct syscalls. When the
@@ -466,13 +471,22 @@ the file the link resolves to, and the box also shows that file at the link's na
 program runs a helper by the name `PATH` finds. Granting only the target left that name missing,
 so cargo failed with `linker 'cc' not found` on Linux. The links in between, such as
 `/etc/alternatives/cc`, are not granted: Linux binds the file at the named path, and macOS allows
-the link nodes on the way. We rejected granting the folders that hold the links, such as
+reading the metadata of each link on the way, linked folders included. For a linked folder below
+the link's own folder, such as `current` in `helper -> current/file`, the path asked for through it,
+`current/file`, is granted the same way, because macOS tests that path's existence before it
+follows `current`. A linked folder anywhere else, such as `current` in
+`~/.local/bin/java -> ~/.sdkman/candidates/java/current/bin/java` or `/tmp` in a link to
+`/tmp/build/out`, gets no such path, so on macOS the link's own name may still fail to open. The grant is built from one lookup of the link, compared
+with the file the run approved, so a hop swapped after the spawn check is refused rather than
+granted. We rejected granting the folders that hold the links, such as
 `/usr/bin` or `/etc/alternatives`, because that grants every file in them. The link must sit in its
 own real folder, and every other list still refuses a link. A link inside a credential store is
 refused, because the store exception resolves the entry again at each spawn, and the link could be
 pointed at another file of the store during a run. A write, exec, list or metadata grant
 through a link would act on a name the operator did not state as that file.
-`a_read_entry_naming_a_link_to_a_file_reads_by_both_names` pins it.
+`a_read_entry_naming_a_link_to_a_file_reads_by_both_names`,
+`a_read_entry_naming_a_link_through_a_linked_folder_reads_by_both_names` and
+`a_link_hop_swapped_after_the_spawn_check_is_refused` pin it.
 
 <a id="the-runtime-minimum-is-two-sets-and-the-agent-takes-the-smaller-one"></a>
 ### The runtime minimum is two sets, and the agent takes only the smaller one
@@ -968,10 +982,10 @@ Callers must retain each token until its effect ends, and existing unlabeled eve
 `durable_http_history_preserves_one_identifier_for_each_operation` pins request/result pairing.
 
 <a id="history-is-durable-per-box-and-has-no-rewind"></a>
-### History is durable per box, and it offers no rewind and no audit record
+### Box batches history by default and accepts loss before a completed flush
 
 One box owns one engine, one policy source set, and one history file, and a restart reuses that
-file. `open` recovers a decision-equivalent history before returning an authority. If recovery
+file. `open` recovers decision-equivalent state from the saved history before returning an authority. If recovery
 fails, it returns an error. The box never falls back to empty or partial history. The engine
 timestamps each event from the trusted system wall clock. Callers cannot supply timestamps. If the
 clock steps backwards, each append advances one nanosecond until it catches up. This can keep a
@@ -986,6 +1000,49 @@ still hold timestamps ahead for up to five minutes. A policy edit applies prospe
 identity that still matches keeps its state, and an unmatched identity starts empty. The contract
 excludes checkpoint, rewind, branch, tamper evidence, an audit record, atomic commit across an
 external effect, and any history shared between boxes.
+
+Box enables the `experimental-idle-flush` Cargo feature by default to reduce per-event
+persistence work. Hosted `run` selects Dogwood's periodic durability interface and starts an
+independent timer on the existing policy engine, so pending history can be flushed even when
+events stop arriving. It checks thresholds of 1,000 events or one second when an event arrives
+and uses a separate one-second timer. A build with `--no-default-features` retains per-event
+persistence. The default accepts the loss of recent
+requests and outcomes if the process crashes before a successful flush; after restart, a history
+rule can admit requests that those missing events would have denied. The timer's interval is a
+polling cadence, not a maximum persistence delay. After successful startup, explicit hosted
+shutdown stops the workload and
+joins the broker, discovery, native monitoring, and gateway connection workers before stopping
+the timer and performing its final flush. Gateway shutdown interrupts client sockets and joins
+workers after their existing outcome handling finishes, in both persistence modes. Recorded timer
+failures stop the workload; final-flush failures make the run fail. Each flush retries completed
+outcomes retained after a recording failure, then persists events the engine has already accepted.
+Explicit and final flushes return an error if any outcome remains refused. Timer ticks keep retrying
+an outcome delayed only by a backward clock change without treating that delay as a failure.
+Other recording and storage failures remain errors. An earlier run failure remains visible alongside
+a shutdown failure. If native monitoring cannot stop, Box reports the failure and joins the timer
+without an additional final flush. Cleanup after a startup error remains best effort: a native-monitor
+stop failure can leave callbacks active while the timer destructor attempts a flush. Startup
+still returns an error; this path does not certify that all producers stopped. Destruction
+remains a fallback that reports failures to stderr.
+
+The policy crate's matching feature exposes `PolicyEngine::set_periodic_history` to select
+persistence thresholds, `PolicyEngine::flush_history` to persist submitted history explicitly,
+and `PolicyEngine::start_history_flusher` to start one owned timer for that engine.
+`HistoryFlusher` owns the timer: `HistoryFlusher::snapshot` observes completed calls, and
+`HistoryFlusher::shutdown` joins the worker, attempts a final flush, and returns observed errors.
+`HistoryFlusher::stop` joins without that final flush when producers cannot stop.
+`HistoryFlushSnapshot` carries call counts, elapsed time, and retained errors, not a count of
+persisted events. These interfaces keep Dogwood's engine-library types private. The policy
+crate's feature alone does not change `PolicyEngine::open`: it uses per-event persistence until
+its caller selects periodic persistence. Box makes that selection in its default composition. See the
+[policy persistence interface](../../crates/policy/README.md#experimental-idle-history-flushing)
+for the caller contract.
+
+`a_timer_calls_flush_without_event_submissions` pins idle timer calls, and
+`killing_before_the_first_timer_tick_still_loses_pending_history` pins the accepted crash-loss
+boundary. `idle_timer_preserves_history_after_sigkill` checks recovery after completed timer
+flushes.
+
 
 <a id="a-temporal-rule-names-one-action"></a>
 ### A temporal rule names one action, so a budget does not span a family
@@ -1494,6 +1551,25 @@ File identity and link-count verification at launch still apply.
 A backend may make the file non-executable if it cannot preserve both write subtraction and
 write-xor-execute. Callers must not rely on write protection to preserve an execute grant.
 
+<a id="a-directory-inside-a-write-grant-can-be-write-protected"></a>
+### A directory inside a write grant can be write-protected
+
+`deny_write` names a directory inside a `write` directory. The agent can read it and run the
+programs that an `exec` grant covers there, but it cannot write anything below it. A Python virtual
+environment in a writable project is the case this serves: the operator creates it before the box
+starts, and the agent runs it but cannot replace it. Containment records the directory's device and
+inode and revalidates them at the backend's last safe point. macOS denies writes and hard links
+below the directory after the write root, and pins the directories between it and the write root.
+Linux overlays a read-only bind on the directory, which keeps execution when an `exec` grant covers
+it. A write protection grants nothing, so it is not a `deny` entry and not an operation. The
+agent, each tool, and each local MCP server take it, because a process that can write the directory's parent can replace the programs
+the agent runs from it, so each writer needs its own protection. A tool's leaf box keeps it with
+broad exec. As with a denial, the guarantee covers paths below the directory, so a file there that also has a hard link in a writable directory stays a residual risk.
+`a_write_protected_tree_runs_its_programs_and_refuses_writes` and
+`a_leaf_runs_from_a_write_protected_tree_and_refuses_writes` check each backend, and
+`a_deny_write_directory_reads_and_refuses_writes_inside_a_write_tree` and
+`a_deny_write_directory_refuses_writes_for_every_process` check the box.
+
 <a id="the-deny-only-floors-run-beneath-every-backend"></a>
 ### The deny-only floors run beneath every backend, in one module
 
@@ -1676,6 +1752,30 @@ retains its existing execution restrictions. Linux keeps automatic temporary mou
 and protected files non-executable. `cn_x_04` tests execution and library loading from tool output,
 with agent denials on both platforms.
 
+<a id="a-jit-runtime-maps-executable-memory-on-linux"></a>
+#### A JIT runtime maps executable memory on Linux
+
+A JIT runtime such as Node, Java, or Bun writes the code it compiles into memory and then runs it.
+Linux refused that memory, so V8 and the JVM aborted, Bun fell back to its interpreter, and Python
+`ctypes` could not build a libffi callback. A box now permits writable-and-executable `mmap` and
+`mprotect` with `PROT_EXEC` in every process. `memfd_create`, descriptor `execveat`,
+`pkey_mprotect`, and the `noexec` mounts stay refused, so the kernel never maps or starts a file
+outside the process's exec grants.
+
+The cost is that a process can run code it writes into memory, not only code its mount view admits.
+A runtime that calls native code, such as Python through `ctypes` or Java through its foreign
+function API, can run any bytes this way, including a readable program it copies into memory. For
+such a runtime, a read grant on a program works like an exec grant. That code is still bound by the
+system-call filter, the filesystem grants, and the network policy. This gives up a hardening
+measure, not an authority, and its effect on kernel-exploit risk is not quantified.
+
+We chose this over a per-table opt-in for two reasons. macOS has no counterpart rule: Seatbelt does
+not govern anonymous memory, so a macOS box already lets every process write code and run it. And
+the exec view already treats a granted interpreter or FFI runtime as able to run any authored data,
+so a key would add a setting without closing a route.
+`a_box_runs_generated_code_that_stays_contained` pins that generated code runs and stays inside the
+other restrictions.
+
 <a id="native-egress-is-an-operator-declared-leaf-escape"></a>
 #### Native egress is an operator-declared escape from a tool's or server's sandbox, recorded as a downgrade
 
@@ -1768,7 +1868,7 @@ interpreter.
 ### Box runs a pinned Strands Shell, never the host OS's shell
 
 Box runs every shell command the agent issues through Strands Shell, an open-source interpreter. Box
-builds against a pinned upstream revision, `20c642b`, and holds no copy of its source. It never runs
+builds against a pinned upstream revision, `39daa83`, and holds no copy of its source. It never runs
 `bash` or `zsh` from the surrounding OS for the agent's sandbox. A tool's or MCP server's sandbox
 runs programs of the surrounding OS, a shell included, inside that sandbox. A harness runs a real
 shell for its command tool, so Box gives it something with the same exit codes, the same stdout and
@@ -1906,19 +2006,35 @@ Monty.
 
 The Shell's deadline bounds both ways, and the Shell reads a script file argument under policy.
 The broker refuses a request that opens Monty without the Shell, so a `shell:exec` decision covers
-every route.
+every route. With `monty = false`, both ways reach whatever the Shell's `python3` resolves to
+instead ([a bare `python` name means Monty unless the operator turns Monty off](#a-bare-python-name-always-means-monty)).
 
 <a id="a-bare-python-name-always-means-monty"></a>
-### A bare `python` name always means Monty, so a host interpreter needs its absolute path
+### A bare `python` name means Monty unless the operator turns Monty off, and then it is an ordinary program
 
-The Shell's registered `python` and `python3` commands win over any host interpreter on `PATH`, and
-over a declared `[tool.<name>]` table that names a host interpreter. So `python --version` returns a
-Monty identifying string, and `python3 -m venv` fails. That precedence prevents a declared tool from
-taking over the bare name. This is a known gap. A workload that runs an interpreter by its own
-absolute path, or runs a virtual environment's `python` by absolute path, reaches the host OS's
-Python under the `[tool.<name>]` table whose `command` names that path. Monty is stateless and
-refuses the interactive frames, so a `python` with no `-c` and no script file refuses instead of
-opening a REPL.
+While Monty is on, which is the default, the Shell's `python` and `python3` win over any host
+interpreter on `PATH` and over a declared `[tool.python3]` or `[tool.python]`. So
+`python --version` returns a Monty identifying string, and `python3 -m venv` fails with a refusal
+that says how to turn real Python on. Startup names a Python table that Monty leaves unused.
+
+`monty = false` at the top of `box.toml` turns Monty off for the box. Box then installs no Monty
+runner, and both names resolve the way any other program the Shell starts does: a tool whose command
+file is named `python3` or `python` answers that name, and otherwise the host's `PATH` decides. The
+spawn meets its own `shell:spawn` decision. Nothing falls back to Monty. With Monty off, Box treats
+the Python tool like any other tool: it adds no grants and doesn't inspect the install, so the
+operator lists what Python reads and writes, and keeps the interpreter's install out of every write
+grant and every `fs:write` rule. Box's check on a configured command still refuses a write grant
+that can change the tool's command or its path, but not one that reaches the rest of a venv.
+
+Why a box-level switch rather than a per-tool one: Monty is part of the Shell, not a tool, and one
+bare name runs one program, so the choice is the box's. A box that never sets the key keeps Monty,
+so existing configurations don't change on upgrade, and a record with `monty = false` needs record
+version 37, so an older build refuses it rather than running Monty again.
+
+We rejected a Box that recognizes Python installs and grants and protects them itself. It made Box
+know Python's layouts and it widened grants no policy decision covers, when a declared tool already
+says what the operator wants. Monty is stateless and refuses the interactive frames, so a `python`
+with no `-c` and no script file refuses instead of opening a REPL.
 
 <a id="monty-is-judged-at-the-effect-level-alone"></a>
 ### Monty is judged at the effect level alone, above two deny-only floors
@@ -2378,10 +2494,17 @@ remain in its heap without wiping.
 <a id="an-undeliverable-credential-is-refused-at-load"></a>
 ### A credential the box cannot deliver is refused when the config loads
 
-A box egress entry may name the `env://` or `aws://` credential scheme. Every other scheme is
-refused when the config loads, and the message names the accepted set. The credentials crate also
-resolves `file://` and `op://`. Box cannot deliver those credentials, so egress entries cannot name
-those schemes. `an_undeliverable_credential_scheme_is_refused` pins the refusal.
+A box egress entry can name the `env://`, `aws://`, or `credsd://` credential scheme, or a scheme
+that a `[secret-source.<scheme>]` table declares. Every other scheme is refused when the config
+loads, and the message names the accepted set. A provider scheme such as `op://` is valid only when
+its provider is declared: the declaration names the host program that reads the secret, and
+`secret.env` names the variable that holds the placeholder. The credentials crate also resolves
+`file://`, and it has a built-in `op://` source. Box does not use them for a route. `file` is a
+reserved scheme that no table can declare. The built-in `op://` source has no declaration, so Box
+does not know which program runs, or which paths and variables hold the credential of the vault.
+So an entry cannot name `file://`, and it cannot name `op://` without a declaration. The cost is
+that an operator declares each provider, because Box finds no provider from a scheme alone.
+`an_undeliverable_credential_scheme_is_refused` pins the refusal.
 
 <a id="endpoint-breadth-is-refused-by-the-parsed-pattern"></a>
 ### Endpoint breadth is refused by the parsed pattern, and never by its text
@@ -2483,11 +2606,18 @@ crate because it requires a newer major version of an HTTP client that two other
 That dependency would put two TLS stacks in the process holding the CA key.
 
 <a id="a-target-is-a-file-or-an-otlp-endpoint"></a>
-### A target is a file or an OTLP endpoint, and no other type parses
+### A target is a file or an OTLP endpoint, and a vendor kind expands to an OTLP endpoint
 
-`box.toml` accepts `file` and `otlp`. Any other exporter name is refused when the config loads, and
-the refusal names the two that exist. For a vendor this build does not support directly, run a
-separate OTLP collector with that vendor's exporter. Point an `otlp` target at the collector's port.
+`box.toml` accepts six kinds: `file`, `otlp`, `langfuse`, `langsmith`, `cloudwatch_logs`, and
+`cloudwatch_traces`. It refuses any other kind when the config loads. The collector has two exporters
+only, a file and OTLP over HTTP. When the config loads, the box expands each vendor kind into the `otlp`
+target that it stands for, with the vendor's path, headers, payloads, and credential placement, and
+stores that target, which `a_vendor_kind_expands_to_its_otlp_target` pins. A vendor kind refuses each
+key that it sets itself, so an operator cannot override half of a vendor's settings
+(`a_vendor_kind_refuses_what_it_sets_or_lacks`). A `vendor` key beside `kind = "otlp"` was rejected,
+because it states the type of the target two times. Each vendor's path and headers are box code, so a
+change at the vendor needs a new build, and any other vendor is reached with `kind = "otlp"` and its
+settings written out.
 
 <a id="every-box-records-by-default"></a>
 ### Every box records by default, to a file the workload cannot reach
@@ -2501,7 +2631,7 @@ tree, which a deny-only floor refuses to the workload whatever a permit says. A 
 replaces the default instead of adding to it. The file has no size bound or rotation.
 
 <a id="a-target-names-a-set-of-signals"></a>
-### A target names a set of signals, and an absent list takes every signal
+### A target names a set of signals, an absent list takes every signal, and `accepts` narrows by payload
 
 `[telemetry.<label>] include` takes five words: `deny` and `permit` name the two effective verdicts,
 `trace` names the agent's relayed spans and the box's own control-plane records. `logs` names the
@@ -2509,8 +2639,14 @@ agent's relayed log records and the box's unmatched MCP routing diagnostics. `me
 agent's relayed metric records. A target names a set, with no ordering, and no signal contains
 another. A target that names no `include` receives every signal, which
 `an_absent_include_takes_every_signal` pins. An empty list, a repeated word, and a misspelled word
-are each refused before the box exists. The box relays harness signals without producing them. The
-harness's exporter settings determine whether those records exist.
+are each refused before the box exists. The agent's log records and metrics reach every target
+whatever `include` names. `accepts` on an `otlp` target is a second filter, by OTLP payload and not
+by signal: the exporter sends no `traces`, `logs`, or `metrics` batch that the list leaves out,
+which `a_traces_only_target_is_sent_no_other_payload` pins. Each vendor kind stores one payload, so
+a Langfuse target receives no log or metric batch, because Langfuse answers `404` on those routes
+and each batch would count as a loss. The cost is that an operator who reads only `include` can
+expect a log record that an `accepts` list keeps out. The box relays harness signals without
+producing them. The harness's exporter settings determine whether those records exist.
 
 <a id="the-strands-box-namespace-is-reserved"></a>
 ### `strands.box.` is reserved, and the collector strips it from an agent's payload at every level
@@ -2559,10 +2695,13 @@ on that port.
 <a id="delivery-is-best-effort"></a>
 ### Delivery is best effort, and a record can be lost
 
-When delivery to a target fails, the collector prints to stderr and loses the record. A relayed
-agent span does not take part in the shutdown drain, so a shutdown can lose one in flight; a refusal
-cannot be lost that way. A record that the SDK's own queue refuses is not counted. Every exit runs
-the same drain. A box that fails before its workload starts therefore still records its stop.
+When delivery to a target fails, the collector loses the record and counts the loss. The drain
+prints the count once, on one stderr line, when the run ends. Each failed export prints its own
+line, with its cause, only when `STRANDS_BOX_TELEMETRY_DEBUG` is set, because a vendor that is down
+would print a line on each export interval. A relayed agent span does not take part in the shutdown
+drain, so a shutdown can lose one in flight; a refusal cannot be lost that way. A record that the SDK's own
+queue refuses is not counted. Every exit runs the same drain. A box that fails before its workload
+starts therefore still records its stop.
 
 <a id="the-effective-decision-is-the-canonical-record"></a>
 ### The effective decision from the enforcement point is the canonical record

@@ -55,10 +55,12 @@ decisions:
   on it.
 - Each file operation the script makes takes an `fs:*` decision.
 
-Strands Shell implements `python` and `python3` as commands that run Monty. They select Monty even
-when the operator's `PATH` contains the host OS's Python. `python3 --version` prints `Monty
-(Strands-Box Python subset)`. See [a bare `python` name always means
-Monty](decisions.md#a-bare-python-name-always-means-monty).
+Strands Shell implements `python` and `python3` as commands that run Monty. While Monty is on, the
+default, they select Monty even when the operator's `PATH` contains the host OS's Python, and over a
+declared `[tool.python3]`. `python3 --version` prints `Monty (Strands-Box Python subset)`. With
+`monty = false` in `box.toml`, Box installs no Monty runner, and both names resolve like any other
+program: a declared tool, else `PATH`. See [a bare `python` name means Monty unless the operator turns
+Monty off](decisions.md#a-bare-python-name-always-means-monty).
 
 The broker provides no standard input and forwards no signals to a Python program. `input()` raises
 `NameError`. In Strands Shell a `python` with no `-c` and no script file is refused rather than

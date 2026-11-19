@@ -10,6 +10,7 @@ name = "containment"
 path = "src/lib.rs"
 
 [features]
+native-filesystem-policy = []
 # Opt-in test doubles (see src/test_support.rs). Not enabled by default so shipped
 # binaries never carry mocks.
 test-support = []
@@ -96,6 +97,16 @@ required-features = ["test-support"]
 [[test]]
 name = "supervisor_memory_linux"
 path = "tests/supervisor_memory_linux.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "working_folder_linux"
+path = "tests/working_folder_linux.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "root_links_linux"
+path = "tests/root_links_linux.rs"
 required-features = ["test-support"]
 
 [[test]]

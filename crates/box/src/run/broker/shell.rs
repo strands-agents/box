@@ -57,6 +57,9 @@ pub(super) struct ShellSpec {
     /// The most stdin one Shell Program receives.
     pub(super) max_stdin: usize,
     pub(super) max_output: usize,
+    /// Whether a bare `python3` or `python` runs Monty. `false` installs no Monty runner, so both
+    /// names resolve like any other program: a declared tool, or the host's `PATH`.
+    pub(super) monty: bool,
     /// The Shell's own bound on one submitted Shell call.
     pub(super) command_timeout: Option<Duration>,
     /// The broker's backstop deadline on one Call, distinct from `command_timeout`. The Shell's own
@@ -153,12 +156,14 @@ impl ShellSpec {
         );
         verify_direct_binds(&backend, &self.reach.shell_binds())?;
         let correlation = recorder.request_context();
-        let mut kernel = ShellKernel::over(backend, interceptor)
-            .programs(Arc::clone(&self.host_programs))
-            .python(
+        let mut kernel =
+            ShellKernel::over(backend, interceptor).programs(Arc::clone(&self.host_programs));
+        if self.monty {
+            kernel = kernel.python(
                 self.max_output,
                 self.script_interpreter(correlation.clone()),
             );
+        }
         // With no gateway the network stays off: a fail-closed refusal, never a direct dial.
         if let Some(egress) = &self.egress {
             super::kernel::verify_gateway_ca(egress)?;
@@ -457,7 +462,8 @@ fn fs_action(operation: FsOperation) -> &'static str {
         | FsOperation::Exec => r#"Box::Action::"fs:read""#,
         FsOperation::WriteContent { .. }
         | FsOperation::CreateDir
-        | FsOperation::SetPermissions { .. } => r#"Box::Action::"fs:write""#,
+        | FsOperation::SetPermissions { .. }
+        | FsOperation::SetTimes => r#"Box::Action::"fs:write""#,
         FsOperation::RemoveFile | FsOperation::RemoveDir => r#"Box::Action::"fs:delete""#,
         _ => r#"Box::Action::"fs:other""#,
     }
@@ -842,6 +848,7 @@ mod tests {
             FsOperation::RemoveDir,
             FsOperation::CreateDir,
             FsOperation::SetPermissions { mode: 0o644 },
+            FsOperation::SetTimes,
             FsOperation::ChangeDir,
             FsOperation::ReadLink,
         ] {
@@ -1537,6 +1544,7 @@ mod tests {
                 },
             ),
             (directory.as_str(), box_shell::FsOperation::RemoveDir),
+            (policy.as_str(), box_shell::FsOperation::SetTimes),
             (
                 policy.as_str(),
                 box_shell::FsOperation::WriteContent {

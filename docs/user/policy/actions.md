@@ -8,8 +8,7 @@ Audience: an operator writing a `policy.dw` who needs the exact action name, its
 fields, and which part of the box raises it. [Policy](../policy.md) introduces the rules, and
 [common rules](../policy.md#common-rules) shows each field in use.
 
-> **Status.** The vocabulary can change before 1.0.0. Pin the Box build you install. A rule that
-> names an action the build does not have refuses to load.
+A rule that names an action the build does not have refuses to load.
 
 ## The fixed parts
 
@@ -318,6 +317,9 @@ What each caller records as a response:
 | A tool grammar action, `Tool::<name>::Action::"<action>"` | When a program the Shell started ends | `status`, as on `shell:spawn` |
 | `mcp:call` | For `tools/call`, `prompts/get`, and `resources/read`: when the call completes or ends indeterminately over stdio, or when the upstream response completes, fails, or reaches its deadline over HTTP | none |
 | A per-tool action, `<server>::Action::"<tool>"` | Beside each `mcp:call::response` for a `tools/call` that the per-tool action decided and allowed. Its `input` is the call's arguments, as its `::request` recorded them | `reply`, a string: `result`, `tool_error`, or `protocol_error` for the server's answer; `cancelled`; or `indeterminate` when the connection ended, when the reply only accepted an MCP task or asked for input (`resultType` other than `complete`), or when Box couldn't read an http reply in full (over 16 MiB, compressed, or cut off). `structured`, when the tool declares an `outputSchema` and the reply is a `result`: the reply's `structuredContent`, keeping only the fields the `outputSchema` declares, converted like `input`. An optional field that doesn't match its declared type is left out. Box records no `structured` when a required field doesn't match |
+
+In the Shell, a content write (a redirect, `tee`, or `cp`) records `descriptor_issued` when it
+opens the file, and nothing when it finishes. A time change from `touch` records `completed`.
 
 An MCP outcome is always a response, so Box never records `mcp:call::error` or a per-tool
 `::error`. The load refuses a `when temporal` clause that names one, because it could never match.

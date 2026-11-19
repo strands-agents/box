@@ -13,7 +13,7 @@ mod receive;
 mod record;
 
 pub use collector::Collector;
-pub use config::{Target, TargetKind, TargetSecret, TelemetryConfig};
+pub use config::{Payload, Target, TargetKind, TargetSecret, TelemetryConfig};
 pub use correlation::Correlation;
 pub use error::{Result, TelemetryError};
 pub use record::{

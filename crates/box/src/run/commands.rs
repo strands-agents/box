@@ -1,4 +1,4 @@
-//! The configured tool programs whose identities belong to one run.
+//! The configured programs whose identities belong to one run: each tool, and each secret source.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -10,7 +10,10 @@ use containment::{Operation, Scope};
 use crate::error::{BoxError, ConfigError};
 use crate::record::config::Record;
 use crate::record::config::filesystem::DirectReach;
-use crate::record::layout::{disk_identity, lies_within, open_without_following};
+use crate::record::config::secret_source::SecretSourceEntry;
+use crate::record::layout::{
+    disk_identity, lies_within, open_without_following, resolved_through_links,
+};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod aliases;
@@ -18,6 +21,8 @@ mod aliases;
 #[derive(Debug, Default)]
 pub(crate) struct ConfiguredCommands {
     tools: BTreeMap<String, Arc<ConfiguredCommand>>,
+    /// The program of each `[secret-source.<scheme>]` table, which no workload may change.
+    sources: BTreeMap<String, Arc<ConfiguredCommand>>,
 }
 
 /// The file each bare name runs in the hosted Shell, from the `[tool]` tables that answer to it.
@@ -53,12 +58,50 @@ pub(crate) enum CommandMutationRefusal {
     IncompleteScan(std::io::Error),
 }
 
+/// A `[tool.<name>]` that a run leaves out because its program is not installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LeftOut {
+    /// The table, spelled `[tool.<name>]`.
+    pub(crate) table: String,
+    /// The program as `command` spells it.
+    pub(crate) program: String,
+}
+
+/// Remove from `record` each `[tool.<name>]` whose program is not installed, so no later step of the
+/// run sees it, and answer with those tables, refusing one whose `command` no run can expand.
+pub(crate) fn leave_out_absent(record: &mut Record) -> Result<Vec<LeftOut>, BoxError> {
+    use super::contain::boundary::environment;
+
+    let mut left_out = Vec::new();
+    for (label, spec) in &record.tool {
+        if !super::contain::executable::is_absent(spec.program(), &spec.search_path()) {
+            continue;
+        }
+        let table = format!("[tool.{label}]");
+        if let Some(reason) =
+            environment::program_refusal(spec).or_else(|| environment::argument_refusal(spec))
+        {
+            return Err(ConfigError::Process { table, reason }.into());
+        }
+        left_out.push((label.clone(), table, spec.program().to_string()));
+    }
+    Ok(left_out
+        .into_iter()
+        .map(|(label, table, program)| {
+            record.tool.remove(&label);
+            LeftOut { table, program }
+        })
+        .collect())
+}
+
 #[derive(Debug)]
 pub(crate) struct ConfiguredCommand {
     table: String,
     path: PathBuf,
     invoked: PathBuf,
     routes: Vec<PathBuf>,
+    /// Each symbolic link that the resolution of a secret source program passes through.
+    links: Vec<PathBuf>,
     opened: File,
     identity: (u64, u64),
     loaded: FileState,
@@ -93,56 +136,71 @@ impl ConfiguredCommands {
             .tool
             .iter()
             .map(|(label, spec)| {
-                let table = format!("[tool.{label}]");
-                let resolved =
-                    super::contain::executable::resolve(spec.program(), &spec.search_path())?;
-                let path = resolved.granted_path().to_path_buf();
-                let opened = open_without_following(&path).map_err(|error| {
-                    refusal(&table, &path, &format!("cannot be opened: {error}"))
-                })?;
-                let metadata = opened.metadata().map_err(|error| {
-                    refusal(&table, &path, &format!("cannot be inspected: {error}"))
-                })?;
-                use std::os::unix::fs::MetadataExt as _;
-                if !metadata.is_file() {
-                    return Err(refusal(&table, &path, "must be a regular file"));
-                }
-                let loaded = FileState::of(&metadata);
-                let writable_links =
-                    loaded.links > 1 && writable_by_this_user(&opened, &path, loaded);
-                if writable_links && !cfg!(any(target_os = "macos", target_os = "linux")) {
-                    return Err(refusal(
-                        &table,
-                        &path,
-                        &format!(
-                            "has {} hard links, and the user that runs Box may be able to write \
-                             it. Use a copy with one hard link",
-                            loaded.links
-                        ),
-                    ));
-                }
-                let invoked = resolved.invoked().to_path_buf();
-                let mut routes = vec![invoked.clone()];
-                let authored = Path::new(spec.program());
-                if authored.is_absolute() && !routes.iter().any(|route| route == authored) {
-                    routes.push(authored.to_path_buf());
-                }
-                let command = ConfiguredCommand {
-                    table,
-                    path,
-                    invoked,
-                    routes,
-                    opened,
-                    identity: (metadata.dev(), metadata.ino()),
-                    loaded,
-                    #[cfg(any(target_os = "macos", target_os = "linux"))]
-                    needs_alias_scan: writable_links,
-                };
-                command.verify()?;
+                let command = ConfiguredCommand::load(
+                    format!("[tool.{label}]"),
+                    spec.program(),
+                    &spec.search_path(),
+                )?;
                 Ok((label.clone(), Arc::new(command)))
             })
             .collect::<Result<_, BoxError>>()?;
-        Ok(Self { tools })
+        let sources = Self::source_programs(&record.secret_source)?;
+        Ok(Self { tools, sources })
+    }
+
+    /// The program of each `[secret-source.<scheme>]` table alone, opened and checked.
+    pub(crate) fn of_secret_sources(
+        entries: &BTreeMap<String, SecretSourceEntry>,
+    ) -> Result<Self, BoxError> {
+        Ok(Self {
+            tools: BTreeMap::new(),
+            sources: Self::source_programs(entries)?,
+        })
+    }
+
+    fn source_programs(
+        entries: &BTreeMap<String, SecretSourceEntry>,
+    ) -> Result<BTreeMap<String, Arc<ConfiguredCommand>>, BoxError> {
+        entries
+            .iter()
+            .map(|(scheme, entry)| {
+                let refuse = |reason: String| ConfigError::SecretSource {
+                    scheme: scheme.clone(),
+                    reason,
+                };
+                let program = entry
+                    .command
+                    .first()
+                    .ok_or_else(|| refuse("has an empty command".to_string()))?;
+                // The program is an absolute path, so no search path finds it.
+                let nowhere = std::ffi::OsStr::new("");
+                super::contain::executable::resolve(program, nowhere)
+                    .map_err(|error| refuse(format!("its program cannot run: {error}")))?;
+                let mut command =
+                    ConfiguredCommand::load(format!("[secret-source.{scheme}]"), program, nowhere)?;
+                // A workload that can change one link of the chain chooses the file that the
+                // next run starts.
+                command.links = links_on_the_way(Path::new(program)).map_err(|error| {
+                    refuse(format!("its program path cannot be inspected: {error}"))
+                })?;
+                Ok((scheme.clone(), Arc::new(command)))
+            })
+            .collect()
+    }
+
+    /// The checked program of the `[secret-source.<scheme>]` table for `scheme`.
+    pub(crate) fn source(&self, scheme: &str) -> Option<&Arc<ConfiguredCommand>> {
+        self.sources.get(scheme)
+    }
+
+    /// Whether this value holds the program of a secret source.
+    pub(crate) fn has_sources(&self) -> bool {
+        !self.sources.is_empty()
+    }
+
+    /// Each program that no workload may change: of a tool, and of a secret source.
+    fn protected(&self) -> impl Iterator<Item = &Arc<ConfiguredCommand>> {
+        self.tools.values().chain(self.sources.values())
     }
 
     pub(crate) fn get(&self, label: &str) -> Option<&Arc<ConfiguredCommand>> {
@@ -164,7 +222,11 @@ impl ConfiguredCommands {
             let (Some(name), Some(command)) = (bound_name(spec), self.tools.get(label)) else {
                 continue;
             };
-            if box_shell::implements_program(name) {
+            // `python3` and `python` are the Shell's own only while Monty answers them. With
+            // `monty = false` a tool declared under either name answers it like any other tool.
+            if box_shell::implements_program(name)
+                && (record.monty || !matches!(name, "python" | "python3"))
+            {
                 continue;
             }
             let declares = name == called_name(spec);
@@ -237,7 +299,7 @@ impl ConfiguredCommands {
     }
 
     pub(crate) fn mutation_refusal(&self, path: &Path) -> Option<CommandMutationRefusal> {
-        if self.tools.values().any(|command| command.enclosed_by(path)) {
+        if self.protected().any(|command| command.enclosed_by(path)) {
             return Some(CommandMutationRefusal::CommandOrAncestor);
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -260,7 +322,7 @@ impl ConfiguredCommands {
             if grant.operation != Operation::Write {
                 continue;
             }
-            for command in self.tools.values() {
+            for command in self.protected() {
                 let overlaps = match grant.scope {
                     Scope::Root | Scope::Dir => command.enclosed_by(&grant.resolved),
                     Scope::File => command.names(&grant.resolved),
@@ -271,9 +333,14 @@ impl ConfiguredCommands {
                         entry: grant.authored.clone(),
                         reason: format!(
                             "this write grant can change {} command {} or its path. \
-                             Keep configured tools outside every process's write grants",
+                             Keep {} outside every process's write grants",
                             command.table,
-                            command.path.display()
+                            command.path.display(),
+                            if command.table.starts_with("[secret-source.") {
+                                "the program of each secret source"
+                            } else {
+                                "configured tools"
+                            }
                         ),
                     }
                     .into());
@@ -309,8 +376,7 @@ impl ConfiguredCommands {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn mutable_aliases(&self, target: &Path) -> Vec<(u64, u64)> {
         let directory = std::fs::symlink_metadata(target).is_ok_and(|metadata| metadata.is_dir());
-        self.tools
-            .values()
+        self.protected()
             .filter(|command| {
                 command.needs_alias_scan && (!directory || !command.every_name_beside(target))
             })
@@ -320,6 +386,59 @@ impl ConfiguredCommands {
 }
 
 impl ConfiguredCommand {
+    /// Open and check the program file that `table` names as `program`, which `search_path`
+    /// finds when it is a bare name.
+    pub(crate) fn load(
+        table: String,
+        program: &str,
+        search_path: &std::ffi::OsStr,
+    ) -> Result<Self, BoxError> {
+        let resolved = super::contain::executable::resolve(program, search_path)?;
+        let path = resolved.granted_path().to_path_buf();
+        let opened = open_without_following(&path)
+            .map_err(|error| refusal(&table, &path, &format!("cannot be opened: {error}")))?;
+        let metadata = opened
+            .metadata()
+            .map_err(|error| refusal(&table, &path, &format!("cannot be inspected: {error}")))?;
+        use std::os::unix::fs::MetadataExt as _;
+        if !metadata.is_file() {
+            return Err(refusal(&table, &path, "must be a regular file"));
+        }
+        let loaded = FileState::of(&metadata);
+        let writable_links = loaded.links > 1 && writable_by_this_user(&opened, &path, loaded);
+        if writable_links && !cfg!(any(target_os = "macos", target_os = "linux")) {
+            return Err(refusal(
+                &table,
+                &path,
+                &format!(
+                    "has {} hard links, and the user that runs Box may be able to write \
+                     it. Use a copy with one hard link",
+                    loaded.links
+                ),
+            ));
+        }
+        let invoked = resolved.invoked().to_path_buf();
+        let mut routes = vec![invoked.clone()];
+        let authored = Path::new(program);
+        if authored.is_absolute() && !routes.iter().any(|route| route == authored) {
+            routes.push(authored.to_path_buf());
+        }
+        let command = Self {
+            table,
+            path,
+            invoked,
+            routes,
+            links: Vec::new(),
+            opened,
+            identity: (metadata.dev(), metadata.ino()),
+            loaded,
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            needs_alias_scan: writable_links,
+        };
+        command.verify()?;
+        Ok(command)
+    }
+
     /// Whether the current target can omit the hard-link scan for this command.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn every_name_beside(&self, target: &Path) -> bool {
@@ -382,7 +501,24 @@ impl ConfiguredCommand {
         self.names(path)
             || lies_within(&self.path, path)
             || self.routes.iter().any(|route| lies_within(route, path))
+            || self.links.iter().any(|link| holds(path, link))
     }
+}
+
+/// Whether the folder `outer` holds the directory entry `entry`, at any depth.
+fn holds(outer: &Path, entry: &Path) -> bool {
+    // A change to the entry itself needs a write to its folder, so the folder is what a workload
+    // must not write. A grant entry or an interpreter path that names the link itself is refused
+    // as a symbolic link, by the filesystem lists and by the path resolver.
+    entry
+        .parent()
+        .is_some_and(|folder| lies_within(folder, outer))
+}
+
+/// Each symbolic link that the resolution of the absolute `path` passes through, spelled as the
+/// resolved folder that holds it and its own name.
+fn links_on_the_way(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    resolved_through_links(path).map(|(_, links)| links)
 }
 
 /// Whether the user that runs Box can write `opened`, or can give itself that right, through any name.
@@ -515,6 +651,7 @@ mod tests {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: "commands-test".to_string(),
@@ -541,6 +678,7 @@ mod tests {
             mcp: Default::default(),
             contained_mcp: Default::default(),
             telemetry: Default::default(),
+            secret_source: Default::default(),
         }
     }
 
@@ -557,6 +695,7 @@ mod tests {
                 policy: None,
                 authority_directories: Vec::new(),
                 program_search_directories: Vec::new(),
+                source_paths: &[],
             },
         )
         .expect("read-write reach")
@@ -591,6 +730,190 @@ mod tests {
         commands
             .validate_reach("[agent]", &reach(&home, &output))
             .expect("unrelated build output stays writable");
+    }
+
+    /// **The program of a secret source is protected as a configured tool command is**: no write
+    /// grant covers the program, its link, or a folder of either, and no interpreter changes them.
+    #[test]
+    fn a_secret_source_program_is_protected_like_a_configured_tool_command() {
+        let directory = tempfile::tempdir().expect("directory");
+        let home = directory
+            .path()
+            .canonicalize()
+            .expect("canonical directory");
+        let project = home.join("project");
+        let cellar = project.join("cellar");
+        let bin = project.join("bin");
+        let output = project.join("output");
+        for folder in [&project, &cellar, &bin, &output] {
+            std::fs::create_dir(folder).expect("folder");
+        }
+        let target = cellar.join("op");
+        let link = bin.join("op");
+        program(&target);
+        std::os::unix::fs::symlink(&target, &link).expect("symbolic link");
+        let commands = ConfiguredCommands::load(&source_record(&link)).expect("the program loads");
+
+        for writable in [&project, &cellar, &bin, &target] {
+            let error = commands
+                .validate_reach("[agent]", &reach(&home, writable))
+                .expect_err("the program of a secret source cannot be writable")
+                .to_string();
+            assert_eq!(
+                error,
+                format!(
+                    "`[agent]` filesystem entry {:?} is refused: this write grant can change \
+                     [secret-source.op] command {} or its path. Keep the program of each \
+                     secret source outside every process's write grants",
+                    writable.display().to_string(),
+                    target.display()
+                )
+            );
+        }
+        for mutation in [&home, &project, &cellar, &bin, &target, &link] {
+            assert!(
+                matches!(
+                    commands.mutation_refusal(mutation),
+                    Some(CommandMutationRefusal::CommandOrAncestor)
+                ),
+                "{}",
+                mutation.display()
+            );
+        }
+        commands
+            .validate_reach("[agent]", &reach(&home, &output))
+            .expect("an unrelated folder stays writable");
+        assert!(commands.mutation_refusal(&output.join("file")).is_none());
+    }
+
+    /// A record with no tool, whose `[secret-source.op]` table runs `program`.
+    fn source_record(program: &Path) -> Record {
+        let mut record = record(Path::new("/bin/sh"));
+        record.tool.clear();
+        record.secret_source.insert(
+            "op".to_string(),
+            crate::record::config::secret_source::SecretSourceEntry {
+                command: vec![program.display().to_string(), "read".to_string()],
+                ..Default::default()
+            },
+        );
+        record
+    }
+
+    #[test]
+    fn a_secret_source_table_with_no_command_does_not_load() {
+        let mut record = source_record(Path::new("/bin/sh"));
+        record
+            .secret_source
+            .insert("empty".to_string(), Default::default());
+        assert_eq!(
+            ConfiguredCommands::load(&record)
+                .expect_err("a table with no program")
+                .to_string(),
+            "invalid `[secret-source.empty]` table: has an empty command"
+        );
+    }
+
+    /// **Each symbolic link on the way to a secret source program is protected, and a tool command
+    /// keeps its own check**: a write grant or an interpreter that can change a link in the middle
+    /// of the chain, a folder link, or a folder above one of them is refused.
+    #[test]
+    fn each_link_on_the_way_to_a_secret_source_program_is_protected() {
+        let directory = tempfile::tempdir().expect("directory");
+        let home = directory
+            .path()
+            .canonicalize()
+            .expect("canonical directory");
+        let folder = |name: &str| {
+            let folder = home.join(name);
+            std::fs::create_dir_all(&folder).expect("folder");
+            folder
+        };
+        let (bin, middle, links, cellar, output) = (
+            folder("bin"),
+            folder("outer/middle"),
+            folder("links"),
+            folder("versions/2"),
+            folder("output"),
+        );
+        // `bin/op` names `outer/middle/op`, which names `links/current/op`, and `links/current`
+        // names the folder `versions/2`.
+        let target = cellar.join("op");
+        program(&target);
+        std::os::unix::fs::symlink("../versions/2", links.join("current")).expect("folder link");
+        std::os::unix::fs::symlink("../../links/current/op", middle.join("op")).expect("link");
+        std::os::unix::fs::symlink(middle.join("op"), bin.join("op")).expect("link");
+        assert_eq!(
+            links_on_the_way(&bin.join("op")).expect("the path resolves"),
+            [bin.join("op"), middle.join("op"), links.join("current")]
+        );
+        let commands =
+            ConfiguredCommands::load(&source_record(&bin.join("op"))).expect("the program loads");
+
+        // A folder above the folder of a link holds that link too.
+        let outer = home.join("outer");
+        for writable in [&bin, &middle, &outer, &links, &cellar] {
+            let error = commands
+                .validate_reach("[tool.build]", &reach(&home, writable))
+                .expect_err("a link of the chain cannot be writable")
+                .to_string();
+            assert_eq!(
+                error,
+                format!(
+                    "`[tool.build]` filesystem entry {:?} is refused: this write grant can \
+                     change \
+                     [secret-source.op] command {} or its path. Keep the program of each \
+                     secret source outside every process's write grants",
+                    writable.display().to_string(),
+                    target.display()
+                )
+            );
+        }
+        for mutation in [
+            &bin,
+            &middle,
+            &outer,
+            &links,
+            &cellar,
+            &middle.join("op"),
+            &links.join("current"),
+            &home.join("versions"),
+        ] {
+            assert!(
+                matches!(
+                    commands.mutation_refusal(mutation),
+                    Some(CommandMutationRefusal::CommandOrAncestor)
+                ),
+                "{}",
+                mutation.display()
+            );
+        }
+        commands
+            .validate_reach("[agent]", &reach(&home, &output))
+            .expect("an unrelated folder stays writable");
+        assert!(commands.mutation_refusal(&output.join("file")).is_none());
+
+        // A tool command keeps its check: a link in the middle of its path is not held.
+        let mut tool = record(&bin.join("op"));
+        tool.secret_source.clear();
+        ConfiguredCommands::load(&tool)
+            .expect("the tool loads")
+            .validate_reach("[agent]", &reach(&home, &middle))
+            .expect("the tool check does not change");
+    }
+
+    #[test]
+    fn a_program_path_whose_links_do_not_end_is_an_error() {
+        let directory = tempfile::tempdir().expect("directory");
+        let (first, second) = (directory.path().join("a"), directory.path().join("b"));
+        std::os::unix::fs::symlink(&second, &first).expect("link");
+        std::os::unix::fs::symlink(&first, &second).expect("link");
+        assert_eq!(
+            links_on_the_way(&first)
+                .expect_err("the chain does not end")
+                .to_string(),
+            "the path passes through too many symbolic links"
+        );
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -1151,6 +1474,7 @@ mod tests {
                 path: path.to_path_buf(),
                 invoked: path.to_path_buf(),
                 routes: vec![path.to_path_buf()],
+                links: Vec::new(),
                 identity: (metadata.dev(), metadata.ino()),
                 loaded: loaded.unwrap_or_else(|| FileState::of(&metadata)),
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1347,6 +1671,39 @@ mod tests {
         ConfiguredCommands::load(&record)
             .expect("the commands load")
             .bare_names(&record, std::ffi::OsStr::new(""))
+    }
+
+    /// **With `monty = false` a tool declared as `python3` or `python` answers the bare name**, the
+    /// way any tool answers to its command's file name. While Monty is on, the Shell keeps both
+    /// names and neither tool answers.
+    #[test]
+    fn with_monty_off_a_python_tool_answers_its_bare_name() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        std::fs::create_dir_all(root.join("venv/bin")).expect("folder");
+        let python3 = root.join("venv/bin/python3");
+        let python = root.join("venv/bin/python");
+        program(&python3);
+        program(&python);
+        for monty in [true, false] {
+            let mut record = record(&python3);
+            record.monty = monty;
+            record.tool = BTreeMap::from([
+                ("python3".to_string(), tool(&python3, None)),
+                ("python".to_string(), tool(&python, None)),
+            ]);
+            let names = ConfiguredCommands::load(&record)
+                .expect("the commands load")
+                .bare_names(&record, std::ffi::OsStr::new(""));
+            let answered: Vec<&str> = names.declared.keys().map(String::as_str).collect();
+            if monty {
+                assert!(answered.is_empty(), "Monty keeps both names: {answered:?}");
+            } else {
+                assert_eq!(answered, ["python", "python3"]);
+                assert_eq!(names.declared["python3"].0, python3);
+                assert_eq!(names.declared["python"].0, python);
+            }
+        }
     }
 
     /// **A tool answers to its command's file name, not its label**, and several tables that run
@@ -1595,6 +1952,203 @@ mod tests {
         assert_eq!(
             names.declared.get("git").map(|(path, _)| path.clone()),
             Some(root.join("bin/git"))
+        );
+    }
+}
+
+#[cfg(test)]
+mod left_out_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use crate::record::config::process::ProcessSpec;
+
+    fn spec(command: &[&str], path: Option<&Path>) -> ProcessSpec {
+        ProcessSpec {
+            file_watching: false,
+            native_filesystem_policy: None,
+            command: command.iter().map(|part| (*part).to_string()).collect(),
+            workspace: None,
+            env: path
+                .map(|path| BTreeMap::from([("PATH".to_string(), path.display().to_string())]))
+                .unwrap_or_default(),
+            filesystem: Default::default(),
+            network: None,
+            grammar: None,
+            ingress: Vec::new(),
+        }
+    }
+
+    fn with_tools(tools: Vec<(&str, ProcessSpec)>) -> Record {
+        Record {
+            version: crate::record::config::RECORD_VERSION,
+            experimental_features: Default::default(),
+            file_attributes: false,
+            monty: true,
+            gateway: Default::default(),
+            limits: Default::default(),
+            box_id: "left-out-test".to_string(),
+            box_dir: PathBuf::from("/var/lib/boxes/left-out"),
+            name: "left-out-test".to_string(),
+            policy: None,
+            agent: None,
+            tool: tools
+                .into_iter()
+                .map(|(label, spec)| (label.to_string(), spec))
+                .collect(),
+            egress: Default::default(),
+            remote_mcp: Default::default(),
+            mcp: Default::default(),
+            contained_mcp: Default::default(),
+            telemetry: Default::default(),
+            secret_source: Default::default(),
+        }
+    }
+
+    fn executable(path: &Path, mode: u32) {
+        std::fs::write(path, "#!/bin/sh\nexit 0\n").expect("program");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("mode");
+    }
+
+    fn tables(left_out: &[LeftOut]) -> Vec<&str> {
+        left_out.iter().map(|tool| tool.table.as_str()).collect()
+    }
+
+    /// **A tool whose program is not installed is left out of the record**, by a bare name no
+    /// search-path entry holds, even when an entry is a file or cannot be searched, by an absolute
+    /// path to nothing or beneath a file, and by a link to nothing, and the tools that remain load.
+    #[test]
+    fn a_tool_whose_program_is_not_installed_is_left_out() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let bin = root.join("bin");
+        std::fs::create_dir(&bin).expect("bin");
+        executable(&bin.join("present"), 0o755);
+        std::os::unix::fs::symlink(root.join("nowhere"), bin.join("dangling")).expect("link");
+        let locked = root.join("locked");
+        std::fs::create_dir(&locked).expect("locked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("mode");
+        std::os::unix::fs::symlink("looped", root.join("looped")).expect("a link loop");
+        let odd_path = std::env::join_paths([
+            bin.clone(),
+            bin.join("present"),
+            locked.clone(),
+            root.join("looped"),
+        ])
+        .expect("a search path");
+        let mut record = with_tools(vec![
+            ("present", spec(&["present"], Some(&bin))),
+            ("odd_path", spec(&["tsx"], Some(Path::new(&odd_path)))),
+            (
+                "under_a_file",
+                spec(&[&bin.join("present/tsx").display().to_string()], None),
+            ),
+            ("bare", spec(&["tsx", "--flag"], Some(&bin))),
+            (
+                "absolute",
+                spec(&[&root.join("opt/tsx").display().to_string()], None),
+            ),
+            (
+                "dangling",
+                spec(&[&bin.join("dangling").display().to_string()], None),
+            ),
+            ("dangling_bare", spec(&["dangling"], Some(&bin))),
+        ]);
+
+        let left_out = leave_out_absent(&mut record).expect("absent tools are left out");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("mode");
+
+        assert_eq!(
+            tables(&left_out),
+            [
+                "[tool.absolute]",
+                "[tool.bare]",
+                "[tool.dangling]",
+                "[tool.dangling_bare]",
+                "[tool.odd_path]",
+                "[tool.under_a_file]"
+            ]
+        );
+        assert_eq!(left_out[1].program, "tsx");
+        assert_eq!(record.tool.keys().collect::<Vec<_>>(), ["present"]);
+        let commands = ConfiguredCommands::load(&record).expect("the remaining tool loads");
+        assert!(commands.get("present").is_some());
+        assert!(commands.get("bare").is_none());
+    }
+
+    /// **Every other check on a tool's file still stops the box**: a file that is not executable,
+    /// a directory, and a link loop, by path and by bare name, and a relative path stay in the
+    /// record, so the load refuses them.
+    #[test]
+    fn a_program_that_exists_is_never_left_out() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let plain = root.join("plain");
+        executable(&plain, 0o644);
+        let directory = root.join("directory");
+        std::fs::create_dir(&directory).expect("directory");
+        std::os::unix::fs::symlink("looped", root.join("looped")).expect("a link loop");
+        for (label, command, path) in [
+            ("plain", plain.display().to_string(), None),
+            ("directory", directory.display().to_string(), None),
+            ("bare_plain", "plain".to_string(), Some(root.as_path())),
+            (
+                "bare_directory",
+                "directory".to_string(),
+                Some(root.as_path()),
+            ),
+            ("looped", root.join("looped").display().to_string(), None),
+            ("bare_looped", "looped".to_string(), Some(root.as_path())),
+            ("relative", "bin/tool".to_string(), None),
+        ] {
+            let mut record = with_tools(vec![(label, spec(&[&command], path))]);
+
+            let left_out = leave_out_absent(&mut record).expect("nothing is refused here");
+
+            assert!(left_out.is_empty(), "{label}: {left_out:?}");
+            assert!(record.tool.contains_key(label), "{label}");
+            ConfiguredCommands::load(&record).expect_err("the load refuses the file");
+        }
+    }
+
+    /// **A tool whose program holds a token, or whose argument holds one no run can expand, still
+    /// stops the box**, so a typo in a token is reported whether or not the program is installed.
+    #[test]
+    fn a_left_out_tool_with_an_unexpandable_token_is_refused() {
+        let mut record = with_tools(vec![(
+            "tsx",
+            spec(&["/nonexistent/strands-box/tsx", "${NOT_A_VALUE}"], None),
+        )]);
+
+        let refusal = leave_out_absent(&mut record)
+            .expect_err("the token is refused")
+            .to_string();
+
+        assert!(refusal.contains("[tool.tsx]"), "{refusal}");
+        assert!(refusal.contains("NOT_A_VALUE"), "{refusal}");
+        for program in ["/nonexistent/${USER}/tsx", "${TSX}"] {
+            let mut record = with_tools(vec![("tsx", spec(&[program], None))]);
+
+            let refusal = leave_out_absent(&mut record)
+                .expect_err("a program is never expanded")
+                .to_string();
+
+            assert!(refusal.contains("[tool.tsx]"), "{refusal}");
+            assert!(refusal.contains("a program is never expanded"), "{refusal}");
+        }
+        let mut record = with_tools(vec![(
+            "tsx",
+            spec(
+                &[
+                    "/nonexistent/strands-box/tsx",
+                    "${OTEL_EXPORTER_OTLP_ENDPOINT}",
+                ],
+                None,
+            ),
+        )]);
+        assert_eq!(
+            tables(&leave_out_absent(&mut record).expect("a known token passes")),
+            ["[tool.tsx]"]
         );
     }
 }

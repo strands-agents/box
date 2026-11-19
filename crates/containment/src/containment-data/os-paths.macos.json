@@ -6,7 +6,7 @@
     "read_dir": ["/"],
     "read_file": ["/dev/null", "/etc/localtime", "/usr/lib/libffi-trampolines.dylib"],
     "write_file": ["/dev/null"],
-    "metadata_root": ["/private/tmp"],
+    "metadata_root": ["/tmp"],
     "metadata_dir": ["/etc", "/var"]
   },
   "leaf": {

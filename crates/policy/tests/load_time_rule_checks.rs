@@ -412,6 +412,112 @@ when { context.input has host };"#;
     }
 }
 
+/// Cedar refuses an action list of mixed types, so such a rule never validates: it stays pending
+/// and is dropped when discovery finishes, whether or not it reads the input.
+#[test]
+fn an_action_list_across_namespaces_refuses_validate_and_open() {
+    for (label, list) in [
+        (
+            "a built-in action beside a tool's",
+            r#"[Box::Action::"fs:read", svc::Action::"deploy"]"#,
+        ),
+        (
+            "a built-in action beside a server labelled Tool",
+            r#"[Box::Action::"http:request", Tool::Action::"read"]"#,
+        ),
+        (
+            "a built-in action beside a tool grammar's",
+            r#"[Box::Action::"fs:read", Tool::git::Action::"push"]"#,
+        ),
+        (
+            "the tools of two servers",
+            r#"[alpha::Action::"read", beta::Action::"verify"]"#,
+        ),
+    ] {
+        let source = format!("@id(\"both_doors\")\nforbid(principal, action in {list}, resource);");
+        for (path, result) in [
+            ("validate", validate(&source)),
+            ("open", open(&source).map(|_| ())),
+        ] {
+            match result {
+                Err(PolicyError::MixedActionNamespaces(reason)) => assert!(
+                    reason.contains("rule @id(\"both_doors\")")
+                        && reason.contains("one rule for each namespace"),
+                    "{label}, {path}: {reason}"
+                ),
+                Err(other) => panic!("{label}, {path}: expected a namespace refusal, got {other}"),
+                Ok(()) => panic!("{label}, {path}: a mixed action list must refuse the load"),
+            }
+        }
+    }
+}
+
+/// A rule that does not lower yet must not hide a mixed action list, its own or another rule's: the
+/// checks before discovery judge each rule on its own, and a list needs only its rule's head, so
+/// validate, check and open give one answer.
+#[test]
+fn a_rule_that_does_not_lower_cannot_hide_a_mixed_action_list() {
+    for (label, source) in [
+        (
+            "another rule does not lower",
+            r#"permit(principal, action == Box::Action::"fs:read", resource);
+
+@id("both_doors")
+forbid(principal, action in [Box::Action::"fs:read", svc::Action::"deploy"], resource);
+
+permit(principal, action == other::Action::"x", resource)
+when { context.input.x.unsupported() };"#,
+        ),
+        (
+            "its own condition does not lower",
+            r#"permit(principal, action == Box::Action::"http:request", resource);
+permit(principal, action == Box::Action::"mcp:call", resource);
+@id("both_doors") @description("a (paren) inside a string")
+forbid(principal, action in [Box::Action::"http:request", svc::Action::"read"], resource)
+when { context.input.x.unsupported() };"#,
+        ),
+    ] {
+        assert!(
+            matches!(
+                PolicyEngine::validate_staged(&[self::source(source)]),
+                Err(PolicyError::MixedActionNamespaces(_))
+            ),
+            "{label}: validate_staged"
+        );
+        let check = PolicyEngine::check(&Operator::unanchored(), &[self::source(source)], false);
+        assert!(
+            check
+                .errors()
+                .iter()
+                .any(|finding| finding.message().contains("more than one namespace")),
+            "{label}: check: {:?}",
+            check.errors()
+        );
+        let history = tempfile::tempdir().expect("history directory");
+        assert!(
+            matches!(
+                PolicyEngine::open_staged(
+                    &Operator::unanchored(),
+                    vec![self::source(source)],
+                    &history.path().join("dogwood.redb"),
+                ),
+                Err(PolicyStagingError::Policy(
+                    PolicyError::MixedActionNamespaces(_)
+                ))
+            ),
+            "{label}: open_staged"
+        );
+    }
+}
+
+/// A list of one action type loads, however many actions it names.
+#[test]
+fn an_action_list_of_one_namespace_loads() {
+    let source = r#"forbid(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource);"#;
+    validate(source).expect("one namespace validates");
+    open(source).expect("one namespace opens");
+}
+
 /// A `net:connect` no longer carries `ip`, so a rule that names it is refused rather than loaded
 /// and left to match nothing.
 ///

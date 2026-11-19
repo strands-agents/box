@@ -12,7 +12,7 @@ Box runs an agent, or another command, under an operator's policy, with operatin
 - [`shell-policy.md`](./shell-policy.md): write policy for the agent's shell commands, the programs it runs, and the files they touch.
 - [`tool-grammars.md`](./tool-grammars.md): experimental. Describe a program such as `git` as actions
   and effects, and write one rule for every spelling of a command.
-- [`telemetry.md`](./telemetry.md): the `[telemetry.decisions]` keys, what each record carries, and how to read a records file.
+- [`telemetry.md`](./telemetry.md): the `[telemetry.decisions]` keys, the endpoint and vendor kinds, what each record carries, and how to read a records file.
 - [`policy.md`](./policy.md): what a policy is, when the box asks it, the ten actions, the six
   common rules, and what to do when a policy fails to load. Start here for policy.
 - [`security.md`](./security.md): what `box.toml` governs, what `policy.dw` governs, the one rule
@@ -42,7 +42,9 @@ Box runs an agent, or another command, under an operator's policy, with operatin
 
 ## Reference
 
-- [`cloud-deployments.md`](./cloud-deployments.md): Linux deployment requirements and configuration guidance
+- [`linux-requirements.md`](./linux-requirements.md): required libraries, permissions to create the sandbox, verification commands, startup errors, and tested Linux configurations.
+- [`macos-requirements.md`](./macos-requirements.md): release package requirements, program dependencies, startup checks, and requirements for optional native filesystem policy.
+- [`cloud-deployments.md`](./cloud-deployments.md): service configuration and deployment checks
   for AgentCore Runtime and Lambda MicroVM.
 - [`config.md`](./config.md): the `box.toml` reference: every key and table, its type and default,
   and what the loader refuses.

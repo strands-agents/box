@@ -22,7 +22,9 @@ use super::grammar::GrammarTable;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProcessSpec {
-    /// Permit macOS FSEvents, including possible disclosure of denied names and event metadata.
+    /// Permit macOS FSEvents, including possible disclosure of denied names, event metadata, the
+    /// host-wide event count, and each volume's history identifier. A root process can also delete
+    /// any volume's event history.
     #[serde(
         default,
         rename = "file-watching",
@@ -66,7 +68,17 @@ pub(crate) struct ProcessSpec {
     pub(crate) ingress: Vec<super::ingress::Ingress>,
 }
 
-/// The eight path lists. A directory entry is recursive, and a file entry is exact.
+#[cfg(all(target_os = "linux", feature = "native-filesystem-policy",))]
+pub(crate) fn uses_native_filesystem<'a>(
+    processes: impl IntoIterator<Item = &'a ProcessSpec>,
+    default: bool,
+) -> bool {
+    processes
+        .into_iter()
+        .any(|spec| spec.native_filesystem_policy.unwrap_or(default))
+}
+
+/// The nine path lists. A directory entry is recursive, and a file entry is exact.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Filesystem {
@@ -86,9 +98,11 @@ pub(crate) struct Filesystem {
     pub(crate) exec: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) deny: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) deny_write: Vec<PathBuf>,
 }
 
-/// Which of the eight lists an entry came from.
+/// Which of the nine lists an entry came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Grant {
     Read,
@@ -99,11 +113,12 @@ pub(crate) enum Grant {
     Metadata,
     Exec,
     Deny,
+    DenyWrite,
 }
 
 impl Grant {
     /// Every list, in the order the contract states them.
-    pub(crate) const ALL: [Grant; 8] = [
+    pub(crate) const ALL: [Grant; 9] = [
         Grant::Read,
         Grant::Write,
         Grant::ReadFile,
@@ -112,6 +127,7 @@ impl Grant {
         Grant::Metadata,
         Grant::Exec,
         Grant::Deny,
+        Grant::DenyWrite,
     ];
 
     /// The `box.toml` key.
@@ -125,6 +141,7 @@ impl Grant {
             Grant::Metadata => "metadata",
             Grant::Exec => "exec",
             Grant::Deny => "deny",
+            Grant::DenyWrite => "deny_write",
         }
     }
 
@@ -150,6 +167,7 @@ impl Filesystem {
             Grant::Metadata => &self.metadata,
             Grant::Exec => &self.exec,
             Grant::Deny => &self.deny,
+            Grant::DenyWrite => &self.deny_write,
         }
     }
 
@@ -370,7 +388,7 @@ impl ProcessSpec {
     pub(crate) fn credential_store_entries(&self, operator_home: &Path) -> Vec<(Grant, String)> {
         self.filesystem
             .entries()
-            .filter(|(kind, _)| !matches!(kind, Grant::Deny))
+            .filter(|(kind, _)| !matches!(kind, Grant::Deny | Grant::DenyWrite))
             .filter_map(|(kind, entry)| {
                 let spelling = entry.display().to_string();
                 let relative = match spelling.strip_prefix("~/") {
