@@ -7,7 +7,9 @@ use std::sync::Arc;
 use credentials::{Backend, Vault, VaultConfig};
 
 use crate::error::{BoxError, Internal};
-use crate::record::config::egress::{EgressEntry, EgressRoute, credsd_environments};
+use crate::record::config::egress::{
+    EgressEntry, EgressRoute, SIGNING_PLACEHOLDER_VARIABLES, credsd_environments,
+};
 use crate::record::config::telemetry::TelemetryEntry;
 
 /// Validate every declared `credsd` credential before the workload starts.
@@ -57,9 +59,9 @@ pub(crate) struct ProvisionedVariable {
 
 /// Placeholder AWS credentials for a workload whose destination is a signed route.
 const SIGNING_PLACEHOLDERS: [(&str, &str); 2] = [
-    ("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE"),
+    (SIGNING_PLACEHOLDER_VARIABLES[0], "AKIAIOSFODNN7EXAMPLE"),
     (
-        "AWS_SECRET_ACCESS_KEY",
+        SIGNING_PLACEHOLDER_VARIABLES[1],
         "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
     ),
 ];
@@ -202,8 +204,9 @@ pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError
             // box-owned token has this shape, but it opens through `backend_capabilities`, not here
             // (`to_bindings` skips a backend entry), so no route reaches this arm in practice.
             (None, []) => {}
-            // A minted phantom this crate cannot deliver. Unreachable today — `validate` admits
-            // only `env://` (which names a variable) and `aws://` (which mints none), so the two
+            // A minted phantom this crate cannot deliver. Unreachable today: `validate` admits
+            // only a secret that names a variable (`env://`, or a declared scheme with
+            // `secret.env`) and a signed secret (which mints none), so the two
             (None, phantoms) => {
                 return Err(Internal::CredentialProjection(format!(
                     "credential for {} minted {} phantom binding(s) the box cannot place: a \

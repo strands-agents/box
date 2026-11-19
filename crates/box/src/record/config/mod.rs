@@ -20,6 +20,7 @@
 //! | [`limits`] | `[limits.shell]`: the execution timeout of one Shell submission |
 //! | `env` | which environment names a process may set, and which Core owns |
 //! | [`mcp`] | `[mcp.<name>]`: which local MCP servers exist, and how each starts |
+//! | [`secret_source`] | `[secret-source.<scheme>]`: which host program reads a secret for a scheme |
 //! | [`telemetry`] | `[telemetry.<label>]`: where a box's decision records go |
 //!
 //! One module per key that carries a vocabulary. `mod.rs` keeps only the two wire records and the
@@ -34,6 +35,7 @@ pub(crate) mod ingress;
 pub(crate) mod limits;
 pub(crate) mod mcp;
 pub(crate) mod process;
+pub(crate) mod secret_source;
 pub(crate) mod telemetry;
 
 use std::collections::BTreeMap;
@@ -60,6 +62,7 @@ use self::env::{reserved_workload_environment, valid_environment_name};
 use self::gateway::Gateway;
 use self::limits::Limits;
 use self::process::{ContainedMcp, ProcessSpec};
+use self::secret_source::{DeclaredSources, SecretSourceEntry};
 use credentials::DestinationPattern;
 
 /// The default credential header, and the one whose convention carries a prefix.
@@ -127,8 +130,24 @@ pub(crate) struct RemoteMcpServer {
 pub(crate) fn read_remote_mcp_servers(path: &Path) -> Result<Vec<RemoteMcpServer>, BoxError> {
     let file = ConfigFile::read(path)?;
     let (_, remote_mcp) = mcp::partition(&file.mcp)?;
+    // Discovery attaches each server's credential itself, so each server's secret is judged here
+    // as a run judges it.
+    let remote_mcp = remote_mcp_entries(remote_mcp);
+    let declared = file.declared_sources()?;
+    validate_egress_and_remote(&file.egress, &remote_mcp, &declared)?;
     let mut servers = Vec::new();
-    for remote in remote_mcp {
+    for (name, remote) in remote_mcp {
+        // No step here reads a secret through a declared program.
+        if let Some(scheme) = remote
+            .secret
+            .as_ref()
+            .and_then(|secret| declared.source_of(&secret.reference))
+        {
+            return Err(ConfigError::SecretSourceFetch {
+                scheme: scheme.to_string(),
+            }
+            .into());
+        }
         // A re-routed server is reachable only through the backend, and that re-route — with its
         // SigV4/`env://` backend auth — happens at `run` time in the egress gateway. Offline
         // `generate-schema` has no gateway, so it cannot discover a re-routed server; refuse by name
@@ -136,7 +155,7 @@ pub(crate) fn read_remote_mcp_servers(path: &Path) -> Result<Vec<RemoteMcpServer
         // phantom-only destination `secret` against that host).
         if !remote.backends.is_empty() {
             return Err(ConfigError::Mcp {
-                name: remote.name,
+                name,
                 reason: "re-routes to a backend, which generate-schema cannot discover (the \
                          re-route and its backend auth apply only at run time, in the egress \
                          gateway). This stops the whole run; generate a schema from a box.toml \
@@ -150,12 +169,32 @@ pub(crate) fn read_remote_mcp_servers(path: &Path) -> Result<Vec<RemoteMcpServer
             continue;
         };
         servers.push(RemoteMcpServer {
-            name: remote.name,
+            name,
             url: remote_mcp_url(destination),
             secret: remote.secret,
         });
     }
     Ok(servers)
+}
+
+/// Each remote MCP server as the egress entry that routes it, keyed by the server's name.
+fn remote_mcp_entries(servers: Vec<mcp::HttpMcp>) -> BTreeMap<String, EgressEntry> {
+    servers
+        .into_iter()
+        .map(|remote| {
+            (
+                remote.name,
+                EgressEntry {
+                    destinations: remote.destinations,
+                    protocol: Protocol::Mcp,
+                    secret: remote.secret,
+                    // A remote MCP server re-routes to its declared backend, exactly as an
+                    // `[egress.<name>]` entry does; an empty list means no re-route.
+                    backends: remote.backends,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Derive the Streamable-HTTP endpoint from an egress destination: `scheme://host[:port]/mcp`.
@@ -482,29 +521,15 @@ impl RunContract {
         // operator credential binding; the two are validated together so a shared HOST is still
         // refused. Internally each remote server is an egress entry with `protocol = "mcp"`.
         let egress = self.file.egress.clone();
-        let remote_mcp: BTreeMap<String, EgressEntry> = http_mcp
-            .into_iter()
-            .map(|remote| {
-                (
-                    remote.name,
-                    EgressEntry {
-                        destinations: remote.destinations,
-                        protocol: Protocol::Mcp,
-                        secret: remote.secret,
-                        // A remote MCP server re-routes to its declared backend, exactly as an
-                        // `[egress.<name>]` entry does; an empty list means no re-route.
-                        backends: remote.backends,
-                    },
-                )
-            })
-            .collect();
-        validate_egress_and_remote(&egress, &remote_mcp)?;
-        let _ = routes_for_and_remote(&egress, &remote_mcp)?;
+        let remote_mcp = remote_mcp_entries(http_mcp);
+        let declared = self.file.declared_sources()?;
+        validate_egress_and_remote(&egress, &remote_mcp, &declared)?;
+        let _ = routes_for_and_remote(&egress, &remote_mcp, &declared)?;
         let mut sources = vec![self.source];
         if let Some(source) = policy_source {
             sources.push(source);
         }
-        let telemetry = telemetry::checked(&self.file.telemetry, root.root())?;
+        let telemetry = telemetry::checked(&self.file.telemetry, root.root(), &declared)?;
         Ok(ConfigureRequest {
             record: Record {
                 version: record_version(
@@ -523,6 +548,7 @@ impl RunContract {
                     has_backend(&egress, &remote_mcp),
                     &self.file.gateway,
                     &telemetry,
+                    holds_secret_source_keys(&self.file.secret_source, &egress, &remote_mcp),
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 file_attributes: self.file.file_attributes,
@@ -535,6 +561,7 @@ impl RunContract {
                 policy: policy.as_ref().map(|source| source.origin.clone()),
                 agent: self.file.agent.clone(),
                 tool: self.file.tool.clone(),
+                secret_source: self.file.secret_source.clone(),
                 egress,
                 remote_mcp,
                 mcp: mcp_servers,
@@ -626,6 +653,14 @@ pub(crate) struct Record {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) tool: BTreeMap<String, ProcessSpec>,
 
+    /// The host programs that read a secret for a scheme, as `[secret-source.<scheme>]` declared them.
+    #[serde(
+        default,
+        rename = "secret-source",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub(crate) secret_source: BTreeMap<String, SecretSourceEntry>,
+
     /// The credential declarations, verbatim.
     #[serde(default, rename = "egress", skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) egress: BTreeMap<String, EgressEntry>,
@@ -712,6 +747,9 @@ const TELEMETRY_EXPORT_RECORD_VERSION: u32 = 36;
 const MONTY_OFF_RECORD_VERSION: u32 = 37;
 /// The record version of a record whose process declares a `filesystem.deny_write` list.
 const DENY_WRITE_RECORD_VERSION: u32 = 38;
+/// The record version of a record that holds a `[secret-source.<scheme>]` table or a `secret.env`
+/// key, so an older build refuses the box by its version.
+const SECRET_SOURCE_RECORD_VERSION: u32 = 39;
 
 /// Monty is on unless the operator turns it off.
 fn monty_default() -> bool {
@@ -733,11 +771,16 @@ pub(crate) struct ExperimentalFeatures {
     pub(crate) tool_grammars: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) ingress: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) secret_sources: bool,
 }
 
 impl ExperimentalFeatures {
     fn is_disabled(&self) -> bool {
-        !self.native_filesystem_policy && !self.tool_grammars && !self.ingress
+        !self.native_filesystem_policy
+            && !self.tool_grammars
+            && !self.ingress
+            && !self.secret_sources
     }
 
     fn record_version(&self) -> u32 {
@@ -781,9 +824,12 @@ fn record_version<'a>(
     has_backend: bool,
     gateway: &Gateway,
     targets: &BTreeMap<String, telemetry::TelemetryEntry>,
+    secret_source_keys: bool,
 ) -> u32 {
     let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
-    if specs
+    if secret_source_keys {
+        SECRET_SOURCE_RECORD_VERSION
+    } else if specs
         .clone()
         .any(|spec| !spec.filesystem.deny_write.is_empty())
     {
@@ -833,6 +879,20 @@ fn has_backend(
         .values()
         .chain(remote_mcp.values())
         .any(|entry| !entry.backends.is_empty())
+}
+
+/// Whether a record holds a key that only `SECRET_SOURCE_RECORD_VERSION` reads: a
+/// `[secret-source.<scheme>]` table, or a `secret.env` key on a route or a remote MCP server.
+fn holds_secret_source_keys(
+    secret_source: &BTreeMap<String, SecretSourceEntry>,
+    egress: &BTreeMap<String, EgressEntry>,
+    remote_mcp: &BTreeMap<String, EgressEntry>,
+) -> bool {
+    !secret_source.is_empty()
+        || egress
+            .values()
+            .chain(remote_mcp.values())
+            .any(EgressEntry::names_a_placeholder_variable)
 }
 
 fn process_record_version<'a>(
@@ -1090,6 +1150,7 @@ impl Record {
             TELEMETRY_EXPORT_RECORD_VERSION,
             MONTY_OFF_RECORD_VERSION,
             DENY_WRITE_RECORD_VERSION,
+            SECRET_SOURCE_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1124,6 +1185,7 @@ impl Record {
             has_backend(&record.egress, &record.remote_mcp),
             &record.gateway,
             &record.telemetry,
+            holds_secret_source_keys(&record.secret_source, &record.egress, &record.remote_mcp),
         );
         if record.version != expected {
             return Err(ConfigError::RecordVersion {
@@ -1134,6 +1196,7 @@ impl Record {
         BoxName::parse(&record.name)?;
         record.gateway.validate()?;
         record.validate_processes()?;
+        record.declared_sources()?;
         Ok(record)
     }
 
@@ -1171,7 +1234,15 @@ impl Record {
     /// The stored `[egress.a]` entries and the remote MCP servers as validated routes, one per
     /// destination, so the gateway learns every plain-HTTP credential and every remote MCP host.
     pub(crate) fn egress_routes(&self) -> Result<Vec<EgressRoute>, BoxError> {
-        routes_for_and_remote(&self.egress, &self.remote_mcp)
+        routes_for_and_remote(&self.egress, &self.remote_mcp, &self.declared_sources()?)
+    }
+
+    /// The stored `[secret-source.<scheme>]` tables, checked again.
+    pub(crate) fn declared_sources(&self) -> Result<DeclaredSources, ConfigError> {
+        DeclaredSources::check(
+            &self.secret_source,
+            self.experimental_features.secret_sources,
+        )
     }
 
     /// The credential routes for each backend entry, grouped per entry so each opens in one vault
@@ -1451,6 +1522,10 @@ struct ConfigFile {
     #[serde(default)]
     tool: BTreeMap<String, ProcessSpec>,
 
+    /// The host programs that read a secret for a scheme, keyed by that scheme.
+    #[serde(default, rename = "secret-source")]
+    secret_source: BTreeMap<String, SecretSourceEntry>,
+
     /// The credential declarations: what secret goes on which request.
     #[serde(default, rename = "egress")]
     egress: BTreeMap<String, EgressEntry>,
@@ -1512,7 +1587,15 @@ impl ConfigFile {
     /// Every declared destination as a validated [`EgressRoute`], one per destination.
     #[cfg(test)]
     fn egress_routes(&self) -> Result<Vec<EgressRoute>, BoxError> {
-        routes_for(&self.egress)
+        routes_for(&self.egress, &self.declared_sources()?)
+    }
+
+    /// The `[secret-source.<scheme>]` tables, checked.
+    fn declared_sources(&self) -> Result<DeclaredSources, ConfigError> {
+        DeclaredSources::check(
+            &self.secret_source,
+            self.experimental_features.secret_sources,
+        )
     }
 
     /// Reject a config no run could honor, before anything is stored.
@@ -1559,7 +1642,7 @@ impl ConfigFile {
                 ),
             });
         }
-        validate_egress(&self.egress)
+        validate_egress(&self.egress, &self.declared_sources()?)
     }
 
     /// Every declared `ProcessSpec` beside the table that declared it.
@@ -1633,6 +1716,7 @@ mod tests {
                             false,
                             &Gateway::default(),
                             &stored.telemetry,
+                            false,
                         ),
                         expected_version
                     );
@@ -1688,6 +1772,7 @@ mod tests {
                 has_backend(&stored.egress, &stored.remote_mcp),
                 &Gateway::default(),
                 &stored.telemetry,
+                false,
             ),
             MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
         );
@@ -1857,6 +1942,7 @@ mod tests {
             mcp: Vec::new(),
             contained_mcp: BTreeMap::new(),
             telemetry: std::collections::BTreeMap::new(),
+            secret_source: Default::default(),
         }
     }
 
@@ -2086,6 +2172,7 @@ native-filesystem-policy = false
                         native_filesystem_policy,
                         tool_grammars: true,
                         ingress: false,
+                        secret_sources: false,
                     };
                     for override_value in [None, Some(false)] {
                         spec.native_filesystem_policy = override_value;
@@ -2103,6 +2190,7 @@ native-filesystem-policy = false
                                     false,
                                     &Gateway::default(),
                                     &BTreeMap::new(),
+                                    false,
                                 ),
                                 27
                             );
@@ -3005,6 +3093,7 @@ native-filesystem-policy = false
                     protocol: Protocol::Http,
                     secret: Some(EgressSecret {
                         reference: format!("env://{variable}"),
+                        env: None,
                         header: Some("x-api-key".to_string()),
                         prefix: None,
                         placement: None,
@@ -3215,7 +3304,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, DENY_WRITE_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, SECRET_SOURCE_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -3498,6 +3587,7 @@ env = {}
                         protocol: Protocol::Http,
                         secret: Some(EgressSecret {
                             reference: "env://ONE".to_string(),
+                            env: None,
                             header: None,
                             prefix: None,
                             placement: None,
@@ -3516,6 +3606,7 @@ env = {}
                         protocol: Protocol::Http,
                         secret: Some(EgressSecret {
                             reference: "env://TWO".to_string(),
+                            env: None,
                             header: None,
                             prefix: None,
                             placement: None,
@@ -3549,6 +3640,7 @@ env = {}
                     protocol: Protocol::Http,
                     secret: Some(EgressSecret {
                         reference: "env://ONE".to_string(),
+                        env: None,
                         header: None,
                         prefix: None,
                         placement: None,
@@ -3605,6 +3697,7 @@ env = {}
                 protocol: Protocol::Http,
                 secret: Some(EgressSecret {
                     reference: "env://ONE".to_string(),
+                    env: None,
                     header: None,
                     prefix: None,
                     placement: None,
@@ -4726,5 +4819,471 @@ command = ["mcp-server-fetch"]
             error.to_string().contains("re-routes to a backend"),
             "the refusal must name the re-route host-cover rule: {error}"
         );
+    }
+
+    /// The switch that turns on `[secret-source.<scheme>]`.
+    const SECRET_SOURCES_ON: &str = "[experimental-features]\nsecret-sources = true\n";
+
+    /// One declared source, with each key that the table takes.
+    const OP_SOURCE: &str = "[secret-source.op]\nprotocol = \"box.secret-source.v1\"\n\
+         command = [\"/opt/homebrew/bin/op\", \"read\", \"op://{ref}\"]\noutput = \"text\"\n\
+         pass-env = [\"OP_ACCOUNT\"]\npass-secret-env = [\"OP_SERVICE_ACCOUNT_TOKEN\"]\n\
+         reads = [\"~/.config/op\"]\ndeny = [\"/var/run/op\"]\n";
+
+    /// A route, a remote MCP server, a backend auth, and a telemetry target that each name `op://`.
+    #[cfg(target_os = "macos")]
+    const OP_USE_SITES: &str = "[egress.github]\ndestinations = [\"api.github.com\"]\n\
+         secret.ref = \"op://Personal/GitHub/token\"\nsecret.env = \"GH_TOKEN\"\n\
+         [egress.internal]\ndestinations = [\"internal.example.com\"]\n\
+         [[egress.internal.backends]]\nurl = \"https://gateway.example.com\"\n\
+         auth.ref = \"op://Personal/Gateway/token\"\n\
+         [mcp.tools]\ntype = \"http\"\ndestinations = [\"mcp.example.com\"]\n\
+         secret.ref = \"op://Personal/Tools/token\"\nsecret.env = \"TOOLS_TOKEN\"\n\
+         [telemetry.otlp]\nkind = \"otlp\"\ndestination = \"https://otlp.example.com\"\n\
+         secret.ref = \"op://Personal/Otlp/key\"\nsecret.header = \"x-api-key\"\n";
+
+    /// The refusal of a declaration on an operating system with no protection for it.
+    const UNPROTECTED: &str = "invalid `[secret-source.op]` table: a secret source loads on macOS \
+         only: protection of its program and its files from the workload is not built for Linux yet";
+
+    /// **`[secret-source.<scheme>]` needs the `secret-sources` switch**, and it loads on macOS
+    /// only.
+    #[test]
+    fn a_secret_source_table_needs_the_secret_sources_switch() {
+        let without = load(OP_SOURCE).expect_err("the switch is off").to_string();
+        let with = load(&format!("{SECRET_SOURCES_ON}{OP_SOURCE}"));
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                without,
+                "invalid `[secret-source.op]` table: a secret source is experimental: set \
+                 `secret-sources = true` in `[experimental-features]` to load it"
+            );
+            let file = with.expect("the switch is on");
+            assert_eq!(
+                file.secret_source.keys().collect::<Vec<_>>(),
+                ["op"],
+                "the table is kept under its scheme"
+            );
+        } else {
+            assert_eq!(without, UNPROTECTED);
+            assert_eq!(with.expect_err("no protection").to_string(), UNPROTECTED);
+        }
+        // The switch alone declares nothing, on each operating system.
+        let file = load(SECRET_SOURCES_ON).expect("the switch alone loads");
+        assert!(file.experimental_features.secret_sources);
+        assert!(file.secret_source.is_empty());
+    }
+
+    /// An unknown key in a `[secret-source.<scheme>]` table is a parse error that names the key.
+    #[test]
+    fn a_secret_source_table_refuses_an_unknown_key() {
+        let error = ConfigFile::parse(
+            &format!(
+                "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n{SECRET_SOURCES_ON}{OP_SOURCE}\
+                 timeout = 5\n"
+            ),
+            Path::new("box.toml"),
+        )
+        .expect_err("the table takes seven keys");
+        assert!(matches!(error, ConfigError::Parse { .. }), "{error}");
+        assert!(
+            error.to_string().contains(
+                "unknown field `timeout`, expected one of `protocol`, `command`, `output`, \
+                 `pass-env`, `pass-secret-env`, `reads`, `deny`"
+            ),
+            "{error}"
+        );
+    }
+
+    /// **A route in a scheme that no table declares is refused when the configuration loads**,
+    /// with or without the switch.
+    #[test]
+    fn a_route_in_an_undeclared_scheme_is_refused_at_load() {
+        for switch in ["", SECRET_SOURCES_ON] {
+            let error = load(&format!(
+                "{switch}[egress.github]\ndestinations = [\"api.github.com\"]\n\
+                 secret.ref = \"op://Personal/GitHub/token\"\nsecret.env = \"GH_TOKEN\"\n"
+            ))
+            .expect_err("no table declares `op`");
+            assert!(
+                error
+                    .to_string()
+                    .contains("secret scheme \"op\" has no `[secret-source.op]` table"),
+                "{error}"
+            );
+        }
+    }
+
+    /// **The stored record holds each declaration and each use site, at the secret source record
+    /// version**, and this build reads its own record.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_declaration_is_stored_at_a_version_no_earlier_build_reads() {
+        let stored = pinned_record(&format!("{SECRET_SOURCES_ON}{OP_SOURCE}{OP_USE_SITES}"));
+        assert_eq!(stored.version, SECRET_SOURCE_RECORD_VERSION);
+        assert_eq!(SECRET_SOURCE_RECORD_VERSION, 39);
+        assert!(stored.experimental_features.secret_sources);
+        assert_eq!(
+            toml::to_string(&stored.secret_source).expect("the declarations serialize"),
+            "[op]\nprotocol = \"box.secret-source.v1\"\n\
+             command = [\"/opt/homebrew/bin/op\", \"read\", \"op://{ref}\"]\noutput = \"text\"\n\
+             pass-env = [\"OP_ACCOUNT\"]\npass-secret-env = [\"OP_SERVICE_ACCOUNT_TOKEN\"]\n\
+             reads = [\"~/.config/op\"]\ndeny = [\"/var/run/op\"]\n"
+        );
+        assert_eq!(
+            stored.egress["github"]
+                .secret
+                .as_ref()
+                .and_then(|secret| secret.env.as_deref()),
+            Some("GH_TOKEN")
+        );
+        assert_eq!(
+            stored.remote_mcp["tools"]
+                .secret
+                .as_ref()
+                .and_then(|secret| secret.env.as_deref()),
+            Some("TOOLS_TOKEN")
+        );
+        assert_eq!(
+            stored.telemetry["otlp"]
+                .secret
+                .as_ref()
+                .map(|secret| secret.reference.as_str()),
+            Some("op://Personal/Otlp/key")
+        );
+        let text = stored.to_toml().unwrap();
+        assert!(text.contains("[secret-source.op]\n"), "{text}");
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+        for older in [RECORD_VERSION, FILE_WATCHING_RECORD_VERSION] {
+            let mut forged = stored.clone();
+            forged.version = older;
+            assert!(
+                matches!(
+                    Record::parse(&forged.to_toml().unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion {
+                        expected: SECRET_SOURCE_RECORD_VERSION,
+                        ..
+                    })
+                ),
+                "a declaration cannot hide in a version {older} record"
+            );
+        }
+        let routes = stored.egress_routes().expect("the stored routes build");
+        let placeholders: Vec<Option<&str>> =
+            routes.iter().map(EgressRoute::provisioned_name).collect();
+        assert_eq!(placeholders, [Some("GH_TOKEN"), Some("TOOLS_TOKEN")]);
+    }
+
+    /// **A `secret.env` key alone needs the secret source record version**, and a configuration
+    /// without one keeps the version that an earlier build stored.
+    #[test]
+    fn a_placeholder_variable_key_stores_the_secret_source_version() {
+        let variable = present_variable();
+        let route = |env: &str| {
+            format!(
+                "[egress.github]\ndestinations = [\"api.github.com\"]\n\
+                 secret.ref = \"env://{variable}\"\n{env}"
+            )
+        };
+        let plain = pinned_record(&route(""));
+        assert_eq!(plain.version, RECORD_VERSION);
+        // The key needs the switch, on each operating system.
+        let refused = load(&route(&format!("secret.env = {variable:?}\n")))
+            .expect_err("the switch is off")
+            .to_string();
+        assert!(
+            refused.contains(
+                "secret.env is experimental: set `secret-sources = true` in \
+                 `[experimental-features]` to load it"
+            ),
+            "{refused}"
+        );
+        let stored = pinned_record(&format!(
+            "{SECRET_SOURCES_ON}{}",
+            route(&format!("secret.env = {variable:?}\n"))
+        ));
+        assert_eq!(stored.version, SECRET_SOURCE_RECORD_VERSION);
+        assert!(stored.experimental_features.secret_sources);
+        let text = stored.to_toml().unwrap();
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+        let mut forged = stored.clone();
+        forged.version = RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&forged.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                expected: SECRET_SOURCE_RECORD_VERSION,
+                ..
+            })
+        ));
+        // The key beside `monty = false` takes the higher version of the two.
+        let both = pinned_record(&format!(
+            "monty = false\n{SECRET_SOURCES_ON}{}",
+            route(&format!("secret.env = {variable:?}\n"))
+        ));
+        assert!(!both.monty);
+        assert_eq!(both.version, SECRET_SOURCE_RECORD_VERSION);
+        // The key beside a `deny_write` list takes the higher version too, and the list alone
+        // keeps its own version.
+        let denied = "[agent]\ncommand = [\"/bin/sh\"]\n[agent.filesystem]\n\
+                      write = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n";
+        let list_alone = pinned_record(&format!("{}{denied}", route("")));
+        assert_eq!(list_alone.version, DENY_WRITE_RECORD_VERSION);
+        let list_and_key = pinned_record(&format!(
+            "{SECRET_SOURCES_ON}{}{denied}",
+            route(&format!("secret.env = {variable:?}\n"))
+        ));
+        assert_eq!(
+            list_and_key
+                .agent
+                .as_ref()
+                .expect("the agent")
+                .filesystem
+                .deny_write,
+            [PathBuf::from("/work/.venv")]
+        );
+        assert_eq!(list_and_key.version, SECRET_SOURCE_RECORD_VERSION);
+        assert_eq!(
+            Record::parse(&list_and_key.to_toml().unwrap(), Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            list_and_key
+        );
+        let mut forged = list_and_key.clone();
+        forged.version = DENY_WRITE_RECORD_VERSION;
+        assert!(
+            matches!(
+                Record::parse(&forged.to_toml().unwrap(), Path::new("record.toml")),
+                Err(ConfigError::RecordVersion {
+                    expected: SECRET_SOURCE_RECORD_VERSION,
+                    ..
+                })
+            ),
+            "the key cannot hide in a record at the `deny_write` version"
+        );
+        // The switch alone keeps the ordinary version, and an earlier build refuses its key.
+        let switched = pinned_record(SECRET_SOURCES_ON);
+        assert_eq!(switched.version, RECORD_VERSION);
+        assert!(switched.to_toml().unwrap().contains(
+            "[experimental-features]\nnative-filesystem-policy = false\nsecret-sources = true\n"
+        ));
+        assert!(
+            !pinned_record("")
+                .to_toml()
+                .unwrap()
+                .contains("secret-sources"),
+            "a record without the switch writes no key for it"
+        );
+    }
+
+    /// **A stored `secret.env` key needs the stored switch**: a record that holds the key while
+    /// its switch is off builds no route.
+    #[test]
+    fn a_stored_placeholder_variable_key_needs_the_stored_switch() {
+        let variable = present_variable();
+        let mut stored = record(
+            None,
+            BTreeMap::from([(
+                "github".to_string(),
+                EgressEntry {
+                    backends: Vec::new(),
+                    destinations: vec!["api.github.com".to_string()],
+                    protocol: Protocol::Http,
+                    secret: Some(EgressSecret {
+                        reference: format!("env://{variable}"),
+                        env: Some(variable.clone()),
+                        header: None,
+                        prefix: None,
+                        placement: None,
+                        param: None,
+                        inject: None,
+                        phantom_prefix: None,
+                        aws: None,
+                    }),
+                },
+            )]),
+        );
+        stored.version = SECRET_SOURCE_RECORD_VERSION;
+        let error = match stored.egress_routes() {
+            Ok(_) => panic!("the stored switch is off"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("secret.env is experimental"),
+            "{error}"
+        );
+        stored.experimental_features.secret_sources = true;
+        let routes = stored.egress_routes().expect("the stored switch is on");
+        assert_eq!(routes[0].provisioned_name(), Some(variable.as_str()));
+    }
+
+    /// A stored record with one declaration, written by hand.
+    fn declared_record(switch: bool, command: &[&str]) -> Record {
+        let mut stored = record(None, BTreeMap::new());
+        stored.version = SECRET_SOURCE_RECORD_VERSION;
+        stored.experimental_features.secret_sources = switch;
+        stored.secret_source.insert(
+            "op".to_string(),
+            SecretSourceEntry {
+                protocol: Some("box.secret-source.v1".to_string()),
+                command: command.iter().map(|part| (*part).to_string()).collect(),
+                ..SecretSourceEntry::default()
+            },
+        );
+        stored
+    }
+
+    /// **A stored declaration is checked again when the record is read**: the switch, the
+    /// operating system, and the declaration's own rules.
+    #[test]
+    fn a_stored_declaration_is_checked_again_when_the_record_is_read() {
+        let parse = |stored: Record| {
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml"))
+                .map_err(|error| error.to_string())
+        };
+        let valid = declared_record(true, &["/opt/op", "read", "op://{ref}"]);
+        if cfg!(target_os = "macos") {
+            assert_eq!(parse(valid.clone()), Ok(valid));
+            assert_eq!(
+                parse(declared_record(false, &["/opt/op", "read", "op://{ref}"])),
+                Err(
+                    "invalid `[secret-source.op]` table: a secret source is experimental: set \
+                     `secret-sources = true` in `[experimental-features]` to load it"
+                        .to_string()
+                )
+            );
+            assert_eq!(
+                parse(declared_record(true, &["op", "read", "op://{ref}"])),
+                Err(
+                    "invalid `[secret-source.op]` table: credential error: the secret source \
+                     \"op\" names the program \"op\", which is not an absolute path"
+                        .to_string()
+                )
+            );
+        } else {
+            assert_eq!(parse(valid), Err(UNPROTECTED.to_string()));
+        }
+    }
+
+    /// **A stored route is judged against the stored declarations when it is read**, so a record
+    /// whose declaration is gone refuses its route.
+    #[test]
+    fn a_stored_route_in_an_undeclared_scheme_is_refused_when_it_is_read() {
+        let stored = record(
+            None,
+            BTreeMap::from([(
+                "github".to_string(),
+                EgressEntry {
+                    backends: Vec::new(),
+                    destinations: vec!["api.github.com".to_string()],
+                    protocol: Protocol::Http,
+                    secret: Some(EgressSecret {
+                        reference: "op://Personal/GitHub/token".to_string(),
+                        env: Some("GH_TOKEN".to_string()),
+                        header: None,
+                        prefix: None,
+                        placement: None,
+                        param: None,
+                        inject: None,
+                        phantom_prefix: None,
+                        aws: None,
+                    }),
+                },
+            )]),
+        );
+        let error = match stored.egress_routes() {
+            Ok(_) => panic!("no stored table declares `op`"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("secret scheme \"op\" has no `[secret-source.op]` table"),
+            "{error}"
+        );
+    }
+
+    /// **Offline schema generation judges a remote MCP server's secret as a run does**, so a
+    /// scheme that no table declares stops it on each operating system.
+    #[test]
+    fn offline_schema_generation_refuses_an_undeclared_scheme() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("box.toml");
+        std::fs::write(
+            &path,
+            "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+             [mcp.web]\ntype = \"http\"\ndestinations = [\"api.example.com\"]\n\
+             secret.ref = \"op://Personal/Web/token\"\nsecret.env = \"WEB_TOKEN\"\n",
+        )
+        .unwrap();
+        let error = match read_remote_mcp_servers(&path) {
+            Ok(_) => panic!("no table declares `op`"),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(
+            error,
+            "invalid credential entry for host \"api.example.com\": secret scheme \"op\" has \
+             no `[secret-source.op]` table: declare the secret source that reads it, which Box \
+             loads on macOS only, or use env://NAME for a credential the workload presents as \
+             a placeholder, aws://profile for one signed in the boundary, or \
+             credsd://<environment> for a credsd-vended credential"
+        );
+    }
+
+    /// **Offline schema generation reads no secret through a declared program**, so it refuses a
+    /// remote MCP server whose secret names a declared scheme.
+    #[test]
+    fn offline_schema_generation_refuses_a_declared_secret_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("box.toml");
+        let server = |secret: &str| {
+            format!(
+                "name = \"test\"\nbox_dir = \"/var/lib/box\"\n{SECRET_SOURCES_ON}{OP_SOURCE}\
+                 [mcp.web]\ntype = \"http\"\ndestinations = [\"api.example.com\"]\n{secret}"
+            )
+        };
+        std::fs::write(
+            &path,
+            server("secret.ref = \"op://Personal/Web/token\"\nsecret.env = \"WEB_TOKEN\"\n"),
+        )
+        .unwrap();
+        let error = match read_remote_mcp_servers(&path) {
+            Ok(_) => panic!("a declared scheme must be refused, not read"),
+            Err(error) => error.to_string(),
+        };
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                error,
+                "`[secret-source.op]` loaded, but this build cannot yet read a secret from a \
+                 declared secret source, so the box does not start"
+            );
+            // A server that names no declared scheme is read beside the declaration.
+            std::fs::write(&path, server("")).unwrap();
+            assert_eq!(read_remote_mcp_servers(&path).unwrap().len(), 1);
+            // Discovery sends the server's credential, so it cannot be the vault's own.
+            std::fs::write(
+                &path,
+                server("secret.ref = \"env://OP_SERVICE_ACCOUNT_TOKEN\"\n"),
+            )
+            .unwrap();
+            let error = match read_remote_mcp_servers(&path) {
+                Ok(_) => panic!("the credential of the vault must not reach a server"),
+                Err(error) => error.to_string(),
+            };
+            assert_eq!(
+                error,
+                "invalid credential entry for host \"api.example.com\": the variable \
+                 OP_SERVICE_ACCOUNT_TOKEN is a credential of the secret source `op` (its \
+                 `pass-secret-env` names it), so no env:// or secret:// reference can read it"
+            );
+        } else {
+            assert_eq!(error, UNPROTECTED);
+        }
     }
 }

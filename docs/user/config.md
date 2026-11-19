@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries thirteen keys. `name` and `box_dir` are required.
+The file carries fourteen keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -78,15 +78,16 @@ The file carries thirteen keys. `name` and `box_dir` are required.
 | `[agent]` | table | The one process the box runs. |
 | `[tool.<name>]` | tables | One process each, which the agent selects by invocation. The label takes the same characters as `name`. |
 | `[egress.<name>]` | tables | Which secret attaches to which outbound destination. |
+| `[secret-source.<scheme>]` | tables | Experimental: the host program that reads the secret of a reference in `<scheme>://`. See [`[secret-source.<scheme>]`](#secret-sourcescheme). |
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
-| `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, and ingress. Each is disabled by default. |
+| `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, ingress, and secret sources. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
 | `monty` | boolean | Whether a bare `python3` or `python` in the Shell runs Monty, Box's built-in Python subset. `true` by default. With `false`, both names resolve like any other program: a `[tool.python3]` or `[tool.python]`, else the host's `PATH`. |
 | `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
 
-The example uses five of the thirteen: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the fourteen: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -334,6 +335,9 @@ by default.
 
 `ingress = true` turns on [`[[agent.ingress]]`](#agentingress), which is experimental and off by
 default.
+
+`secret-sources = true` turns on [`[secret-source.<scheme>]`](#secret-sourcescheme) and the
+`secret.env` key of a route or a remote MCP server, which are experimental and off by default.
 
 ## `[agent]` and `[tool.<name>]`
 
@@ -1032,13 +1036,14 @@ requests out. The current reference for this table is
 |---|---|---|
 | `destinations` | string array | A host, `host:port`, a path prefix or `/*` suffix, or a `*.` wildcard. A pattern that matches every host is refused, and two entries may not overlap. |
 | `protocol` | string | `http`, the default and the only accepted value. |
-| `secret.ref` | string | `env://NAME` for a variable on the operator's side, `aws://PROFILE` to SigV4-sign as a named profile (resolved through the AWS SDK), or a bare `aws://` to sign with the AWS SDK default credential provider chain (the host's ambient identity). Required. A literal value, or any other scheme, is refused. |
+| `secret.ref` | string | `env://NAME` for a variable on the operator's side, `aws://PROFILE` to SigV4-sign as a named profile (resolved through the AWS SDK), a bare `aws://` to sign with the AWS SDK default credential provider chain (the host's ambient identity), or a reference in a scheme that a [`[secret-source.<scheme>]`](#secret-sourcescheme) table declares, such as `op://Personal/GitHub/token`. Required. A literal value, or any other scheme, is refused. |
+| `secret.env` | string | Experimental: needs `secret-sources = true` in [`[experimental-features]`](#experimental-features). The variable that holds the placeholder in the workload. Required with a reference in a declared scheme. Optional with `env://NAME`, where it must equal `NAME`. Refused with `aws://`. |
 | `secret.placement` | string | `header` (default), `basic_auth`, or `query_param`. |
 | `secret.header` | string | The header the secret lands in. Defaults to `Authorization`. |
 | `secret.prefix` | string | Text before the secret in the header value. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |
 | `secret.param` | string | The query-parameter name. Required by, and only valid for, `placement = "query_param"`. |
-| `secret.inject` | string | `phantom` (default) or `always`. `phantom` attaches the real secret only to a request that presents the box's placeholder, and rejects any other. `always` attaches the real secret to every request to the destinations, with or without a placeholder, and the decision record carries an advisory note. Valid only for an `env://` route. |
-| `secret.phantom_prefix` | string | The literal prefix of the minted placeholder, before its random suffix. Defaults to `strands_box_`. Set it, such as `sk-ant-`, so a harness that checks its key format accepts the placeholder. At most 64 characters from `A-Z`, `a-z`, `0-9`, `-`, `_`, `.`, `~`. Valid only for an `env://` route. |
+| `secret.inject` | string | `phantom` (default) or `always`. `phantom` attaches the real secret only to a request that presents the box's placeholder, and rejects any other. `always` attaches the real secret to every request to the destinations, with or without a placeholder, and the decision record carries an advisory note. Valid only for an `env://` route or a route in a declared scheme. |
+| `secret.phantom_prefix` | string | The literal prefix of the minted placeholder, before its random suffix. Defaults to `strands_box_`. Set it, such as `sk-ant-`, so a harness that checks its key format accepts the placeholder. At most 64 characters from `A-Z`, `a-z`, `0-9`, `-`, `_`, `.`, `~`. Valid only for an `env://` route or a route in a declared scheme. |
 
 The example takes every default: the key lands in the `Authorization` header with a `Bearer `
 prefix, and only a request that carries the placeholder gets it.
@@ -1055,9 +1060,11 @@ An `aws://` route signs inside the box, so it takes no `header`, `prefix`, `plac
 not resolve (AWS SSO), the warning, and the writable-`~/.aws` rule.
 
 An entry re-routes to a backend with one `[[egress.<name>.backends]]` table, holding a `url`
-(`scheme://host[:port][/prefix]`, `https` or `http`) and an optional `auth` — the backend's own
-credential, an `env://` token or an `aws://` profile SigV4-signed over the backend host (with an
+(`scheme://host[:port][/prefix]`, `https` or `http`) and an optional `auth`, which is the backend's own
+credential: an `env://` token, a token in a declared scheme, or an `aws://` profile SigV4-signed
+over the backend host (with an
 explicit `auth.aws.service` and `auth.aws.region`, since a gateway host carries no derivable scope).
+An `auth` takes no `env` key, because the workload holds no placeholder for it.
 The backend `url`'s path prefix joins in front of the agent's request path. An entry may keep its own
 `env://` `secret` beside a backend, phantom-only: the box provisions the placeholder and strips it,
 never injecting the real destination credential, so the named variable need not be set. The loader
@@ -1066,10 +1073,103 @@ another entry also names (on any port), a `url` with a query,
 fragment, or a non-`http(s)` scheme, a `credsd://` `auth`, an `aws://` `auth` without a valid
 `auth.aws.service`/`auth.aws.region` (each non-empty and only lowercase `[a-z0-9-]`, or those keys on
 a non-`aws://` auth), a signed (`aws://` or `credsd://`) destination `secret`, a destination `secret`
+in a declared scheme, a destination `secret`
 beside an `http` backend, a destination `secret.inject` beside a backend (the re-routed secret is
 phantom-only, so `inject` has no effect), and an `auth` on an `http` backend.
 [The egress table](egress.md#backends) describes the backend, and
 [egress design](../design/egress.md) describes how the box dials it.
+
+One placeholder variable holds one secret. Two entries that place a placeholder in one variable
+must name the same reference, and an `env://NAME` entry counts under `NAME`. Otherwise the load is
+refused, and the message names both tables: `` `[egress.b]` and `[egress.a]` both hold a
+placeholder in the variable TOKEN, and they name different secrets; one placeholder variable holds
+one secret, so give one of them another variable``. An `aws://` route fills `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` with its own placeholders, so beside one, no other route can hold a
+placeholder in either variable. The own `secret` of an entry with a backend is not such a route,
+because Box strips that placeholder.
+
+## `[secret-source.<scheme>]`
+
+> **Status.** Experimental, and macOS only. Box loads, checks, and stores a declaration. This build
+> does not read a secret through one, so a box that declares a source does not start.
+
+Each table declares one host program that reads a secret, and the table's name is the scheme of
+the references that the program serves. Box runs the program itself, outside every sandbox, with
+your rights. A route, a remote MCP server, a backend `auth`, or a telemetry target then names a
+secret in that scheme, and the workload gets a placeholder. Set `secret-sources = true` in
+[`[experimental-features]`](#experimental-features) to load the table.
+
+```toml
+[experimental-features]
+secret-sources = true
+
+[secret-source.op]
+protocol        = "box.secret-source.v1"
+command         = ["/opt/homebrew/bin/op", "read", "op://{ref}"]
+pass-env        = ["OP_ACCOUNT", "TMPDIR"]
+pass-secret-env = ["OP_SERVICE_ACCOUNT_TOKEN", "OP_SESSION_*"]
+reads           = ["~/.config/op"]
+
+[egress.github]
+destinations = ["api.github.com"]
+secret.ref   = "op://Personal/GitHub/token"
+secret.env   = "GH_TOKEN"
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `protocol` | string | The version of the contract between Box and the program. Required, and `box.secret-source.v1` is the only value. |
+| `command` | string array | The program, then its arguments. Required. The program is an absolute path. One argument or more holds `{ref}`, which stands for the text after `<scheme>://` in a reference, without `#FIELD`. |
+| `output` | string | How Box reads the program's stdout: `text` (default) or `json`, where stdout is one JSON string. |
+| `pass-env` | string array | Plain settings from your environment that the program receives when they are set, such as `AWS_REGION`. An entry that ends with `*` names each variable with that prefix. |
+| `pass-secret-env` | string array | Credentials from your environment that the program receives when they are set, such as `OP_SERVICE_ACCOUNT_TOKEN`. An entry that ends with `*` names each variable with that prefix. No `env://` or `secret://` reference can read one of these variables. |
+| `reads` | string array | The paths that the program reads, such as its configuration directory. Each is absolute, is `~`, or begins with `~/`. |
+| `deny` | string array | Other paths to the vault, such as the directory of an authentication socket. Each is absolute, is `~`, or begins with `~/`. |
+
+The scheme is a lowercase letter, then lowercase letters, digits, `+`, `.`, or `-`. A table can
+declare `op`, and no table can declare a scheme that Box reserves: `env`, `file`, `aws`, `credsd`,
+`secret`, `cmd`, `oauth2`, `aws-signed`, and `strip-phantom`.
+
+A reference in a declared scheme can end with `#FIELD`, such as
+`aws-secretsmanager://box/telemetry#OTLP_KEY`, to name one field of a secret that is a JSON object.
+
+Each of these is refused when the configuration loads:
+
+- A table while `secret-sources` is off: ``invalid `[secret-source.op]` table: a secret source is
+  experimental: set `secret-sources = true` in `[experimental-features]` to load it``.
+- A table on Linux: ``invalid `[secret-source.op]` table: a secret source loads on macOS only:
+  protection of its program and its files from the workload is not built for Linux yet``.
+- A reserved scheme, an absent `protocol`, another `protocol`, an empty `command`, a program that
+  is not an absolute path, a `command` with no `{ref}` in its arguments, an `output` other than
+  `text` or `json`, and an unknown key.
+- A `pass-env` or `pass-secret-env` entry that is empty, is `*`, is `PATH` or `HOME`, holds `=`, or
+  holds a `*` before its end. The program always gets your `HOME` and a fixed `PATH`.
+- A `reads` or `deny` entry that is not absolute, is not `~`, and does not begin with `~/`.
+- A reference in a scheme that no table declares: ``secret scheme "op" has no `[secret-source.op]`
+  table``.
+- A reference in a scheme that a table can declare, with nothing after `://`, such as `op://`. A
+  route, a remote MCP server, and a backend `auth` get ``credential locator "op://" is invalid``,
+  and a telemetry target gets ``names no scheme this box reads``. Name the secret after `://`.
+- A route or a remote MCP server in a declared scheme with no `secret.env`.
+- A `secret.env` key while `secret-sources` is off, on each operating system. With `env://NAME`
+  the key has no effect, so you can also remove it: ``secret.env is experimental: set
+  `secret-sources = true` in `[experimental-features]` to load it, or remove secret.env, because
+  an env:// reference already names its variable``.
+- An `env://NAME` or `secret://NAME` reference whose `NAME` a `pass-secret-env` entry names, on a
+  route, a remote MCP server, a backend `auth`, or a telemetry target: ``the variable
+  OP_SERVICE_ACCOUNT_TOKEN is a credential of the secret source `op` (its `pass-secret-env` names
+  it), so no env:// or secret:// reference can read it``.
+  A bare `aws://` route is not such a reference. It signs with the AWS identity of your
+  environment, even when a `pass-secret-env` list names the AWS keys. So a request that policy
+  permits to that route's destinations is signed as the identity that reads the vault.
+
+A box that declares a source stores its record at version 39, and so does a box with a
+`secret.env` key. An older build refuses that record.
+
+A configuration that passes these checks stops before the workload starts, with ``
+`[secret-source.op]` loaded, but this build cannot yet read a secret from a declared secret source,
+so the box does not start``. `policy generate-schema` stops with the same message for a remote MCP
+server whose secret names a declared scheme.
 
 ## `[mcp.<name>]`
 
@@ -1111,6 +1211,7 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | `file-watching` | boolean | For `stdio`: `false` by default. Permit macOS FSEvents with the [limitations](#file-watching). Linux ignores this setting. Remote `http` entries refuse this field. |
 | `destinations` | string array | For `http`: the hosts the server answers on. |
 | `secret.ref` | string | For `http`: the credential the gateway attaches on the way out. |
+| `secret.env` | string | For `http`, and experimental: needs `secret-sources = true` in [`[experimental-features]`](#experimental-features). The variable that holds the placeholder in the workload. Required with a reference in a [declared scheme](#secret-sourcescheme). |
 | `backends` | table array | For `http`: a backend to re-route the server's requests to, at most one. The same shape and rules as an `[egress.<name>]` backend; a `stdio` table refuses it. See [Backends](mcp.md#backends). |
 
 Without native filesystem mediation, no `fs:*` decision covers a `stdio` server's direct file operations.
@@ -1133,7 +1234,7 @@ started reads with `jq`.
 | `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, or `metrics`. `trace` names the agent's own spans and the box's control-plane records. `logs` includes unmatched MCP routing diagnostics. **Absent means every signal**, so write `include` only to narrow the target. An empty list is refused, and so is a repeated word. |
 | `accepts` | string array | For `otlp`: which OTLP payloads the endpoint takes, from `traces`, `logs`, and `metrics`. Absent means all three. The box sends no batch of a payload the list leaves out. |
 | `headers` | table | For `otlp`: fixed headers sent on every request. A header that carries a credential or a signature is refused here. |
-| `secret.ref` | string | `env://NAME`, `secret://NAME`, `aws://PROFILE`, or `credsd://ENVIRONMENT`. `aws://` and `credsd://` sign each request with SigV4. A literal value is refused. |
+| `secret.ref` | string | `env://NAME`, `secret://NAME`, `aws://PROFILE`, `credsd://ENVIRONMENT`, or a reference in a [declared scheme](#secret-sourcescheme). `aws://` and `credsd://` sign each request with SigV4. A literal value is refused. The box attaches this secret itself, so the target takes no `secret.env`. |
 | `secret.placement` | string | For `otlp`: `header` (default) or `basic_auth`. `basic_auth` sends a `user:password` secret as `Authorization: Basic`. |
 | `secret.header` | string | For `otlp`: the header the secret lands in. Defaults to `Authorization`. |
 | `secret.prefix` | string | For `otlp`: text before the secret in the header. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |
@@ -1174,6 +1275,11 @@ secret.ref = "aws://my-profile"
 | `langsmith` | spans, to `<destination>/otel`, with `Langsmith-Project` when `project` is set | `x-api-key` |
 | `cloudwatch_logs` | log records, to `https://logs.<region>.amazonaws.com`, with `x-aws-log-group` and `x-aws-log-stream` | SigV4 for `logs`, from `aws://` or `credsd://` |
 | `cloudwatch_traces` | spans, to `https://xray.<region>.amazonaws.com` | SigV4 for `xray`, from `aws://` or `credsd://` |
+
+A `langfuse` or `langsmith` target also takes a reference in a
+[declared scheme](#secret-sourcescheme), such as
+`secret.ref = "aws-secretsmanager://box/telemetry#LANGSMITH_API_KEY"`. A CloudWatch kind takes only
+`aws://` or `credsd://`.
 
 A vendor kind refuses each key it sets itself: `headers`, `accepts`, `secret.header`,
 `secret.prefix`, and `secret.placement`. The message is ``a `<kind>` target sets `<key>` itself, so
@@ -1277,6 +1383,7 @@ absent or invalid `name`, an absent or relative `box_dir`, an empty or relative 
 relative `workspace`, an `env` name the box owns, a relative `env.HOME` or `env.TMPDIR`, a patterned
 or relative `filesystem` path, a `filesystem` path carrying `..`, a duplicated `filesystem` path, an
 overlapping or all-hosts egress destination, a secretless egress entry, a literal egress secret,
+each [`[secret-source.<scheme>]`](#secret-sourcescheme) refusal,
 each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal, an `ingress` outside `[agent]`, an
 `[[agent.ingress]]` while `ingress` is off in `[experimental-features]`, more than
 five `[[agent.ingress]]` entries, an `[[agent.ingress]] listen` that is not an IP address and port, a

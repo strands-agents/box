@@ -192,8 +192,9 @@ impl SecretSourceCommand {
             .any(|entry| entry_matches(entry, name))
     }
 
-    /// Whether `pass-secret-env` names the variable `name`.
-    pub(crate) fn passes_as_secret(&self, name: &str) -> bool {
+    /// Whether `pass-secret-env` names the variable `name`, by an exact entry or by a prefix entry.
+    #[must_use]
+    pub fn passes_as_secret(&self, name: &str) -> bool {
         self.pass_secret_env
             .iter()
             .any(|entry| entry_matches(entry, name))

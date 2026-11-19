@@ -42,9 +42,19 @@ An HTTP MCP server, `[mcp.<name>] type = "http"`, takes the same `secret` keys. 
 the same route, and everything on this page applies to it as described in [the `[mcp.<name>]`
 table](../user/mcp.md).
 
-Box accepts only the `env://` and `aws://` schemes. A route that names any other scheme is refused
-when the configuration loads. See [a credential the box can't deliver is refused at
+Box accepts the `env://` and `aws://` schemes, and a scheme that a `[secret-source.<scheme>]` table
+declares. A route that names any other scheme is refused when the configuration loads. See [a
+credential the box can't deliver is refused at
 load](./decisions.md#an-undeliverable-credential-is-refused-at-load).
+
+A `[secret-source.<scheme>]` table names a host program that reads a secret, such as the 1Password
+CLI. The table is experimental, and it loads on macOS only. Box checks the table and stores it in
+the record when the configuration loads. Box doesn't read a secret through the table yet, so a box
+that declares one doesn't start. When the configuration loads, Box also refuses an `env://NAME` or
+`secret://NAME` reference on a route, a remote MCP server, a backend credential, or a telemetry
+target when the table's `pass-secret-env` list names `NAME`. Those variables hold the vault's own
+credential. A bare `aws://` route is the one exception: it signs with the ambient AWS identity,
+even when the list names the AWS keys.
 
 ## The parts
 

@@ -2428,10 +2428,17 @@ remain in its heap without wiping.
 <a id="an-undeliverable-credential-is-refused-at-load"></a>
 ### A credential the box cannot deliver is refused when the config loads
 
-A box egress entry may name the `env://` or `aws://` credential scheme. Every other scheme is
-refused when the config loads, and the message names the accepted set. The credentials crate also
-resolves `file://` and `op://`. Box cannot deliver those credentials, so egress entries cannot name
-those schemes. `an_undeliverable_credential_scheme_is_refused` pins the refusal.
+A box egress entry can name the `env://`, `aws://`, or `credsd://` credential scheme, or a scheme
+that a `[secret-source.<scheme>]` table declares. Every other scheme is refused when the config
+loads, and the message names the accepted set. A provider scheme such as `op://` is valid only when
+its provider is declared: the declaration names the host program that reads the secret, and
+`secret.env` names the variable that holds the placeholder. The credentials crate also resolves
+`file://`, and it has a built-in `op://` source. Box does not use them for a route. `file` is a
+reserved scheme that no table can declare. The built-in `op://` source has no declaration, so Box
+does not know which program runs, or which paths and variables hold the credential of the vault.
+So an entry cannot name `file://`, and it cannot name `op://` without a declaration. The cost is
+that an operator declares each provider, because Box finds no provider from a scheme alone.
+`an_undeliverable_credential_scheme_is_refused` pins the refusal.
 
 <a id="endpoint-breadth-is-refused-by-the-parsed-pattern"></a>
 ### Endpoint breadth is refused by the parsed pattern, and never by its text

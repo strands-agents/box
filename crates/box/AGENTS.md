@@ -6,7 +6,7 @@ Read the **"`strands-box` is interface-frozen"** section of the
 [repository guidance](../../AGENTS.md) before changing anything here. A change to an
 observable surface — the `strands-box` verbs and flags, `box.toml`'s keys, the four box inputs,
 the on-disk records (`Record` at `RECORD_VERSION` and each later record version through
-`TELEMETRY_EXPORT_RECORD_VERSION`, with the `box_id` grammar `valid_box_identity` accepts,
+`SECRET_SOURCE_RECORD_VERSION`, with the `box_id` grammar `valid_box_identity` accepts,
 `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
 `PROTOCOL_VERSION`, the alias names and their socket derivation, the
 policy action vocabulary, the composed workload environment — or to a foundational premise,
@@ -31,8 +31,9 @@ and nothing else, and `run/configure` owns **no verb at all**: it is the creatio
 calls, and it is not operator-facing. `list`, `stop`, and `remove` are deleted with the verbs they
 implemented — see "The lifecycle verbs are gone" below before adding one back.
 
-The three `record/` modules each answer one question. `config` is `box.toml` — the two wire records,
-plus one module per vocabulary: `process`, `filesystem`, `egress`, `env`, `mcp`, and `telemetry`.
+The three `record/` modules each answer one question. `config` is `box.toml`: the two wire records,
+plus one module per vocabulary. The modules are `process`, `filesystem`, `egress`, `env`, `mcp`,
+`secret_source`, and `telemetry`.
 `process` holds `ProcessSpec`, the one shape `[agent]` and each `[tool.<name>]` take, and the
 `Filesystem` that spec carries. `filesystem` translates the nine lists into containment cells.
 `layout` sites the filesystem. `config/mcp` is `box.toml`'s MCP
@@ -167,9 +168,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   caller wanting determinism passes an absolute program path).
 
   **`tests/four_inputs.rs` is the guard.** It asserts both halves: no withheld flag is a box
-  argument, and `ConfigFile` carries exactly **twelve** keys — `agent`, `box_dir`, `egress`, `mcp`,
-  `name`, `policy`, `telemetry`, `tool`, `experimental-features`, `file-attributes`, `limits`, and
-  `gateway`. That is the `box.toml` key set, and it is
+  argument, and `ConfigFile` carries exactly **fourteen** keys: `agent`, `box_dir`, `egress`, `mcp`,
+  `name`, `policy`, `secret-source`, `telemetry`, `tool`, `experimental-features`,
+  `file-attributes`, `limits`, `gateway`, and `monty`. That is the `box.toml` key set, and it is
   **not** the stored `Record`'s key set: `Record` adds `version` and `box_id`, which no operator
   authors. Read
   which one a passage means before you change a count. The withheld-flag guard is split in two —
@@ -256,10 +257,10 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   about one box. **Do not reintroduce `--name`**; reconciling a flag against the file is the shape in
   which the file's key became silently dead once already.
 
-  **`box.toml` carries thirteen top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
-  `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-  `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.** The experimental settings select native file
-  checks and tool grammars. They add no authority beyond the authored policy. `file-attributes` adds
+  **`box.toml` carries fourteen top-level keys: `name`, `box_dir`, `policy`, `[agent]`,
+  `[tool.<label>]`, `[egress.<name>]`, `[secret-source.<scheme>]`, `[mcp.<name>]`,
+  `[telemetry.<kind>]`, `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.** The experimental settings select native file
+  checks, tool grammars, ingress, and secret sources. They add no authority beyond the authored policy. `file-attributes` adds
   no grant: it widens what the workload's own `write` lists allow on macOS, so it is part of the
   workload input, and each process discloses it. `[gateway] upgrade_http` adds no grant either:
   policy decides each upgraded request on port 443, as it decides a `CONNECT` to that host. `[agent]` and each
@@ -311,6 +312,51 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   that line: one exact host, no wildcard, no path, locator required, one credential authority per
   destination, and `aws://` taking no header or prefix. A key that narrows or widens *which
   requests* are governed makes this file a second authority — that is the defect, not the syntax.
+- **A `[secret-source.<scheme>]` table is part of the credentials input, and it is experimental.**
+  It names the host program that reads the secret of a reference in that scheme, and it permits no
+  request. `record::config::secret_source` owns the table. Keep each part:
+  - `DeclaredSources::check` is the one check, on load and on record read. Its order is the
+    operating system (macOS only, until protection for Linux exists), the
+    `[experimental-features] secret-sources` switch, the scheme, the `protocol` key, the
+    `credentials::SecretSourceCommand` constructor, and the shape of `reads` and `deny`. Do not
+    restate a rule that the constructor owns.
+  - An entry's own rules need no declarations: `SecretScheme::Declared` is each scheme that
+    `SecretSourceCommand::check_scheme` accepts. `validate_pairs` holds the rules that need them:
+    a scheme that no table declares, a reference to a `pass-secret-env` variable, one
+    placeholder variable with two references, and a placeholder in a variable that a signed route
+    fills (`SIGNING_PLACEHOLDER_VARIABLES`), for an entry with no backend. Each path that builds
+    routes calls it, so add no second place that decides whether a scheme is declared.
+  - `secret.env` names the placeholder variable. A declared scheme on a route or a remote MCP
+    server requires it, `env://NAME` takes only `NAME`, and a signed secret, a backend `auth`, and
+    a telemetry target take none. A re-routed entry's own secret stays `env://`.
+    `validate_pairs` refuses the key while the switch is off, also on `env://NAME` where it has
+    no effect, so no key of the feature loads and no record moves to its version without the
+    switch. `grammar` and `[[agent.ingress]]` refuse themselves the same way.
+  - A refusal of a telemetry `secret.ref` echoes no part of the value, the scheme included.
+  - **`secret_source::routed_scheme` is the one place that finds the scheme of a reference for
+    a declared source.** It asks `credentials::Locator`, which is what `Backend::resolve` routes
+    by, so Box and the backend cannot name two schemes for one reference.
+    `DeclaredSources::source_of` answers "which declared source reads this reference" for each
+    caller. Do not split a reference on `://` to ask that question. `EgressSecret::deliverable`
+    and `validate_secret` split to sort a reference into its kind and to word a refusal, and no
+    declaration is looked up with their scheme. A reference that `Locator` refuses has no
+    scheme, so no source reads it: `op://` with nothing after it is refused as a locator on a
+    route, and as a reference in no scheme on a telemetry target.
+    `a_declared_source_reads_a_reference_by_the_scheme_that_credentials_routes` pins it.
+  - A record that holds a declaration or a `secret.env` key is `SECRET_SOURCE_RECORD_VERSION`.
+  - **This build reads no secret through a declaration.** `command::run::refuse_declared_sources`
+    stops a run after the load checks, and `read_remote_mcp_servers` stops `policy generate-schema`
+    for a remote MCP server whose secret names a declared scheme. Without them `Backend::local()`
+    runs the built-in `op://` source and ignores the declaration. Remove each refusal only together
+    with the step that reads the secret through `Backend::declared`.
+  - `reads` and `deny` are stored and judged for shape only. No grant is checked against them yet.
+  - The `pass-secret-env` refusal covers `env://NAME` and `secret://NAME` only. A bare `aws://`
+    route signs with the ambient AWS identity, also when a `pass-secret-env` entry names an AWS
+    key. The design pairs that route with a source that reads AWS Secrets Manager under the same
+    identity, so Box does not refuse the pair.
+  - `read_remote_mcp_servers` runs `validate_egress_and_remote`, because `policy generate-schema`
+    sends each remote MCP server's credential itself. Without that call, a server that names the
+    variable of a `pass-secret-env` entry gets the vault's own credential at discovery.
 - **This crate holds no list of credential paths, and must not grow one back.** `~/.aws`, `~/.ssh`,
   a keychain, a browser profile — every one lives in `containment`'s `FORBIDDEN_PATHS`, judged
   beneath every grant the translator renders, through `containment::validate_grant`. Two lists in

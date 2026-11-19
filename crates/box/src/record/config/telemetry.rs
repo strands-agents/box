@@ -21,6 +21,7 @@ use crate::error::{BoxError, ConfigError};
 // The `[[egress]]` vocabulary owns these: a telemetry target's secret is a credential,
 // and it follows the same header convention.
 use super::egress::Placement;
+use super::secret_source::{DeclaredSources, vault_credential_refusal};
 use super::{BASIC_AUTH_PLACEMENT, BEARER_PREFIX, DEFAULT_HEADER, ENV_SCHEME, HEADER_PLACEMENT};
 
 /// Refuse a file destination the workload could truncate.
@@ -83,8 +84,8 @@ fn expanded_home_path(destination: &str, operator_home: Option<&Path>) -> Option
 /// The spelling an operator may use beside the credential vocabulary's own.
 const TELEMETRY_ALIAS_SCHEME: &str = "secret://";
 
-/// The schemes whose credential signs the request instead of sitting in one header. With `env://`
-/// and its alias, these are every scheme a telemetry credential may name.
+/// The schemes whose credential signs the request instead of sitting in one header. With `env://`,
+/// its alias, and each declared scheme, these are every scheme a telemetry credential may name.
 const SIGNING_SCHEMES: [&str; 2] = [AWS_REFERENCE, CREDSD_REFERENCE];
 
 /// The scheme of a credential signed from an AWS profile.
@@ -248,8 +249,8 @@ pub(crate) struct TelemetryEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TelemetrySecret {
-    /// The secret to attach, as a URI: `env://NAME`, `secret://NAME`, `aws://PROFILE`, or
-    /// `credsd://ENVIRONMENT`.
+    /// The secret to attach, as a URI: `env://NAME`, `secret://NAME`, `aws://PROFILE`,
+    /// `credsd://ENVIRONMENT`, or a reference in a declared scheme.
     #[serde(rename = "ref")]
     pub(crate) reference: String,
 
@@ -344,30 +345,39 @@ fn presented(placement: &Placement, phantom: &str) -> Option<(String, String)> {
     }
 }
 
-/// A telemetry secret reference, as the credential vocabulary spells it.
-fn telemetry_secret_uri(reference: &str) -> Result<String, String> {
+/// A telemetry secret reference, as the credential vocabulary spells it, in a configuration that
+/// declares `sources`.
+fn telemetry_secret_uri(reference: &str, sources: &DeclaredSources) -> Result<String, String> {
     let reference = reference.trim();
-    if let Some(name) = reference.strip_prefix(TELEMETRY_ALIAS_SCHEME) {
+    let uri = if let Some(name) = reference.strip_prefix(TELEMETRY_ALIAS_SCHEME) {
         if name.is_empty() {
             return Err(format!(
                 "the {TELEMETRY_ALIAS_SCHEME} reference names no variable"
             ));
         }
-        return Ok(format!("{ENV_SCHEME}{name}"));
-    }
-    if reference.starts_with(ENV_SCHEME)
+        format!("{ENV_SCHEME}{name}")
+    } else if reference.starts_with(ENV_SCHEME)
         || SIGNING_SCHEMES
             .iter()
             .any(|scheme| reference.starts_with(scheme))
+        || sources.source_of(reference).is_some()
     {
-        return Ok(reference.to_string());
+        reference.to_string()
+    } else {
+        return Err(format!(
+            "`secret.ref` names no scheme this box reads; write `{ENV_SCHEME}NAME`, \
+             `{TELEMETRY_ALIAS_SCHEME}NAME`, `aws://profile`, `credsd://environment`, or a \
+             reference in a scheme that a `[secret-source.<scheme>]` table declares (macOS \
+             only), never the value itself. The value is deliberately not echoed here, in case \
+             it is one"
+        ));
+    };
+    if let Some(name) = uri.strip_prefix(ENV_SCHEME)
+        && let Some(scheme) = sources.credential_owner(name)
+    {
+        return Err(vault_credential_refusal(name, scheme));
     }
-    Err(format!(
-        "`secret.ref` names no scheme this box reads; write `{ENV_SCHEME}NAME`, \
-         `{TELEMETRY_ALIAS_SCHEME}NAME`, `aws://profile` or \
-         `credsd://environment`, never the value itself. The value is deliberately not echoed \
-         here, in case it is one"
-    ))
+    Ok(uri)
 }
 
 /// The refusal a declared target carries, naming the target the operator keyed it under.
@@ -722,15 +732,16 @@ fn credential_destination(destination: &str) -> Result<credentials::DestinationP
 /// One target's vault, and the header that presents its phantom when the credential has one.
 type ResolvedCredential = (Arc<credentials::Vault>, Option<(String, String)>);
 
-/// The vault holding one target's credential, apart from the egress gateway's so no workload
-/// request can carry it, and the header presenting its phantom.
+/// The vault holding one target's credential, which it reads through the local sources of
+/// `credentials` and keeps apart from the egress gateway's so no workload request can carry it, and
+/// the header presenting its phantom.
 fn resolved_secret(
     label: &str,
     destination: &str,
     secret: &TelemetrySecret,
 ) -> Result<ResolvedCredential, BoxError> {
     let refused = |reason: String| -> BoxError { refuse(label, reason).into() };
-    let uri = telemetry_secret_uri(&secret.reference).map_err(refused)?;
+    let uri = telemetry_secret_uri(&secret.reference, &DeclaredSources::none()).map_err(refused)?;
     let locator = credentials::Locator::parse_uri(&uri).map_err(|source| ConfigError::Locator {
         locator: "<telemetry secret>".to_string(),
         source,
@@ -876,6 +887,7 @@ pub(crate) fn needs_export_record(targets: &BTreeMap<String, TelemetryEntry>) ->
 pub(crate) fn checked(
     entries: &BTreeMap<String, TelemetryEntry>,
     box_directory: &Path,
+    sources: &DeclaredSources,
 ) -> Result<BTreeMap<String, TelemetryEntry>, ConfigError> {
     let home = crate::record::layout::operator_home_directory().ok();
 
@@ -928,7 +940,7 @@ pub(crate) fn checked(
             }
             let placement = match &entry.secret {
                 Some(secret) => {
-                    telemetry_secret_uri(&secret.reference)
+                    telemetry_secret_uri(&secret.reference, sources)
                         .map_err(|reason| refuse(name, reason))?;
                     let placement = placement_of(secret).map_err(|reason| refuse(name, reason))?;
                     placement
@@ -970,6 +982,7 @@ pub(crate) fn checked(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::config::secret_source::tests::declared;
 
     /// **A destination inside the box directory but outside `private/` is refused**, because a
     /// process a spec grants reach there could truncate the record of its own denials.
@@ -1061,25 +1074,231 @@ mod tests {
     /// refused without being echoed, in case it is one.
     #[test]
     fn a_secret_reference_is_normalized_and_a_literal_is_refused() {
+        let none = DeclaredSources::none();
         assert_eq!(
-            telemetry_secret_uri("secret://HONEYCOMB_KEY").expect("the alias is accepted"),
+            telemetry_secret_uri("secret://HONEYCOMB_KEY", &none).expect("the alias is accepted"),
             format!("{ENV_SCHEME}HONEYCOMB_KEY")
         );
         assert_eq!(
-            telemetry_secret_uri("env://HONEYCOMB_KEY").expect("the canonical form is accepted"),
+            telemetry_secret_uri("env://HONEYCOMB_KEY", &none)
+                .expect("the canonical form is accepted"),
             "env://HONEYCOMB_KEY"
         );
         assert!(
-            telemetry_secret_uri("secret://").is_err(),
+            telemetry_secret_uri("secret://", &none).is_err(),
             "an empty name names no variable"
         );
 
-        let refusal = telemetry_secret_uri("hcaik_live_abcdef")
+        let refusal = telemetry_secret_uri("hcaik_live_abcdef", &none)
             .expect_err("a literal value is not a reference");
         assert!(
             !refusal.contains("hcaik_live_abcdef"),
             "the refusal must not echo the value, in case it is a secret: {refusal}"
         );
+
+        // A reference in a declared scheme is kept as written, with its `#FIELD`.
+        let declared = declared();
+        assert_eq!(
+            telemetry_secret_uri("aws-secretsmanager://box/telemetry#OTLP_KEY", &declared)
+                .expect("the scheme is declared"),
+            "aws-secretsmanager://box/telemetry#OTLP_KEY"
+        );
+        // The same reference with no declaration is refused, and no part of it is echoed.
+        for sources in [&none, &declared] {
+            let refusal = telemetry_secret_uri("vault://kv/box/telemetry", sources)
+                .expect_err("no table declares the scheme");
+            assert_eq!(
+                refusal,
+                "`secret.ref` names no scheme this box reads; write `env://NAME`, \
+                 `secret://NAME`, `aws://profile`, `credsd://environment`, or a reference in a \
+                 scheme that a `[secret-source.<scheme>]` table declares (macOS only), never \
+                 the value itself. The value is deliberately not echoed here, in case it is one"
+            );
+        }
+        assert!(
+            telemetry_secret_uri("aws-secretsmanager://box/telemetry#OTLP_KEY", &none).is_err(),
+            "a declared scheme is read only in a configuration that declares it"
+        );
+        // The scheme is the one that `credentials` routes by, after the trim. A declared scheme
+        // with nothing after it is no reference, so it is refused here, and no part is echoed.
+        assert_eq!(
+            telemetry_secret_uri(" op://Personal/Vendor/key ", &declared)
+                .expect("the scheme is declared"),
+            "op://Personal/Vendor/key"
+        );
+        let undeclared = telemetry_secret_uri("vault://kv/box/telemetry", &declared)
+            .expect_err("no table declares the scheme");
+        for reference in ["op://", "OP://Personal/Vendor/key", "op ://key"] {
+            assert_eq!(
+                telemetry_secret_uri(reference, &declared)
+                    .expect_err("credentials routes this text to no declared source"),
+                undeclared,
+                "for {reference:?}"
+            );
+        }
+    }
+
+    /// **A telemetry target cannot send out the credential of a declared source's vault**, under
+    /// either spelling of the reference, by an exact entry or by a prefix entry.
+    #[test]
+    fn a_reference_to_the_credential_of_a_declared_source_is_refused() {
+        let declared = declared();
+        for (reference, name) in [
+            ("env://OP_SERVICE_ACCOUNT_TOKEN", "OP_SERVICE_ACCOUNT_TOKEN"),
+            (
+                "secret://OP_SERVICE_ACCOUNT_TOKEN",
+                "OP_SERVICE_ACCOUNT_TOKEN",
+            ),
+            ("secret://OP_SESSION_abc", "OP_SESSION_abc"),
+        ] {
+            assert_eq!(
+                telemetry_secret_uri(reference, &declared).expect_err("the variable is refused"),
+                format!(
+                    "the variable {name} is a credential of the secret source `op` (its \
+                     `pass-secret-env` names it), so no env:// or secret:// reference can read it"
+                )
+            );
+            telemetry_secret_uri(reference, &DeclaredSources::none())
+                .expect("no declaration names the variable");
+        }
+        telemetry_secret_uri("env://OP_ACCOUNT", &declared)
+            .expect("a `pass-env` name is a plain setting");
+
+        let entry = TelemetryEntry {
+            kind: TelemetryKind::Otlp,
+            destination: "http://localhost:4318".to_string(),
+            include: None,
+            secret: Some(TelemetrySecret {
+                reference: "env://OP_SERVICE_ACCOUNT_TOKEN".to_string(),
+                header: None,
+                prefix: None,
+                placement: None,
+            }),
+            accepts: None,
+            headers: None,
+            log_group: None,
+            log_stream: None,
+            project: None,
+            region: None,
+        };
+        let refusal = checked(
+            &BTreeMap::from([("otlp".to_string(), entry)]),
+            Path::new("/var/lib/boxes/codex"),
+            &declared,
+        )
+        .expect_err("the target is refused when the configuration loads");
+        assert_eq!(
+            refusal.to_string(),
+            "invalid `[telemetry.otlp]` target: the variable OP_SERVICE_ACCOUNT_TOKEN is a \
+             credential of the secret source `op` (its `pass-secret-env` names it), so no env:// or secret:// \
+             reference can read it"
+        );
+    }
+
+    /// **A telemetry target takes a reference in a declared scheme and no placeholder variable**:
+    /// Box attaches that secret itself, so the target has no `secret.env` key.
+    #[test]
+    fn a_target_takes_a_declared_scheme_and_no_placeholder_variable() {
+        let target = |extra: &str| {
+            toml::from_str::<TelemetryEntry>(&format!(
+                "kind = \"otlp\"\ndestination = \"http://localhost:4318\"\n\
+                 secret.ref = \"aws-secretsmanager://box/telemetry#OTLP_KEY\"\n\
+                 secret.header = \"x-api-key\"\n{extra}"
+            ))
+        };
+        let entry = target("").expect("the target parses");
+        checked(
+            &BTreeMap::from([("otlp".to_string(), entry.clone())]),
+            Path::new("/var/lib/boxes/codex"),
+            &declared(),
+        )
+        .expect("the scheme is declared");
+        let refusal = checked(
+            &BTreeMap::from([("otlp".to_string(), entry)]),
+            Path::new("/var/lib/boxes/codex"),
+            &DeclaredSources::none(),
+        )
+        .expect_err("the scheme is not declared");
+        assert!(
+            refusal
+                .to_string()
+                .starts_with("invalid `[telemetry.otlp]` target: `secret.ref` names no scheme"),
+            "{refusal}"
+        );
+
+        let error = target("secret.env = \"OTLP_KEY\"\n").expect_err("the key is unknown");
+        assert!(
+            error.message().starts_with(
+                "unknown field `env`, expected one of `ref`, `header`, `prefix`, `placement`"
+            ),
+            "{error}"
+        );
+    }
+
+    /// **A vendor kind takes a reference in a declared scheme**, and Box stores the target with the
+    /// placement of that vendor. A CloudWatch kind is signed, so it refuses the reference.
+    #[test]
+    fn a_vendor_kind_takes_a_declared_scheme() {
+        let stored = checked(
+            &parsed(
+                "[telemetry.langsmith]\nkind = \"langsmith\"\n\
+                 secret.ref = \"aws-secretsmanager://box/telemetry#LANGSMITH_API_KEY\"\n\
+                 [telemetry.langfuse]\nkind = \"langfuse\"\n\
+                 secret.ref = \"aws-secretsmanager://box/telemetry#LANGFUSE_AUTH\"\n",
+            ),
+            Path::new("/var/lib/boxes/codex"),
+            &declared(),
+        )
+        .expect("the scheme is declared");
+        assert_eq!(
+            stored["langsmith"].secret,
+            Some(TelemetrySecret {
+                reference: "aws-secretsmanager://box/telemetry#LANGSMITH_API_KEY".to_string(),
+                header: Some(LANGSMITH_KEY_HEADER.to_string()),
+                prefix: None,
+                placement: None,
+            })
+        );
+        assert_eq!(
+            stored["langfuse"].secret,
+            Some(TelemetrySecret {
+                reference: "aws-secretsmanager://box/telemetry#LANGFUSE_AUTH".to_string(),
+                header: None,
+                prefix: None,
+                placement: Some(BASIC_AUTH_PLACEMENT.to_string()),
+            })
+        );
+
+        let refusal = checked(
+            &parsed(
+                "[telemetry.logs]\nkind = \"cloudwatch_logs\"\nregion = \"us-west-2\"\n\
+                 log_group = \"group\"\nlog_stream = \"stream\"\n\
+                 secret.ref = \"aws-secretsmanager://box/telemetry#KEY\"\n",
+            ),
+            Path::new("/var/lib/boxes/codex"),
+            &declared(),
+        )
+        .expect_err("a CloudWatch target is signed")
+        .to_string();
+        assert!(refusal.contains("is signed with SigV4"), "{refusal}");
+    }
+
+    /// **No secret source can take a scheme that a telemetry target reads without one**: the
+    /// credentials crate reserves each of them, and this file owns the `secret://` alias.
+    #[test]
+    fn no_secret_source_can_claim_a_scheme_that_a_target_reads_itself() {
+        for prefix in [TELEMETRY_ALIAS_SCHEME, ENV_SCHEME]
+            .into_iter()
+            .chain(SIGNING_SCHEMES)
+        {
+            let scheme = prefix
+                .strip_suffix("://")
+                .expect("each constant is a scheme prefix");
+            assert!(
+                credentials::SecretSourceCommand::check_scheme(scheme).is_err(),
+                "{scheme} is reserved"
+            );
+        }
     }
 
     /// A file destination must be absolute or `~/`-relative, judged on the AUTHORED spelling.
@@ -1098,8 +1317,12 @@ mod tests {
             region: None,
         };
         let entries = BTreeMap::from([("decisions".to_string(), entry)]);
-        let refusal = checked(&entries, Path::new("/var/lib/boxes/codex"))
-            .expect_err("a relative file destination must be refused");
+        let refusal = checked(
+            &entries,
+            Path::new("/var/lib/boxes/codex"),
+            &DeclaredSources::none(),
+        )
+        .expect_err("a relative file destination must be refused");
         assert!(refusal.to_string().contains("absolute"), "{refusal}");
         // The refusal names the target the operator keyed it under, not a position in an array.
         assert!(refusal.to_string().contains("decisions"), "{refusal}");
@@ -1200,6 +1423,7 @@ mod tests {
         let empty = checked(
             &BTreeMap::from([("decisions".to_string(), entry(vec![]))]),
             Path::new("/var/lib/boxes/codex"),
+            &DeclaredSources::none(),
         )
         .expect_err("an empty include names no signal")
         .to_string();
@@ -1217,6 +1441,7 @@ mod tests {
                 entry(vec![SignalGroup::Deny, SignalGroup::Deny]),
             )]),
             Path::new("/var/lib/boxes/codex"),
+            &DeclaredSources::none(),
         )
         .expect_err("a repeated word is refused rather than deduplicated in silence")
         .to_string();
@@ -1267,7 +1492,12 @@ accepts = ["traces"]
 secret.ref = "credsd://default"
 "#,
         );
-        let checked = checked(&entries, Path::new("/var/lib/boxes/codex")).expect("accepted");
+        let checked = checked(
+            &entries,
+            Path::new("/var/lib/boxes/codex"),
+            &DeclaredSources::none(),
+        )
+        .expect("accepted");
         assert_eq!(checked.len(), 4);
         assert_eq!(
             checked["langfuse"].accepts.as_deref(),
@@ -1324,7 +1554,12 @@ region = "us-west-2"
 secret.ref = "aws://runtime"
 "#,
         );
-        let stored = checked(&entries, Path::new("/var/lib/boxes/codex")).expect("accepted");
+        let stored = checked(
+            &entries,
+            Path::new("/var/lib/boxes/codex"),
+            &DeclaredSources::none(),
+        )
+        .expect("accepted");
         let header = |label: &str, name: &str| {
             stored[label]
                 .headers
@@ -1387,7 +1622,12 @@ secret.ref = "aws://runtime"
 
         // The stored form is itself accepted unchanged, so `run` reads what `checked` wrote.
         assert_eq!(
-            checked(&stored, Path::new("/var/lib/boxes/codex")).expect("accepted"),
+            checked(
+                &stored,
+                Path::new("/var/lib/boxes/codex"),
+                &DeclaredSources::none()
+            )
+            .expect("accepted"),
             stored
         );
     }
@@ -1458,9 +1698,13 @@ secret.ref = "aws://runtime"
 
     /// One entry's refusal, as the operator reads it.
     fn refusal(text: &str) -> String {
-        checked(&parsed(text), Path::new("/var/lib/boxes/codex"))
-            .expect_err("refused")
-            .to_string()
+        checked(
+            &parsed(text),
+            Path::new("/var/lib/boxes/codex"),
+            &DeclaredSources::none(),
+        )
+        .expect_err("refused")
+        .to_string()
     }
 
     /// **A signed credential takes no header, and Basic auth takes no prefix**, because neither
@@ -1666,9 +1910,13 @@ secret.ref = "aws://runtime"
     #[test]
     fn no_declaration_can_name_a_kind_without_a_target() {
         assert!(
-            checked(&BTreeMap::new(), Path::new("/var/lib/boxes/codex"))
-                .expect("no targets is not an error")
-                .is_empty()
+            checked(
+                &BTreeMap::new(),
+                Path::new("/var/lib/boxes/codex"),
+                &DeclaredSources::none()
+            )
+            .expect("no targets is not an error")
+            .is_empty()
         );
     }
 }

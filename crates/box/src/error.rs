@@ -301,6 +301,16 @@ pub(crate) enum ConfigError {
     #[error("invalid credential entry for host {host:?}: {reason}")]
     Credential { host: String, reason: String },
 
+    #[error("invalid `[secret-source.{scheme}]` table: {reason}")]
+    SecretSource { scheme: String, reason: String },
+
+    /// The declarations loaded, and this build has no step that reads a secret through one.
+    #[error(
+        "`[secret-source.{scheme}]` loaded, but this build cannot yet read a secret from a \
+         declared secret source, so the box does not start"
+    )]
+    SecretSourceFetch { scheme: String },
+
     #[error("credential locator {locator:?} is invalid: {source}")]
     Locator {
         locator: String,
