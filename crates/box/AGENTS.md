@@ -138,6 +138,11 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   - **No public signature names or returns a `PolicyEngine`**, an environment overlay, or a proxy
     port, and none returns a host path or working directory the box resolved. So nothing outside
     the box holds an authority object.
+  - **A policy decision channel only receives.** `PolicyDecisionSender` has no public method: the
+    box sends on it from `DecisionRecorder::record` with `try_send`, and a full channel counts the
+    decision as dropped. So a caller that reads slowly, or never, cannot block or delay a decision.
+    `decisions.rs::a_full_channel_drops_and_counts_without_waiting` pins this. A `PolicyDecision`
+    is a copy of the record's values, with no principal, so it cannot change a verdict.
 
   **A library caller shares the box's trusted process, so the caller is trusted.** It still
   **cannot** open a `PolicyEngine`, build a `ContainmentConfig`, hold a proxy handle, or resolve a

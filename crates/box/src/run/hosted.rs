@@ -814,6 +814,7 @@ impl HostedBox {
         policy: Arc<PolicyEngine>,
         commands: Arc<ConfiguredCommands>,
         collector: Arc<telemetry::Collector>,
+        policy_decisions: Option<crate::PolicyDecisionSender>,
         secrets: RouteSecrets,
         protected_sources: &[AuthoritySource],
         owned: Lock,
@@ -840,7 +841,7 @@ impl HostedBox {
         let trust_certificate = Arc::new(root.open_trust_certificate()?);
 
         let telemetry_port = collector.port();
-        let recorder = telemetry::DecisionRecorder::over(Arc::clone(&collector));
+        let recorder = telemetry::DecisionRecorder::over(Arc::clone(&collector), policy_decisions);
         // A backend entry opens one vault holding its strip-phantom destination secret (a phantom is
         // provisioned to the workload and stripped at the gateway) and its box-owned backend token
         // (attached at the gateway, never placed in the workload environment). One control per
@@ -2085,6 +2086,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             policy,
             commands,
             Arc::clone(&collector),
+            None,
             RouteSecrets::none(),
             &[],
             owned,
@@ -2162,6 +2164,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
                 policy,
                 Arc::new(ConfiguredCommands::load(&record).expect("the commands load")),
                 collector,
+                None,
                 RouteSecrets::none(),
                 &[],
                 owned,
