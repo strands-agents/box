@@ -68,9 +68,11 @@ Its waiting processes then close their copies.
 The macOS backend leaves this descriptor to the trampoline.
 The trampoline owns the completion protocol described below.
 
-The fourth argument, `native_filesystem_handoff`, reserves an optional Unix stream
-for native filesystem registration. This preparation does not implement that registration.
-Pass `None`. A supplied handoff returns `UnsupportedCapability` before backend selection.
+The fourth argument, `native_filesystem_handoff`, is an optional Unix stream to the
+trusted native filesystem monitor. On Linux, it transfers the notification listener
+and filesystem root, then waits for registration before the workload runs.
+Pass `None` when native filesystem checks are disabled.
+Builds without Linux native filesystem support refuse a supplied handoff.
 
 A successful `apply` returns `()`. Kernel enforcement remains active until the
 process exits and is inherited by child processes and across `exec`. There is no
@@ -360,9 +362,8 @@ The production facade selects on the platform and, on Linux, on the architecture
 | Linux, any other architecture | `ContainmentError::PlatformUnsupported`, carrying the reason. |
 | Windows and other targets | `ContainmentError::PlatformUnsupported`. |
 
-This table describes the standalone containment library. The Box application separately
-requires `EXPERIMENTAL_X86_SUPPORT=TRUE` before executing a command on Linux x86-64.
-See the [Box interface](../box/README.md#the-interface) for the startup opt-in.
+This table describes the standalone containment library. See the
+[Box interface](../box/README.md#the-interface) for application startup requirements.
 
 Landlock was considered as the Linux mechanism and rejected: it restricts the calling process in
 place and expresses no right that denies all network, which is the default mode, so a contained
@@ -388,7 +389,7 @@ process-memory, and lifecycle limits.
 
 The opt-in `BackendOverride::LinuxContainer` instead requires a private container
 PID 1 and forks once. It retains the container's masked procfs and a supervisor
-lifetime channel. See [container agent mode](../../docs/user/container-agent.md)
+lifetime channel. See [container agent mode](../../docs/user/linux-requirements.md#run-an-agent-in-a-container-pid-namespace)
 for the required installer boundary and refusal conditions.
 
 Run the macOS enforcement proof on a macOS host:

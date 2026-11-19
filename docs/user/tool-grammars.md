@@ -15,8 +15,8 @@ This page adds a grammar for `git`, writes rules against it, and then states wha
 governs and what it doesn't. For every key and every startup refusal, see
 [`[tool.<name>.grammar]`](config.md#toolnamegrammar) in the configuration reference.
 
-> **Status.** Tool grammars are experimental. They load only when `box.toml` sets
-> `[experimental-features] tool-grammars = true`, and the format can change before 1.0.0.
+Tool grammars are experimental. They load only when `box.toml` sets
+`[experimental-features] tool-grammars = true`.
 
 ## Before you start
 
@@ -86,7 +86,7 @@ The keys:
 | `effects` | Each effect a command can have, with a one-line description. |
 | `global.options` | Options that come before the action's words. Only an action whose `usage` has `[global options]` accepts them. |
 | `shell.<action>` | One action, such as `shell.push`. |
-| `shell.<action>.usage` | The action's command line. Each `<name>` is an operand, and `<name>...` takes more than one word. |
+| `shell.<action>.usage` | The action's command line. Each `<name>` is an operand, and `<name>...` takes more than one word. A command word, such as `push`, `payment_intents`, `emptyTrash`, or `+send`, holds ASCII letters, digits, `-`, and `_`, starts with a letter or a digit, has a lowercase letter if it has any letter, and can have one `+` in front. An all-uppercase word such as `FILE` is refused, because help text spells an operand that way: write it as `<file>`. It matches only that exact spelling, so `emptytrash` doesn't match `emptyTrash`. A `usage` or an alias whose first command word starts with `+` is refused when any `usage` in the grammar has `[+<toolchain>]`, a selector such as cargo's `+stable`, because the parser reads that word as the selector. |
 | `shell.<action>.adds` | The effects that every spelling of the action has. |
 | `shell.<action>.options` | The options the action accepts, each with its `flag` spellings. An option with no `value` is a flag. |
 | `shell.<action>.operands` | Effects for an operand that `usage` names. `like` is a pattern: `like = "+*"` matches a refspec that starts with `+`. |
@@ -207,8 +207,9 @@ has an option the action doesn't declare, so it reads as `unmodeled` and records
 response. Add an option to the `test` action only when the option can't point the tests at another
 crate.
 
-History is durable for each box. A test that passed before you restart the box still allows a
-push after the restart, within the hour.
+Persisted history survives a box restart. A recorded passing test still allows a push within
+the hour after restart if that outcome was saved. A process crash before a completed flush can
+lose the outcome; see [history persistence and process crashes](policy.md#history-persistence-and-process-crashes).
 
 A temporal predicate names one action, and never a group. A predicate such as
 `Tool::git::Action::"*"::response{}` is refused at startup, because history records each action and
@@ -358,6 +359,9 @@ A grammar reads the command line, and nothing else. It doesn't see:
   `[alias]` entry in `.cargo/config.toml` can make `cargo t` run another cargo command.
 - **Child processes**, as in [What a grammar governs](#what-a-grammar-governs), and **another
   name or a copy of the program**, as in [Which program files a grammar binds](#which-program-files-a-grammar-binds).
+- **Another spelling of a command word.** A command word matches only its exact case. If a program
+  also accepts `EMPTYTRASH` for `emptyTrash`, that line is `unmodeled`, and a forbid on the
+  `emptyTrash` action doesn't apply to it.
 
 The effects are what the command line states, not what the program does. Write rules that stay
 safe when a command does more than its words say.

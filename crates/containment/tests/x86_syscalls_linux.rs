@@ -21,6 +21,8 @@ const CONTENT: &[u8] = b"owned syscall fixture\n";
 const VFORK_CHILD_ALLOWED: i32 = 37;
 const VFORK_CHILD_DENIED: i32 = 38;
 const VFORK_CHILD_UNEXPECTED: i32 = 39;
+const FORK_CHILD_ALLOWED: i32 = 40;
+const FORK_CHILD_DENIED: i32 = 45;
 const SCOPES: [&str; 3] = ["writable", "readonly", "ungranted"];
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,7 +33,7 @@ struct Metadata {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct VforkChild {
+struct ReapedChild {
     pid: i32,
     waited_pid: i32,
     wait_error: i32,
@@ -47,7 +49,8 @@ struct Report {
     pipe_bytes: Vec<u8>,
     escaped_read: Option<Vec<u8>>,
     opened_bytes: BTreeMap<String, Vec<u8>>,
-    vfork_child: Option<VforkChild>,
+    vfork_child: Option<ReapedChild>,
+    fork_child: Option<ReapedChild>,
 }
 
 fn name(path: &Path) -> CString {
@@ -191,6 +194,10 @@ fn vfork(report: &mut Report) {
     }
     let pid = libc::pid_t::try_from(result).unwrap();
     assert!(pid > 0, "the child must never return to Rust");
+    report.vfork_child = Some(reap_child(pid));
+}
+
+fn reap_child(pid: libc::pid_t) -> ReapedChild {
     let mut status = 0;
     let (waited_pid, wait_error) = loop {
         // SAFETY: pid is this probe's child, and status is writable for waitpid's result.
@@ -212,14 +219,80 @@ fn vfork(report: &mut Report) {
     } else {
         0
     };
-    report.vfork_child = Some(VforkChild {
+    ReapedChild {
         pid,
         waited_pid,
         wait_error,
         status,
         second_wait,
         second_wait_error,
-    });
+    }
+}
+
+// Only syscall wrappers and scalar operations run in the child of the multithreaded test harness.
+unsafe fn raw_fork_child() -> ! {
+    // SAFETY: these calls address only this child.
+    let priority = unsafe { libc::syscall(libc::SYS_getpriority, libc::PRIO_PROCESS, 0) };
+    let priority_error = if priority == -1 {
+        // SAFETY: errno is thread-local and is read immediately after the failed call.
+        unsafe { *libc::__errno_location() }
+    } else {
+        0
+    };
+    // A nonzero pid argument is what the restriction filter refuses, and the permit filter admits.
+    // SAFETY: making this child its own process-group leader touches no other process.
+    let grouped = unsafe { libc::syscall(libc::SYS_setpgid, libc::syscall(libc::SYS_getpid), 0) };
+    let group_error = if grouped == -1 {
+        // SAFETY: errno is thread-local and is read immediately after the failed call.
+        unsafe { *libc::__errno_location() }
+    } else {
+        0
+    };
+    let priority_outcome = if priority >= 0 {
+        0
+    } else if priority_error == libc::EPERM {
+        1
+    } else {
+        2
+    };
+    let group_outcome = if grouped == 0 {
+        0
+    } else if group_error == libc::EPERM {
+        1
+    } else {
+        2
+    };
+    // Two-bit outcomes distinguish success, EPERM, and unexpected errors for each filter.
+    let code = FORK_CHILD_ALLOWED + priority_outcome + 4 * group_outcome;
+    // SAFETY: exit terminates only this child without running copied userspace destructors.
+    unsafe { libc::syscall(libc::SYS_exit, code) };
+    loop {
+        std::hint::spin_loop();
+    }
+}
+
+#[test]
+fn raw_fork_probe() {
+    if std::env::var_os("BOX_X86_SYSCALL_PROBE").is_none() {
+        return;
+    }
+    let mut report = Report::default();
+    // SAFETY: the child takes a syscall-only path to SYS_exit; only the parent allocates or logs.
+    let result = unsafe { libc::syscall(libc::SYS_fork) };
+    if result == 0 {
+        // SAFETY: this is the child of a fork that shares no address space.
+        unsafe { raw_fork_child() };
+    }
+    let fork_error = if result == -1 {
+        std::io::Error::last_os_error().raw_os_error().unwrap()
+    } else {
+        0
+    };
+    report.calls.insert("fork".into(), fork_error);
+    if result > 0 {
+        report.fork_child = Some(reap_child(libc::pid_t::try_from(result).unwrap()));
+    }
+    println!("{MARKER}{}", serde_json::to_string(&report).unwrap());
 }
 
 #[test]
@@ -366,7 +439,7 @@ fn bounded_output(command: &mut Command) -> Output {
     }
 }
 
-fn run_probe(root: &Path, contained: bool) -> Report {
+fn run_probe(root: &Path, contained: bool, probe: &str) -> Report {
     let executable = std::env::current_exe().unwrap();
     let config_file = tempfile::NamedTempFile::new().unwrap();
     let mut command;
@@ -405,7 +478,7 @@ fn run_probe(root: &Path, contained: bool) -> Report {
     }
     command.current_dir(root.join("writable")).args([
         "--exact",
-        "legacy_syscall_probe",
+        probe,
         "--nocapture",
         "--test-threads=1",
     ]);
@@ -464,6 +537,42 @@ fn user_ids() -> [u32; 4] {
 }
 
 #[test]
+fn raw_fork_preserves_child_restrictions() {
+    for contained in [false, true] {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        for scope in SCOPES {
+            fs::create_dir(root.join(scope)).unwrap();
+        }
+        let report = run_probe(root, contained, "raw_fork_probe");
+        assert_eq!(report.calls.len(), 1, "{report:?}");
+        assert_eq!(
+            report.calls["fork"], 0,
+            "raw fork must create a child: {report:?}"
+        );
+        let child = report
+            .fork_child
+            .as_ref()
+            .expect("fork must create a child");
+        assert!(child.pid > 0);
+        assert_eq!(child.waited_pid, child.pid, "{child:?}");
+        assert_eq!(child.wait_error, 0, "{child:?}");
+        assert!(libc::WIFEXITED(child.status), "{child:?}");
+        assert_eq!(
+            libc::WEXITSTATUS(child.status),
+            if contained {
+                FORK_CHILD_DENIED
+            } else {
+                FORK_CHILD_ALLOWED
+            },
+            "getpriority checks the permit filter; setpgid with a nonzero pid checks the restriction filter: {child:?}"
+        );
+        assert_eq!(child.second_wait, -1, "{child:?}");
+        assert_eq!(child.second_wait_error, libc::ECHILD, "{child:?}");
+    }
+}
+
+#[test]
 fn legacy_syscalls_preserve_effects_and_filesystem_grants() {
     let identity = user_ids();
     assert!(
@@ -515,7 +624,7 @@ fn legacy_syscalls_preserve_effects_and_filesystem_grants() {
                 },
             );
         }
-        let report = run_probe(root, contained);
+        let report = run_probe(root, contained, "legacy_syscall_probe");
         assert_eq!(
             report.calls.len(),
             42,

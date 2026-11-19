@@ -1,11 +1,15 @@
 //! [`Backend`] — where a secret comes from, and the one way to dereference a locator.
 
+use std::fs::File;
+use std::sync::Arc;
+
 use zeroize::Zeroizing;
 
 use crate::sources::{
-    AWS_SCHEME, EnvSource, FileSource, OnePasswordSource, SecretSource, SourceRegistry,
+    AWS_SCHEME, CommandSource, EnvSource, FileSource, OnePasswordSource, SecretSource,
+    SourceRegistry,
 };
-use crate::{CredentialError, Locator, Result, Secret};
+use crate::{CredentialError, Locator, Result, Secret, SecretSourceCommand};
 
 /// Which compiled source set a [`Backend`] is.
 #[derive(Debug)]
@@ -15,12 +19,18 @@ enum Profile {
         /// The opaque-secret sources, routed by [`Locator::scheme`].
         registry: SourceRegistry,
     },
+    /// The local source set plus one command source for each declared scheme.
+    Declared {
+        /// The opaque-secret sources, routed by [`Locator::scheme`].
+        registry: SourceRegistry,
+    },
 }
 
 /// Where secrets are fetched from — the compiled swap point, chosen by a named constructor.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Backend {
-    profile: Profile,
+    /// Shared by every clone, so every clone of a declared backend shares each fetched secret.
+    profile: Arc<Profile>,
 }
 
 impl Backend {
@@ -38,15 +48,57 @@ impl Backend {
                 .expect("the local sources use distinct schemes");
         }
         Self {
-            profile: Profile::Local { registry },
+            profile: Arc::new(Profile::Local { registry }),
         }
+    }
+
+    /// The local source set plus one source for each declaration and the opened program file that
+    /// the caller checked for it, where a declared `op` takes the place of the built-in `op://`
+    /// source.
+    pub fn declared(
+        declarations: impl IntoIterator<Item = (SecretSourceCommand, File)>,
+    ) -> Result<Self> {
+        Self::with_command_sources(
+            declarations
+                .into_iter()
+                .map(|(declaration, program)| CommandSource::new(declaration, program)),
+        )
+    }
+
+    /// Wipe each secret that a declared source holds, and refuse each later read through one.
+    pub fn close_declared(&self) {
+        match &*self.profile {
+            Profile::Local { registry } | Profile::Declared { registry } => registry.close(),
+        }
+    }
+
+    /// [`declared`](Self::declared) over built sources, so a test supplies the environment.
+    pub(crate) fn with_command_sources(
+        sources: impl IntoIterator<Item = CommandSource>,
+    ) -> Result<Self> {
+        let mut registry = SourceRegistry::new();
+        registry.register(Box::new(EnvSource::new()))?;
+        registry.register(Box::new(FileSource::new()))?;
+        for source in sources {
+            registry.register(Box::new(source))?;
+        }
+        let built_in = OnePasswordSource::new();
+        if !registry.contains(built_in.scheme()) {
+            registry.register(Box::new(built_in))?;
+        }
+        Ok(Self {
+            profile: Arc::new(Profile::Declared { registry }),
+        })
     }
 
     /// Register an additional [`SecretSource`], returning the backend for chaining.
     #[cfg(test)]
     pub(crate) fn with_source(mut self, source: Box<dyn SecretSource>) -> Result<Self> {
-        match &mut self.profile {
-            Profile::Local { registry } => registry.register(source)?,
+        let profile = Arc::get_mut(&mut self.profile).expect("a new backend has one owner");
+        match profile {
+            Profile::Local { registry } | Profile::Declared { registry } => {
+                registry.register(source)?;
+            }
         }
         Ok(self)
     }
@@ -81,8 +133,8 @@ impl Backend {
             ));
         }
 
-        match &self.profile {
-            Profile::Local { registry } => registry.fetch(locator),
+        match &*self.profile {
+            Profile::Local { registry } | Profile::Declared { registry } => registry.fetch(locator),
         }
     }
 }
@@ -144,6 +196,16 @@ mod tests {
             .resolve(&Locator::parse_uri("env://BACKEND_DEFINITELY_UNSET").unwrap())
             .expect_err("an unset variable does not resolve");
         assert!(err.is_soft(), "a genuinely absent secret is the soft miss");
+    }
+
+    /// The local profile holds the `env`, `file`, and `op` schemes, and nothing else.
+    #[test]
+    fn local_holds_the_env_file_and_op_schemes() {
+        assert_eq!(
+            format!("{:?}", Backend::local()),
+            "Backend { profile: Local { registry: SourceRegistry { schemes: [\"env\", \"file\", \
+             \"op\"] } } }"
+        );
     }
 
     /// A second source claiming a registered scheme is refused, so no source is silently shadowed.

@@ -2078,6 +2078,16 @@ fn observe_one_canned_reply(
     response: &'static [u8],
     max_body_bytes: usize,
 ) -> (Vec<Observed>, harness::SeenRequest) {
+    observe_one_canned_reply_to(host, TOOL_CALL, response, max_body_bytes)
+}
+
+/// As `observe_one_canned_reply`, for a request carrying `body`.
+fn observe_one_canned_reply_to(
+    host: &str,
+    body: &'static str,
+    response: &'static [u8],
+    max_body_bytes: usize,
+) -> (Vec<Observed>, harness::SeenRequest) {
     let upstream = TlsUpstream::start_with_response(host, response);
     let observed = Arc::new(Mutex::new(Vec::new()));
     let handle = MitmInterceptor::start(
@@ -2102,7 +2112,7 @@ fn observe_one_canned_reply(
             ("Content-Type", "application/json"),
             ("Accept-Encoding", "gzip"),
         ],
-        TOOL_CALL.as_bytes(),
+        body.as_bytes(),
     );
     // Read until the gateway stops sending; a refused or cut-off reply ends with a read error.
     let mut received = Vec::new();
@@ -2125,6 +2135,21 @@ fn a_tool_call_asks_the_server_for_an_uncompressed_reply() {
         "a compressed reply would go unread, so the workload cannot ask for one"
     );
     assert_eq!(observed.len(), 1);
+}
+
+/// A catalog is staged into the policy, and a compressed one fails that staging, so a workload
+/// that asks for one could leave a rule that waits for the catalog unenforced.
+#[test]
+fn a_tools_list_asks_the_server_for_an_uncompressed_reply() {
+    const TOOLS_LIST: &str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    const REPLY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}";
+    let (_, seen) =
+        observe_one_canned_reply_to("list-identity.test", TOOLS_LIST, REPLY, 1024 * 1024);
+    assert_eq!(
+        seen.header("accept-encoding").as_deref(),
+        Some("identity"),
+        "a compressed catalog fails staging, so the workload cannot ask for one"
+    );
 }
 
 /// A server that compresses anyway hands the observer bytes no JSON parser reads, so the policy

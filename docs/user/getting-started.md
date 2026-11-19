@@ -43,8 +43,9 @@ Rules:
 
 ## Before you start
 
-Box supports macOS on Apple silicon and Linux ARM64 (64-bit Arm). Linux x86-64 is experimental.
-On Linux, use Amazon Linux 2023 for your CPU architecture with GNU C library (glibc) 2.34 or newer and the GCC runtime library (`libgcc_s.so.1`).
+Box supports macOS on Apple silicon and Linux ARM64 (64-bit Arm). Linux x86-64 builds require no environment opt-in.
+Check the [macOS requirements](./macos-requirements.md) for the release package, workload dependencies, and startup checks.
+Linux release executables are built on Amazon Linux 2023. Check the [Linux requirements](./linux-requirements.md) for required libraries, permissions to create the sandbox, and tested configurations.
 [Step 1](#step-1-download-box) installs Box on either platform.
 The Strands CLI walkthrough in steps 2–8 uses macOS. For that walkthrough, you need:
 
@@ -83,6 +84,7 @@ Use a fresh destination to keep a previous installation if the final extraction 
 The signed macOS package contains `Box.app`, with a `box` launcher and helper links into that bundle.
 Moving only an executable out of the bundle loses its provisioning profile.
 The package is also notarized, so macOS runs a copy that you download in a browser.
+Check the [macOS requirements](./macos-requirements.md) before running a workload; a successful `box --version` does not test sandbox startup.
 
 ### Linux
 
@@ -90,20 +92,13 @@ Select a release that includes the archive for your CPU: `box-<tag>-linux-arm64.
 The release must also include its checksum in `SHA256SUMS.txt`. Set `BOX_VERSION` to that release tag when running the downloader.
 A release can omit Linux or x86-64 assets. If the x86-64 archive or its checksum is missing, the download stops without substituting an ARM64 archive.
 
-To run Box on x86-64, set its experimental startup opt-in in the same terminal:
+Box has no runtime environment opt-in for ARM64 or x86-64.
 
-```sh
-export EXPERIMENTAL_X86_SUPPORT=TRUE
-```
-
-Box requires the exact value `TRUE` for `run` and `policy generate-schema`, including
-their Rust library entry points. Help and version output do not require the flag.
-ARM64 does not require the flag. It does not change the sandbox permissions.
-
-After installation, continue with the [Amazon EKS coding example](tutorials/eks.md) or the [AgentCore Runtime shipment example](tutorials/agentcore-runtime.md).
+After installation, run the [native Linux example](./linux-requirements.md#run-a-native-linux-example) to check sandbox startup and file access without model credentials.
+For a cloud workload, continue with the [Amazon EKS coding example](tutorials/eks.md) or the [AgentCore Runtime shipment example](tutorials/agentcore-runtime.md).
 Steps 2–8 below follow the macOS Strands CLI example.
 
-Check [Linux setup requirements](cloud-deployments.md#shared-requirements) for the permissions Box needs at startup.
+Check the [Linux requirements](./linux-requirements.md) before running a workload; a successful `box --version` does not test sandbox startup.
 Use the [platform comparison](../design/platform-differences.md) when adapting a macOS configuration.
 
 <a id="build-from-source"></a>
@@ -119,8 +114,6 @@ mkdir box-core
 cp box-src/target/release/strands-box box-core/box
 cp box-src/target/release/strands-box-sock-alias box-src/target/release/strands-box-contain-trampoline box-core/
 ```
-
-The x86-64 startup opt-in above also applies to builds from source.
 
 </details>
 

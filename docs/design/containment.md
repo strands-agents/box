@@ -12,13 +12,9 @@ mechanism.
 > Platform scope. Unless a section explicitly states Linux behavior, this page describes operating
 > system enforcement and guarantees on macOS.
 
-Before reading configuration, the Box command and the Rust library functions `run`
-and `generate_policy_schema` require `EXPERIMENTAL_X86_SUPPORT=TRUE` in the
-operator environment on Linux x86-64.
-Without that exact value, Box refuses command execution before starting a workload
-or schema-discovery server. Help and version output remain available. ARM64 startup
-and the standalone containment library do not require this opt-in. Once enabled,
-x86-64 uses the Linux namespace launcher and its existing restrictions.
+Linux ARM64 and x86-64 startup require no environment opt-in. The Linux namespace
+launcher applies the sandbox restrictions before the workload starts. Configuration
+validation and the required operating system permissions still apply.
 
 ## Two kinds of enforcement
 
@@ -111,6 +107,9 @@ A box makes five guarantees:
 - Every descendant of a contained process inherits its sandbox restrictions. Replacing the program
   with another one preserves those restrictions. Nothing widens a box after it applies. See
   [children inherit the boundary](decisions.md#children-inherit-the-boundary).
+  On Linux x86-64, Box permits both `fork` and `clone` for child-process creation.
+  A child created with `fork` inherits the parent's syscall filters and namespaces,
+  which define its isolated view of the system.
 - The sandbox protects the operator's files, credentials, and network from what runs inside. It
   doesn't make the box's own contents confidential, and it doesn't govern code the agent writes and
   gets run somewhere else. See [the sandbox protects the surrounding
@@ -155,9 +154,10 @@ the same four plus `network`. One translator turns each of them into a set of sa
   is `PWD`, `USER`, or an OTLP exporter name, which Box sets in every process. `LoadsCode` is a name
   that loads code before a program's first line, which a credential cannot take.
 
-- `filesystem` lists name paths and their access modes. The agent takes eight: `read`, `write`,
-  `read_file`, `write_file`, `list`, `metadata`, `exec`, and `deny`. A tool and a local MCP server
-  take the same lists without `metadata` and `exec`. A directory entry covers its tree, and a file
+- `filesystem` lists name paths and their access modes. The agent takes nine: `read`, `write`,
+  `read_file`, `write_file`, `list`, `metadata`, `exec`, `deny`, and `deny_write`. A tool and a
+  local MCP server take the same
+  lists without `metadata` and `exec`. A directory entry covers its tree, and a file
   entry is exact. `write` doesn't imply `read`.
 
 On Linux, the trusted process prepares filesystem grants for each new sandbox launch.
@@ -185,6 +185,13 @@ Each check uses the file identity resolved from the script's path spelling. Expl
 protected paths, and Box state remain outside the accepted grants. Discovery cannot use a grant
 added for an earlier interpreter to authorize a later interpreter. A required spelling can expose
 the same authorized file inside the sandbox without adding authority over another file.
+
+A script a process creates at run time gets no discovery, and names its interpreter by the host's
+spelling, such as `#!/bin/sh`. The Linux view copies each host link from a top-level name into
+`/usr`, such as `/bin -> usr/bin`, and mounts every path written through such a link at its `/usr`
+name, so a grant, loader bind, or refusal of `/bin/bash` sits at `/usr/bin/bash`. The kernel
+then finds a granted `/usr/bin/sh` under `/bin/sh`. A link resolves only to paths the view binds,
+so it adds no reach (`a_bin_sh_script_runs_through_the_hosts_bin_link`).
 
 Box discovers shared-library dependencies from executable-file grants that existed before it
 inspected the script. Preserving an interpreter's spelling adds no new source for dependency
@@ -230,7 +237,11 @@ floors](decisions.md#the-deny-only-floors-run-beneath-every-backend). The floors
   disclosed](decisions.md#direct-filesystem-reach-is-declared-and-disclosed).
 - Box refuses direct writable grants that can overwrite a configured command or replace its path,
   including its symbolic-link route and enclosing directories. The check covers the agent, every
-  tool, and every local MCP server.
+  tool, and every local MCP server. The program of a declared secret source gets the same check.
+- Grants cannot reach a path that a declared secret source lists in `reads` or `deny`: the path,
+  a path inside it, or a directory that holds it. A write grant also cannot reach the directory
+  that holds a symbolic link on the way to one. Each sandbox also denies those paths. A
+  credential store in those lists loses its exact-name exception.
 - Box refuses writable grants that can change its executable, containment launcher, socket-alias
   image, or the macOS package launcher when present. This includes hard-link names, mounted aliases,
   and enclosing directories. The check covers every process's grants. See [installation
@@ -336,7 +347,7 @@ Programs can select database behavior for network filesystems without reading su
 Programs that need actual free-space counts cannot obtain them through this query.
 Relative paths return `EOPNOTSUPP`, and `fstatfs` remains denied.
 
-A seccomp notification sends each query to the existing launcher outside the workload's PID namespace.
+A seccomp notification sends each query to the trusted launcher. In the default backend it runs outside the workload's PID namespace. In [container agent mode](../user/linux-requirements.md#run-an-agent-in-a-container-pid-namespace), a thread of PID 1 handles the query.
 The launcher copies the pathname and pins the requesting process's root through a private procfs descriptor.
 It resolves the copied path with `openat2` and `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS`, then queries the pinned result.
 Ungranted files remain absent, and read-only binds remain read-only.
@@ -349,7 +360,7 @@ It never asks the kernel to continue the original `statfs` call.
 
 The [editable diagram](images/statfs-query-flow.drawio) contains the same query flow.
 
-The launcher retains only `CAP_SYS_PTRACE` within this sandbox's private user namespace.
+In the default backend, the launcher retains only `CAP_SYS_PTRACE` within this sandbox's private user namespace.
 Its bounding, inheritable, and ambient capability sets are empty, and it sets `no_new_privs` and becomes non-dumpable.
 The kernel's capability checks prevent this authority from accessing process memory in surrounding-OS user namespaces.
 The namespace reaper and workload retain their existing capability removal.
@@ -360,7 +371,7 @@ Hosts that prohibit process-memory access can also refuse these queries.
 
 The workload installs the notification filter and transfers its listener before its final syscall restrictions and execution.
 A failed handoff prevents execution.
-After a fatal service error, the launcher exits; the reaper's existing parent-death signal terminates the namespace.
+On a fatal service error in the default backend, the launcher exits and the reaper's parent-death signal terminates the namespace. In container agent mode, PID 1 drops all capabilities before starting the query thread. A fatal service error exits PID 1 and terminates its namespace.
 Request validation rejects canceled notifications, but does not make a numeric process identifier an atomic lifetime reference.
 The kernel's user-namespace checks independently restrict memory access, and both trusted launcher processes are excluded as query targets.
 Filesystem lookup and statistics can block in the kernel, which can delay launcher exit handling.
@@ -728,10 +739,10 @@ one policy engine decides for the whole box. See [the interpreters run in the bo
 process](decisions.md#the-interpreters-run-in-the-trusted-process).
 
 Each one asks policy before it touches a file, then applies the reachable paths check. This check also refuses changes to
-configured tool programs and the installed trusted binaries, including changes to their enclosing
-paths. Before changing a directory, it also scans for hard-link names of commands admitted through
-the startup scan. Reads remain subject to policy. These checks are separate from the agent's own
-grants.
+configured tool programs, the programs of declared secret sources, and the installed trusted
+binaries, including changes to their enclosing paths. Before changing a directory, it also scans
+for hard-link names of commands admitted through the startup scan. Reads remain subject to policy.
+These checks are separate from the agent's own grants.
 
 No additional check protects credential paths from the interpreters. A broad `fs:read` permit lets
 Strands Shell read `~/.aws`, even though no grant could give the agent that path. See [credential
@@ -763,7 +774,7 @@ For the request path, read [Policy](policy.md). For the three binaries and where
 
 ## Linux container agent boundary
 
-The optional [container agent mode](../user/container-agent.md) uses the runtime-provided
+The optional [container agent mode](../user/linux-requirements.md#run-an-agent-in-a-container-pid-namespace) uses the runtime-provided
 private PID namespace and its masked procfs. The launcher checks its initial PID,
 UID, capabilities, process count, and thread count before creating the other
 namespaces. The trusted Box supervisor stays outside that namespace. A private

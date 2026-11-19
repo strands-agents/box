@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::env::{checked_provisioned_name, checked_provisioned_name_without_value};
+use super::secret_source::{DeclaredSources, declarable, routed_scheme, vault_credential_refusal};
 use super::{
     AWS_SCHEME, BASIC_AUTH_PLACEMENT, BEARER_PREFIX, CREDSD_SCHEME, DEFAULT_HEADER,
     HEADER_PLACEMENT, INJECT_ALWAYS, INJECT_PHANTOM, QUERY_PARAM_PLACEMENT, URL_PATH_PLACEMENT,
@@ -24,6 +25,10 @@ use crate::error::{BoxError, ConfigError};
 /// The prefix a phantom carries when a route sets none; keep in step with
 /// `credentials::DEFAULT_PHANTOM_PREFIX`.
 const DEFAULT_PHANTOM_PREFIX: &str = "strands_box_";
+
+/// The variables that hold the placeholder AWS credentials of a signed route.
+pub(crate) const SIGNING_PLACEHOLDER_VARIABLES: [&str; 2] =
+    ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"];
 
 /// The longest a `secret.phantom_prefix` may be; keep in step with `credentials::check_phantom_prefix`.
 const PHANTOM_PREFIX_MAX_LEN: usize = 64;
@@ -41,6 +46,16 @@ fn is_unreserved(byte: u8) -> bool {
 enum Origin {
     Egress,
     RemoteMcp,
+}
+
+impl Origin {
+    /// The `box.toml` table that holds the entry `name`.
+    fn table(self, name: &str) -> String {
+        match self {
+            Self::Egress => format!("[egress.{name}]"),
+            Self::RemoteMcp => format!("[mcp.{name}]"),
+        }
+    }
 }
 
 /// Every `[egress.<name>]` credential entry as borrowed `(origin, name, entry)` triples, so a caller
@@ -73,8 +88,9 @@ fn union_pairs<'a>(
 
 fn routes_for_pairs(
     entries: &[(Origin, &str, &EgressEntry)],
+    sources: &DeclaredSources,
 ) -> Result<Vec<EgressRoute>, BoxError> {
-    validate_pairs(entries)?;
+    validate_pairs(entries, sources)?;
     let mut bindings = Vec::new();
     for &(_, _, entry) in entries {
         bindings.extend(entry.to_bindings()?);
@@ -114,8 +130,9 @@ pub(crate) fn credsd_environments<'a>(
 #[cfg(test)]
 pub(super) fn routes_for(
     entries: &BTreeMap<String, EgressEntry>,
+    sources: &DeclaredSources,
 ) -> Result<Vec<EgressRoute>, BoxError> {
-    routes_for_pairs(&as_pairs(entries))
+    routes_for_pairs(&as_pairs(entries), sources)
 }
 
 /// Routes for the operator egress entries and the remote-MCP entries together, so the gateway learns
@@ -123,13 +140,17 @@ pub(super) fn routes_for(
 pub(super) fn routes_for_and_remote(
     egress: &BTreeMap<String, EgressEntry>,
     remote_mcp: &BTreeMap<String, EgressEntry>,
+    sources: &DeclaredSources,
 ) -> Result<Vec<EgressRoute>, BoxError> {
-    routes_for_pairs(&union_pairs(egress, remote_mcp))
+    routes_for_pairs(&union_pairs(egress, remote_mcp), sources)
 }
 
 /// Validate the operator's `[egress.*]` entries alone.
-pub(super) fn validate_egress(entries: &BTreeMap<String, EgressEntry>) -> Result<(), ConfigError> {
-    validate_pairs(&as_pairs(entries))
+pub(super) fn validate_egress(
+    entries: &BTreeMap<String, EgressEntry>,
+    sources: &DeclaredSources,
+) -> Result<(), ConfigError> {
+    validate_pairs(&as_pairs(entries), sources)
 }
 
 /// Validate the operator egress entries and the remote-MCP entries together, so a host that names a
@@ -139,11 +160,51 @@ pub(super) fn validate_egress(entries: &BTreeMap<String, EgressEntry>) -> Result
 pub(super) fn validate_egress_and_remote(
     egress: &BTreeMap<String, EgressEntry>,
     remote_mcp: &BTreeMap<String, EgressEntry>,
+    sources: &DeclaredSources,
 ) -> Result<(), ConfigError> {
-    validate_pairs(&union_pairs(egress, remote_mcp))
+    validate_pairs(&union_pairs(egress, remote_mcp), sources)
 }
 
-fn validate_pairs(entries: &[(Origin, &str, &EgressEntry)]) -> Result<(), ConfigError> {
+/// Refuse a secret reference that the declared sources do not allow: one in a scheme that no
+/// `[secret-source.<scheme>]` table declares, or one that reads the credential of a source's vault.
+fn validate_against_sources(
+    secret: &EgressSecret,
+    label: &str,
+    sources: &DeclaredSources,
+) -> Result<(), ConfigError> {
+    let refuse = |reason: String| {
+        Err(ConfigError::Credential {
+            host: label.to_string(),
+            reason,
+        })
+    };
+    match secret.deliverable() {
+        Some((SecretScheme::Declared, _)) => {
+            let scheme = secret.routed_scheme()?;
+            if !sources.declares(&scheme) {
+                return refuse(format!(
+                    "secret scheme {scheme:?} has no `[secret-source.{scheme}]` table: declare \
+                     the secret source that reads it, which Box loads on macOS only, or use \
+                     env://NAME for a credential the workload presents as a placeholder, \
+                     aws://profile for one signed in the boundary, or credsd://<environment> \
+                     for a credsd-vended credential"
+                ));
+            }
+        }
+        Some((SecretScheme::Env, name)) => {
+            if let Some(scheme) = sources.credential_owner(name) {
+                return refuse(vault_credential_refusal(name, scheme));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_pairs(
+    entries: &[(Origin, &str, &EgressEntry)],
+    sources: &DeclaredSources,
+) -> Result<(), ConfigError> {
     // Each pattern remembers the entry it came from, so an overlap names both by the name the
     // operator keyed them under rather than quoting two patterns back at them.
     let mut patterns: Vec<(&str, String, DestinationPattern)> = Vec::new();
@@ -152,31 +213,96 @@ fn validate_pairs(entries: &[(Origin, &str, &EgressEntry)]) -> Result<(), Config
     // rather than mislabelled there. Keyed by the normalized host so a case- or IP-form-only
     // difference collides here as it does at run time.
     let mut hosts: BTreeMap<String, (Origin, &str, Protocol, bool)> = BTreeMap::new();
-    // Which entry first named each `env://` variable, and the phantom prefix it asked for. Every
-    // route that names one variable shares one phantom, and one variable holds one value.
-    let mut variables: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
+    // Which entry first placed a placeholder in each variable, with its reference and the phantom
+    // prefix it asked for. Every route that names one variable shares one phantom, and one variable
+    // holds one secret.
+    let mut variables: BTreeMap<&str, (Origin, &str, &str, &str)> = BTreeMap::new();
+    // The first signed route, which fills each signing variable with a placeholder.
+    let signed = entries
+        .iter()
+        .find(|(_, _, entry)| {
+            // A signed secret beside a backend is no signed route, and its own refusal names it.
+            entry.backends.is_empty()
+                && entry
+                    .secret
+                    .as_ref()
+                    .is_some_and(EgressEntry::signs_in_boundary)
+        })
+        .map(|&(origin, name, _)| origin.table(name));
     for &(origin, name, entry) in entries {
+        let label = entry.destinations.first().map_or("", String::as_str);
+        // Before the entry's own rules, so an undeclared scheme is named first.
+        for secret in entry.secrets() {
+            validate_against_sources(secret, label, sources)?;
+        }
         entry.validate()?;
+        // After the entry's own rules, so a key that the entry cannot take is named first.
+        if !sources.enabled() && entry.names_a_placeholder_variable() {
+            return Err(ConfigError::Credential {
+                host: label.to_string(),
+                reason: "secret.env is experimental: set `secret-sources = true` in \
+                         `[experimental-features]` to load it, or remove secret.env, because an \
+                         env:// reference already names its variable"
+                    .to_string(),
+            });
+        }
         if let Some(secret) = &entry.secret
-            && let Some((SecretScheme::Env, variable)) = secret.deliverable()
+            && let Some((scheme, variable)) = secret.placeholder_variable()
         {
+            // Box strips the own placeholder of a re-routed entry, and the workload keeps the
+            // placeholder of the signed route, so that entry does not compete for the variable.
+            if entry.backends.is_empty()
+                && let Some(signed) = &signed
+                && SIGNING_PLACEHOLDER_VARIABLES.contains(&variable)
+            {
+                return Err(ConfigError::Credential {
+                    host: label.to_string(),
+                    reason: format!(
+                        "`{}` holds a placeholder in the variable {variable}, and the signed \
+                         route `{signed}` fills that variable with a signing placeholder; one \
+                         placeholder variable holds one secret, so give `{}` another variable",
+                        origin.table(name),
+                        origin.table(name),
+                    ),
+                });
+            }
             let prefix = secret
                 .phantom_prefix
                 .as_deref()
                 .unwrap_or(DEFAULT_PHANTOM_PREFIX);
-            if let Some(&(earlier, earlier_prefix)) = variables.get(variable)
-                && earlier_prefix != prefix
+            if let Some(&(earlier_origin, earlier, earlier_reference, earlier_prefix)) =
+                variables.get(variable)
             {
-                return Err(ConfigError::Credential {
-                    host: entry.destinations.first().cloned().unwrap_or_default(),
-                    reason: format!(
-                        "`{name}` and `{earlier}` both name env://{variable} with a different \
-                         phantom_prefix; every route that names one variable shares one phantom, \
-                         so set the same phantom_prefix on both"
-                    ),
-                });
+                if earlier_reference != secret.reference.as_str() {
+                    return Err(ConfigError::Credential {
+                        host: label.to_string(),
+                        reason: format!(
+                            "`{}` and `{}` both hold a placeholder in the variable {variable}, \
+                             and they name different secrets; one placeholder variable holds one \
+                             secret, so give one of them another variable",
+                            origin.table(name),
+                            earlier_origin.table(earlier),
+                        ),
+                    });
+                }
+                if earlier_prefix != prefix {
+                    let both = match scheme {
+                        SecretScheme::Env => format!("name env://{variable}"),
+                        _ => format!("hold a placeholder in the variable {variable}"),
+                    };
+                    return Err(ConfigError::Credential {
+                        host: label.to_string(),
+                        reason: format!(
+                            "`{name}` and `{earlier}` both {both} with a different \
+                             phantom_prefix; every route that names one variable shares one \
+                             phantom, so set the same phantom_prefix on both"
+                        ),
+                    });
+                }
             }
-            variables.entry(variable).or_insert((name, prefix));
+            variables
+                .entry(variable)
+                .or_insert((origin, name, secret.reference.as_str(), prefix));
         }
         // A remote MCP server's name is its `context.input.server`, which a rule reads to gate its
         // tool calls. It must be present and nameable: empty leaves it nameless, and a control
@@ -586,15 +712,24 @@ enum SecretScheme {
     /// `credsd://environment`: a credsd credential. It signs in the boundary; the daemon's
     /// `material.type` picks the signer per request, and the entry names no credential type.
     Credsd,
+    /// A scheme that a `[secret-source.<scheme>]` table can declare: a host program reads the
+    /// secret, and the workload presents a placeholder.
+    Declared,
 }
 
 /// Which secret an entry attaches, and where it lands on the request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EgressSecret {
-    /// The secret to attach, as a URI: `env://NAME` or `aws://profile`.
+    /// The secret to attach, as a URI: `env://NAME`, `aws://profile`, or a reference in a declared
+    /// scheme.
     #[serde(rename = "ref")]
     pub(crate) reference: String,
+
+    /// The workload variable that holds the placeholder: required with a declared scheme, and
+    /// equal to `NAME` with `env://NAME`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) env: Option<String>,
 
     /// The header to attach it under. Defaults to `Authorization`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -615,13 +750,13 @@ pub(crate) struct EgressSecret {
 
     /// When the gateway attaches the real secret: `phantom` (the default) only on a request that
     /// carries the route's phantom, `always` on every request to the destinations. Valid only for
-    /// an `env://` route.
+    /// a route whose workload holds a placeholder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) inject: Option<String>,
 
     /// The literal prefix the minted phantom carries, before its random suffix. Defaults to
-    /// `strands_box_`. Valid only for an `env://` route, so a harness that checks its key format
-    /// accepts the injected phantom.
+    /// `strands_box_`. Valid only for a route whose workload holds a placeholder, so a harness that
+    /// checks its key format accepts the injected phantom.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) phantom_prefix: Option<String>,
 
@@ -651,9 +786,37 @@ impl EgressSecret {
             "env" => SecretScheme::Env,
             AWS_SCHEME => SecretScheme::Aws,
             CREDSD_SCHEME => SecretScheme::Credsd,
+            other if declarable(other) => SecretScheme::Declared,
             _ => return None,
         };
         Some((scheme, value))
+    }
+
+    /// The scheme by which `credentials` routes this reference, or the refusal of a reference
+    /// that `credentials` does not parse.
+    fn routed_scheme(&self) -> Result<String, ConfigError> {
+        routed_scheme(&self.reference).map_err(|source| ConfigError::Locator {
+            locator: self.reference.clone(),
+            source,
+        })
+    }
+
+    /// The workload variable that holds this secret's placeholder, with the scheme that places
+    /// it: `NAME` for `env://NAME`, and `secret.env` for a declared scheme.
+    fn placeholder_variable(&self) -> Option<(SecretScheme, &str)> {
+        match self.deliverable()? {
+            (SecretScheme::Env, name) => Some((SecretScheme::Env, name)),
+            (SecretScheme::Declared, _) => Some((SecretScheme::Declared, self.env.as_deref()?)),
+            _ => None,
+        }
+    }
+
+    /// Whether the workload presents a placeholder for this secret.
+    fn mints_a_phantom(&self) -> bool {
+        matches!(
+            self.deliverable(),
+            Some((SecretScheme::Env | SecretScheme::Declared, _))
+        )
     }
 
     /// The placeholder-check mode this secret selects. `validate` already refused every spelling but
@@ -667,6 +830,20 @@ impl EgressSecret {
 }
 
 impl EgressEntry {
+    /// Each secret this entry names: its own, and the `auth` of each backend.
+    fn secrets(&self) -> impl Iterator<Item = &EgressSecret> {
+        self.secret.iter().chain(
+            self.backends
+                .iter()
+                .filter_map(|backend| backend.auth.as_ref()),
+        )
+    }
+
+    /// Whether a secret of this entry carries the `env` key.
+    pub(super) fn names_a_placeholder_variable(&self) -> bool {
+        self.secrets().any(|secret| secret.env.is_some())
+    }
+
     fn pattern(&self, destination: &str) -> Result<DestinationPattern, ConfigError> {
         DestinationPattern::parse(destination).map_err(|source| ConfigError::Credential {
             host: destination.to_string(),
@@ -758,8 +935,9 @@ impl EgressEntry {
                     aws_scope,
                 });
             } else {
-                // An `env://` auth is a static box-owned token, attached once at the backend
-                // connection, keyed on the original destination (Host-independent).
+                // An `env://` auth, or one in a declared scheme, is a static box-owned token,
+                // attached once at the backend connection, keyed on the original destination
+                // (Host-independent).
                 for destination in &self.destinations {
                     routes.push(EgressRoute {
                         destination: self.pattern(destination)?,
@@ -855,13 +1033,16 @@ impl EgressEntry {
         let mode = RouteMode::Opaque;
         let mut bindings = Vec::with_capacity(self.destinations.len());
         for destination in &self.destinations {
-            // Only an `env://` secret has a name to provision a phantom under. Every other scheme
-            // resolves host-side, with nothing placed in the workload's environment.
-            let provisioned_name = match secret.deliverable() {
+            // An `env://` secret and a secret in a declared scheme each have a name to provision a
+            // phantom under. A signed scheme resolves host-side, with nothing placed under a name.
+            // The operator sets the variable of an `env://` secret, and need not set the one that
+            // a declared scheme names, because a host program reads that secret.
+            let provisioned_name = match secret.placeholder_variable() {
                 Some((SecretScheme::Env, name)) => {
                     Some(checked_provisioned_name(destination, name)?)
                 }
-                _ => None,
+                Some((_, name)) => Some(checked_provisioned_name_without_value(destination, name)?),
+                None => None,
             };
             bindings.push(EgressRoute {
                 destination: self.pattern(destination)?,
@@ -964,6 +1145,17 @@ impl EgressEntry {
                      phantom",
                 );
             }
+            // The box never reads the value of a re-routed destination secret, so a host program
+            // has nothing to read for it.
+            if let Some(secret) = &self.secret
+                && matches!(secret.deliverable(), Some((SecretScheme::Declared, _)))
+            {
+                return refuse(
+                    "a destination secret beside a backend must be env://: the box provisions a \
+                     phantom and strips it, and never reads the secret, so a declared secret \
+                     source has nothing to read for it",
+                );
+            }
             // A backend entry names exactly one destination with an exact host. The re-route is
             // matched per connection, on host and port, before TLS is terminated and the path is
             // known: a path could not match at that point, and the box presents the backend host on
@@ -1018,11 +1210,17 @@ impl EgressEntry {
                 }
                 // The backend credential is the box's own, and the workload presents no placeholder
                 // for it, so there is no phantom to tune. `inject` and `phantom_prefix` are refused.
-                // (An `aws://` auth already takes no placement keys; this covers the `env://` case.)
+                // (An `aws://` auth already takes no placement keys; this covers the other schemes.)
                 if auth.inject.is_some() || auth.phantom_prefix.is_some() {
                     return refuse(
                         "a backend auth takes no inject or phantom_prefix: the credential is the \
                          box's own, and the workload presents no placeholder to check or seed",
+                    );
+                }
+                if auth.env.is_some() {
+                    return refuse(
+                        "a backend auth takes no env: the box attaches the credential itself, \
+                         and the workload holds no placeholder for it",
                     );
                 }
                 // An `aws://` auth signs over the backend host — a gateway or custom domain with no
@@ -1094,7 +1292,29 @@ impl EgressEntry {
         if secret.aws.is_some() {
             return refuse("aws.service and aws.region are only valid for an aws:// backend auth");
         }
-        validate_secret(secret, &label)
+        validate_secret(secret, &label)?;
+        // The variable that holds the placeholder. A declared scheme names no variable of its
+        // own, an `env://` reference names one already, and a signed secret places no placeholder
+        // that the operator can name.
+        match (secret.deliverable(), secret.env.as_deref()) {
+            (Some((SecretScheme::Declared, _)), None) => refuse(&format!(
+                "a reference in the {}:// scheme needs secret.env: it names the variable that \
+                 holds the placeholder in the workload, as in secret.env = \"GH_TOKEN\"",
+                secret.routed_scheme()?
+            )),
+            (Some((SecretScheme::Env, name)), Some(variable)) if variable != name => {
+                refuse(&format!(
+                    "secret.env {variable:?} does not match env://{name}: an env:// reference \
+                     holds its placeholder in the variable that it names, so remove secret.env \
+                     or write {name:?}"
+                ))
+            }
+            (Some((SecretScheme::Aws | SecretScheme::Credsd, _)), Some(_)) => refuse(
+                "a signed AWS secret (aws:// or a credsd:// source) takes no secret.env: the \
+                 box places the signing placeholders under the AWS variable names",
+            ),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -1184,7 +1404,9 @@ fn validate_secret(secret: &EgressSecret, label: &str) -> Result<(), ConfigError
     };
 
     // Only a scheme the box can actually deliver. `env://` names a variable to seed the phantom
-    // into, and `aws://` needs none, because the signer places the signature. Every other
+    // into, and `aws://` needs none, because the signer places the signature. A scheme that a
+    // `[secret-source.<scheme>]` table can declare passes here, and `validate_pairs` refuses it
+    // when no table declares it. Every other scheme is refused.
     if secret.deliverable().is_none() {
         return refuse(&format!(
             "secret scheme {scheme:?} is not one the box can deliver: use env://NAME for a \
@@ -1218,12 +1440,12 @@ fn validate_secret(secret: &EgressSecret, label: &str) -> Result<(), ConfigError
         );
     }
 
-    // The injection mode tunes the phantom swap, which only an `env://` route performs. A
-    // signed route mints no phantom, so the key has no meaning there.
-    if secret.inject.is_some() && !matches!(secret.deliverable(), Some((SecretScheme::Env, _))) {
+    // The injection mode tunes the phantom swap, which only a route with a placeholder performs.
+    // A signed route mints no phantom, so the key has no meaning there.
+    if secret.inject.is_some() && !secret.mints_a_phantom() {
         return refuse(
-            "inject tunes the env:// phantom swap, so it belongs only with an env:// \
-             reference; a signed route (aws:// or credsd://) mints no phantom to check",
+            "inject tunes the phantom swap, so it belongs only with an env:// reference or one \
+             in a declared scheme; a signed route (aws:// or credsd://) mints no phantom to check",
         );
     }
     if let Some(mode) = &secret.inject
@@ -1235,14 +1457,13 @@ fn validate_secret(secret: &EgressSecret, label: &str) -> Result<(), ConfigError
         ));
     }
 
-    // The phantom prefix shapes the minted placeholder, which only an `env://` route mints. A
-    // signed route mints none, so the key has no meaning there.
-    if secret.phantom_prefix.is_some()
-        && !matches!(secret.deliverable(), Some((SecretScheme::Env, _)))
-    {
+    // The phantom prefix shapes the minted placeholder, which only a route with a placeholder
+    // mints. A signed route mints none, so the key has no meaning there.
+    if secret.phantom_prefix.is_some() && !secret.mints_a_phantom() {
         return refuse(
             "phantom_prefix sets the minted phantom's prefix, so it belongs only with an \
-             env:// reference; a signed route (aws:// or credsd://) mints no phantom",
+             env:// reference or one in a declared scheme; a signed route (aws:// or \
+             credsd://) mints no phantom",
         );
     }
     if let Some(prefix) = &secret.phantom_prefix {
@@ -1435,6 +1656,7 @@ fn normalized_host(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::config::secret_source::tests::{declared, switched_on};
 
     /// Parse `[[egress]]` the way `box.toml` delivers it, and run the structural check.
     #[derive(serde::Deserialize)]
@@ -1445,9 +1667,30 @@ mod tests {
     }
 
     fn load(text: &str) -> Result<BTreeMap<String, EgressEntry>, ConfigError> {
+        load_with(text, &DeclaredSources::none())
+    }
+
+    /// [`load`] for a configuration that declares `sources`.
+    fn load_with(
+        text: &str,
+        sources: &DeclaredSources,
+    ) -> Result<BTreeMap<String, EgressEntry>, ConfigError> {
         let fixture: Fixture = toml::from_str(text).expect("test config parses");
-        validate_egress(&fixture.egress)?;
+        validate_egress(&fixture.egress, sources)?;
         Ok(fixture.egress)
+    }
+
+    /// The routes of a configuration that declares no secret source.
+    fn routes_for(entries: &BTreeMap<String, EgressEntry>) -> Result<Vec<EgressRoute>, BoxError> {
+        super::routes_for(entries, &DeclaredSources::none())
+    }
+
+    /// The refusal of `text` in a configuration that declares the `op` and `aws-secretsmanager`
+    /// sources of [`crate::record::config::secret_source::tests::DECLARED`].
+    fn declared_refusal(text: &str) -> String {
+        load_with(text, &declared())
+            .expect_err("the entry is refused")
+            .to_string()
     }
 
     /// One present variable accepted for credential projection.
@@ -2147,28 +2390,676 @@ mod tests {
         );
     }
 
-    /// A credential scheme the box cannot deliver is refused at `configure`.
+    /// A credential scheme the box cannot deliver is refused at `configure`: a scheme that the box
+    /// reserves and does not deliver, and a scheme that no `[secret-source.<scheme>]` table declares.
     #[test]
     fn an_undeliverable_credential_scheme_is_refused() {
-        for locator in [
-            "file:///etc/tokens/gh",
-            "op://Private/GitHub/token",
-            "cmd://mint-a-token",
-            "vault://kv/box/key",
+        let route = |locator: &str| {
+            format!(
+                "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = {locator:?}\n\
+                 secret.env = \"TOKEN\""
+            )
+        };
+        for sources in [DeclaredSources::none(), declared()] {
+            for (locator, scheme) in [
+                ("file:///etc/tokens/gh", "file"),
+                ("cmd://mint-a-token", "cmd"),
+                ("oauth2://issuer/client", "oauth2"),
+                ("strip-phantom://route", "strip-phantom"),
+                ("Op://Private/GitHub/token", "Op"),
+            ] {
+                let error = load_with(&route(locator), &sources)
+                    .expect_err("a reserved or malformed scheme has no source");
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "invalid credential entry for host \"api.test\": secret scheme \
+                         {scheme:?} is not one the box can deliver: use env://NAME for a \
+                         credential the workload presents as a placeholder, aws://profile for \
+                         one signed in the boundary, or credsd://<environment> for a \
+                         credsd-vended credential"
+                    )
+                );
+            }
+        }
+        for (sources, locator, scheme) in [
+            (DeclaredSources::none(), "op://Private/GitHub/token", "op"),
+            (DeclaredSources::none(), "vault://kv/box/key", "vault"),
+            (declared(), "vault://kv/box/key", "vault"),
         ] {
-            let error = load(&format!(
-                "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = {locator:?}"
-            ))
-            .expect_err(&format!(
-                "{locator} cannot be delivered and must be refused"
-            ));
-
-            let message = error.to_string();
-            assert!(
-                message.contains("env://") && message.contains("aws://"),
-                "the refusal must name the accepted set: {message}"
+            let error = load_with(&route(locator), &sources)
+                .expect_err("a provider route is valid only when its provider is declared");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "invalid credential entry for host \"api.test\": secret scheme {scheme:?} \
+                     has no `[secret-source.{scheme}]` table: declare the secret source that \
+                     reads it, which Box loads on macOS only, or use env://NAME for a credential \
+                     the workload presents as a placeholder, aws://profile for one signed in the \
+                     boundary, or credsd://<environment> for a credsd-vended credential"
+                )
             );
         }
+        // The undeclared scheme is named before the entry's own rules.
+        let error = load("[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"op://a/b/c\"")
+            .expect_err("no table declares `op`");
+        assert!(
+            error.to_string().contains("has no `[secret-source.op]`"),
+            "{error}"
+        );
+        load_with(&route("op://Private/GitHub/token"), &declared())
+            .expect("a declared provider makes the route valid");
+    }
+
+    /// **A reference that `credentials` does not parse has no scheme to look up**, so a declarable
+    /// scheme with nothing after it is refused as a locator, with or without a declaration.
+    #[test]
+    fn a_reference_with_nothing_after_a_declarable_scheme_is_refused_as_a_locator() {
+        for (scheme, extra) in [
+            ("op", ""),
+            ("op", "secret.env = \"TOKEN\"\n"),
+            ("vault", ""),
+            ("vault", "secret.env = \"TOKEN\"\n"),
+        ] {
+            let route = format!(
+                "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"{scheme}://\"\n{extra}"
+            );
+            assert_eq!(
+                declared_refusal(&route),
+                format!(
+                    "credential locator \"{scheme}://\" is invalid: credential error: malformed \
+                     credential reference (expected `scheme://locator`): \"{scheme}://[REDACTED]\""
+                ),
+                "for {scheme} with {extra:?}"
+            );
+        }
+    }
+
+    /// **A route in a declared scheme names its placeholder variable**, and the route places the
+    /// placeholder there without a value in the operator's environment.
+    #[test]
+    fn a_declared_route_needs_a_placeholder_variable_and_provisions_it() {
+        let route = "[egress.github]\ndestinations = [\"api.github.com\"]\n\
+                     secret.ref = \"op://Personal/GitHub/token\"\n";
+        assert_eq!(
+            declared_refusal(route),
+            "invalid credential entry for host \"api.github.com\": a reference in the op:// \
+             scheme needs secret.env: it names the variable that holds the placeholder in the \
+             workload, as in secret.env = \"GH_TOKEN\""
+        );
+
+        let variable = "STRANDS_BOX_UNSET_PLACEHOLDER_FOR_TESTS";
+        assert!(std::env::var_os(variable).is_none());
+        let entries = load_with(&format!("{route}secret.env = {variable:?}\n"), &declared())
+            .expect("the route names its variable");
+        let routes = super::routes_for(&entries, &declared()).expect("the route builds");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].provisioned_name(), Some(variable));
+        assert!(!routes[0].signs());
+        routes[0]
+            .to_route_spec()
+            .expect("a declared route is an opaque swap");
+    }
+
+    /// A reserved or malformed `secret.env` is refused when the route is built.
+    #[test]
+    fn a_declared_route_may_not_claim_a_reserved_variable() {
+        for (name, expected) in [
+            ("PATH", "names invalid or reserved variable \"PATH\""),
+            (
+                "HTTPS_PROXY",
+                "names invalid or reserved variable \"HTTPS_PROXY\"",
+            ),
+            (
+                "LD_PRELOAD",
+                "names invalid or reserved variable \"LD_PRELOAD\"",
+            ),
+            (
+                "GH TOKEN",
+                "names invalid or reserved variable \"GH TOKEN\"",
+            ),
+            ("", "has an empty environment variable name"),
+        ] {
+            let entries = load_with(
+                &format!(
+                    "[egress.a]\ndestinations = [\"api.test\"]\n\
+                     secret.ref = \"op://a/b/c\"\nsecret.env = {name:?}\n"
+                ),
+                &declared(),
+            )
+            .expect("the entry's own shape is valid");
+            let Err(error) = super::routes_for(&entries, &declared()) else {
+                panic!("{name:?} cannot hold a placeholder");
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    /// **`secret.env` on an `env://NAME` route is optional and equals `NAME`**, and a signed
+    /// route takes none.
+    #[test]
+    fn a_placeholder_variable_on_another_scheme_is_checked() {
+        let variable = present_variable();
+        let route = |reference: &str, env: &str| {
+            format!(
+                "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = {reference:?}\n\
+                 secret.env = {env:?}\n"
+            )
+        };
+        let entries = load_with(
+            &route(&format!("env://{variable}"), &variable),
+            &switched_on(),
+        )
+        .expect("the variable equals the name");
+        assert_eq!(
+            super::routes_for(&entries, &switched_on()).expect("the route builds")[0]
+                .provisioned_name(),
+            Some(variable.as_str())
+        );
+        assert_eq!(
+            load(&route("env://TOKEN", "OTHER"))
+                .expect_err("one reference names one variable")
+                .to_string(),
+            "invalid credential entry for host \"api.test\": secret.env \"OTHER\" does not \
+             match env://TOKEN: an env:// reference holds its placeholder in the variable that \
+             it names, so remove secret.env or write \"TOKEN\""
+        );
+        for reference in ["aws://prod", "credsd://prod-inference"] {
+            assert_eq!(
+                load(&route(reference, "TOKEN"))
+                    .expect_err("a signed route places no named placeholder")
+                    .to_string(),
+                "invalid credential entry for host \"api.test\": a signed AWS secret (aws:// or \
+                 a credsd:// source) takes no secret.env: the box places the signing \
+                 placeholders under the AWS variable names"
+            );
+        }
+    }
+
+    /// **`secret.env` needs the `secret-sources` switch**, also on an `env://NAME` route, where the
+    /// key has no effect.
+    #[test]
+    fn a_placeholder_variable_key_needs_the_secret_sources_switch() {
+        let variable = present_variable();
+        let route = format!(
+            "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"env://{variable}\"\n\
+             secret.env = {variable:?}\n"
+        );
+        let expected = |host: &str| {
+            format!(
+                "invalid credential entry for host {host:?}: secret.env is experimental: set \
+                 `secret-sources = true` in `[experimental-features]` to load it, or remove \
+                 secret.env, because an env:// reference already names its variable"
+            )
+        };
+        assert_eq!(
+            load(&route).expect_err("the switch is off").to_string(),
+            expected("api.test")
+        );
+        load_with(&route, &switched_on()).expect("the switch is on");
+        load(&format!(
+            "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"env://{variable}\"\n"
+        ))
+        .expect("a route without the key needs no switch");
+
+        // The same holds for a remote MCP server.
+        let remote = BTreeMap::from([(
+            "tools".to_string(),
+            EgressEntry {
+                destinations: vec!["mcp.test".to_string()],
+                protocol: Protocol::Mcp,
+                secret: Some(EgressSecret {
+                    reference: format!("env://{variable}"),
+                    env: Some(variable.clone()),
+                    header: None,
+                    prefix: None,
+                    placement: None,
+                    param: None,
+                    inject: None,
+                    phantom_prefix: None,
+                    aws: None,
+                }),
+                backends: Vec::new(),
+            },
+        )]);
+        assert_eq!(
+            validate_egress_and_remote(&BTreeMap::new(), &remote, &DeclaredSources::none())
+                .expect_err("the switch is off")
+                .to_string(),
+            expected("mcp.test")
+        );
+        validate_egress_and_remote(&BTreeMap::new(), &remote, &switched_on())
+            .expect("the switch is on");
+
+        // A key that the entry cannot take is named first, with the switch off.
+        assert_eq!(
+            load(
+                "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"aws://prod\"\n\
+                 secret.env = \"TOKEN\"\n"
+            )
+            .expect_err("a signed route takes no placeholder variable")
+            .to_string(),
+            "invalid credential entry for host \"api.test\": a signed AWS secret (aws:// or a \
+             credsd:// source) takes no secret.env: the box places the signing placeholders \
+             under the AWS variable names"
+        );
+    }
+
+    /// **One placeholder variable holds one secret.** Two entries with one variable and different
+    /// references are refused by the names of both tables, and an `env://NAME` entry counts under
+    /// `NAME`.
+    #[test]
+    fn one_placeholder_variable_with_two_references_is_refused() {
+        let route = |table: &str, host: &str, secret: &str| {
+            format!("[{table}]\ndestinations = [\"{host}\"]\n{secret}\n")
+        };
+        let op = |item: &str, variable: &str| {
+            format!("secret.ref = \"op://Personal/{item}/token\"\nsecret.env = \"{variable}\"")
+        };
+        let refusal = |first: String, second: String| declared_refusal(&format!("{first}{second}"));
+        let expected = |host: &str, later: &str, earlier: &str, variable: &str| {
+            format!(
+                "invalid credential entry for host {host:?}: `[egress.{later}]` and \
+                 `[egress.{earlier}]` both hold a placeholder in the variable {variable}, and \
+                 they name different secrets; one placeholder variable holds one secret, so \
+                 give one of them another variable"
+            )
+        };
+
+        // Two declared references.
+        assert_eq!(
+            refusal(
+                route("egress.a", "a.test", &op("GitHub", "TOKEN")),
+                route("egress.b", "b.test", &op("GitLab", "TOKEN")),
+            ),
+            expected("b.test", "b", "a", "TOKEN")
+        );
+        // Two references that differ only in the field are two secrets.
+        assert_eq!(
+            refusal(
+                route(
+                    "egress.a",
+                    "a.test",
+                    "secret.ref = \"aws-secretsmanager://box/keys#ONE\"\nsecret.env = \"TOKEN\""
+                ),
+                route(
+                    "egress.b",
+                    "b.test",
+                    "secret.ref = \"aws-secretsmanager://box/keys#TWO\"\nsecret.env = \"TOKEN\""
+                ),
+            ),
+            expected("b.test", "b", "a", "TOKEN")
+        );
+        // An `env://NAME` entry counts under `NAME`, in either order.
+        assert_eq!(
+            refusal(
+                route("egress.a", "a.test", "secret.ref = \"env://TOKEN\""),
+                route("egress.b", "b.test", &op("GitHub", "TOKEN")),
+            ),
+            expected("b.test", "b", "a", "TOKEN")
+        );
+        assert_eq!(
+            refusal(
+                route("egress.a", "a.test", &op("GitHub", "TOKEN")),
+                route("egress.b", "b.test", "secret.ref = \"env://TOKEN\""),
+            ),
+            expected("b.test", "b", "a", "TOKEN")
+        );
+
+        // One reference under one variable at two destinations is one secret.
+        load_with(
+            &format!(
+                "{}{}",
+                route("egress.a", "a.test", &op("GitHub", "TOKEN")),
+                route("egress.b", "b.test", &op("GitHub", "TOKEN")),
+            ),
+            &declared(),
+        )
+        .expect("one variable holds one secret");
+        // Two references under two variables are two secrets.
+        load_with(
+            &format!(
+                "{}{}",
+                route("egress.a", "a.test", &op("GitHub", "GH_TOKEN")),
+                route("egress.b", "b.test", &op("GitLab", "GL_TOKEN")),
+            ),
+            &declared(),
+        )
+        .expect("each variable holds its own secret");
+    }
+
+    /// **A signed route fills the AWS signing variables**, so no other entry holds a placeholder
+    /// in one of them beside a signed route.
+    #[test]
+    fn a_placeholder_in_a_signing_variable_beside_a_signed_route_is_refused() {
+        let declared_route = |variable: &str| {
+            format!(
+                "[egress.keys]\ndestinations = [\"keys.test\"]\n\
+                 secret.ref = \"op://Personal/Keys/id\"\nsecret.env = \"{variable}\"\n"
+            )
+        };
+        let signed_route = |name: &str, reference: &str| {
+            format!(
+                "[egress.{name}]\ndestinations = [\"bedrock-runtime.us-west-2.amazonaws.com\"]\n\
+                 secret.ref = \"{reference}\"\n"
+            )
+        };
+        for (variable, name, reference) in [
+            ("AWS_ACCESS_KEY_ID", "model", "aws://prod"),
+            ("AWS_SECRET_ACCESS_KEY", "model", "aws://"),
+            // The signed route sorts before the other entry here.
+            ("AWS_SECRET_ACCESS_KEY", "a", "credsd://prod-inference"),
+        ] {
+            assert_eq!(
+                declared_refusal(&format!(
+                    "{}{}",
+                    declared_route(variable),
+                    signed_route(name, reference)
+                )),
+                format!(
+                    "invalid credential entry for host \"keys.test\": `[egress.keys]` holds a \
+                     placeholder in the variable {variable}, and the signed route \
+                     `[egress.{name}]` fills that variable with a signing placeholder; one \
+                     placeholder variable holds one secret, so give `[egress.keys]` another \
+                     variable"
+                )
+            );
+        }
+        // An `env://` reference counts under its name here too.
+        let error = load(&format!(
+            "[egress.keys]\ndestinations = [\"keys.test\"]\n\
+             secret.ref = \"env://AWS_ACCESS_KEY_ID\"\n{}",
+            signed_route("model", "aws://prod")
+        ))
+        .expect_err("the signed route fills the variable");
+        assert!(
+            error
+                .to_string()
+                .contains("fills that variable with a signing placeholder"),
+            "{error}"
+        );
+        // Box strips the own secret of a re-routed entry, and `merge_workload_environment` keeps
+        // the placeholder of the signed route, so that entry still loads.
+        load(&format!(
+            "[egress.gw]\ndestinations = [\"gw.test\"]\nsecret.ref = \"env://AWS_ACCESS_KEY_ID\"\n\
+             [[egress.gw.backends]]\nurl = \"https://gateway.example.com\"\n{}",
+            signed_route("model", "aws://prod")
+        ))
+        .expect("a stripped placeholder does not compete with the signing placeholder");
+        // A signed secret beside a backend is not a signed route, so its own refusal names it.
+        let error = load(
+            "[egress.keys]\ndestinations = [\"keys.test\"]\nsecret.ref = \"env://AWS_ACCESS_KEY_ID\"\n\
+             [egress.model]\ndestinations = [\"gw.test\"]\nsecret.ref = \"aws://prod\"\n\
+             [[egress.model.backends]]\nurl = \"https://gateway.example.com\"\n",
+        )
+        .expect_err("a signed secret beside a backend is refused");
+        assert!(
+            error
+                .to_string()
+                .contains("a destination secret beside a backend must be env://"),
+            "{error}"
+        );
+        // With no signed route, and under another variable, the entry loads.
+        load_with(&declared_route("AWS_ACCESS_KEY_ID"), &declared())
+            .expect("no signed route fills the variable");
+        load_with(
+            &format!(
+                "{}{}",
+                declared_route("AWS_REGION_KEY"),
+                signed_route("model", "aws://prod")
+            ),
+            &declared(),
+        )
+        .expect("another variable is free");
+    }
+
+    /// The same rule holds between an egress route and a remote MCP server, and the refusal names
+    /// each table by its section.
+    #[test]
+    fn one_placeholder_variable_across_egress_and_remote_mcp_is_refused() {
+        let secret = |item: &str| EgressSecret {
+            reference: format!("op://Personal/{item}/token"),
+            env: Some("TOKEN".to_string()),
+            header: None,
+            prefix: None,
+            placement: None,
+            param: None,
+            inject: None,
+            phantom_prefix: None,
+            aws: None,
+        };
+        let entry = |host: &str, protocol: Protocol, item: &str| EgressEntry {
+            destinations: vec![host.to_string()],
+            protocol,
+            secret: Some(secret(item)),
+            backends: Vec::new(),
+        };
+        let egress = BTreeMap::from([(
+            "github".to_string(),
+            entry("api.github.com", Protocol::Http, "GitHub"),
+        )]);
+        let remote = |item: &str| {
+            BTreeMap::from([(
+                "github".to_string(),
+                entry("mcp.github.com", Protocol::Mcp, item),
+            )])
+        };
+        assert_eq!(
+            validate_egress_and_remote(&egress, &remote("GitHubMcp"), &declared())
+                .expect_err("one variable, two secrets")
+                .to_string(),
+            "invalid credential entry for host \"mcp.github.com\": `[mcp.github]` and \
+             `[egress.github]` both hold a placeholder in the variable TOKEN, and they name \
+             different secrets; one placeholder variable holds one secret, so give one of them \
+             another variable"
+        );
+        validate_egress_and_remote(&egress, &remote("GitHub"), &declared())
+            .expect("the server and the route share one secret");
+    }
+
+    /// **A declared route takes each other `secret.*` key that an `env://` route takes**: the
+    /// phantom prefix, the injection mode, and the placement keys.
+    #[test]
+    fn a_declared_route_takes_the_other_secret_keys() {
+        let route = |name: &str, host: &str, keys: &str| {
+            format!(
+                "[egress.{name}]\ndestinations = [\"{host}\"]\n\
+                 secret.ref = \"op://Private/Anthropic/credential\"\n\
+                 secret.env = \"ANTHROPIC_API_KEY\"\n{keys}\n"
+            )
+        };
+        let entries = load_with(
+            &route(
+                "anthropic",
+                "api.anthropic.com",
+                "secret.phantom_prefix = \"sk-ant-\"\nsecret.inject = \"always\"\n\
+                 secret.header = \"x-api-key\"\nsecret.prefix = \"\"",
+            ),
+            &declared(),
+        )
+        .expect("the keys load");
+        let routes = super::routes_for(&entries, &declared()).expect("the route builds");
+        assert_eq!(routes[0].phantom_prefix(), Some("sk-ant-"));
+        assert_eq!(routes[0].phantom(), PhantomCheck::Advisory);
+        assert_eq!(
+            routes[0].placement,
+            Placement::Header {
+                name: "x-api-key".to_string(),
+                prefix: String::new(),
+            }
+        );
+        routes[0].to_route_spec().expect("the route spec builds");
+
+        for keys in [
+            "secret.placement = \"basic_auth\"",
+            "secret.placement = \"query_param\"\nsecret.param = \"key\"",
+        ] {
+            load_with(&route("anthropic", "api.anthropic.com", keys), &declared())
+                .unwrap_or_else(|error| panic!("{keys} must load: {error}"));
+        }
+
+        // One variable still shares one phantom prefix.
+        assert_eq!(
+            declared_refusal(&format!(
+                "{}{}",
+                route("a", "a.test", "secret.phantom_prefix = \"sk-ant-\""),
+                route("b", "b.test", ""),
+            )),
+            "invalid credential entry for host \"b.test\": `b` and `a` both hold a placeholder \
+             in the variable ANTHROPIC_API_KEY with a different phantom_prefix; every route \
+             that names one variable shares one phantom, so set the same phantom_prefix on both"
+        );
+
+        // A signed route still takes neither key, and the refusal names both kinds of route.
+        for (key, expected) in [
+            (
+                "secret.inject = \"always\"",
+                "inject tunes the phantom swap, so it belongs only with an env:// reference or \
+                 one in a declared scheme; a signed route (aws:// or credsd://) mints no phantom \
+                 to check",
+            ),
+            (
+                "secret.phantom_prefix = \"sk-\"",
+                "phantom_prefix sets the minted phantom's prefix, so it belongs only with an \
+                 env:// reference or one in a declared scheme; a signed route (aws:// or \
+                 credsd://) mints no phantom",
+            ),
+        ] {
+            assert_eq!(
+                load(&format!(
+                    "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"aws://prod\"\n{key}"
+                ))
+                .expect_err("a signed route mints no phantom")
+                .to_string(),
+                format!("invalid credential entry for host \"api.test\": {expected}")
+            );
+        }
+    }
+
+    /// **A backend `auth.ref` takes a declared scheme and no placeholder variable**, and the
+    /// re-routed entry's own secret stays `env://`.
+    #[test]
+    fn a_backend_auth_takes_a_declared_scheme_and_the_destination_secret_does_not() {
+        let entry = |secret: &str, auth: &str| {
+            format!(
+                "[egress.github]\ndestinations = [\"api.github.com\"]\n{secret}\n\
+                 [[egress.github.backends]]\nurl = \"https://gateway.example.com\"\n{auth}\n"
+            )
+        };
+        let entries = load_with(
+            &entry("", "auth.ref = \"op://Personal/Gateway/token\""),
+            &declared(),
+        )
+        .expect("a backend auth names a declared scheme");
+        let routes = entries["github"]
+            .backend_credential_routes()
+            .expect("the backend route builds");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].mode, RouteMode::BoxOwned);
+        assert_eq!(routes[0].provisioned_name(), None);
+        routes[0].to_route_spec().expect("a box-owned route");
+
+        assert_eq!(
+            declared_refusal(&entry(
+                "",
+                "auth.ref = \"op://Personal/Gateway/token\"\nauth.env = \"GATEWAY_TOKEN\""
+            )),
+            "invalid credential entry for host \"api.github.com\": a backend auth takes no env: \
+             the box attaches the credential itself, and the workload holds no placeholder for it"
+        );
+        assert_eq!(
+            load(&entry("", "auth.ref = \"op://Personal/Gateway/token\""))
+                .expect_err("no table declares `op`")
+                .to_string(),
+            "invalid credential entry for host \"api.github.com\": secret scheme \"op\" has no \
+             `[secret-source.op]` table: declare the secret source that reads it, which Box \
+             loads on macOS only, or use env://NAME for a credential the workload presents as \
+             a placeholder, aws://profile for one signed in the boundary, or \
+             credsd://<environment> for a credsd-vended credential"
+        );
+        assert_eq!(
+            declared_refusal(&entry(
+                "secret.ref = \"op://Personal/GitHub/token\"\nsecret.env = \"GH_TOKEN\"",
+                ""
+            )),
+            "invalid credential entry for host \"api.github.com\": a destination secret beside \
+             a backend must be env://: the box provisions a phantom and strips it, and never \
+             reads the secret, so a declared secret source has nothing to read for it"
+        );
+    }
+
+    /// **No `env://` reference reads the credential of a declared source's vault**: an `env://NAME` whose
+    /// `NAME` a `pass-secret-env` entry names is refused on a route, on a remote MCP server, and
+    /// on a backend auth, by an exact entry or by a prefix entry.
+    #[test]
+    fn a_reference_to_the_credential_of_a_declared_source_is_refused() {
+        let expected = |host: &str, name: &str| {
+            format!(
+                "invalid credential entry for host {host:?}: the variable {name} is a \
+                 credential of the secret source `op` (its `pass-secret-env` names it), so no env:// or secret:// \
+                 reference can read it"
+            )
+        };
+        for name in ["OP_SERVICE_ACCOUNT_TOKEN", "OP_SESSION_abc"] {
+            let route = format!(
+                "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"env://{name}\"\n"
+            );
+            assert_eq!(declared_refusal(&route), expected("api.test", name));
+            // The re-routed entry's own secret, which the box never reads, is refused too.
+            assert_eq!(
+                declared_refusal(&format!(
+                    "{route}[[egress.a.backends]]\nurl = \"https://gateway.example.com\"\n"
+                )),
+                expected("api.test", name)
+            );
+            assert_eq!(
+                declared_refusal(&format!(
+                    "[egress.a]\ndestinations = [\"api.test\"]\n\
+                     [[egress.a.backends]]\nurl = \"https://gateway.example.com\"\n\
+                     auth.ref = \"env://{name}\"\n"
+                )),
+                expected("api.test", name)
+            );
+            let remote = BTreeMap::from([(
+                "tools".to_string(),
+                EgressEntry {
+                    destinations: vec!["mcp.test".to_string()],
+                    protocol: Protocol::Mcp,
+                    secret: Some(EgressSecret {
+                        reference: format!("env://{name}"),
+                        env: None,
+                        header: None,
+                        prefix: None,
+                        placement: None,
+                        param: None,
+                        inject: None,
+                        phantom_prefix: None,
+                        aws: None,
+                    }),
+                    backends: Vec::new(),
+                },
+            )]);
+            assert_eq!(
+                validate_egress_and_remote(&BTreeMap::new(), &remote, &declared())
+                    .expect_err("a remote MCP server is covered")
+                    .to_string(),
+                expected("mcp.test", name)
+            );
+            validate_egress_and_remote(&BTreeMap::new(), &remote, &DeclaredSources::none())
+                .expect("no declaration names the variable");
+        }
+        // A placeholder under the same name is allowed, and so is a `pass-env` name.
+        load_with(
+            "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"op://a/b/c\"\n\
+             secret.env = \"OP_SERVICE_ACCOUNT_TOKEN\"\n",
+            &declared(),
+        )
+        .expect("a placeholder is not the operator's value");
+        load_with(
+            "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"env://OP_ACCOUNT\"\n",
+            &declared(),
+        )
+        .expect("a `pass-env` name is a plain setting");
     }
 
     #[test]
@@ -2864,7 +3755,7 @@ mod tests {
 
             [[egress.github.backends]]
             url = "https://gateway-1.example.com"
-            auth.ref = "vault://nope"
+            auth.ref = "cmd://nope"
             "#,
         )
         .expect_err("a backend auth with an undeliverable scheme is refused");

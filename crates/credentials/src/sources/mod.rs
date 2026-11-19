@@ -8,6 +8,7 @@ use crate::{CredentialError, Locator, Result, Secret};
 
 mod aws;
 mod aws_chain;
+mod command;
 mod credsd;
 mod env;
 mod file;
@@ -60,9 +61,10 @@ pub(crate) use aws::{
     AwsSource, credsd_session_credentials, default_aws_provider, is_bare_aws_default_chain,
     sign_request,
 };
+pub(crate) use command::CommandSource;
 pub(crate) use credsd::{CREDSD_SCHEME, CredsdClient, resolve_credsd_socket};
-pub(crate) use env::EnvSource;
-pub(crate) use file::FileSource;
+pub(crate) use env::{EnvSource, SCHEME as ENV_SCHEME};
+pub(crate) use file::{FileSource, SCHEME as FILE_SCHEME};
 pub(crate) use op::OnePasswordSource;
 
 /// Return the raw URI-form reference string (`scheme://body`) for a URI-form locator.
@@ -77,22 +79,24 @@ pub(crate) fn uri_reference<'a>(loc: &'a Locator, scheme: &str) -> Result<&'a st
 
 /// A credential *source*: the extension point for *where* a static secret is fetched from.
 pub(crate) trait SecretSource: Send + Sync {
-    /// The routing key this source handles — the URI scheme or structured `source` tag, e.g.
-    /// `"env"`, `"file"`, `"op"`. The registry dispatches by comparing this against
-    /// [`Locator::scheme`]. It is `&'static str` (not `&str`) so it stays object-safe and
-    /// so a source's identity is a compile-time constant.
-    fn scheme(&self) -> &'static str;
+    /// The routing key the registry compares against [`Locator::scheme`]: a constant such as
+    /// `"env"` for a built-in source, and the declared scheme for a declared source.
+    fn scheme(&self) -> &str;
 
     /// Parse+validate the locator and fetch the secret as a [`Secret`]
     /// (docs/design/decisions.md#an-unusable-secret-value-is-unrepresentable).
     fn fetch(&self, loc: &Locator) -> Result<Secret>;
+
+    /// Wipe each secret this source holds, and refuse each later fetch; a source that holds none
+    /// does nothing.
+    fn close(&self) {}
 }
 
 /// A scheme→source registry: routes a reference to the source whose [`scheme`](SecretSource::scheme)
 /// matches, then calls its [`fetch`](SecretSource::fetch).
 #[derive(Default)]
 pub(crate) struct SourceRegistry {
-    sources: HashMap<&'static str, Box<dyn SecretSource>>,
+    sources: HashMap<String, Box<dyn SecretSource>>,
 }
 
 impl SourceRegistry {
@@ -104,8 +108,8 @@ impl SourceRegistry {
 
     /// Register `source` under its own [`scheme`](SecretSource::scheme).
     pub(crate) fn register(&mut self, source: Box<dyn SecretSource>) -> Result<()> {
-        let scheme = source.scheme();
-        if self.sources.contains_key(scheme) {
+        let scheme = source.scheme().to_string();
+        if self.sources.contains_key(&scheme) {
             return Err(CredentialError::Credential(format!(
                 "duplicate credential source registered for scheme {scheme:?}"
             )));
@@ -114,8 +118,12 @@ impl SourceRegistry {
         Ok(())
     }
 
+    /// Close each registered source.
+    pub(crate) fn close(&self) {
+        self.sources.values().for_each(|source| source.close());
+    }
+
     /// Whether a source is registered for `scheme` (the routing key, not a full reference).
-    #[cfg(test)]
     pub(crate) fn contains(&self, scheme: &str) -> bool {
         self.sources.contains_key(scheme)
     }
@@ -136,7 +144,7 @@ impl std::fmt::Debug for SourceRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Sources hold no secret material, but list only their (non-secret) schemes so the output
         // stays a stable, useful audit line regardless of the boxed implementations.
-        let mut schemes: Vec<&&'static str> = self.sources.keys().collect();
+        let mut schemes: Vec<&String> = self.sources.keys().collect();
         schemes.sort_unstable();
         f.debug_struct("SourceRegistry")
             .field("schemes", &schemes)

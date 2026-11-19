@@ -97,15 +97,19 @@ fn configured_shell_output_limits_control_source_loading_and_capture() {
         ("", false),
         ("[limits.shell]\nmax_input = 524288\n", false),
         (
-            "[limits.shell]\nmax_input = 128\nmax_output = 262144\n",
+            "[limits.shell]\nmax_input = 128\nmax_output = 4194304\n",
             true,
         ),
         ("[limits.shell]\nmax_input = 128\nmax_output = 0\n", true),
     ] {
         let box_ = Request::with_config("shell-output-size", PERMISSIVE_POLICY, settings).expect();
-        let script = format!("#{}\nprintf SOURCE_LOADED\n", "x".repeat(100 * 1024));
+        let script = format!("#{}\nprintf SOURCE_LOADED\n", "x".repeat(2 * 1024 * 1024));
         std::fs::write(box_.workspace().join("large.sh"), script).unwrap();
-        std::fs::write(box_.workspace().join("large.txt"), "x".repeat(100 * 1024)).unwrap();
+        std::fs::write(
+            box_.workspace().join("large.txt"),
+            "x".repeat(2 * 1024 * 1024),
+        )
+        .unwrap();
         let output = box_.bash(
             r#"zsh -c '. ./large.sh'; printf '\nsource_status=%s\n' "$?"
                zsh -c 'value=$(cat large.txt); printf "captured=%s\n" "${#value}"'"#,
@@ -113,7 +117,7 @@ fn configured_shell_output_limits_control_source_loading_and_capture() {
         if accepted {
             assert_eq!(
                 stdout(&output),
-                "SOURCE_LOADED\nsource_status=0\ncaptured=102400\n",
+                "SOURCE_LOADED\nsource_status=0\ncaptured=2097152\n",
                 "{}",
                 stderr(&output)
             );
@@ -129,7 +133,7 @@ fn configured_shell_output_limits_control_source_loading_and_capture() {
                 stdout(&output)
             );
             assert!(
-                !stdout(&output).contains("captured=102400"),
+                !stdout(&output).contains("captured=2097152"),
                 "{}",
                 stdout(&output)
             );
@@ -1112,13 +1116,11 @@ fn the_shim_image_name_is_not_on_the_workloads_path() {
 /// around the only governed one the box has. Its one route is the gateway, which
 /// judges a Shell `curl` under the same `net:*` policy as workload traffic. `PERMISSIVE_POLICY`
 /// grants no `net:*`, so the gateway refuses the CONNECT before any network is touched: the
-/// routed request fails at send with exit **6** and no origin body.
+/// routed request fails with the gateway's `policy denied` reason, exit 1, and no origin body.
 ///
-/// The exit code pins the gateway as the cause and rules out the vacuous alternatives. Exit 6 is
-/// the transport-error code, reached only after `curl` ran and the routed request left for the
-/// proxy. A missing builtin exits 127, a denied exec 126, and the two `PermissionDenied` floors —
-/// the Shell's own SSRF floor and a disabled network — exit 1 with `access denied` or `network
-/// access disabled`. `-sS` keeps the error visible; `-s` alone hides it. A live positive control
+/// The text pins the gateway as the cause and rules out the vacuous alternatives. A missing
+/// builtin exits 127, a denied exec 126, and the two Shell floors — its own SSRF floor and a
+/// disabled network — exit 1 with `access denied` or `network access disabled`. `-sS` keeps the error visible; `-s` alone hides it. A live positive control
 /// would need a public host, because the SSRF floor blocks the loopback a local upstream binds,
 /// and this suite otherwise reaches no external network.
 #[test]
@@ -1135,17 +1137,14 @@ fn the_shims_shell_has_no_network_path() {
     // exits non-zero, the failure is the gateway's own CONNECT refusal
     // (NOT the shell kernel's `disable_network` fallback or the SSRF
     // floor), and nothing that looks like a response body comes back.
-    // Linux (namespace launcher) exits 6 through the gateway; macOS
-    // (Seatbelt) exits with a different code through the same gateway;
-    // both satisfy the bound. Naming the exact Linux exit as the
-    // positive check made the assertion Linux-only, while the security
-    // property held on both platforms.
+    // Both platforms refuse through the same gateway; the exit code is
+    // not the positive check, because it differed by platform while the
+    // security property held on both.
     assert!(
         seen.contains("status=") && !seen.contains("status=0"),
         "the routed curl must fail at the egress boundary — refused by the box's gateway, \
          not by the shell kernel's `disable_network` fallback, and not by a missing curl. \
-         Linux exits with the transport-error 6; macOS (Seatbelt) exits with a different \
-         code, and both satisfy this bound. A `status=0` would mean egress escaped, a \
+         A `status=0` would mean egress escaped, a \
          missing `status=` would mean the shim did not run curl at all: {output:?}"
     );
     assert!(
@@ -1154,6 +1153,10 @@ fn the_shims_shell_has_no_network_path() {
             && !seen.contains("command not found"),
         "the failure must be the gateway's CONNECT refusal, not a disabled network, the SSRF \
          floor, or a missing curl: {output:?}"
+    );
+    assert!(
+        seen.contains("curl: policy denied this operation on 'example.com:443'"),
+        "the gateway's refusal reason must reach the workload: {output:?}"
     );
     assert!(
         !seen.contains("<html") && !seen.contains("<!doctype") && !seen.contains("Example Domain"),
@@ -1812,6 +1815,57 @@ fn every_python_alias_reaches_the_broker() {
             "{name} must reach the broker: {output:?}"
         );
     }
+}
+
+/// **`monty = false` in `box.toml` turns Monty off in the running box.** With a `[tool.python3]`
+/// declared, `python3 --version` runs the declared file, both through the `python3` alias and
+/// through `zsh`, and Monty's version never appears. This covers the whole path: the key in the
+/// record, the bare-name map, the Shell built with no Monty runner, and the alias. Every other test
+/// here runs with Monty on.
+#[test]
+fn with_monty_off_python3_runs_the_declared_tool_through_the_alias() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    const POLICY: &str = r#"
+permit(principal, action == Box::Action::"shell:exec", resource);
+permit(principal, action == Box::Action::"shell:spawn", resource)
+when { context.input.program_path == "{workspace}/declared-python/python3" };
+"#;
+    const TOOL: &str = "[tool.python3]\ncommand = [\"{workspace}/declared-python/python3\"]\n";
+    let request = Request::with_config("monty-off-tool", POLICY, TOOL).top_level("monty = false");
+    let program = request.workspace().join("declared-python/python3");
+    std::fs::create_dir_all(program.parent().expect("the program's folder"))
+        .expect("create the declared program's folder");
+    compile_command_integrity_probe(
+        &program,
+        r#"fn main() {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    println!("DECLARED_PYTHON3 {}", arguments.join(" "));
+}
+"#,
+    );
+    let box_ = request.expect();
+
+    let output = box_.bash(
+        r#"python3 --version; echo "alias=$?"
+           zsh -lc "python3 --version"; echo "zsh=$?""#,
+    );
+
+    let seen = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(
+        !seen.contains("Monty"),
+        "with monty = false, python3 must not be Monty: {output:?}"
+    );
+    assert_eq!(
+        seen.matches("DECLARED_PYTHON3 --version").count(),
+        2,
+        "the alias and zsh must each run the declared python3: {output:?}"
+    );
+    assert!(
+        seen.contains("alias=0") && seen.contains("zsh=0"),
+        "both calls must exit 0: {output:?}"
+    );
 }
 
 /// A box whose agent may read `{workspace}/sub`, which holds a `here.txt` and a `show.py` of its

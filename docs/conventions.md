@@ -6,8 +6,9 @@ House style for a crate under `crates/`, derived from the established siblings
 directory layout and the package names agree.
 
 > **One crate cited below no longer exists in the tree.** `journal`
-> predates the 2026-07-12 crate reset; [`Cargo.toml`](../Cargo.toml) lists the live members. `box` is
-> `[[bin]]`-only, so the `lib.rs` façade items below do not apply to it. Their examples are kept because each is a
+> predates the 2026-07-12 crate reset; [`Cargo.toml`](../Cargo.toml) lists the live members. `box` is a
+> thin binary over a narrow `lib.rs` library, not a mechanism crate, so the mechanism-crate façade
+> items below do not apply to it. Their examples are kept because each is a
 > worked illustration of the rule it sits under — read them as *the shape to copy*,
 > not as a file to open. Where you need a live reference, use `containment`. This is a **mechanical checklist** — each item is
 phrased so an agent (or a reviewer, or a CI gate) can verify it by reading the
@@ -230,15 +231,15 @@ cargo fmt     -p <package-name> --check
 
 ### Why `--all-features`, and not "default plus `--no-default-features`"
 
-**A plain `cargo test` reports success while skipping the tests that matter.** `strands-box` declares
-`test-support`, and `box_shell` and `box_credentials` each carry
-`required-features = ["test-support"]`. Without the flag, cargo runs one integration suite instead of
-three, says nothing about the two it dropped, and exits `0`. Those two are the suites asserting the
-Shell boundary and the credential phantom.
+**A plain `cargo test` omits tests that require `test-support`.** `strands-box` declares
+this feature, and `box_shell` and `box_credentials` each carry
+`required-features = ["test-support"]`. Cargo skips those targets when the feature is absent,
+even if other tests pass. These suites assert the Shell boundary and credential handling.
 
-**"Default features and `--no-default-features`" does not reach it.** `strands-box` declares no
-`default` feature, so both spellings are the same empty set, and neither enables `test-support`. The
-older wording therefore prescribed running the same configuration twice.
+**Default and `--no-default-features` builds exercise different history modes.**
+`strands-box` enables `experimental-idle-flush` by default; `--no-default-features`
+alone retains per-event persistence. Neither selection enables `test-support`.
+The gates above still need `--all-features` to run the suites that require it.
 
 ### Clippy: `-D warnings` is scoped, and it is unpassable per binary crate
 

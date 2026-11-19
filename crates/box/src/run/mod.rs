@@ -7,8 +7,10 @@
 //! | [`lock`] | which process owns a box, and the record naming it |
 //! | [`hardening`] | refusing another process that `PolicyEngine`, the CA key, and the secrets |
 //! | [`credential`] | dereferencing a stored locator into a phantom |
+//! | [`secret_sources`] | the declared secret sources: each checked program and the one backend |
 //! | [`broker`] | the one socket, its protocol, and both interpreters |
 //! | [`configure`] | writing a validated authority to disk, for `run` |
+//! | [`decisions`] | the channel that gives a library caller each policy decision as it is made |
 //! | [`contain`] | the ordered path from an argv to a contained process |
 //! | `descriptor_limit` | the box's raised open-file limit, and the limit each child starts with |
 //! | [`telemetry`] | this box's own collector and effective decision recorder |
@@ -19,6 +21,7 @@ pub(crate) mod commands;
 pub(crate) mod configure;
 pub(crate) mod contain;
 pub(crate) mod credential;
+pub(crate) mod decisions;
 pub(crate) mod descriptor_limit;
 #[cfg(unix)]
 pub(crate) mod diagnostics;
@@ -30,23 +33,10 @@ pub(crate) mod lock;
 pub(crate) mod macos_enforcement;
 #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
 pub(crate) use macos_enforcement as native_enforcement;
-#[cfg(all(
-    target_os = "linux",
-    feature = "native-filesystem-policy",
-    box_native_adapter_tests
-))]
+#[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
 #[path = "linux_enforcement/mod.rs"]
 pub(crate) mod native_enforcement;
 #[cfg(target_os = "linux")]
 pub(crate) mod netns_relay;
+pub(crate) mod secret_sources;
 pub(crate) mod telemetry;
-
-#[cfg(all(
-    test,
-    box_native_kernel_tests,
-    not(box_native_adapter_tests),
-    target_os = "linux",
-    feature = "native-filesystem-policy"
-))]
-#[path = "linux_enforcement/kernel.rs"]
-mod native_enforcement;

@@ -326,6 +326,37 @@ fn a_policy_naming_a_grammar_action_starts_with_its_grammar_and_the_switch() {
     );
 }
 
+/// **A left-out tool's grammar still decides an installed tool with its program, and says so**:
+/// the `git` grammar of a tool whose file is missing reads the spawns of another `git` tool.
+#[test]
+fn a_left_out_tools_grammar_is_disclosed_for_the_installed_tool_it_decides() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+
+    let (output, _) = attempt(FORBID_PUSH, |home| {
+        let missing = tools_directory(home).join("missing/git");
+        format!(
+            "{}{}{}{SWITCH_ON}",
+            tool_at(home, "system_git", &git_program(home)),
+            tool_at(home, "optional_git", &missing),
+            GRAMMAR.replace("[tool.git.", "[tool.optional_git.")
+        )
+    });
+
+    let text = stderr(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("[tool.optional_git] left out: "), "{text}");
+    assert!(
+        text.contains(
+            "strands-box: [tool.system_git]: a spawn of `git` is decided by its tool grammar, \
+             and no `shell:spawn` rule applies to it"
+        ),
+        "startup names the installed tool that the left-out grammar decides: {text}"
+    );
+}
+
 #[test]
 fn a_forbid_on_a_grammar_action_denies_the_command_that_raises_it() {
     if !namespace_launcher_is_usable() {

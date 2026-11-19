@@ -38,12 +38,9 @@ strands-box run    --config <file> [-- <args>...]
 strands-box policy generate-schema --config <file> --output-dir <dir>
 ```
 
-On Linux x86-64, both verbs require the operator environment variable
-`EXPERIMENTAL_X86_SUPPORT=TRUE`. If the variable is unset or has any other value,
-Box refuses execution before reading the configuration or starting a workload. `--help` and `--version`
-remain available. The same check applies to the Rust library functions `run` and
-`generate_policy_schema`; set the variable before starting the host application.
-ARM64 does not require the flag. This startup opt-in does not change sandbox permissions.
+On Linux ARM64 and x86-64, neither verb requires an environment opt-in. The Rust
+library functions `run` and `generate_policy_schema` follow the same startup behavior.
+Configuration validation and sandbox requirements still apply.
 
 There are two verbs. The caller that created `box_dir` owns its lifecycle: it holds the path, so it
 stops a box by ending the `run` process and deletes one by removing the directory.
@@ -80,10 +77,10 @@ every harness's stored credentials, through an interpreter that runs outside con
 refusal tells the operator to make a directory for the workspace and to work there, and
 `the_operator_home_is_not_a_project` pins it.
 
-The config file's complete key set is **twelve**: `name`, `box_dir`, `policy`, `[agent]`,
-`[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-`[experimental-features]`, `file-attributes`, `[limits]`, and `[gateway]`. `name` and `box_dir`
-are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
+The config file's complete key set is **fourteen**: `name`, `box_dir`, `policy`, `[agent]`,
+`[tool.<label>]`, `[egress.<name>]`, `[secret-source.<scheme>]`, `[mcp.<name>]`,
+`[telemetry.<kind>]`, `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.
+`name` and `box_dir` are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
 every removed spelling is refused by its own name with its replacement.
 `four_inputs.rs::the_config_record_carries_only_the_four_inputs` pins the set, and
 `run_config.rs::name_is_required_and_every_removed_key_is_refused_by_name` pins the refusals.
@@ -96,9 +93,9 @@ the execution timeout for each submitted Strands Shell call. The default is 30 s
 For ten minutes, set `shell.timeout = 600`; for unlimited execution, set `shell.timeout = false`.
 The nested table `[limits.shell]` accepts the same values under `timeout`.
 `shell.max_input` and `shell.max_output` accept nonnegative integer byte counts, with defaults
-of 262144 and 65536. Shell applies the output limit to both output buffers and source-file reads.
+of 262144 and 1048576. Shell applies the output limit to both output buffers and source-file reads, and Box applies it to each `curl` response body.
 Set either size to `0` to disable that Shell limit, or omit it to keep its default.
-`shell.max_stdin` is a positive byte count, 65536 by default, of the standard input one command
+`shell.max_stdin` is a positive byte count, 1048576 by default, of the standard input one command
 receives through a Shell alias; it cannot be disabled.
 Invalid or unrepresentable durations and sizes are load errors. Python retains its existing limits.
 See [execution limits](../../docs/user/config.md#limits).
@@ -134,13 +131,15 @@ also delete any volume's event history. Box prints these limitations at startup.
 [file watching](../../docs/user/config.md#file-watching).
 
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
-`exec`, and `deny`. They give this process's own filesystem calls direct reach, because an
+`exec`, and `deny` — and also takes `deny_write`, which keeps an existing directory inside a
+`write` directory read-only. A tool and a local MCP server take `deny_write` too.
+They give this process's own filesystem calls direct reach, because an
 unmodified coding agent's `Read`, `Write` and `Edit` issue those calls and containment refuses every
 one. A directory entry is recursive, and a file entry is exact. `write` does not imply `read`. Linux
 is the residual: a writable bind reads there, and the startup disclosure says so on that entry's
 line.
 
-What a grant costs is that no `fs:*` decision records these operations, so the box prints each one
+Without experimental native filesystem policy, no `fs:*` decision records these operations, so the box prints each grant
 on stderr when it starts. A grant that would expose the box's own directory is refused, which
 `run_config.rs::a_tool_grant_cannot_expose_the_box_directory` pins, and a command inside a writable
 grant is disclosed as a warning, which `a_writable_command_is_disclosed_as_a_warning` pins.
@@ -216,7 +215,7 @@ Two properties of that table carry the design:
   arguments selects the server, so the two values are not interchangeable.
 
 Linux ARM64 can opt into `experimental-features.container-agent` for an agent
-launched in its own container PID namespace. See the [container agent guide](../../docs/user/container-agent.md)
+launched in its own container PID namespace. See the [container agent guide](../../docs/user/linux-requirements.md#run-an-agent-in-a-container-pid-namespace)
 for its prerequisites and refusal conditions. This mode does not support hosted tools or MCP servers.
 
 ## Policy
@@ -298,6 +297,48 @@ so nothing is reachable.
 Egress is the enforced principal. The proxy asks the policy per request, and no
 destination allowlist exists beside it.
 
+<a id="experimental-history-timer"></a>
+### History persistence
+
+Box batches policy-history writes by default. The `experimental-idle-flush` Cargo
+feature in `crates/box/Cargo.toml` is enabled by default and selects this behavior.
+Both persistence modes use the public Dogwood 1.1.2 packages.
+
+Box selects thresholds of 1,000 events or one second, checked when an event arrives,
+and owns a separate one-second timer that also flushes while Box is idle. One second
+is a polling target, not a maximum persistence delay. A process crash before a
+completed flush can lose recent requests and outcomes. After restart, a count-based
+limit can admit requests that the missing events would have denied. These values
+are fixed by the build, not runtime configuration keys.
+
+To persist each event before returning from its submission, build Box and its helpers
+from the repository root with batching disabled:
+
+```sh
+cargo build --release --locked -p strands-box -p strands-box-containment --no-default-features
+```
+
+To retain the native filesystem policy build feature, also pass
+`--features native-filesystem-policy`. Its runtime selection remains separate.
+Passing `--all-features` or `--features experimental-idle-flush` enables batching again.
+There is no `box.toml` key for this build selection.
+
+After successful startup, explicit shutdown first stops the workload, closes policy reload and discovery admission,
+and joins the broker, discovery, native monitoring, and gateway connection workers.
+Box then stops and joins the timer and performs the final history flush. Gateway shutdown
+interrupts client sockets while allowing the existing upstream outcome handling to finish.
+Cleanup after a startup error is best effort; it does not certify that every producer stopped.
+Gateway workers are joined in both persistence modes.
+Shutdown can wait for an upstream request or callback to finish; it has no fixed completion deadline.
+
+A recorded timer failure stops the supervised workload and makes the run fail, even if
+a later flush succeeds. A final-flush failure also makes the run fail; an earlier run
+failure remains visible. If native monitoring cannot stop, Box reports the failure and
+stops the timer without claiming a final flush after all producers stopped.
+
+The [policy timer interface](../policy/README.md#experimental-idle-history-flushing)
+describes explicit shutdown and completed-call counters.
+
 ## Egress targets
 
 `.strands-box/box.toml` declares which host-side secret is attached at which
@@ -336,18 +377,37 @@ secret.ref   = "aws://prod"
 |---|---|---|
 | `destinations` | required | One or more destinations this secret is attached at. Each is an exact host, a `*.` suffix wildcard, an explicit `:port`, and a path prefix or `/*suffix`. Not a regex. |
 | `protocol` | `http` | What the destination speaks. `mcp` makes the gateway parse JSON-RPC frames and raise `mcp:call`; `http` is an ordinary request. |
-| `secret.ref` | required unless a backend is declared | `env://NAME`, `aws://profile` (static keys), or a bare `aws://` (the AWS default credential chain). No other scheme. See below. Beside a backend it must be `env://`, and it is phantom-only: the box provisions the placeholder and strips it, and never injects the real destination credential (the backend handles the destination's auth). |
+| `secret.ref` | required unless a backend is declared | `env://NAME`, `aws://profile` (static keys), a bare `aws://` (the AWS default credential chain), or a reference in a scheme that a `[secret-source.<scheme>]` table declares. No other scheme. See below. Beside a backend it must be `env://`, and it is phantom-only: the box provisions the placeholder and strips it, and never injects the real destination credential (the backend handles the destination's auth). |
+| `secret.env` | `NAME` for `env://NAME` | Experimental: refused unless `[experimental-features] secret-sources = true`. The workload variable that holds the phantom. Required with a declared scheme. With `env://NAME` it is optional and equals `NAME`. A signed route and a backend `auth` take none. Two entries with one variable and different references are refused. |
 | `backends.url` | — | A single backend this destination re-routes to, as `scheme://host[:port][/prefix]` (`https` or `http`; a path prefix is allowed, a query or fragment is not). Box dials the backend, presents the backend host (SNI, certificate, and `Host`), prepends the `url`'s path prefix to the agent's path, and keeps the original destination and path in policy and audit. At most one. |
-| `backends.auth.ref` | — | `env://NAME` for the backend's own token. The box attaches it (no phantom; it takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `inject` or `phantom_prefix`). A signed (`aws://` or `credsd://`) auth is refused, and an auth needs an `https` backend. |
+| `backends.auth.ref` | — | `env://NAME`, or a reference in a declared scheme, for the backend's own token. The box attaches it (no phantom; it takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `env`, `inject`, or `phantom_prefix`). A signed (`aws://` or `credsd://`) auth is refused, and an auth needs an `https` backend. |
 | `secret.placement` | `header` | Where the credential lands: `header`, `basic_auth`, or `query_param`. |
 | `secret.header` | `Authorization` | The header the credential is attached under. `header` placement only. |
 | `secret.prefix` | `Bearer ` for `Authorization`, else empty | Literal text prepended to the credential in the header value. `header` placement only, and carries no braces. |
 | `secret.param` | required for `query_param` | The query-parameter name the credential is attached under. |
-| `secret.inject` | `phantom` | When the gateway attaches the real secret. `phantom` attaches it only to a request that carries the route's phantom, and refuses any other; `always` attaches it to every request to the destinations, and warns. `env://` only. |
-| `secret.phantom_prefix` | `strands_box_` | The literal prefix the minted phantom carries, before its random suffix. `env://` only, so a harness that checks its key format accepts the phantom. |
+| `secret.inject` | `phantom` | When the gateway attaches the real secret. `phantom` attaches it only to a request that carries the route's phantom, and refuses any other; `always` attaches it to every request to the destinations, and warns. `env://` and a declared scheme only. |
+| `secret.phantom_prefix` | `strands_box_` | The literal prefix the minted phantom carries, before its random suffix. `env://` and a declared scheme only, so a harness that checks its key format accepts the phantom. |
 
 The entry carries no credential-type key, so a `secret.type` on any scheme is an unknown key the box
 refuses.
+
+**A `[secret-source.<scheme>]` table declares the host program that reads a secret for a scheme.**
+It is experimental: it needs `[experimental-features] secret-sources = true`, and it loads on macOS
+only. The `secret.env` key needs the same switch, on each operating system. The table takes `protocol`, `command`, `output`, `pass-env`, `pass-secret-env`, `reads`, and
+`deny`, and `credentials::SecretSourceCommand` checks the first five. A reference in that scheme is
+then valid on an egress route and a remote MCP server (with `secret.env`), and on a backend
+`auth.ref` and a telemetry `secret.ref` (with no placeholder variable). An `env://NAME` or
+`secret://NAME` reference is refused when a `pass-secret-env` entry names `NAME`. The record stores
+each declaration at record version 39. `record::config::secret_source` holds the table and its
+checks. When a run starts, `run::secret_sources` checks each program file, prints one line for each
+source on stderr, and runs each program once for each secret before a workload starts: the secrets
+of telemetry targets first, then the others. The workload gets a placeholder in the `secret.env`
+variable. `policy generate-schema` reads the secret of a remote MCP server through the same
+declarations. `run::commands` protects each source program as it protects a configured tool
+command: no write grant covers it, and no interpreter changes it. Before a program first starts,
+`run::secret_sources` also refuses a grant that reaches a `reads` or `deny` path. Each
+sandbox denies the `reads` and `deny` paths. The interpreters do not: policy alone decides a
+read or a change of those paths through Strands Shell or Monty.
 
 **A host pattern is not a reachability claim.** An entry says only what is
 attached to a request the policy already permitted, so widening one attaches a
@@ -387,15 +447,14 @@ box has no setting that refuses the bare form. See
 [the egress guide](../../docs/user/egress.md#credential-sources) for both forms, the warning, and the
 `~/.aws` rule.
 
-**Only `env://` and `aws://` are accepted**, and the config load refuses the rest by
-name.
-`file://` and `op://` resolve host-side and place nothing in the workload's
-environment — which for a credential the workload must present is not a different
-mode but an unusable one: the vault mints a phantom the box cannot deliver, so every
-request to that destination is refused for a missing placeholder. `cmd://` and
-`oauth2://` have no mint path at all. The vault still dereferences `file://` and
-`op://` for callers that need one secret and no placeholder, such as an ingress
-front door; this narrows the box's config surface, not the crate's.
+**Only `env://`, `aws://`, and a scheme that a `[secret-source.<scheme>]` table declares are
+accepted**, and the config load refuses the rest by name. `file://` resolves host-side and names no
+variable for a placeholder, so the box cannot deliver a credential that the workload must present.
+`op://` is accepted only when a `[secret-source.op]` table declares it. `secret.env` then names the
+variable that holds the phantom. `cmd://` and `oauth2://` have no mint path at all. The vault still
+dereferences `file://` and its built-in `op://` source for callers that need one secret and no
+placeholder, such as an ingress front door. This rule narrows the config surface of the box, not
+the surface of the crate.
 
 A credential whose value is empty, only whitespace, or carrying a control character
 is refused — at the config load for `env://`, and by the vault at box load for any
@@ -609,6 +668,42 @@ permits exec on the literals the box granted, so a longer `PATH` advertises noth
 run. `a_declared_home_and_path_win_beneath_cores_names` pins the order.
 
 `TERM`, `TMPDIR`, `LANG`, and `TZ` are the operator's to set, in `env`.
+
+## Policy decisions for a library caller
+
+A program that runs a box through the library can receive each policy decision as the box makes it,
+without reading a records file. Make a channel with `policy_decisions(capacity)`, pass its sender in
+`RunOptions::policy_decisions`, and read the receiver from a thread that `RunOptions::on_ready`
+starts, because a host starts its threads only after hardening.
+
+```rust
+let (sender, receiver) = strands_box::policy_decisions(4096);
+strands_box::run(config, workload, strands_box::RunOptions {
+    policy_decisions: Some(sender),
+    on_ready: Some(Box::new(move || {
+        std::thread::spawn(move || {
+            while let Ok(decision) = receiver.recv() {
+                if !decision.permitted {
+                    eprintln!("denied {} {} ({})", decision.action, decision.resource, decision.rule);
+                }
+            }
+        });
+        Ok(())
+    })),
+    ..Default::default()
+});
+```
+
+A `PolicyDecision` holds the values that the decision's record states in its
+`strands.box.policy.*` attributes: the time, the verdict, the action and its category, the
+resource, the rule, the cause, and the reason. The channel reserves room for `capacity` decisions
+when it is made. The box never waits for the reader. When the channel
+holds `capacity` unread decisions, the box drops the next one from the channel, and
+`PolicyDecisionReceiver::dropped` counts it. The records file and the telemetry targets still
+receive it as their `include` lists select. `recv` waits for the next decision. Once the run has
+ended and the channel is empty, it returns an error, and `try_recv` and `recv_timeout` return
+`Disconnected`, so the reader above stops with the run. While the run goes on, they return `Empty`
+and `Timeout` instead.
 
 ## Running
 

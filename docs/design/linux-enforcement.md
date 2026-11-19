@@ -27,7 +27,8 @@ flowchart LR
 
 The user namespace maps the surrounding OS identity to the workload identity.
 The mount namespace holds the restricted filesystem view.
-The process namespace gives the workload its own process identifiers and a fresh `/proc`.
+The default backend creates a process namespace with its own process identifiers and a fresh `/proc`.
+In [container agent mode](../user/linux-requirements.md#run-an-agent-in-a-container-pid-namespace), the runtime provides the private namespace and Box binds its existing `/proc` read-only.
 Separate namespaces also isolate system identity and interprocess communication.
 The [network exception](#network-access) changes only the network namespace choice.
 
@@ -45,13 +46,23 @@ The filters permit creation of nested user namespaces, but read-only `/proc` pre
 
 Strands Shell, Monty, and the policy engine run in the box's trusted process, outside these sandboxes.
 Policy decides requests that reach those components.
-The workload's own file operations use its filesystem grants and produce no individual policy decision.
+Without native filesystem policy, the workload's own file operations use filesystem grants and produce no individual policy decision.
 See [the two enforcement paths](containment.md#two-kinds-of-enforcement).
 
 The [Linux boundary uses namespaces rather than Landlock](decisions.md#the-linux-boundary-is-namespaces-not-landlock), a mechanism for additional process access restrictions.
-Direct Linux file operations use filesystem grants rather than individual policy decisions.
-Linux refuses `[experimental-features] native-filesystem-policy = true` during configuration validation.
-See the [platform comparison](platform-differences.md#behavior-and-configuration) for the macOS build requirement and mediated alternatives.
+The optional [native filesystem policy](../user/native-filesystem-policy.md) adds policy decisions to selected direct filesystem operations.
+It requires a feature-enabled build and a kernel with seccomp notification, descriptor transfer, and BPF security hooks.
+The trusted process loads its identity guard with `CAP_BPF` and `CAP_PERFMON`, then drops those capabilities.
+Selected workloads pass their notification listener and filesystem root through the trusted launcher.
+The broker resolves paths inside that root and checks the same policy engine used by mediated requests.
+It transfers approved open descriptors and applies delete or rename through kernel-checked file identities.
+It never resumes an unchecked pathname operation after an approval.
+
+The running kernel determines whether path-only descriptor transfer is available.
+An active probe checks both ordinary and path-only transfer before workload launch.
+Unsupported path-only transfer is disclosed; other probe failures stop startup.
+Existing handles remain usable without fresh read, write, or directory-listing decisions.
+The [native policy guide](../user/native-filesystem-policy.md#coverage-and-limits) lists operations, failure behavior, and remaining limits.
 
 ## Native request forwarding
 
@@ -193,12 +204,10 @@ The permit set includes `copy_file_range` and `sendfile`, which Node uses to cop
 Both calls move data from a file that the workload already has open, to a file, pipe, or connected socket that it already has open.
 So they reach only what the filesystem grants and the network restrictions already allow.
 
-The filter rejects simultaneous writable and executable memory mappings.
 The `mprotect` and `pkey_mprotect` system calls change memory access permissions.
-The filter refuses `mprotect` requests whose permissions include executable access, including requests that retain that access.
-It refuses every `pkey_mprotect` request.
-A runtime that compiles code during execution can fail under these restrictions.
-Tool execution from writable files does not remove these memory restrictions.
+Writable-and-executable `mmap` and `mprotect` with `PROT_EXEC` are permitted on Linux, so a JIT runtime runs the code it compiles.
+The permit set omits `pkey_mprotect`, so the filter refuses it.
+See [the executable memory decision](decisions.md#a-jit-runtime-maps-executable-memory-on-linux).
 
 ## Terminal controls
 

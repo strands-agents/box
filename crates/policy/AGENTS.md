@@ -6,7 +6,7 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   names, readable attributes, and what `when temporal { … }` observes. An operator's policy file is
   their source code.
 - Fix the Box integration, the schema, and the event mapping behind the façade without approval.
-- `dogwood-language` and `dogwood-local-engine` are published crates, pinned at `=1.0.0`.
+- `dogwood-language` and `dogwood-local-engine` are published crates, pinned at `=1.1.2`.
 - Close a gap listed here; never widen one. Never delete or `#[ignore]` a test that pins one.
 
 ## Read This First: Durable Dogwood History
@@ -31,19 +31,26 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 
 - The lifecycle is `PolicyEngine::open` → `decide` → `record` → `effective`.
   `PolicyEngine::validate` and `PolicyEngine::check` sit off it and return no authority.
-- The root `pub use` set is the whole API: `EgressPolicyInterceptor`, `RenameDestination`,
-  `ScriptPermit`, `ScriptPolicyInterceptor`, `ScriptRefusal`, `ShellPolicyInterceptor`,
-  `CatalogRefusal`, `CatalogStage`, `CompleteCatalog`, `DiscoveryFailure`, `ListPage`,
-  `MAXIMUM_LIST_BYTES`, `MAXIMUM_LIST_PAGES`, `McpServerKind`, `ServerDiscovery`, `ToolCatalogs`,
-  `Finding`, `Location`, `PolicyCheck`, `RuleRef`, `Decision`, `DenyReason`, `PolicyAttribution`,
-  `RuleId`, `event_schema_source`, `PolicyDiagnostic`, `PolicyError`, `PolicyStagingError`,
-  `McpSchemaError`, `compose_action_schema`, `generate_mcp_schema`,
+- The root `pub use` set is the whole API: `EgressPolicyInterceptor`, `ReplyReader`,
+  `RenameDestination`, `ScriptPermit`, `ScriptPolicyInterceptor`, `ScriptRefusal`,
+  `ShellPolicyInterceptor`, `CatalogRefusal`, `CatalogStage`, `CompleteCatalog`, `DiscoveryFailure`,
+  `ListPage`, `MAXIMUM_LIST_BYTES`, `MAXIMUM_LIST_PAGES`, `McpServerKind`, `ServerDiscovery`,
+  `ToolCatalogs`, `Finding`, `Location`, `PolicyCheck`, `RuleRef`, `Decision`, `DenyReason`,
+  `PolicyAttribution`, `RuleId`, `event_schema_source`, `PolicyDiagnostic`, `PolicyError`,
+  `PolicyStagingError`, `McpSchemaError`, `compose_action_schema`, `generate_mcp_schema`,
   `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `McpReply`,
   `Outcome`, `PendingToolResponse`, `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`,
   `EffectivePolicy`, `Policy`, `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`,
   `FsOperation`, `Principal`, `Request`, `RequestId`, `GovernedBox`, `Operator`, `PolicyWarning`,
-  `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 60
-  names with `--all-features` and 54 by default; recompute it when you touch the façade.
+  `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`,
+  `HistoryFlusher`, `HistoryFlushSnapshot`. That is 63 names with `--all-features` and 54 by
+  default; recompute it when you touch the façade. The two history-flush types require
+  `experimental-idle-flush`.
+  `ReplyReader` is exported for the box, which reads every remote `tools/call` reply for its
+  tool-call log record with the same incremental reader the per-tool response uses, and
+  `McpReply::as_str` spells the end on that record. The box reads a reply the policy does not
+  already read only when a telemetry target takes tool calls, because each copy counts against the
+  gateway's shared budget.
 - `check` and `validate` share one composition (`check_and_expand`), and the staged check repeats
   the steps of `open_staged_with_engine` with no engine. A finding keeps a span only when the span
   is an offset into the authored text: a Dogwood parse error and a Cedar validation error over
@@ -151,6 +158,15 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   across a tool action and another family is refused, not parked; a rule scoped to one tool action
   loads. Pinned by
   `tests/runtime_mcp_policy_staging.rs::a_rule_that_reads_the_input_across_a_tool_action_is_refused_before_its_schema_stages`.
+- A pending rule is dropped when discovery finishes. Cedar refuses a set of mixed types, so an
+  action list that names actions of more than one action type (a `Box::Action` beside an MCP
+  tool's action, a tool grammar's, or the actions of two servers) never validates. The load refuses
+  it whether or not it reads the input (`spelling::refuse_mixed_action_namespaces`). Pinned by
+  `tests/load_time_rule_checks.rs::an_action_list_across_namespaces_refuses_validate_and_open`.
+  A rule that names the two in a condition and not in its head loads, and it is not enforced until
+  every server it names has listed its tools. The gateway forces `identity` on every MCP frame, so
+  a workload cannot make a listed catalog fail to stage by asking for a compressed reply. A
+  workload that never lists a server, or abandons a list, still leaves that rule unenforced.
 - An MCP union argument reads as its generated `typeChoice` record. `ToolInputs::conform` places a
   bare value in every member it matches, before the request gate and the event, so a rule on a
   duplicate member still fires. It refuses a value that matches none, including a value already in
@@ -263,3 +279,12 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Parse the schema at `open`, never lazily: a lazy parse costs the first call ~1.5 ms and turns a
   load error into a first-request deny. `cached_uid` saves ~7 µs per verdict and still yields
   `PolicyError::Schema`.
+- Declare no common type for each grammar action. Dogwood 1.0.0 finds a common type by a scan over
+  all of them, once for each action, so one type per action makes `open` grow with the square of
+  the action count (1.6 s at 400 actions and 13.7 s at 1600, on a loaded host). `Grammar::schema`
+  writes each input record inline. Pinned by
+  `grammar/schema.rs::a_grammar_with_many_actions_declares_no_type_per_action_and_loads`.
+  `generate_mcp_schema` still declares one `<tool>Input` type for each tool, so a server with many
+  tools has the same cost. A history from before the change can replay the old schema text until
+  its next snapshot. Each decision also builds every action entity again, and only a Dogwood
+  release can fix that.

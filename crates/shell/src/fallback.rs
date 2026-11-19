@@ -157,6 +157,16 @@ fn refusal(error: &io::Error) -> (i32, String) {
     (status, format!("strands-shell: {label}: {error}\n"))
 }
 
+/// The diagnostic for a bare name that no tool and no file on the box's search path answers to.
+fn not_found(program: &str) -> String {
+    format!(
+        "strands-shell: {program}: command not found\n\
+         strands-shell: {program}: no tool in this box has this name, and no file of this name is \
+         on the PATH that `box run` started with. A PATH set inside the box does not change where \
+         the box looks\n"
+    )
+}
+
 async fn write_stderr(context: &mut CommandContext, text: &str) {
     if let (_, _, Some(stderr)) = context.stdio() {
         let _ = stderr.write_all(text.as_bytes()).await;
@@ -323,8 +333,11 @@ impl CommandFallback for ShellKernel {
                 return Ok(Some(held.finish(context, status).await));
             }
             Decided::NotFound(permit) => {
-                finish(context, permit, 127).await;
-                return Ok(None);
+                let status = finish(context, permit, 127).await;
+                if status == 127 {
+                    write_stderr(context, &not_found(&program)).await;
+                }
+                return Ok(Some(status));
             }
             Decided::Spawn { permit, program } => (Unsettled(Some(permit)), program),
         };

@@ -26,6 +26,8 @@ pub enum Signal {
     ControlPlane,
     /// One MCP invocation that matches no declared command.
     McpUnmatched,
+    /// One MCP tool call's own arguments and output, in clear text, and how it ended.
+    McpToolCalls,
 }
 
 impl Signal {
@@ -40,6 +42,7 @@ impl Signal {
             Self::AgentMetrics => "agent_metrics",
             Self::ControlPlane => "control_plane",
             Self::McpUnmatched => "mcp_unmatched",
+            Self::McpToolCalls => "mcp_tool_calls",
         }
     }
 
@@ -55,10 +58,14 @@ impl Signal {
         vec![Self::PolicyDenied, Self::PolicyPermitted]
     }
 
-    /// Every signal, which is what a target receives when it names none.
+    /// What a target receives when it names none: every signal except [`Self::McpToolCalls`].
     #[must_use]
     pub fn default_signals() -> Vec<Self> {
-        Self::EVERY.to_vec()
+        // A tool call carries its values in clear text, so it reaches only a target that names it.
+        Self::EVERY
+            .into_iter()
+            .filter(|signal| *signal != Self::McpToolCalls)
+            .collect()
     }
 
     /// The signals every target receives, whatever it names.
@@ -89,6 +96,7 @@ impl Signal {
             Self::AgentMetrics => opentelemetry::logs::Severity::Trace3,
             Self::ControlPlane => opentelemetry::logs::Severity::Info2,
             Self::McpUnmatched => opentelemetry::logs::Severity::Info3,
+            Self::McpToolCalls => opentelemetry::logs::Severity::Info4,
         }
     }
 
@@ -112,13 +120,14 @@ impl Signal {
             Self::AgentMetrics => 4,
             Self::ControlPlane => 5,
             Self::McpUnmatched => 6,
+            Self::McpToolCalls => 7,
         }
     }
 
     /// How many slots such a set needs.
-    pub(crate) const SLOTS: usize = 7;
+    pub(crate) const SLOTS: usize = 8;
 
-    const EVERY: [Self; 7] = [
+    const EVERY: [Self; 8] = [
         Self::PolicyDenied,
         Self::PolicyPermitted,
         Self::AgentTrace,
@@ -126,6 +135,7 @@ impl Signal {
         Self::AgentMetrics,
         Self::ControlPlane,
         Self::McpUnmatched,
+        Self::McpToolCalls,
     ];
 }
 
@@ -351,6 +361,117 @@ impl McpUnmatched {
     }
 }
 
+/// One MCP tool call: the arguments it was decided with, and how it ended.
+#[derive(Debug, Clone)]
+pub struct McpToolCall {
+    server: String,
+    tool: String,
+    arguments: Option<crate::tool::ToolFields>,
+    reply: Option<String>,
+    output: Option<crate::tool::ToolFields>,
+    phase: ToolCallPhase,
+    correlation: crate::Correlation,
+    unix_nanos: u128,
+}
+
+/// Which half of one tool call a record states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolCallPhase {
+    /// The call was decided, and its arguments are what policy judged.
+    Called,
+    /// The call ended, however it ended.
+    Completed,
+}
+
+impl ToolCallPhase {
+    pub(crate) fn event_name(self) -> &'static str {
+        match self {
+            Self::Called => "strands.box.mcp.tool.call",
+            Self::Completed => "strands.box.mcp.tool.completion",
+        }
+    }
+}
+
+impl McpToolCall {
+    /// Record one decided call's `server`, `tool`, and `arguments`, flattened into fields.
+    #[must_use]
+    pub fn called(server: &str, tool: &str, arguments: &serde_json::Value) -> Self {
+        Self {
+            server: bounded(server),
+            tool: bounded(tool),
+            arguments: Some(crate::tool::ToolFields::of(arguments)),
+            reply: None,
+            output: None,
+            phase: ToolCallPhase::Called,
+            correlation: crate::Correlation::current(),
+            unix_nanos: now_unix_nanos(),
+        }
+    }
+
+    /// Record how one call ended, with `reply` naming the end and `output` the tool's
+    /// `structuredContent`, flattened into fields like arguments.
+    #[must_use]
+    pub fn completed(
+        server: &str,
+        tool: &str,
+        reply: &str,
+        output: Option<&serde_json::Value>,
+    ) -> Self {
+        Self {
+            server: bounded(server),
+            tool: bounded(tool),
+            arguments: None,
+            reply: Some(bounded(reply)),
+            output: output.map(crate::tool::ToolFields::of),
+            phase: ToolCallPhase::Completed,
+            correlation: crate::Correlation::current(),
+            unix_nanos: now_unix_nanos(),
+        }
+    }
+
+    /// Attach the context of the MCP request this call belongs to.
+    #[must_use]
+    pub fn correlated(mut self, correlation: crate::Correlation) -> Self {
+        self.correlation = correlation;
+        self
+    }
+
+    pub(crate) fn phase(&self) -> ToolCallPhase {
+        self.phase
+    }
+
+    pub(crate) fn correlation(&self) -> &crate::Correlation {
+        &self.correlation
+    }
+
+    pub(crate) fn unix_nanos(&self) -> u128 {
+        self.unix_nanos
+    }
+
+    pub(crate) fn attributes(&self) -> Vec<(&'static str, AnyValue)> {
+        let mut pairs: Vec<(&'static str, AnyValue)> = vec![
+            (crate::tool::SERVER, self.server.clone().into()),
+            (crate::tool::NAME, self.tool.clone().into()),
+        ];
+        if let Some(arguments) = &self.arguments {
+            pairs.push((crate::tool::ARGUMENTS, arguments.attribute()));
+            if let Some(omitted) = arguments.omitted() {
+                pairs.push((crate::tool::ARGUMENTS_OMITTED, omitted.into()));
+            }
+        }
+        if let Some(reply) = &self.reply {
+            pairs.push(("strands.box.mcp.tool.reply", reply.clone().into()));
+        }
+        if let Some(output) = &self.output {
+            pairs.push((crate::tool::OUTPUT, output.attribute()));
+            if let Some(omitted) = output.omitted() {
+                pairs.push((crate::tool::OUTPUT_OMITTED, omitted.into()));
+            }
+        }
+        pairs
+    }
+}
+
 /// One policy that determined an effective decision.
 #[derive(Debug, Clone)]
 pub struct DeterminingPolicy {
@@ -461,35 +582,85 @@ impl DecisionRecord {
         }
     }
 
+    /// The action, as `strands.box.policy.action` states it.
+    #[must_use]
+    pub fn action(&self) -> &str {
+        vocabulary_term(&self.action)
+    }
+
+    /// The namespace of the action, as `strands.box.policy.category` states it.
+    #[must_use]
+    pub fn category(&self) -> &str {
+        action_category(&self.action)
+    }
+
+    /// The resource, as `strands.box.policy.resource` states it.
+    #[must_use]
+    pub fn resource(&self) -> &str {
+        &self.resource
+    }
+
+    /// Whether the decision is a permit.
+    #[must_use]
+    pub fn permitted(&self) -> bool {
+        self.permitted
+    }
+
+    /// The class of result, as `strands.box.policy.cause` states it.
+    #[must_use]
+    pub fn cause(&self) -> DecisionCause {
+        self.cause
+    }
+
+    /// The governing rule, as `strands.box.policy.rule` states it.
+    #[must_use]
+    pub fn rule(&self) -> &str {
+        // An authored policy is named only when one actually decided, which the cause states. A
+        // fault keeps its attribution while the engine reaches `<default-deny>`, so naming the first
+        // entry there would report a policy that did not decide.
+        self.governing()
+            .map_or(self.rule.as_str(), |policy| policy.id.as_str())
+    }
+
+    /// The reason for a refusal, as `strands.box.policy.reason` states it.
+    #[must_use]
+    pub fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+
+    /// The time of the decision, which is the record's timestamp.
+    #[must_use]
+    pub fn time(&self) -> SystemTime {
+        UNIX_EPOCH
+            + std::time::Duration::from_nanos(u64::try_from(self.unix_nanos).unwrap_or(u64::MAX))
+    }
+
     /// The attributes a consumer reads, in the order the box states them.
     pub(crate) fn attributes(&self) -> Vec<(&'static str, AnyValue)> {
-        let action = vocabulary_term(&self.action);
         let mut pairs: Vec<(&'static str, AnyValue)> = vec![
             ("strands.box.policy.principal", PRINCIPAL.into()),
-            ("strands.box.policy.action", action.to_string().into()),
-            ("strands.box.policy.resource", self.resource.clone().into()),
+            (
+                "strands.box.policy.action",
+                self.action().to_string().into(),
+            ),
+            (
+                "strands.box.policy.resource",
+                self.resource().to_string().into(),
+            ),
             ("strands.box.policy.verdict", self.verdict().into()),
         ];
-        pairs.push(("strands.box.policy.cause", self.cause.as_str().into()));
-        if self.cause == DecisionCause::InternalFault {
+        pairs.push(("strands.box.policy.cause", self.cause().as_str().into()));
+        if self.cause() == DecisionCause::InternalFault {
             pairs.push(("error.type", "strands.box.policy.evaluation_error".into()));
         }
-        if let Some(reason) = &self.reason {
-            pairs.push(("strands.box.policy.reason", reason.clone().into()));
+        if let Some(reason) = self.reason() {
+            pairs.push(("strands.box.policy.reason", reason.to_string().into()));
         }
 
-        // The governing rule, under this product's own namespace. An authored policy is named only
-        // when one actually decided, which the cause states. A fault keeps its attribution while the
-        // engine reaches `<default-deny>`, so naming the first entry there would report a policy
-        // that did not decide.
+        // The governing rule, under this product's own namespace.
         let governing = self.governing();
-        pairs.push((
-            RULE,
-            governing
-                .map_or_else(|| self.rule.clone(), |policy| policy.id.clone())
-                .into(),
-        ));
-        pairs.push((CATEGORY, action_category(&self.action).to_string().into()));
+        pairs.push((RULE, self.rule().to_string().into()));
+        pairs.push((CATEGORY, self.category().to_string().into()));
         if let Some(description) = governing
             .and_then(|policy| policy.description.as_deref())
             .filter(|text| !text.is_empty())
@@ -540,7 +711,7 @@ impl DecisionRecord {
     }
 
     pub(crate) fn verdict(&self) -> &'static str {
-        if self.permitted { "permit" } else { "deny" }
+        if self.permitted() { "permit" } else { "deny" }
     }
 
     pub(crate) fn unix_nanos(&self) -> u128 {
@@ -651,6 +822,8 @@ pub enum ControlOperation {
     BoxStarted,
     /// This run is giving the box up.
     BoxStopped,
+    /// The box read one secret of a configuration entry through a declared secret source.
+    SecretFetched,
 }
 
 impl ControlOperation {
@@ -664,6 +837,7 @@ impl ControlOperation {
             Self::DiscoveryComplete => "discovery_complete",
             Self::BoxStarted => "box_started",
             Self::BoxStopped => "box_stopped",
+            Self::SecretFetched => "secret_fetched",
         }
     }
 }
@@ -720,8 +894,15 @@ fn reportable(argument: &str) -> String {
     REDACTED.to_string()
 }
 
+/// The wall-clock reading a record carries, or zero when the clock is before the epoch.
+fn now_unix_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos())
+}
+
 /// `text` bounded to [`MAXIMUM_ATTRIBUTE_BYTES`], cut on a character boundary.
-fn bounded(text: &str) -> String {
+pub(crate) fn bounded(text: &str) -> String {
     if text.len() <= MAXIMUM_ATTRIBUTE_BYTES {
         return text.to_string();
     }
@@ -982,6 +1163,32 @@ mod tests {
         )));
     }
 
+    /// **Each control operation keeps its wire spelling**, which a consumer selects records by.
+    #[test]
+    fn each_control_operation_keeps_its_wire_spelling() {
+        assert_eq!(
+            [
+                ControlOperation::PolicyInstalled,
+                ControlOperation::PolicyRefused,
+                ControlOperation::SchemaInstalled,
+                ControlOperation::DiscoveryComplete,
+                ControlOperation::BoxStarted,
+                ControlOperation::BoxStopped,
+                ControlOperation::SecretFetched,
+            ]
+            .map(ControlOperation::as_str),
+            [
+                "policy_installed",
+                "policy_refused",
+                "schema_installed",
+                "discovery_complete",
+                "box_started",
+                "box_stopped",
+                "secret_fetched",
+            ]
+        );
+    }
+
     /// **Every signal carries its own severity**, because that is what routes a record to a lane.
     #[test]
     fn no_two_signals_share_a_severity() {
@@ -998,26 +1205,25 @@ mod tests {
         }
     }
 
-    /// **The default set is EVERY signal**, so a target that names no `include` also receives the
-    /// harness's own spans, logs and metrics.
+    /// **The default set is EVERY signal but `mcp_tool_calls`**, so a target that names no `include`
+    /// also receives the harness's own spans, logs and metrics, and never a tool call's values.
     ///
     /// Named signal by signal rather than by length, because a count passes on a set that holds the
-    /// wrong six. The three relayed signals were opt-in until 2026-09-25: a box that declared
-    /// nothing recorded its own decisions and dropped everything the harness exported, which reads
-    /// as a broken harness rather than as a narrowed target.
+    /// wrong members.
     #[test]
-    fn the_default_set_is_every_signal() {
+    fn the_default_set_is_every_signal_but_tool_calls() {
         let default = Signal::default_signals();
         for signal in Signal::EVERY {
-            assert!(
+            assert_eq!(
                 default.contains(&signal),
-                "{} must reach a target that names no include",
+                signal != Signal::McpToolCalls,
+                "{} must reach a target that names no include unless it is mcp_tool_calls",
                 signal.as_str()
             );
         }
         assert_eq!(
             default.len(),
-            Signal::EVERY.len(),
+            Signal::EVERY.len() - 1,
             "the default set names no signal twice"
         );
 
@@ -1030,8 +1236,45 @@ mod tests {
             Signal::PolicyDenied,
             Signal::PolicyPermitted,
             Signal::ControlPlane,
+            Signal::McpToolCalls,
         ] {
             assert!(!own.is_relayed(), "{} is the box's own", own.as_str());
+        }
+    }
+
+    /// Every tool-call value is bounded at construction, so one long argument or answer stays one
+    /// bounded attribute.
+    #[test]
+    fn every_tool_call_value_is_bounded_at_construction() {
+        let long = "x".repeat(MAXIMUM_ATTRIBUTE_BYTES * 3);
+        let value = serde_json::json!({ "field": long });
+        let texts = |value: &AnyValue| -> Vec<String> {
+            match value {
+                AnyValue::String(text) => vec![text.as_str().to_string()],
+                AnyValue::Map(map) => map
+                    .values()
+                    .filter_map(|value| match value {
+                        AnyValue::String(text) => Some(text.as_str().to_string()),
+                        _ => None,
+                    })
+                    .collect(),
+                other => panic!("an unexpected value: {other:?}"),
+            }
+        };
+        for record in [
+            McpToolCall::called(&long, &long, &value),
+            McpToolCall::completed(&long, &long, &long, Some(&value)),
+        ] {
+            for (key, value) in record.attributes() {
+                for text in texts(&value) {
+                    assert!(
+                        text.len() <= MAXIMUM_ATTRIBUTE_BYTES,
+                        "{key} is {} bytes",
+                        text.len()
+                    );
+                    assert!(text.ends_with(TRUNCATED), "{key} says it was cut");
+                }
+            }
         }
     }
 

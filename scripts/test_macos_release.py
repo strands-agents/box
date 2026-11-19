@@ -1,8 +1,10 @@
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import plistlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -38,6 +40,136 @@ class MacOSReleaseTests(unittest.TestCase):
             if extra is not None:
                 output.addfile(extra)
         return archive
+
+    def build_metadata(self, archive, features=None):
+        value = {
+            "source_sha": "a" * 40,
+            "features": features if features is not None else ["native-filesystem-policy"],
+            "input_sha256": release.digest(archive),
+        }
+        path = self.root / "build-metadata.json"
+        path.write_text(json.dumps(value))
+        return path, value
+
+    @unittest.skipUnless(shutil.which("cargo"), "Cargo is required to read release manifests")
+    def test_workflow_records_defaults_from_the_selected_source(self):
+        from test_release_source import workflow_command
+
+        command = workflow_command("Record the macOS build features")
+        for index, defaults in enumerate([[], ["experimental-idle-flush"]]):
+            with self.subTest(defaults=defaults):
+                source = self.root / str(index)
+                crate = source / "crates/box"
+                (crate / "src").mkdir(parents=True)
+                (crate / "src/lib.rs").write_text("")
+                manifest = (
+                    '[package]\nname = "strands-box"\nversion = "0.1.1"\nedition = "2021"\n'
+                    '[features]\nexperimental-idle-flush = []\nnative-filesystem-policy = []\n'
+                )
+                if defaults:
+                    manifest += "default = " + json.dumps(defaults) + "\n"
+                (crate / "Cargo.toml").write_text(manifest)
+                (source / "dist").mkdir()
+                archive = source / "dist/box-v0.1.1-aarch64-apple-darwin.tar.gz"
+                archive.write_bytes(b"unsigned archive fixture")
+                runner_temp = source / "runner-temp"
+                runner_temp.mkdir()
+                source_sha = str(index + 1) * 40
+                environment = {
+                    **os.environ, "NEW_TAG": "v0.1.1", "SOURCE_SHA": source_sha,
+                    "RUNNER_TEMP": str(runner_temp),
+                }
+                result = subprocess.run(["bash", "-c", command], cwd=source, env=environment,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                path = archive.with_name("box-v0.1.1-aarch64-apple-darwin.build-metadata.json")
+                metadata = json.loads(path.read_text())
+                expected = sorted(defaults + ["native-filesystem-policy"])
+                self.assertEqual(metadata, {
+                    "source_sha": source_sha, "features": expected,
+                    "input_sha256": release.digest(archive),
+                })
+                self.assertEqual(release.build_features(path, source_sha, archive), expected)
+
+    def test_release_receipt_keeps_selected_build_features(self):
+        archive = self.build()
+        for index, features in enumerate([
+            ["native-filesystem-policy"],
+            ["native-filesystem-policy", "experimental-idle-flush"],
+        ]):
+            with self.subTest(features=features):
+                metadata, value = self.build_metadata(archive, features)
+                args = release.argparse.Namespace(
+                    input=archive, output=self.root / f"signed-{index}.tar.gz",
+                    work=self.root / f"work-{index}", version="0.1.1",
+                    source_sha=value["source_sha"], build_metadata=metadata,
+                    notary_secret=None, notary_keychain_profile="fixture",
+                )
+
+                def run(command, **options):
+                    if command[0] == "gtar":
+                        Path(command[2]).write_bytes(b"signed archive fixture")
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                with patch.object(release, "Signer") as constructor, \
+                        patch.object(release, "verify"), \
+                        patch.object(release, "verify_notarization"), \
+                        patch.object(release, "notarize", return_value=self.SUBMISSION), \
+                        patch.object(release, "notarytool", return_value=
+                                     subprocess.CompletedProcess([], 0, "", "")), \
+                        patch.object(release.subprocess, "run", side_effect=run):
+                    signer = constructor.return_value
+                    signer.team = "ABCDE12345"
+                    signer.profile = "fixture"
+                    signer.sign.side_effect = lambda directory, *unused: directory
+                    release.release(args)
+                receipt = json.loads((args.work / "receipt.json").read_text())
+                self.assertEqual(receipt["features"], sorted(features))
+                self.assertEqual(receipt["source_sha"], value["source_sha"])
+                self.assertEqual(receipt["input_sha256"], value["input_sha256"])
+
+    def test_build_features_rejects_invalid_or_mismatched_metadata(self):
+        archive = self.build()
+        path, valid = self.build_metadata(archive)
+        cases = [
+            None,
+            [],
+            {key: value for key, value in valid.items() if key != "features"},
+            {**valid, "unexpected": True},
+            {**valid, "source_sha": "b" * 40},
+            {**valid, "source_sha": 123},
+            {**valid, "source_sha": "A" * 40},
+            {**valid, "input_sha256": "0" * 64},
+            {**valid, "input_sha256": 123},
+            {**valid, "features": "native-filesystem-policy"},
+            {**valid, "features": []},
+            {**valid, "features": ["native-filesystem-policy", None]},
+            {**valid, "features": ["native-filesystem-policy", ""]},
+            {**valid, "features": ["native-filesystem-policy"] * 2},
+            {**valid, "features": ["experimental-idle-flush"]},
+        ]
+        for value in cases:
+            with self.subTest(metadata=value):
+                path.write_text(json.dumps(value))
+                with self.assertRaises(ValueError):
+                    release.build_features(path, valid["source_sha"], archive)
+        path.write_text("not json")
+        with self.assertRaises(ValueError):
+            release.build_features(path, valid["source_sha"], archive)
+
+    def test_release_rejects_metadata_before_creating_work_or_signing(self):
+        archive = self.build()
+        metadata, value = self.build_metadata(archive)
+        archive.write_bytes(b"different archive")
+        work = self.root / "work"
+        args = release.argparse.Namespace(
+            input=archive, work=work, source_sha=value["source_sha"], build_metadata=metadata,
+        )
+        with patch.object(release, "Signer") as constructor:
+            with self.assertRaisesRegex(ValueError, "input SHA-256 mismatch"):
+                release.release(args)
+        constructor.assert_not_called()
+        self.assertFalse(work.exists())
 
     def test_build_extracts_only_the_three_regular_binaries(self):
         target = self.root / "binaries"
@@ -345,7 +477,8 @@ class MacOSReleaseTests(unittest.TestCase):
     def test_sign_requires_exactly_one_notarization_credential(self):
         script = Path(release.__file__)
         base = [sys.executable, str(script), "sign", "--input", "unused", "--output", "unused",
-                "--work", str(self.root / "work"), "--version", "0.1.1", "--source-sha", "a" * 40]
+                "--work", str(self.root / "work"), "--version", "0.1.1", "--source-sha", "a" * 40,
+                "--build-metadata", "unused"]
         for extra, code in [
             ([], 2),
             (["--notary-secret", "arn:aws:secretsmanager:x", "--notary-keychain-profile", "p"], 2),
