@@ -4,8 +4,7 @@ use std::io;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http_body_util::{BodyExt as _, Full};
-use hyper::body::Incoming;
+use http_body_util::Full;
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -97,6 +96,9 @@ pub(super) async fn send(
     for (name, value) in &req.headers {
         request = request.header(name.as_str(), value.as_str());
     }
+    if super::needs_zero_length(&req) {
+        request = request.header(hyper::header::CONTENT_LENGTH, "0");
+    }
     let request = request
         .body(Full::new(Bytes::from(req.body.unwrap_or_default())))
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -104,28 +106,7 @@ pub(super) async fn send(
         .send_request(request)
         .await
         .map_err(refused_connection)?;
-
-    if response
-        .headers()
-        .contains_key(egress_gateway::PROXY_ORIGIN_HEADER)
-    {
-        let body = read_body(response.into_body(), MAX_REFUSAL).await?;
-        return Err(super::refusal(&String::from_utf8_lossy(&body)));
-    }
-    let status = response.status();
-    let headers = response
-        .headers()
-        .iter()
-        .map(|(name, value)| (name.to_string(), value.to_str().unwrap_or("").to_string()))
-        .collect();
-    let body = read_body(response.into_body(), req.max_response).await?;
-    Ok(HttpResponse {
-        status: status.as_u16(),
-        headers,
-        body,
-        version: "1.1".to_string(),
-        reason: status.canonical_reason().unwrap_or("").to_string(),
-    })
+    super::shell_response(response, req.max_response).await
 }
 
 /// Open a CONNECT tunnel to `authority`; a refusal the gateway wrote keeps its reason.
@@ -164,8 +145,7 @@ async fn open(egress: &EgressRouting, authority: &str) -> io::Result<hyper::upgr
         .contains_key(egress_gateway::PROXY_ORIGIN_HEADER);
     let status = response.status();
     if refused {
-        let body = read_body(response.into_body(), MAX_REFUSAL).await?;
-        return Err(super::refusal(&String::from_utf8_lossy(&body)));
+        return Err(super::read_refusal(response.into_body()).await);
     }
     Err(io::Error::new(
         io::ErrorKind::ConnectionRefused,
@@ -192,24 +172,6 @@ fn basic_credentials(url: &url::Url) -> Option<String> {
         "Basic {}",
         base64::engine::general_purpose::STANDARD.encode(pair)
     ))
-}
-
-/// The most bytes of a refusal body read before its first line is reported.
-const MAX_REFUSAL: usize = 16 * 1024;
-
-/// Read `body`, refusing one longer than `limit` bytes when `limit` is not zero.
-async fn read_body(mut body: Incoming, limit: usize) -> io::Result<Vec<u8>> {
-    let mut read = Vec::new();
-    while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(io::Error::other)?;
-        if let Ok(chunk) = frame.into_data() {
-            if limit > 0 && read.len() + chunk.len() > limit {
-                return Err(io::Error::other("response body too large"));
-            }
-            read.extend_from_slice(&chunk);
-        }
-    }
-    Ok(read)
 }
 
 fn refused_connection(error: impl std::fmt::Display) -> io::Error {

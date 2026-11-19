@@ -1915,9 +1915,12 @@ reported a refusal as a failed name lookup (`curl` exit 6). `GatewayNetwork` the
 CONNECT keeps its reason. Plain `http://` stays on reqwest. A preflight CONNECT was rejected because
 it records a second `net:connect` decision for each request, which `when temporal` rules count. A
 reqwest connector was rejected because reqwest runs the tunnel inside its own connector and returns
-no response from it. The cost is two clients, which must keep the same trust, default headers, Basic
-credentials from the URL, and body limit. `a_refused_tunnel_fails_curl_with_the_gateways_reason`
-pins the reason. A Monty `fetch` still uses reqwest, so its `https://` refusals still lose the
+no response from it. The cost is two clients, which must send the same request with the same trust,
+default headers, and Basic credentials from the URL. One function reads the response for both, so
+the marker check, the refusal bound, and the body limit have one copy. The request tests in
+`kernel/tests/egress.rs` run each `curl` over `http://` and `https://`, which pins that the two
+clients send the same request. `a_refused_tunnel_fails_curl_with_the_gateways_reason` pins the
+reason. A Monty `fetch` still uses reqwest, so its `https://` refusals still lose the
 reason.
 
 The wrapper governs only requests that reach the kernel's HTTP step. A future Shell network command

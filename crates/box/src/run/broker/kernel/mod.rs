@@ -73,25 +73,47 @@ async fn send(egress: &EgressRouting, req: HttpRequest) -> io::Result<HttpRespon
     for (name, value) in &req.headers {
         request = request.header(name.as_str(), value.as_str());
     }
+    if needs_zero_length(&req) {
+        request = request.header(hyper::header::CONTENT_LENGTH, "0");
+    }
     if let Some(body) = req.body {
         request = request.body(body);
     }
-    let mut response = request
+    let response = request
         .send()
         .await
         .map_err(|error| io::Error::new(io::ErrorKind::ConnectionRefused, error.to_string()))?;
+    shell_response(response.into(), req.max_response).await
+}
 
+/// Whether `req` carries an empty body that no header states the length of.
+fn needs_zero_length(req: &HttpRequest) -> bool {
+    req.body.as_ref().is_some_and(Vec::is_empty)
+        && !req
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+}
+
+/// The Shell's view of a gateway `response`; a refusal the gateway wrote becomes an error.
+async fn shell_response<B>(
+    response: hyper::Response<B>,
+    max_response: usize,
+) -> io::Result<HttpResponse>
+where
+    B: hyper::body::Body<Data = bytes::Bytes>,
+    B::Error: std::fmt::Display,
+{
     if response
         .headers()
         .contains_key(egress_gateway::PROXY_ORIGIN_HEADER)
     {
-        return Err(refusal(&response.text().await.unwrap_or_default()));
+        return Err(read_refusal(response.into_body()).await);
     }
-
     let status = response.status();
     let version = match response.version() {
-        reqwest::Version::HTTP_2 => "2",
-        reqwest::Version::HTTP_11 => "1.1",
+        hyper::Version::HTTP_2 => "2",
+        hyper::Version::HTTP_11 => "1.1",
         _ => "1.0",
     };
     let headers = response
@@ -99,13 +121,7 @@ async fn send(egress: &EgressRouting, req: HttpRequest) -> io::Result<HttpRespon
         .iter()
         .map(|(name, value)| (name.to_string(), value.to_str().unwrap_or("").to_string()))
         .collect();
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(io::Error::other)? {
-        if req.max_response > 0 && body.len() + chunk.len() > req.max_response {
-            return Err(io::Error::other("response body too large"));
-        }
-        body.extend_from_slice(&chunk);
-    }
+    let body = read_body(response.into_body(), max_response).await?;
     Ok(HttpResponse {
         status: status.as_u16(),
         headers,
@@ -113,6 +129,49 @@ async fn send(egress: &EgressRouting, req: HttpRequest) -> io::Result<HttpRespon
         version: version.to_string(),
         reason: status.canonical_reason().unwrap_or("").to_string(),
     })
+}
+
+/// The most bytes of a refusal body read before its first line is reported.
+const MAX_REFUSAL: usize = 16 * 1024;
+
+/// The refusal a gateway-originated `body` states, read to `MAX_REFUSAL` bytes at most.
+async fn read_refusal<B>(body: B) -> io::Error
+where
+    B: hyper::body::Body<Data = bytes::Bytes>,
+{
+    use http_body_util::BodyExt as _;
+    let mut body = std::pin::pin!(body);
+    let mut read = Vec::new();
+    while read.len() < MAX_REFUSAL
+        && let Some(Ok(frame)) = body.frame().await
+    {
+        if let Ok(chunk) = frame.into_data() {
+            let room = MAX_REFUSAL - read.len();
+            read.extend_from_slice(&chunk[..chunk.len().min(room)]);
+        }
+    }
+    refusal(&String::from_utf8_lossy(&read))
+}
+
+/// Read `body`, refusing one longer than `limit` bytes when `limit` is not zero.
+async fn read_body<B>(body: B, limit: usize) -> io::Result<Vec<u8>>
+where
+    B: hyper::body::Body<Data = bytes::Bytes>,
+    B::Error: std::fmt::Display,
+{
+    use http_body_util::BodyExt as _;
+    let mut body = std::pin::pin!(body);
+    let mut read = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|error| io::Error::other(error.to_string()))?;
+        if let Ok(chunk) = frame.into_data() {
+            if limit > 0 && read.len() + chunk.len() > limit {
+                return Err(io::Error::other("response body too large"));
+            }
+            read.extend_from_slice(&chunk);
+        }
+    }
+    Ok(read)
 }
 
 /// The refusal a gateway-originated `body` states, as the workload reads it.
