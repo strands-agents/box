@@ -1716,14 +1716,15 @@ A JIT runtime such as Node, Java, or Bun writes the code it compiles into memory
 Linux refused that memory, so V8 and the JVM aborted, Bun fell back to its interpreter, and Python
 `ctypes` could not build a libffi callback. A box now permits writable-and-executable `mmap` and
 `mprotect` with `PROT_EXEC` in every process. `memfd_create`, descriptor `execveat`,
-`pkey_mprotect`, and the `noexec` mounts stay refused, so the box still governs which program
-*files* run.
+`pkey_mprotect`, and the `noexec` mounts stay refused, so the kernel never maps or starts a file
+outside the process's exec grants.
 
 The cost is that a process can run code it writes into memory, not only code its mount view admits.
 A runtime that calls native code, such as Python through `ctypes` or Java through its foreign
-function API, can run any bytes this way. That code is still bound by the system-call filter, the
-filesystem grants, and the network policy. This gives up a hardening measure, not an authority, and
-its effect on kernel-exploit risk is not quantified.
+function API, can run any bytes this way, including a readable program it copies into memory. For
+such a runtime, a read grant on a program works like an exec grant. That code is still bound by the
+system-call filter, the filesystem grants, and the network policy. This gives up a hardening
+measure, not an authority, and its effect on kernel-exploit risk is not quantified.
 
 We chose this over a per-table opt-in for two reasons. macOS has no counterpart rule: Seatbelt does
 not govern anonymous memory, so a macOS box already lets every process write code and run it. And

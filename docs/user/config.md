@@ -477,9 +477,11 @@ Java, or Bun needs this, and so does Python `ctypes` when libffi writes a callba
 is no setting. macOS has no such restriction.
 
 **A process can run any bytes it writes into memory**, not only the programs its grants let it
-start. The system-call filter, filesystem grants, and network policy still apply to that code.
-`memfd_create`, `pkey_mprotect`, descriptor `execveat`, and the `noexec` mounts stay refused, so the
-box still governs which program *files* run.
+start. `memfd_create`, `pkey_mprotect`, descriptor `execveat`, and the `noexec` mounts stay refused,
+so the kernel never maps or starts a file outside the process's `exec` grants. But a runtime that
+calls native code, such as Python through `ctypes`, can copy a readable program into memory and run
+it. For such a runtime, a `read` grant on a program works like an `exec` grant. The system-call
+filter, filesystem grants, and network policy still apply to that code.
 
 ### Script commands on Linux
 
