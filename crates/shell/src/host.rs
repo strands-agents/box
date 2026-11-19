@@ -63,11 +63,6 @@ pub(super) fn stale_resolution() -> io::Error {
     )
 }
 
-/// The refusal for removing or replacing a mount point.
-pub(super) fn mount_point_busy() -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, "bind mount point is busy")
-}
-
 impl Mounts {
     /// Serve each `(source, visible)` pair, in order.
     pub(crate) fn new(binds: &[(&str, &str)]) -> Self {
