@@ -96,7 +96,13 @@ struct RemoteToolCall {
     server: String,
     tool: String,
     arguments: String,
+    /// Where the emitter leaves the call's record for the reply observer to end.
+    record: ToolCallSlot,
 }
+
+/// The record of one permitted remote tool call, filled when its decision is emitted and taken
+/// when its reply ends it. A slot dropped while full ends the call `indeterminate`.
+type ToolCallSlot = Arc<std::sync::Mutex<Option<McpToolCallRecord>>>;
 
 #[cfg(test)]
 thread_local! {
@@ -387,45 +393,24 @@ impl EgressDecisionInterceptor {
 struct ObservedToolReply {
     inner: Option<Box<dyn egress_gateway::ReplyObserver>>,
     reader: policy::ReplyReader,
-    recorder: Arc<DecisionRecorder>,
-    server: String,
-    tool: String,
-    /// The JSON text of the request's JSON-RPC `id`, which the reply must carry.
-    request_id: Option<String>,
-    /// Whether the completion is recorded, so `Drop` records one only for a reply never read.
-    recorded: bool,
+    record: ToolCallSlot,
 }
 
 impl ObservedToolReply {
     /// Record how the call ended, from the reply body when one arrived.
     fn completed(&mut self, body: Option<&[u8]>) {
-        if self.recorded {
+        let Some(record) = self.record.lock().ok().and_then(|mut slot| slot.take()) else {
             return;
-        }
-        self.recorded = true;
+        };
         let reply = body.and_then(|body| self.reader.reply_in(body));
         let end = reply
             .as_ref()
             .map_or(policy::McpReply::Indeterminate, policy::McpReply::of_reply);
-        let output = reply
-            .as_ref()
-            .and_then(|reply| reply.pointer("/result/structuredContent"));
-        // The gateway names the id as JSON text, so a string id arrives quoted; the call record
-        // names it bare.
-        let id = self.request_id.as_deref().map(|text| {
-            serde_json::from_str::<serde_json::Value>(text)
-                .ok()
-                .and_then(|value| value.as_str().map(str::to_string))
-                .unwrap_or_else(|| text.to_string())
-        });
-        // The reply arrives on the gateway's own thread, so the JSON-RPC identifier is what joins
-        // this record to the call record and the decision.
-        let correlation = telemetry::Correlation::from_headers(None, None).mcp(id.as_deref());
-        self.recorder.for_request(correlation).tool_completed(
-            &self.server,
-            &self.tool,
-            end.as_str(),
-            output,
+        record.completed(
+            end,
+            reply
+                .as_ref()
+                .and_then(|reply| reply.pointer("/result/structuredContent")),
         );
     }
 }
@@ -467,9 +452,7 @@ impl Drop for ObservedToolReply {
 /// One permit whose reply the box observes beside the policy's own observer.
 struct ObservingPermit {
     inner: Box<dyn EgressEffectPermit>,
-    recorder: Arc<DecisionRecorder>,
-    server: String,
-    tool: String,
+    record: ToolCallSlot,
 }
 
 impl EgressEffectPermit for ObservingPermit {
@@ -491,12 +474,51 @@ impl EgressEffectPermit for ObservingPermit {
         Some(Box::new(ObservedToolReply {
             inner,
             reader: policy::ReplyReader::for_request(request_id),
-            recorder: Arc::clone(&self.recorder),
-            server: self.server.clone(),
-            tool: self.tool.clone(),
-            request_id: request_id.map(str::to_string),
-            recorded: false,
+            record: Arc::clone(&self.record),
         }))
+    }
+}
+
+/// One recorded MCP tool call that still owes the record of how it ended.
+///
+/// Both transports end it here: `completed` with the reply, or `refused` when the call never ran.
+/// One dropped while open records `indeterminate`, so a path that forgets to end it loses nothing.
+#[must_use = "a tool call records how it ended; dropping it records `indeterminate`"]
+pub(crate) struct McpToolCallRecord {
+    collector: Arc<Collector>,
+    server: String,
+    tool: String,
+    correlation: telemetry::Correlation,
+    open: bool,
+}
+
+impl McpToolCallRecord {
+    /// Record how the call ended, with the tool's `structuredContent` when it declared one.
+    pub(crate) fn completed(mut self, reply: policy::McpReply, output: Option<&serde_json::Value>) {
+        self.end(reply, output);
+    }
+
+    /// End a call that never ran, which records no completion.
+    pub(crate) fn refused(mut self) {
+        self.open = false;
+    }
+
+    fn end(&mut self, reply: policy::McpReply, output: Option<&serde_json::Value>) {
+        if !std::mem::replace(&mut self.open, false) {
+            return;
+        }
+        #[cfg(test)]
+        TOOL_CALLS_BUILT.with(|count| count.set(count.get() + 1));
+        self.collector.mcp_tool_call(
+            telemetry::McpToolCall::completed(&self.server, &self.tool, reply.as_str(), output)
+                .correlated(self.correlation.clone()),
+        );
+    }
+}
+
+impl Drop for McpToolCallRecord {
+    fn drop(&mut self) {
+        self.end(policy::McpReply::Indeterminate, None);
     }
 }
 
@@ -540,6 +562,7 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
                 server: (*server).to_string(),
                 tool: (*tool).to_string(),
                 arguments: (*arguments).to_string(),
+                record: ToolCallSlot::default(),
             }),
             _ => None,
         };
@@ -553,9 +576,7 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
                 OBSERVING_PERMITS.with(|count| count.set(count.get() + 1));
                 Ok(Box::new(ObservingPermit {
                     inner: permit,
-                    recorder: Arc::clone(&self.recorder),
-                    server: call.server.clone(),
-                    tool: call.tool.clone(),
+                    record: Arc::clone(&call.record),
                 }) as Box<dyn EgressEffectPermit>)
             }
             (result, _) => result,
@@ -871,43 +892,36 @@ impl DecisionRecorder {
             .is_some_and(|collector| collector.accepts(telemetry::Signal::McpToolCalls))
     }
 
-    /// Submit one decided MCP tool call, with the arguments policy judged, as the call's JSON text.
+    /// Record one decided MCP tool call, and return what records how it ends; `None` when no
+    /// target takes MCP tool calls.
     ///
-    /// Text that does not parse records no field, since a target can name no path in it.
-    pub(crate) fn tool_called(&self, server: &str, tool: &str, arguments: &str) {
-        if !self.wants_tool_calls() {
-            return;
-        }
-        #[cfg(test)]
-        TOOL_CALLS_BUILT.with(|count| count.set(count.get() + 1));
-        if let Some(collector) = &self.collector {
-            let arguments = serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
-            collector.mcp_tool_call(
-                telemetry::McpToolCall::called(server, tool, &arguments)
-                    .correlated(self.request_context()),
-            );
-        }
-    }
-
-    /// Submit how one MCP tool call ended, with the tool's own answer when it declared one.
-    pub(crate) fn tool_completed(
+    /// `arguments` is the call's JSON text, and text that does not parse records no field. The
+    /// returned record reuses `correlation`, so the call's two records join on every transport.
+    pub(crate) fn mcp_tool_called(
         &self,
         server: &str,
         tool: &str,
-        reply: &str,
-        output: Option<&serde_json::Value>,
-    ) {
+        arguments: &str,
+        correlation: telemetry::Correlation,
+    ) -> Option<McpToolCallRecord> {
         if !self.wants_tool_calls() {
-            return;
+            return None;
         }
+        let collector = Arc::clone(self.collector.as_ref()?);
         #[cfg(test)]
         TOOL_CALLS_BUILT.with(|count| count.set(count.get() + 1));
-        if let Some(collector) = &self.collector {
-            collector.mcp_tool_call(
-                telemetry::McpToolCall::completed(server, tool, reply, output)
-                    .correlated(self.request_context()),
-            );
-        }
+        let arguments = serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
+        collector.mcp_tool_call(
+            telemetry::McpToolCall::called(server, tool, &arguments)
+                .correlated(correlation.clone()),
+        );
+        Some(McpToolCallRecord {
+            collector,
+            server: server.to_string(),
+            tool: tool.to_string(),
+            correlation,
+            open: true,
+        })
     }
 
     pub(crate) fn mcp_unmatched(&self, program: &str, arguments: &[String]) {
@@ -973,12 +987,19 @@ impl Emitter for EgressDecisionRecorder {
             effective.subject = Some(identity.subject());
             // Every decided remote `tools/call` states its own arguments, allowed or refused, so a
             // reader learns what was asked for and not only what was judged.
-            if let Some(call) = tool_call {
-                self.recorder.for_request(correlation).tool_called(
+            if let Some(call) = tool_call
+                && let Some(record) = self.recorder.mcp_tool_called(
                     &call.server,
                     &call.tool,
                     &call.arguments,
-                );
+                    correlation,
+                )
+            {
+                // A permitted call is ended by its reply; a refused one never ran.
+                match (decision.decision, call.record.lock()) {
+                    (AuditDecision::Allow, Ok(mut slot)) => *slot = Some(record),
+                    _ => record.refused(),
+                }
             }
             self.recorder.record(effective);
             return;
@@ -1735,6 +1756,112 @@ mod tests {
         (collector, recorder)
     }
 
+    /// A remote call admitted and its decision emitted, as the gateway does before it sends.
+    fn admitted(recorder: Arc<DecisionRecorder>) -> Box<dyn EgressEffectPermit> {
+        let permit = capture_probe(Arc::clone(&recorder))
+            .intercept(&remote_tool_attempt(r#"{"a":1}"#))
+            .expect("the call is admitted");
+        EgressDecisionRecorder::over(recorder).emit(remote_tool_emission(AuditDecision::Allow, ""));
+        permit
+    }
+
+    /// A tool-call record that no path ends records one `indeterminate` completion when it drops,
+    /// and a refused one records none, so a missed path loses no record.
+    #[tokio::test]
+    async fn an_unended_tool_call_records_indeterminate_and_a_refused_one_records_nothing() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("tools.jsonl");
+        let (collector, recorder) = tool_call_recorder(Some(&path));
+        let joined = |id: &str| telemetry::Correlation::from_headers(None, None).mcp(Some(id));
+        drop(recorder.mcp_tool_called("demo", "add", r#"{"a":1}"#, joined("dropped")));
+        recorder
+            .mcp_tool_called("demo", "add", r#"{"a":2}"#, joined("refused"))
+            .expect("a target takes tool calls")
+            .refused();
+        recorder
+            .mcp_tool_called("demo", "add", r#"{"a":3}"#, joined("ended"))
+            .expect("a target takes tool calls")
+            .completed(policy::McpReply::Result, None);
+        collector.drained().await;
+
+        let text = std::fs::read_to_string(&path).expect("the tool-call records");
+        let completions: Vec<(String, String)> = text
+            .lines()
+            .flat_map(|line| {
+                let request: serde_json::Value = serde_json::from_str(line).expect("json");
+                request["resourceLogs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|resource| resource["scopeLogs"].as_array().into_iter().flatten())
+                    .flat_map(|scope| scope["logRecords"].as_array().into_iter().flatten())
+                    .filter(|record| record["eventName"] == "strands.box.mcp.tool.completion")
+                    .map(|record| {
+                        let value = |key: &str| {
+                            record["attributes"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .find(|attribute| attribute["key"] == key)
+                                .and_then(|attribute| attribute["value"]["stringValue"].as_str())
+                                .unwrap_or_default()
+                                .to_string()
+                        };
+                        (
+                            value("jsonrpc.request.id"),
+                            value("strands.box.mcp.tool.reply"),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(
+            completions.len(),
+            2,
+            "the dropped and the ended call each end once; the refused one never ran: {text}"
+        );
+        assert!(
+            completions.contains(&("dropped".to_string(), "indeterminate".to_string())),
+            "{completions:?}"
+        );
+        assert!(
+            completions.contains(&("ended".to_string(), "result".to_string())),
+            "{completions:?}"
+        );
+    }
+
+    /// Over http, a permitted call is ended by its reply, and the completion carries the call's
+    /// own correlation rather than one rebuilt from the reply.
+    #[tokio::test]
+    async fn a_remote_call_is_ended_by_its_reply_with_the_calls_own_correlation() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("tools.jsonl");
+        let (collector, recorder) = tool_call_recorder(Some(&path));
+        let mut permit = admitted(recorder);
+        permit
+            .reply_observer(Some("1"))
+            .expect("a target takes tool calls, so the box reads the reply")
+            .finished(br#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#);
+        collector.drained().await;
+
+        let text = std::fs::read_to_string(&path).expect("the tool-call records");
+        assert_eq!(
+            text.matches("strands.box.mcp.tool.call").count(),
+            1,
+            "{text}"
+        );
+        assert_eq!(
+            text.matches("strands.box.mcp.tool.completion").count(),
+            1,
+            "{text}"
+        );
+        assert_eq!(
+            text.matches(r#""stringValue":"remote-tool""#).count(),
+            2,
+            "the completion carries the call's own request id: {text}"
+        );
+    }
+
     fn capture_probe(recorder: Arc<DecisionRecorder>) -> Arc<dyn EgressEffectInterceptor> {
         EgressDecisionInterceptor::over(
             Arc::new(CaptureProbe {
@@ -1818,13 +1945,17 @@ mod tests {
     async fn no_tool_call_record_is_built_when_no_target_takes_tool_calls() {
         let built = |recorder: &Arc<DecisionRecorder>| {
             let before = TOOL_CALLS_BUILT.with(std::cell::Cell::get);
-            recorder.tool_called("demo", "add", r#"{"a":1}"#);
-            recorder.tool_completed(
+            if let Some(record) = recorder.mcp_tool_called(
                 "demo",
                 "add",
-                "result",
-                Some(&serde_json::json!({"sum": 1})),
-            );
+                r#"{"a":1}"#,
+                telemetry::Correlation::current(),
+            ) {
+                record.completed(
+                    policy::McpReply::Result,
+                    Some(&serde_json::json!({"sum": 1})),
+                );
+            }
             TOOL_CALLS_BUILT.with(std::cell::Cell::get) - before
         };
         let (_none, nobody) = tool_call_recorder(None);
@@ -1861,9 +1992,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("tools.jsonl");
         let (collector, recorder) = tool_call_recorder(Some(&path));
-        let mut permit = capture_probe(recorder)
-            .intercept(&remote_tool_attempt(r#"{"a":1}"#))
-            .expect("the call is admitted");
+        let mut permit = admitted(recorder);
         let observer = permit
             .reply_observer(Some("1"))
             .expect("a target takes tool calls, so the box reads the reply");
@@ -1886,9 +2015,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("tools.jsonl");
         let (collector, recorder) = tool_call_recorder(Some(&path));
-        let mut permit = capture_probe(recorder)
-            .intercept(&remote_tool_attempt(r#"{"a":1}"#))
-            .expect("the call is admitted");
+        let mut permit = admitted(recorder);
         let mut observer = permit
             .reply_observer(Some("1"))
             .expect("a target takes tool calls, so the box observes the reply");
@@ -1913,9 +2040,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("tools.jsonl");
         let (collector, recorder) = tool_call_recorder(Some(&path));
-        let mut permit = capture_probe(recorder)
-            .intercept(&remote_tool_attempt(r#"{"a":1}"#))
-            .expect("the call is admitted");
+        let mut permit = admitted(recorder);
         drop(permit.reply_observer(Some("1")).expect("an observer"));
         collector.drained().await;
         let text = std::fs::read_to_string(&path).expect("the tool-call records");
