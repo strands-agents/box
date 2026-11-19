@@ -837,6 +837,37 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
+    fn a_request_recorder_sends_to_the_callers_channel() {
+        let (sender, receiver) = crate::policy_decisions(4);
+        let recorder = DecisionRecorder {
+            collector: None,
+            decisions: Some(Arc::new(sender)),
+            correlation: None,
+            recorded: Arc::new(Mutex::new(Vec::new())),
+        };
+        recorder
+            .for_request(telemetry::Correlation::current())
+            .record(EffectiveDecision::enforcement_deny(
+                r#"Box::Action::"net:connect""#,
+                "example.net:443",
+                "egress",
+                "refused",
+            ));
+        let decision = receiver
+            .try_recv()
+            .expect("the per-request recorder kept the channel");
+        assert_eq!(
+            (
+                decision.permitted,
+                decision.action.as_str(),
+                decision.rule.as_str(),
+                decision.cause.as_str()
+            ),
+            (false, "net:connect", "enforcement:egress", "enforcement")
+        );
+    }
+
+    #[test]
     fn empty_attribution_keeps_policy_denial_classes_distinct() {
         let history = tempfile::tempdir().expect("history directory");
         let policy = PolicyEngine::open(Vec::new(), &history.path().join("dogwood.redb"))

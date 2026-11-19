@@ -522,15 +522,18 @@ impl DecisionRecord {
                 "strands.box.policy.action",
                 self.action().to_string().into(),
             ),
-            ("strands.box.policy.resource", self.resource.clone().into()),
+            (
+                "strands.box.policy.resource",
+                self.resource().to_string().into(),
+            ),
             ("strands.box.policy.verdict", self.verdict().into()),
         ];
-        pairs.push(("strands.box.policy.cause", self.cause.as_str().into()));
-        if self.cause == DecisionCause::InternalFault {
+        pairs.push(("strands.box.policy.cause", self.cause().as_str().into()));
+        if self.cause() == DecisionCause::InternalFault {
             pairs.push(("error.type", "strands.box.policy.evaluation_error".into()));
         }
-        if let Some(reason) = &self.reason {
-            pairs.push(("strands.box.policy.reason", reason.clone().into()));
+        if let Some(reason) = self.reason() {
+            pairs.push(("strands.box.policy.reason", reason.to_string().into()));
         }
 
         // The governing rule, under this product's own namespace.
@@ -587,7 +590,7 @@ impl DecisionRecord {
     }
 
     pub(crate) fn verdict(&self) -> &'static str {
-        if self.permitted { "permit" } else { "deny" }
+        if self.permitted() { "permit" } else { "deny" }
     }
 
     pub(crate) fn unix_nanos(&self) -> u128 {

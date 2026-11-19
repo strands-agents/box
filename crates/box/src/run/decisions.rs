@@ -98,7 +98,8 @@ pub struct PolicyDecision {
     pub resource: String,
     /// The rule that decided: an authored policy's identifier, `<default-deny>`, or an enforcement gate.
     pub rule: String,
-    /// The class of result, such as `permitted`, `forbidden`, or `no_match`.
+    /// The class of result: `permitted`, `forbidden`, `no_match`, `policy_pending`,
+    /// `internal_fault`, or `enforcement`.
     pub cause: String,
     /// The reason for a refusal.
     pub reason: Option<String>,

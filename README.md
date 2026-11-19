@@ -89,6 +89,8 @@ By default, it uses the process's terminal and returns its exit
 code. The second argument appends arguments to `[agent] command`.
 Use `RunOptions::terminal` to supply the workload's terminal and `RunOptions::on_ready`
 to start host threads after hardening and signal registration, before workload setup.
+Use `RunOptions::policy_decisions` to receive each policy decision in memory as the box makes it
+(see [the library section](crates/box/README.md#policy-decisions-for-a-library-caller)).
 Use `RunOptions::box_id` to give a new box your own ID, such as
 `my-app-3f9a1c0e7b2d4a6f`: a prefix of 1 to 15 letters, digits, `.`, `_`, or `-`, then `-` and 16
 lowercase hexadecimal digits. Box stores it, prints it, and labels telemetry with it. A box that
