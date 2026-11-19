@@ -927,8 +927,14 @@ mod decision_tests {
             (code, receiver)
         });
         assert_eq!(code, ExitCode::SUCCESS);
-        while let Some(decision) = receiver.try_recv() {
-            received.push(decision);
+        loop {
+            match receiver.recv_timeout(Duration::from_secs(5)) {
+                Ok(decision) => received.push(decision),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("the channel stayed open after the run ended")
+                }
+            }
         }
         assert_eq!(receiver.dropped(), 0);
         for decision in received {
@@ -966,8 +972,10 @@ mod decision_tests {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut received = Vec::new();
         while Instant::now() < deadline {
-            let Some(decision) = receiver.recv_timeout(Duration::from_millis(50)) else {
-                continue;
+            let decision = match receiver.recv_timeout(Duration::from_millis(50)) {
+                Ok(decision) => decision,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             };
             let refused = !decision.permitted && decision.resource.ends_with("/target.txt");
             received.push(decision);

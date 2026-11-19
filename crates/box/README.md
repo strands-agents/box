@@ -631,12 +631,11 @@ without reading a records file. Make a channel with `policy_decisions(capacity)`
 
 ```rust
 let (sender, receiver) = strands_box::policy_decisions(4096);
-std::thread::spawn(move || loop {
-    let Some(decision) = receiver.recv_timeout(std::time::Duration::from_secs(1)) else {
-        continue;
-    };
-    if !decision.permitted {
-        eprintln!("denied {} {} ({})", decision.action, decision.resource, decision.rule);
+std::thread::spawn(move || {
+    while let Ok(decision) = receiver.recv() {
+        if !decision.permitted {
+            eprintln!("denied {} {} ({})", decision.action, decision.resource, decision.rule);
+        }
     }
 });
 strands_box::run(config, workload, strands_box::RunOptions {
@@ -650,8 +649,10 @@ A `PolicyDecision` holds the values that the decision's record states in its
 resource, the rule, the cause, and the reason. The box never waits for the reader. When the channel
 holds `capacity` unread decisions, the box drops the next one from the channel, and
 `PolicyDecisionReceiver::dropped` counts it. The records file and the telemetry targets still
-receive it as their `include` lists select. After the run ends, `recv_timeout` returns `None` once
-the channel is empty.
+receive it as their `include` lists select. `recv` waits for the next decision. Once the run has
+ended and the channel is empty, it returns an error, and `try_recv` and `recv_timeout` return
+`Disconnected`, so the reader above stops with the run. While the run goes on, they return `Empty`
+and `Timeout` instead.
 
 ## Running
 

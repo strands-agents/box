@@ -9,7 +9,9 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{
+    Receiver, RecvError, RecvTimeoutError, SyncSender, TryRecvError, TrySendError,
+};
 use std::time::{Duration, SystemTime};
 
 use telemetry::DecisionRecord;
@@ -57,14 +59,21 @@ pub struct PolicyDecisionReceiver {
 }
 
 impl PolicyDecisionReceiver {
-    /// The next queued decision, or `None` when none is queued.
-    pub fn try_recv(&self) -> Option<PolicyDecision> {
-        self.receiver.try_recv().ok()
+    /// The next decision, waiting for one; an error means the run has ended and none is queued.
+    pub fn recv(&self) -> Result<PolicyDecision, RecvError> {
+        self.receiver.recv()
     }
 
-    /// The next decision, or `None` when none arrives within `timeout` or the run has ended.
-    pub fn recv_timeout(&self, timeout: Duration) -> Option<PolicyDecision> {
-        self.receiver.recv_timeout(timeout).ok()
+    /// The next queued decision; `Empty` means none is queued yet, `Disconnected` that the run has
+    /// ended.
+    pub fn try_recv(&self) -> Result<PolicyDecision, TryRecvError> {
+        self.receiver.try_recv()
+    }
+
+    /// The next decision within `timeout`; `Timeout` means none arrived yet, `Disconnected` that
+    /// the run has ended.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<PolicyDecision, RecvTimeoutError> {
+        self.receiver.recv_timeout(timeout)
     }
 
     /// The number of decisions the box did not queue because the channel was full.
@@ -138,7 +147,7 @@ mod tests {
         assert_eq!(decision.rule, "<default-deny>");
         assert_eq!(decision.cause, "no_match");
         assert_eq!(decision.reason.as_deref(), Some("no permit matched"));
-        assert!(receiver.try_recv().is_none());
+        assert!(receiver.try_recv().is_err());
     }
 
     /// Run `sends` on another thread, and fail when it does not return within a second.
@@ -169,7 +178,7 @@ mod tests {
         assert_eq!(receiver.dropped(), 998);
         assert_eq!(receiver.try_recv().unwrap().resource, "host-0:443");
         assert_eq!(receiver.try_recv().unwrap().resource, "host-1:443");
-        assert!(receiver.try_recv().is_none());
+        assert!(receiver.try_recv().is_err());
         sender.send(&deny("after:443"));
         assert_eq!(receiver.try_recv().unwrap().resource, "after:443");
     }
@@ -179,6 +188,27 @@ mod tests {
         let (sender, receiver) = policy_decisions(1);
         drop(receiver);
         sender.send(&deny("example.net:443"));
+    }
+
+    #[test]
+    fn a_reader_tells_the_end_of_the_run_from_a_quiet_moment() {
+        let (sender, receiver) = policy_decisions(4);
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(10)),
+            Err(RecvTimeoutError::Timeout)
+        );
+        sender.send(&deny("last:443"));
+        drop(sender);
+        assert_eq!(receiver.recv().unwrap().resource, "last:443");
+        assert_eq!(receiver.recv(), Err(RecvError));
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
+        let started = Instant::now();
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(5)),
+            Err(RecvTimeoutError::Disconnected)
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
