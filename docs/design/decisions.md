@@ -2751,7 +2751,7 @@ prints the count once, on one stderr line, when the run ends. Each failed export
 line, with its cause, only when `STRANDS_BOX_TELEMETRY_DEBUG` is set, because a vendor that is down
 would print a line on each export interval. A relayed agent span does not take part in the shutdown
 drain, so a shutdown can lose one in flight; a refusal cannot be lost that way. A record that the SDK's own
-queue refuses is not counted. Every exit runs the same drain. A box that fails before its workload
+queue refuses is counted and reported, but not kept. Every exit runs the same drain. A box that fails before its workload
 starts therefore still records its stop.
 
 <a id="the-effective-decision-is-the-canonical-record"></a>
