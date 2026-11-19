@@ -1908,6 +1908,18 @@ The alternative was proxy fields on the Shell's `VfsKernel`, set through a build
 Shell doesn't have that feature and Box won't propose it, and a builder call does nothing once Box
 supplies its own kernel.
 
+**An `https://` request opens its own CONNECT tunnel.** The gateway refuses a denied host at the
+CONNECT, with `403` and the reason. reqwest's tunnel drops the body of that response, so the Shell
+reported a refusal as a failed name lookup (`curl` exit 6). `GatewayNetwork` therefore sends an
+`https://` request with hyper and rustls over a tunnel it opens itself, and a marked refusal at the
+CONNECT keeps its reason. Plain `http://` stays on reqwest. A preflight CONNECT was rejected because
+it records a second `net:connect` decision for each request, which `when temporal` rules count. A
+reqwest connector was rejected because reqwest runs the tunnel inside its own connector and returns
+no response from it. The cost is two clients, which must keep the same trust, default headers, Basic
+credentials from the URL, and body limit. `a_refused_tunnel_fails_curl_with_the_gateways_reason`
+pins the reason. A Monty `fetch` still uses reqwest, so its `https://` refusals still lose the
+reason.
+
 The wrapper governs only requests that reach the kernel's HTTP step. A future Shell network command
 that builds its own client would skip it. A test in `shell_dependency_guard.rs` fails if a client
 is built in the Shell sources outside `vfs_kernel.rs`, but that check is a lint and not a guarantee.
@@ -1920,7 +1932,8 @@ tunnel would reach the Shell as an ordinary HTTP status. `curl` exits 0 for any 
 caller passes `-f`. The gateway therefore adds a header to each response it writes. Box's kernel
 wrapper converts that response to a permission-denied error. `curl` then prints one reason line and
 exits 1. The marker identifies who wrote the refusal. It does not authorize the request, which the
-gateway already refused. `kernel.rs::a_marked_refusal_fails_curl` pins it.
+gateway already refused. `a_marked_refusal_fails_curl` pins it for `http://`, and
+`a_marked_refusal_inside_a_tunnel_fails_curl` for `https://`.
 
 **The conversion is the kernel wrapper's alone, and Monty does not have it.** A Monty `fetch` builds
 its own client and never reads the marker, so a denied request reaches the script as an ordinary

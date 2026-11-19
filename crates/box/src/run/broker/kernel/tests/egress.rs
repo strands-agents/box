@@ -297,6 +297,28 @@ fn a_trusted_tunnel_returns_the_response() {
 }
 
 #[test]
+fn a_marked_refusal_inside_a_tunnel_fails_curl() {
+    let (routing, _requests) = tls_gateway(
+        "a.example",
+        response(
+            "403 Forbidden",
+            &[("x-strands-box-egress", "refused")],
+            "policy denied this operation on 'a.example:443/' [policy: p]: reason\n",
+        )
+        .into_bytes(),
+    );
+
+    let (status, stdout, stderr) = run(Some(routing), "curl -sS https://a.example/");
+
+    assert_eq!(status, 1, "{stdout} {stderr}");
+    assert_eq!(
+        stderr.trim(),
+        "curl: policy denied this operation on 'a.example:443/' [policy: p]: reason"
+    );
+    assert!(stdout.is_empty(), "{stdout}");
+}
+
+#[test]
 fn https_user_information_becomes_basic_credentials() {
     let (routing, requests) = tls_gateway("a.example", html("OK").into_bytes());
 
