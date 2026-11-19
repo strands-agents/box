@@ -1,7 +1,7 @@
 # Policy action reference
 
 A rule names one action. The action decides which `context.input` fields the rule can read. The box
-ships twelve actions, and generates one more for each MCP tool it discovers. Each experimental [tool
+ships ten actions, and generates one more for each MCP tool it discovers. Each experimental [tool
 grammar](../config.md#toolnamegrammar) adds its own `Tool::<name>` actions.
 
 Audience: an operator writing a `policy.dw` who needs the exact action name, its `context.input`
@@ -37,9 +37,9 @@ one family: actions whose names start the same way before the `:`, such as `fs:r
 `fs:write`. Each MCP tool action is a family of its own. A rule that checks `context.input` for
 `fs:read` and `http:request` together refuses to load, so write one rule for each.
 
-## The twelve actions
+## The ten actions
 
-Twelve actions in four categories, and one generated action per MCP tool:
+Ten actions in four categories, and one generated action per MCP tool:
 
 - **[Filesystem](#filesystem)**, raised by Strands Shell (the box's shell) and by Monty (the box's
   Python interpreter).
@@ -53,7 +53,6 @@ Twelve actions in four categories, and one generated action per MCP tool:
 - **[Network](#network)**, raised by the egress gateway.
   - `net:connect`: each connection, before TLS.
   - `http:request`: each HTTP request inside the connection, after TLS on an HTTPS connection.
-  - `websocket:send` and `websocket:receive`: each WebSocket message, before it moves on.
 - **[Shell](#shell)**, raised by Strands Shell.
   - `shell:exec`: a command line that runs a program the shell implements, such as `cat` or `grep`.
   - `shell:spawn`: a command line that runs a program of the surrounding OS, such as `git`. The box
@@ -135,20 +134,9 @@ with `expected ipaddr but saw String`.
 A rule on `path` has caveats for repeated slashes and `%2F`.
 [Forbid one URL path on a host](../policy.md#forbid-one-url-path-on-a-host) lists them.
 
-**`websocket:send`** decides each message the workload sends, before any byte of it leaves.
-**`websocket:receive`** decides each message the server sends, before any byte of it reaches the
-workload. Both carry the same fields:
-
-| Field | Type | Meaning |
-|---|---|---|
-| `host` | String | The handshake's destination host. |
-| `port` | Long | The handshake's destination port. |
-| `path` | String | The handshake's URL path. |
-| `opcode` | `Box::WebSocketOpcode` | `text`, `binary`, `ping`, `pong`, or `close`, spelled `Box::WebSocketOpcode::"text"`. |
-| `body_bytes` | Long | The message's payload length. |
-
-The two actions are one family, so one rule can read `context.input` for both. A message needs its
-own permit, so a `GET` permit admits a handshake and no message.
+A WebSocket handshake is one `http:request`, and its permit admits the whole WebSocket. The gateway
+asks policy nothing after the `101`. A permit that doesn't read `upgrade` admits a WebSocket to its
+host, so add `context.input.upgrade == ""` to a permit that is for HTTP only.
 
 Cloud metadata and link-local protection is two `forbid` rules on `net:connect`;
 [what Box always enforces](../security.md#what-box-always-enforces) lists them.
@@ -331,7 +319,6 @@ What each caller records as a response:
 | `fs:*` | When the operation ends. A `test -e`, `test -L`, or `test -r` in the Shell, or an `os.stat()`, `Path.exists()`, `Path.is_file()`, `Path.is_dir()`, or `Path.is_symlink()` in Python, that got an answer is a response even when the answer is "no": for example, a missing file in an existing folder. A check of a path inside the reachable paths that can't be resolved, such as one under a missing folder or under a folder the operating system won't let Box search, is also a response, although the reachable paths check refuses it. This holds only when the path has no `.` or `..` component, crosses no symbolic link, and isn't in Box's own state. Any other check that Box itself refuses is an error: the reach floor refuses it, or a guard refuses it because a path changed during the check. | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
 | `net:connect` | When the connect attempt ends | none |
 | `http:request` | When the upstream response completes, fails, or reaches its deadline, once per exchange | `status`: the upstream's reply status, when received |
-| `websocket:send`, `websocket:receive` | When the gateway has sent the message on. `body_bytes` counts the bytes the other side took. A message of which no byte reached the other side records `::error` | none |
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |
 | A tool grammar action, `Tool::<name>::Action::"<action>"` | When a program the Shell started ends | `status`, as on `shell:spawn` |
 | `mcp:call` | For `tools/call`, `prompts/get`, and `resources/read`: when the call completes or ends indeterminately over stdio, or when the upstream response completes, fails, or reaches its deadline over HTTP | none |

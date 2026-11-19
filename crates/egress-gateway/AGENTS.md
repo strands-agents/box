@@ -11,14 +11,13 @@ not rename during the freeze.
 
 ## Public Contract
 
-The façade exports 37 names (`src/lib.rs`): 32 unconditional, and 5 behind the default-on
+The façade exports 36 names (`src/lib.rs`): 31 unconditional, and 5 behind the default-on
 `tls-intercept` feature — `BackendDial`, `MitmConfig`, `MitmHandle`, `MitmInterceptor`,
 `ResponseLimits` — which stay behind it. `BackendDial` is a `MitmConfig.backends` entry, consumed by
 `strands-box`'s `run/hosted.rs`. `ReplyObserver` is exported for `policy`'s egress adapter, which
-records how an HTTP MCP tool call ended, and `WebSocketOpcode` for the same adapter, which maps it to
-the policy's own opcode. `audit::Decision` exits as `AuditDecision`. `normalize_host`
+records how an HTTP MCP tool call ended. `audit::Decision` exits as `AuditDecision`. `normalize_host`
 and `is_bindable_host` are the one host spelling, exported for `policy::spelling`, which refuses a
-host literal no bound host can equal. A 38th name needs a named external caller.
+host literal no bound host can equal. A 37th name needs a named external caller.
 
 - Keep implementation modules private, re-export the supported surface from `src/lib.rs`, and keep
   `#![warn(missing_docs, unreachable_pub)]` enabled.
@@ -35,9 +34,8 @@ host literal no bound host can equal. A 38th name needs a named external caller.
 
 The seam is `EffectInterceptor::intercept`, taking an `&EffectAttempt` and returning a
 `Box<dyn EffectPermit>` (`src/effect.rs`). It speaks `io::Result`, never `ProxyError`, and a denial is
-`io::ErrorKind::PermissionDenied`. Each attempt kind — `Resolve`, `Connect`, `HttpRequest`,
-`WebSocketSend`, `WebSocketReceive`, `ResponseRelease` — is admitted before its effect, and each but
-`Resolve` reports a terminal `EffectOutcome`. `proxy/websocket.rs` raises the `WebSocket*` attempts.
+`io::ErrorKind::PermissionDenied`. There are exactly three attempt kinds — `Connect`, `HttpRequest`,
+`ResponseRelease` — each admitted before its effect and each reporting a terminal `EffectOutcome`.
 `record_outcome` and `mark_indeterminate` consume `self: Box<Self>`, and `ClaimedEffectPermit`'s
 `Drop` calls `mark_indeterminate`, so one permit makes one terminal transition even on a panic.
 `ResponseRelease` carries routing and status only; `HttpRequest` retains `body_bytes`.

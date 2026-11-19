@@ -17,7 +17,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::Sleep;
 use tokio_rustls::TlsAcceptor;
 
-use crate::audit::{Decision as AuditDecision, RequestId};
+use crate::audit::RequestId;
 use crate::client::http::{ResponseCompletion, ResponseProgress, ResponseState};
 use crate::error::{ProxyError, Result};
 use crate::intercept::mitm::body::ResponseBody;
@@ -111,7 +111,7 @@ async fn first_request(
 
     // A plain `http://` request: the same decisions, with no TLS and no CONNECT ack.
     let handshake = websocket::classify(&request) != Handshake::None;
-    let method = request.method().to_string();
+    let method = request.method().clone();
     let max_body = state.config.response_limits.max_body_bytes;
     let Ok(parsed) = http1::read_request(&head, request.into_body(), max_body).await else {
         return Ok(WorkloadResponse::bare(400));
@@ -123,8 +123,8 @@ async fn first_request(
     // A listed host's port 80 is decided and sent as port 443 over TLS, exactly as a CONNECT to it.
     let (connect, upgraded) = connect::plain_destination(&state.config.upgrade_http, host, port);
     let correlation = RequestId::unique().with_headers(&parsed.headers);
-    let path = l7::judged_path(&origin_target);
-    let handshake = handshake.then_some((method.as_str(), path.as_str()));
+    let path = handshake.then(|| l7::judged_path(&origin_target));
+    let handshake = path.as_deref().map(|path| (method.as_str(), path));
     let (upstream, backend) =
         match admit(state, &connect, token.as_deref(), &correlation, handshake) {
             Ok(opened) => opened,
@@ -157,19 +157,13 @@ fn admit(
         return Err(Box::new(WorkloadResponse::bare(407)));
     }
     if let Some(request) = plain_handshake {
-        let reason = "websocket: handshake on a plaintext request";
-        let correlation = correlation.clone();
-        l7::emit_decision(
+        return Err(Box::new(l7::deny(
             state,
             connect,
             request,
-            AuditDecision::Deny,
-            reason,
-            correlation,
-        );
-        return Err(Box::new(WorkloadResponse::refusal(
-            403,
-            b"WebSocket requires TLS",
+            "websocket: handshake on a plaintext request",
+            correlation.clone(),
+            WorkloadResponse::refusal(403, b"WebSocket requires TLS"),
         )));
     }
     open_governed_upstream(state, connect, correlation).map_err(|error| Box::new(error.response()))

@@ -683,7 +683,7 @@ impl WorkloadResponse {
 }
 
 /// Claim one effect from the authorization authority.
-pub(crate) fn claim_effect(
+fn claim_effect(
     state: &SharedState,
     attempt: &EffectAttempt<'_>,
 ) -> io::Result<ClaimedEffectPermit> {
@@ -741,7 +741,7 @@ pub(crate) fn emit_decision(
 }
 
 /// Record the denial of `request` on `connect`, and return `refusal`, the response that answers it.
-fn deny(
+pub(crate) fn deny(
     state: &SharedState,
     connect: &ConnectRequest,
     request: (&str, &str),

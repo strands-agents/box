@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::path::Path;
 
-use crate::request::{FsOperation, WebSocketDirection, WebSocketOpcode};
+use crate::request::FsOperation;
 
 /// How much of a message actually left, and whether that count can be trusted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,21 +110,6 @@ pub enum Outcome<'a> {
         intercepted: bool,
         /// `websocket` on a WebSocket handshake, and empty on every other request.
         upgrade: &'a str,
-    },
-    /// One WebSocket message ended.
-    WebSocket {
-        /// Which way the message moved.
-        direction: WebSocketDirection,
-        /// The handshake's destination host.
-        host: &'a str,
-        /// The handshake's destination port.
-        port: u16,
-        /// The handshake's path.
-        path: &'a str,
-        /// The opcode of the message's first frame.
-        opcode: WebSocketOpcode,
-        /// How much of the payload the other side took.
-        delivery: Delivery,
     },
     /// A resolved command line finished (`shell:exec::response`).
     ///

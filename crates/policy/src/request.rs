@@ -180,42 +180,6 @@ impl FsOperation {
     }
 }
 
-/// Which way one WebSocket message moves, which selects its action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WebSocketDirection {
-    /// From the workload to the server (`websocket:send`).
-    Send,
-    /// From the server to the workload (`websocket:receive`).
-    Receive,
-}
-
-/// The opcode of a WebSocket message's first frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WebSocketOpcode {
-    /// A text message.
-    Text,
-    /// A binary message.
-    Binary,
-    /// A Ping control frame.
-    Ping,
-    /// A Pong control frame.
-    Pong,
-    /// A Close control frame.
-    Close,
-}
-
-impl WebSocketOpcode {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Text => "text",
-            Self::Binary => "binary",
-            Self::Ping => "ping",
-            Self::Pong => "pong",
-            Self::Close => "close",
-        }
-    }
-}
-
 /// The single value a PEP hands the PDP for one authorization question.
 #[derive(Debug)]
 pub enum Request<'a> {
@@ -266,21 +230,6 @@ pub enum Request<'a> {
         intercepted: bool,
         /// `websocket` on a WebSocket handshake, and empty on every other request.
         upgrade: &'a str,
-    },
-    /// One whole WebSocket message, before any byte of it moves on.
-    WebSocket {
-        /// Which way the message moves.
-        direction: WebSocketDirection,
-        /// The handshake's destination host.
-        host: &'a str,
-        /// The handshake's destination port.
-        port: u16,
-        /// The handshake's path.
-        path: &'a str,
-        /// The opcode of the message's first frame.
-        opcode: WebSocketOpcode,
-        /// The payload length the message offers.
-        body_bytes: usize,
     },
     /// One MCP request, with per-tool actions for `tools/call` and `mcp:call` for other methods.
     McpCall {
@@ -354,9 +303,6 @@ impl Request<'_> {
             Request::Fs { path, .. } => path.reported().into_owned(),
             Request::Connect { host, port, .. } => format!("{host}:{port}"),
             Request::Http {
-                host, port, path, ..
-            }
-            | Request::WebSocket {
                 host, port, path, ..
             } => format!("{host}:{port}{path}"),
             Request::McpCall {

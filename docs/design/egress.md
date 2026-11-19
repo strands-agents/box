@@ -170,20 +170,12 @@ HTTP handshake with 403 before any decision, and a handshake to an HTTP MCP serv
 removes `Sec-WebSocket-Extensions`, adds the credential to the handshake as to any request, and
 refuses a `101` with a wrong `Sec-WebSocket-Accept` or with an extension with 502.
 
-After the `101`, the gateway asks policy `websocket:send` for each message from the workload and
-`websocket:receive` for each one from the server, before any byte of it moves on. It reads each
-message from the workload whole, up to the 16 MiB cap, and decides after its last byte, as it reads
-an HTTP request body. A binary message in one frame from the server carries its length in its
-header, so the gateway decides at the header and streams the payload with no size cap, as it streams
-an HTTP response. It reads every other server message whole, up to the 16 MiB cap: a text message,
-which must be checked for UTF-8, a message in more than one frame, and a message on a host with a
-credential, which is redacted after its decision. It sends each message on as one frame, masked again toward the server. A Ping,
-Pong, or Close is a message of its own. A refused message closes both sides: 1008 to the workload and 1001 to
-the server, with one refusal record. A broken frame gets 1002, bad UTF-8 gets 1007, and a message
-over the cap gets 1009. When one side breaks a rule or drops, the other side gets 1001 after the
-workload or 1014 after the server. After 300 seconds with no byte on either leg, both sides get
-1001. If the gateway is partway through a frame to one side when the WebSocket ends, it closes that
-connection without a Close.
+After the `101`, the gateway copies bytes both ways and asks policy nothing more. On a host with a
+credential, it reads each frame from the server whole, up to the 16 MiB cap, redacts the credential,
+and sends the frame on with its new length. A redacted Ping or Pong goes on with no payload, and a
+redacted Close keeps only its code. A server frame over the cap or one that breaks RFC 6455 ends
+both connections with one refusal record. When one side closes, the gateway closes its write to the
+other side. After 300 seconds with no byte on either leg, it ends both connections.
 
 ### Cloud instance metadata
 

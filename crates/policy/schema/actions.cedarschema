@@ -202,28 +202,6 @@ action "http:request" appliesTo {
   context: { input: NetworkRequestInput, output?: NetworkResponseOutput }
 };
 
-entity WebSocketOpcode enum ["text", "binary", "ping", "pong", "close"];
-
-type WebSocketMessageInput = {
-  host: String,
-  port: Long,
-  path: String,
-  opcode: WebSocketOpcode,
-  body_bytes: Long
-};
-
-action "websocket:send" appliesTo {
-  principal: Agent,
-  resource: Resource,
-  context: { input: WebSocketMessageInput }
-};
-
-action "websocket:receive" appliesTo {
-  principal: Agent,
-  resource: Resource,
-  context: { input: WebSocketMessageInput }
-};
-
 // ─────────────────────────────────────────────────────────────────────────────
 // ── Shell ────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────

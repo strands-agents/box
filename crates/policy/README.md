@@ -18,7 +18,7 @@ enforcement point.
 
 ## Public Interface
 
-The façade exports **62 names with `--all-features`, and 56 by default.** The adapter features add
+The façade exports **60 names with `--all-features`, and 54 by default.** The adapter features add
 the six names in the last row.
 
 `PrincipalKind` left on 2026-08-18. The three enforcement-point principals collapsed into one
@@ -30,7 +30,7 @@ the six names in the last row.
 | `PolicyEngine` | One loaded, strict-validated authority. It carries the lifecycle. |
 | `Principal` | Integration metadata for the fixed `Box::Agent::"self"` identity. |
 | `GovernedBox` | Integration metadata for the box that owns the authority. |
-| `Request`, `FsAccess`, `FsOperation`, `WebSocketDirection`, `WebSocketOpcode` | Typed authorization request. |
+| `Request`, `FsAccess`, `FsOperation` | Typed authorization request. |
 | `RequestId` | Opaque identifier returned for a recorded request and carried into its outcome. |
 | `ApprovedPath`, `PathResolver`, `PathRefusal` | The resolved path a `Request::Fs` demands, the only public minter of one, and why a mint fails. |
 | `Decision`, `DenyReason`, `RuleId` | Authorization verdict and determining rule. |
@@ -211,7 +211,6 @@ load refuses an `operation` guard under no action.
 | `Fs` | one `Box::Action` selected by `operation` | `path: &ApprovedPath`, `operation: FsOperation` |
 | `Connect` | `Box::Action::"net:connect"` | `host: &str`, `ip: Option<IpAddr>`, `port: u16` |
 | `Http` | `Box::Action::"http:request"` | `host: &str`, `port: u16`, `method: &str`, `path: &str`, `body_bytes: usize`, `intercepted: bool`, `upgrade: &str` |
-| `WebSocket` | `Box::Action::"websocket:send"` or `"websocket:receive"`, selected by `direction` | `direction: WebSocketDirection`, `host: &str`, `port: u16`, `path: &str`, `opcode: WebSocketOpcode`, `body_bytes: usize` |
 | `ShellExec` | `Box::Action::"shell:exec"` | `command`, `program`, `args`, `cwd` |
 | `ShellSpawn` | `Box::Action::"shell:spawn"` | the same, plus `program_path` |
 | `McpCall` | `Box::Action::"mcp:call"`, or `<normalized-server>::Action::"<tool>"` when `tool` and `arguments` are present | `server`, `method`, `tool`, `prompt`, `uri`, `arguments` |
@@ -426,7 +425,6 @@ Other facts in those events remain available until normal history pruning remove
 |---|---|
 | `Connect` | `host`, `port`, `address`, `connected` |
 | `Http` | `host`, `port`, `method`, `path`, `delivery`, `status`, `intercepted`, `upgrade` |
-| `WebSocket` | `direction`, `host`, `port`, `path`, `opcode`, `delivery` |
 | `ShellRun` | `command`, `program`, `args`, `cwd`, `status` |
 | `ShellSpawn` | the same, plus `program_path` |
 | `Fs` | `path`, `operation`, `result` |
@@ -542,11 +540,10 @@ this boundary serves. The interceptor holds all three and passes the box into ev
 `decide` and `record` it makes.
 
 The interceptor maps connect and HTTP request attempts to `Request::Connect` and
-`Request::Http`, and each WebSocket message attempt to `Request::WebSocket`. A response release
-raises **no request and no decision**, and its permit records nothing. The gateway consumes the
-request permit when the exchange ends and records the matching HTTP outcome. An
-`http:request::response` event carries delivered request bytes and any reply status in
-`output.status`, which only a `when temporal { … }` rule reads.
+`Request::Http`. A response release raises **no request and no decision**, and its permit
+records nothing. The gateway consumes the request permit when the exchange ends and records
+the matching HTTP outcome. An `http:request::response` event carries delivered request bytes
+and any reply status in `output.status`, which only a `when temporal { … }` rule reads.
 
 1. `intercept` evaluates the typed attempt with `PolicyEngine::decide`.
 2. A denial returns `io::ErrorKind::PermissionDenied`.

@@ -7,7 +7,6 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use base64::Engine as _;
 use credentials::{
     Backend, DestinationPattern, InjectMode, Locator, RouteSpec, Vault, VaultConfig,
 };
@@ -21,29 +20,21 @@ use harness::{SeenRequest, TlsUpstream, UpstreamTls, WorkloadClient, header_valu
 const HOST: &str = "realtime.example.test";
 const BACKEND: &str = "gw.example.test";
 const KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+const ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 const LIMIT: usize = 1024;
 const SECRET: &str = "sk_live_REALSECRET";
-const FLOOD: usize = 15 << 20;
+const ENDED: Frame = (true, 0xF, Vec::new());
 
 #[derive(Default)]
-struct MessagePolicy(Arc<Mutex<Vec<String>>>);
+struct Decisions(Arc<Mutex<Vec<String>>>);
 
-impl EffectInterceptor for MessagePolicy {
+impl EffectInterceptor for Decisions {
     fn intercept(&self, attempt: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
-        let entry = match attempt {
-            EffectAttempt::HttpRequest { upgrade, .. } => format!("http {upgrade:?}"),
-            EffectAttempt::WebSocketSend {
-                opcode, body_bytes, ..
-            } => format!("send {opcode:?} {body_bytes}"),
-            EffectAttempt::WebSocketReceive {
-                opcode, body_bytes, ..
-            } => format!("receive {opcode:?} {body_bytes}"),
-            _ => return Ok(Box::new(Logged(None))),
+        let EffectAttempt::HttpRequest { upgrade, .. } = attempt else {
+            return Ok(Box::new(Logged(None)));
         };
+        let entry = format!("http {upgrade:?}");
         self.0.lock().unwrap().push(entry.clone());
-        if matches!(attempt, EffectAttempt::WebSocketSend { body_bytes, .. } if *body_bytes > 100) {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "too long"));
-        }
         Ok(Box::new(Logged(Some((entry, Arc::clone(&self.0))))))
     }
 }
@@ -106,7 +97,7 @@ fn read_frame_masked(stream: &mut impl Read, masked: bool) -> Option<Frame> {
     }
     if masked {
         stream.read_exact(&mut key).ok()?;
-        (key != WORKLOAD_KEY).then_some(())?;
+        (key == WORKLOAD_KEY).then_some(())?;
     }
     let mut payload = vec![0; len];
     stream.read_exact(&mut payload).ok()?;
@@ -115,39 +106,40 @@ fn read_frame_masked(stream: &mut impl Read, masked: bool) -> Option<Frame> {
 }
 
 fn echo(frames: Arc<Mutex<Vec<Frame>>>) -> impl Fn(&mut UpstreamTls, &SeenRequest) + Send + Sync {
-    move |tls, request| {
-        let key = request.header("sec-websocket-key").unwrap();
-        let mut digest = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
-        digest.update(key.as_bytes());
-        digest.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-        let accept = base64::engine::general_purpose::STANDARD.encode(digest.finish());
+    move |tls, _| {
         let head = format!(
             "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
-             Sec-WebSocket-Accept: {accept}\r\n\r\n"
+             Sec-WebSocket-Accept: {ACCEPT}\r\n\r\n"
         );
         tls.write_all(head.as_bytes()).unwrap();
         while let Some((fin, opcode, payload)) = read_frame_masked(tls, true) {
             frames.lock().unwrap().push((fin, opcode, payload.clone()));
+            if payload == b"leak-split" {
+                let (head, tail) = SECRET.as_bytes().split_at(6);
+                let _ = tls.write_all(&frame(false, 1, &[b"token=", head].concat(), false));
+                let _ = tls.write_all(&frame(true, 0, tail, false));
+                continue;
+            }
             let (opcode, reply) = match &payload[..] {
                 b"leak" => (opcode, format!("token={SECRET}").into_bytes()),
-                b"flood" => (2, vec![0; FLOOD]),
                 b"big" => (2, vec![7; 300]),
                 b"leak-ping" => (9, SECRET.as_bytes().to_vec()),
                 b"leak-close" => (8, [&close(1000)[..], SECRET.as_bytes()].concat()),
                 _ => (opcode, payload),
             };
-            let _ = tls.write_all(&frame(true, opcode, &reply, false));
+            let _ = tls.write_all(&frame(fin, opcode, &reply, false));
             if opcode == 8 {
-                return;
+                break;
             }
         }
+        frames.lock().unwrap().push(ENDED);
     }
 }
 
 #[derive(Clone, Copy)]
 enum Route {
     Direct,
-    Backend(&'static str),
+    Backend,
     Mcp,
 }
 
@@ -166,17 +158,24 @@ impl Session {
         limit: usize,
         handler: impl Fn(&mut UpstreamTls, &SeenRequest) + Send + Sync + 'static,
     ) -> Self {
-        Self::open(credential, limit, Route::Direct, handler)
+        Self::open(
+            credential,
+            limit,
+            Route::Direct,
+            Duration::from_secs(300),
+            handler,
+        )
     }
 
     fn open(
         credential: bool,
         limit: usize,
         route: Route,
+        idle: Duration,
         handler: impl Fn(&mut UpstreamTls, &SeenRequest) + Send + Sync + 'static,
     ) -> Self {
         let backend = match route {
-            Route::Backend(host) => Some(host),
+            Route::Backend => Some(BACKEND),
             Route::Direct | Route::Mcp => None,
         };
         let upstream = TlsUpstream::start_custom(backend.unwrap_or(HOST), handler);
@@ -207,14 +206,15 @@ impl Session {
             backends: backends.into_iter().collect(),
             mcp_servers: match route {
                 Route::Mcp => vec![(HOST.to_string(), "realtime-mcp".to_string())],
-                Route::Direct | Route::Backend(_) => Vec::new(),
+                Route::Direct | Route::Backend => Vec::new(),
             },
             response_limits: ResponseLimits {
                 max_body_bytes: limit,
             },
+            upstream_read_deadline: idle,
             ..MitmConfig::default()
         };
-        let policy = MessagePolicy::default();
+        let policy = Decisions::default();
         let log = Arc::clone(&policy.0);
         let records = StubEmitter::new();
         let gateway = MitmInterceptor::start_with(
@@ -250,6 +250,12 @@ impl Session {
         self.client.read_head()
     }
 
+    fn handshake_with_credential(&mut self) {
+        let phantom = self.phantom.clone().unwrap();
+        let head = self.handshake(&format!("Authorization: Bearer {phantom}\r\n"));
+        assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+    }
+
     fn send(&mut self, fin: bool, opcode: u8, payload: &[u8]) {
         self.client.send_raw(&frame(fin, opcode, payload, true));
     }
@@ -263,24 +269,24 @@ impl Session {
     fn decided(&self) -> Vec<String> {
         self.policy.lock().unwrap().clone()
     }
-
-    fn wait_for(&self, prefix: &str) -> String {
-        for _ in 0..100 {
-            if let Some(entry) = self.decided().into_iter().find(|e| e.starts_with(prefix)) {
-                return entry;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        panic!("no {prefix:?} in {:?}", self.decided());
-    }
 }
 
 fn close(code: u16) -> Vec<u8> {
     code.to_be_bytes().to_vec()
 }
 
+fn ended(frames: &Mutex<Vec<Frame>>) -> bool {
+    for _ in 0..100 {
+        if frames.lock().unwrap().last() == Some(&ENDED) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 #[test]
-fn each_message_is_decided_and_sent_on_as_one_frame() {
+fn one_decision_admits_the_websocket_and_its_frames_pass_as_they_are() {
     let frames = Arc::new(Mutex::new(Vec::new()));
     let mut session = Session::start(false, LIMIT, echo(Arc::clone(&frames)));
     let head = session.handshake("Sec-WebSocket-Extensions: permessage-deflate\r\n");
@@ -290,171 +296,62 @@ fn each_message_is_decided_and_sent_on_as_one_frame() {
     assert_eq!(seen.header("upgrade").as_deref(), Some("websocket"));
     assert_eq!(seen.header("sec-websocket-extensions"), None);
 
-    session.send(false, 1, b"hel");
-    session.send(true, 9, b"p");
-    session.send(true, 0, b"lo");
-    assert_eq!(
-        read_frame(&mut session.client),
-        Some((true, 9, b"p".to_vec()))
-    );
-    assert_eq!(
-        read_frame(&mut session.client),
-        Some((true, 1, b"hello".to_vec()))
-    );
-    session.send(true, 8, &close(1000));
-    assert_eq!(
-        read_frame(&mut session.client),
-        Some((true, 8, close(1000)))
-    );
-
-    let expected = [(9, &b"p"[..]), (1, b"hello"), (8, &close(1000))];
-    let expected: Vec<Frame> = expected
-        .map(|(op, payload)| (true, op, payload.to_vec()))
-        .into();
-    assert_eq!(*frames.lock().unwrap(), expected);
+    let sent: [Frame; 4] = [
+        (false, 1, b"hel".to_vec()),
+        (true, 9, b"p".to_vec()),
+        (true, 0, b"lo".to_vec()),
+        (true, 8, close(1000)),
+    ];
+    for (fin, opcode, payload) in &sent {
+        session.send(*fin, *opcode, payload);
+    }
+    for expected in &sent {
+        assert_eq!(read_frame(&mut session.client).as_ref(), Some(expected));
+    }
+    assert!(ended(&frames));
+    assert_eq!(*frames.lock().unwrap(), [&sent[..], &[ENDED]].concat());
     let decided = session.decided();
-    let sent: Vec<_> = decided
-        .iter()
-        .filter(|entry| entry.starts_with("send"))
-        .collect();
-    assert_eq!(
-        sent,
-        [
-            "send Ping 1",
-            "send Ping 1 -> Completed(1)",
-            "send Text 5",
-            "send Text 5 -> Completed(5)",
-            "send Close 2",
-            "send Close 2 -> Completed(2)",
-        ]
-    );
+    assert_eq!(decided.len(), 2, "{decided:?}");
     assert_eq!(decided[0], r#"http "websocket""#);
-    let recorded = decided
-        .iter()
-        .position(|entry| entry.contains("status: 101"));
-    let first_send = decided.iter().position(|entry| entry.starts_with("send"));
-    assert!(recorded.is_some() && recorded < first_send, "{decided:?}");
-    assert!(decided.contains(&"receive Text 5 -> Completed(5)".to_string()));
+    assert!(decided[1].ends_with("status: 101 }"), "{decided:?}");
     assert!(session.denials().is_empty());
 }
 
 #[test]
-fn a_refused_message_never_leaves_and_both_sides_close() {
-    let frames = Arc::new(Mutex::new(Vec::new()));
-    let mut session = Session::start(false, LIMIT, echo(Arc::clone(&frames)));
-    assert!(session.handshake("").starts_with("HTTP/1.1 101"));
-    session.send(true, 2, &[0; 200]);
-    assert_eq!(
-        read_frame(&mut session.client),
-        Some((true, 8, close(1008)))
-    );
-    std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(*frames.lock().unwrap(), [(true, 8, close(1001))]);
-    assert_eq!(session.denials().len(), 1, "{:?}", session.denials());
-}
-
-#[test]
-fn a_message_over_the_cap_closes_with_1009_and_no_decision() {
-    let mut session = Session::start(false, LIMIT, echo(Arc::default()));
-    assert!(session.handshake("").starts_with("HTTP/1.1 101"));
-    session.send(false, 2, &[0; 1000]);
-    session.send(true, 0, &[0; 100]);
-    assert_eq!(
-        read_frame(&mut session.client),
-        Some((true, 8, close(1009)))
-    );
-    let decided = session.decided();
-    assert!(
-        !decided.iter().any(|entry| entry.starts_with("send")),
-        "{decided:?}"
-    );
-}
-
-#[test]
-fn a_workload_binary_message_is_decided_after_its_last_byte() {
-    let frames = Arc::new(Mutex::new(Vec::new()));
-    let mut session = Session::start(false, 100, echo(Arc::clone(&frames)));
-    assert!(session.handshake("").starts_with("HTTP/1.1 101"));
-    let payload: Vec<u8> = (0..80).collect();
-    let wire = frame(true, 2, &payload, true);
-    session.client.send_raw(&wire[..41]);
-    std::thread::sleep(Duration::from_millis(100));
-    let decided = session.decided();
-    assert!(
-        !decided.iter().any(|entry| entry.starts_with("send")),
-        "{decided:?}"
-    );
-    session.client.send_raw(&wire[41..]);
-    assert_eq!(
-        read_frame(&mut session.client),
-        Some((true, 2, payload.clone()))
-    );
-    assert_eq!(*frames.lock().unwrap(), [(true, 2, payload)]);
-    assert!(
-        session
-            .decided()
-            .contains(&"send Binary 80 -> Completed(80)".to_string())
-    );
-}
-
-#[test]
-fn a_binary_frame_over_the_cap_streams_from_the_server_and_closes_from_the_workload() {
-    let mut session = Session::start(false, 50, echo(Arc::default()));
-    assert!(session.handshake("").starts_with("HTTP/1.1 101"));
-    session.send(true, 1, b"big");
-    assert_eq!(
-        read_frame(&mut session.client),
-        Some((true, 2, vec![7; 300]))
-    );
-    session.send(true, 2, &[0; 80]);
-    assert_eq!(
-        read_frame(&mut session.client),
-        Some((true, 8, close(1009)))
-    );
-    let decided = session.decided();
-    assert!(
-        decided.contains(&"receive Binary 300 -> Completed(300)".to_string()),
-        "{decided:?}"
-    );
-    assert!(
-        !decided.iter().any(|entry| entry.starts_with("send Binary")),
-        "{decided:?}"
-    );
-}
-
-#[test]
-fn a_server_message_that_carries_the_credential_is_scrubbed() {
+fn a_server_frame_that_carries_the_credential_is_scrubbed() {
     let mut session = Session::start(true, LIMIT, echo(Arc::default()));
-    let phantom = session.phantom.clone().unwrap();
-    let head = session.handshake(&format!("Authorization: Bearer {phantom}\r\n"));
-    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+    session.handshake_with_credential();
     let seen = session.upstream.last_request();
     assert_eq!(
         seen.header("authorization"),
         Some(format!("Bearer {SECRET}"))
     );
-
     session.send(true, 1, b"leak");
-    let (_, opcode, payload) = read_frame(&mut session.client).unwrap();
+    let (fin, opcode, payload) = read_frame(&mut session.client).unwrap();
     let text = String::from_utf8(payload).unwrap();
-    assert_eq!(opcode, 1);
-    assert!(
-        !text.contains(SECRET) && text.starts_with("token="),
-        "{text}"
+    assert_eq!((fin, opcode), (true, 1));
+    assert_eq!(text, "token=[REDACTED]");
+}
+
+#[test]
+fn a_credential_split_across_two_server_frames_is_scrubbed() {
+    let mut session = Session::start(true, LIMIT, echo(Arc::default()));
+    session.handshake_with_credential();
+    session.send(true, 1, b"leak-split");
+    let (first_fin, first_opcode, mut text) = read_frame(&mut session.client).unwrap();
+    let (last_fin, last_opcode, tail) = read_frame(&mut session.client).unwrap();
+    text.extend(tail);
+    assert_eq!(
+        (first_fin, first_opcode, last_fin, last_opcode),
+        (false, 1, true, 0)
     );
-    assert!(
-        session
-            .decided()
-            .contains(&format!("receive Text {}", 6 + SECRET.len()))
-    );
+    assert_eq!(String::from_utf8(text).unwrap(), "token=[REDACTED]");
 }
 
 #[test]
 fn a_server_control_frame_that_carries_the_credential_is_scrubbed() {
     let mut session = Session::start(true, LIMIT, echo(Arc::default()));
-    let phantom = session.phantom.clone().unwrap();
-    let head = session.handshake(&format!("Authorization: Bearer {phantom}\r\n"));
-    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+    session.handshake_with_credential();
     session.send(true, 1, b"leak-ping");
     assert_eq!(read_frame(&mut session.client), Some((true, 9, Vec::new())));
     session.send(true, 1, b"leak-close");
@@ -465,8 +362,45 @@ fn a_server_control_frame_that_carries_the_credential_is_scrubbed() {
 }
 
 #[test]
+fn a_server_frame_over_the_cap_on_a_credential_host_ends_the_websocket() {
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let mut session = Session::start(true, 50, echo(Arc::clone(&frames)));
+    session.handshake_with_credential();
+    session.send(true, 1, b"big");
+    assert_eq!(read_frame(&mut session.client), None);
+    assert!(ended(&frames));
+    assert_eq!(
+        session.denials(),
+        ["websocket: server frame exceeds the size limit"]
+    );
+}
+
+#[test]
+fn frames_over_the_cap_pass_on_a_host_with_no_credential() {
+    let mut session = Session::start(false, 50, echo(Arc::default()));
+    assert!(session.handshake("").starts_with("HTTP/1.1 101"));
+    session.send(true, 1, b"big");
+    assert_eq!(
+        read_frame(&mut session.client),
+        Some((true, 2, vec![7; 300]))
+    );
+    session.send(true, 2, &[3; 80]);
+    assert_eq!(
+        read_frame(&mut session.client),
+        Some((true, 2, vec![3; 80]))
+    );
+    assert!(session.denials().is_empty());
+}
+
+#[test]
 fn a_handshake_to_an_mcp_server_host_is_refused_with_403() {
-    let mut session = Session::open(false, LIMIT, Route::Mcp, echo(Arc::default()));
+    let mut session = Session::open(
+        false,
+        LIMIT,
+        Route::Mcp,
+        Duration::from_secs(300),
+        echo(Arc::default()),
+    );
     let head = session.handshake("");
     assert!(head.starts_with("HTTP/1.1 403"), "{head}");
     assert_eq!(
@@ -502,7 +436,6 @@ fn a_plain_handshake_is_refused_with_403() {
     plain.write_all(handshake.as_bytes()).unwrap();
     let head = harness::read_http_head(&mut plain);
     assert!(head.starts_with("HTTP/1.1 403"), "{head}");
-    assert_eq!(session.denials().len(), 1);
     let records = session.records.records().into_iter();
     let denied = records.filter(|record| record.decision == AuditDecision::Deny);
     assert_eq!(
@@ -543,7 +476,13 @@ fn box_owned(port: u16) -> CapabilitySet {
 
 #[test]
 fn a_websocket_through_a_backend_reroute_reaches_the_backend_and_is_judged_on_the_original() {
-    let mut session = Session::open(true, LIMIT, Route::Backend(BACKEND), echo(Arc::default()));
+    let mut session = Session::open(
+        true,
+        LIMIT,
+        Route::Backend,
+        Duration::from_secs(300),
+        echo(Arc::default()),
+    );
     let head = session.handshake("");
     assert!(head.starts_with("HTTP/1.1 101"), "{head}");
     let seen = session.upstream.last_request();
@@ -563,56 +502,34 @@ fn a_websocket_through_a_backend_reroute_reaches_the_backend_and_is_judged_on_th
     let (_, opcode, payload) = read_frame(&mut session.client).unwrap();
     let text = String::from_utf8(payload).unwrap();
     assert_eq!(opcode, 1);
-    assert!(
-        !text.contains(SECRET) && text.starts_with("token="),
-        "{text}"
-    );
+    assert_eq!(text, "token=[REDACTED]");
     let records = session.records.records();
     assert!(records.iter().any(|record| record.host == HOST));
     assert!(!records.iter().any(|record| record.host == BACKEND));
 }
 
 #[test]
-fn an_unmasked_workload_frame_closes_with_1002() {
-    let mut session = Session::start(false, LIMIT, echo(Arc::default()));
-    assert!(session.handshake("").starts_with("HTTP/1.1 101"));
-    session.client.send_raw(&frame(true, 1, b"hi", false));
-    assert_eq!(
-        read_frame(&mut session.client),
-        Some((true, 8, close(1002)))
-    );
-}
-
-#[test]
-fn a_workload_drop_closes_the_server_with_1001() {
+fn a_workload_drop_ends_the_server_connection() {
     let frames = Arc::new(Mutex::new(Vec::new()));
     let mut session = Session::start(false, LIMIT, echo(Arc::clone(&frames)));
     assert!(session.handshake("").starts_with("HTTP/1.1 101"));
     session.client.abort();
-    std::thread::sleep(Duration::from_millis(200));
-    assert_eq!(*frames.lock().unwrap(), [(true, 8, close(1001))]);
+    assert!(ended(&frames));
+    assert_eq!(*frames.lock().unwrap(), [ENDED]);
 }
 
 #[test]
-fn a_cut_off_message_records_the_bytes_the_other_side_took() {
-    let mut session = Session::start(false, 16 << 20, echo(Arc::default()));
+fn an_idle_websocket_ends_both_connections() {
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let idle = Duration::from_millis(500);
+    let mut session = Session::open(false, LIMIT, Route::Direct, idle, echo(Arc::clone(&frames)));
     assert!(session.handshake("").starts_with("HTTP/1.1 101"));
-    session.send(true, 1, b"flood");
-    let flood = format!("receive Binary {FLOOD}");
-    session.wait_for(&flood);
-    session.client.send_raw(&frame(true, 1, b"x", false));
-    let outcome = session.wait_for(&format!("{flood} -> "));
-    assert!(outcome.contains("Partial"), "{outcome}");
-    let mut delivered = Vec::new();
-    let ended = session.client.read_to_end(&mut delivered);
-    let timed_out = |kind| matches!(kind, io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut);
-    assert!(
-        !ended.as_ref().is_err_and(|e| timed_out(e.kind())),
-        "{ended:?}"
+    session.send(true, 1, b"hi");
+    assert_eq!(
+        read_frame(&mut session.client),
+        Some((true, 1, b"hi".to_vec()))
     );
-    assert!(delivered.len() < 10 + FLOOD, "{}", delivered.len());
-    assert!(
-        delivered.iter().skip(10).all(|&byte| byte == 0),
-        "a Close went into the frame"
-    );
+    assert_eq!(read_frame(&mut session.client), None);
+    assert!(ended(&frames));
+    assert!(session.denials().is_empty());
 }

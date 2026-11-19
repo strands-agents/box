@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use egress_gateway::{
     EffectAttempt as EgressEffectAttempt, EffectInterceptor as EgressEffectInterceptor,
     EffectOutcome as EgressEffectOutcome, EffectPermit as EgressEffectPermit, McpFrame,
-    McpListReply, ReplyObserver as EgressReplyObserver, WebSocketOpcode as EgressWebSocketOpcode,
+    McpListReply, ReplyObserver as EgressReplyObserver,
 };
 
 use crate::GovernedBox;
@@ -18,7 +18,7 @@ use crate::{
 };
 use crate::{
     Decision, Delivery, DenyReason, McpReply, Outcome, PendingToolResponse, PolicyEngine,
-    PolicyError, Principal, Request, RequestId, WebSocketDirection, WebSocketOpcode,
+    PolicyError, Principal, Request, RequestId,
 };
 
 /// Binds one policy and egress principal to outbound effect interception.
@@ -243,11 +243,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
             }
             // Response release records nothing: the HTTP permit already records the reply.
             EgressEffectAttempt::ResponseRelease { .. } => Ok((None, (None, None))),
-            other => match websocket_request(other) {
-                Some(request) => authorize(&self.policy, &self.governed, &self.principal, &request)
-                    .map(|request_id| (Some(request_id), (None, None))),
-                None => Err("policy does not support this egress effect".to_string()),
-            },
+            _ => Err("policy does not support this egress effect".to_string()),
         };
 
         decision
@@ -379,13 +375,6 @@ enum AttemptIdentity {
         mcp: Option<McpCallIdentity>,
         upgrade: String,
     },
-    WebSocket {
-        direction: WebSocketDirection,
-        host: String,
-        port: u16,
-        path: String,
-        opcode: WebSocketOpcode,
-    },
     /// An attempt kind this adapter does not map, and the release of a reply. Each is admitted
     /// only if the authorization arm above allowed it, and it records nothing.
     Unmapped,
@@ -449,23 +438,7 @@ impl AttemptIdentity {
                     }),
                 }),
             },
-            other => match websocket_request(other) {
-                Some(Request::WebSocket {
-                    direction,
-                    host,
-                    port,
-                    path,
-                    opcode,
-                    ..
-                }) => Self::WebSocket {
-                    direction,
-                    host: host.to_string(),
-                    port,
-                    path: path.to_string(),
-                    opcode,
-                },
-                _ => Self::Unmapped,
-            },
+            _ => Self::Unmapped,
         }
     }
 }
@@ -814,28 +787,6 @@ impl LocalPolicyEffectPermit {
                     _ => http,
                 }
             }
-            (
-                AttemptIdentity::WebSocket {
-                    direction,
-                    host,
-                    port,
-                    path,
-                    opcode,
-                },
-                Some(delivery),
-            ) => self.policy.record(
-                &self.governed,
-                &self.principal,
-                request_id,
-                &Outcome::WebSocket {
-                    direction: *direction,
-                    host,
-                    port: *port,
-                    path,
-                    opcode: *opcode,
-                    delivery,
-                },
-            ),
             // A message attempt whose outcome carries no delivery, or an unmapped
             // attempt: nothing truthful to record.
             _ => Ok(()),
@@ -916,46 +867,6 @@ fn reply_status_of(outcome: EgressEffectOutcome) -> Option<u16> {
         EgressEffectOutcome::Replied { status, .. } => Some(status),
         _ => None,
     }
-}
-
-fn websocket_request<'a>(effect: &EgressEffectAttempt<'a>) -> Option<Request<'a>> {
-    let (EgressEffectAttempt::WebSocketSend {
-        host,
-        port,
-        path,
-        opcode,
-        body_bytes,
-    }
-    | EgressEffectAttempt::WebSocketReceive {
-        host,
-        port,
-        path,
-        opcode,
-        body_bytes,
-    }) = *effect
-    else {
-        return None;
-    };
-    let direction = if matches!(effect, EgressEffectAttempt::WebSocketSend { .. }) {
-        WebSocketDirection::Send
-    } else {
-        WebSocketDirection::Receive
-    };
-    let opcode = match opcode {
-        EgressWebSocketOpcode::Text => WebSocketOpcode::Text,
-        EgressWebSocketOpcode::Binary => WebSocketOpcode::Binary,
-        EgressWebSocketOpcode::Ping => WebSocketOpcode::Ping,
-        EgressWebSocketOpcode::Pong => WebSocketOpcode::Pong,
-        EgressWebSocketOpcode::Close => WebSocketOpcode::Close,
-    };
-    Some(Request::WebSocket {
-        direction,
-        host,
-        port,
-        path,
-        opcode,
-        body_bytes,
-    })
 }
 
 /// Map a classified MCP frame onto the `mcp:call` request. `server` and `method` are on every

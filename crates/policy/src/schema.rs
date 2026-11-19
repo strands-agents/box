@@ -10,7 +10,7 @@ use cedar_policy::{
 
 use crate::Principal;
 use crate::error::PolicyError;
-use crate::request::{DEFAULT_PRINCIPAL_ID, FsOperation, Request, WebSocketDirection};
+use crate::request::{DEFAULT_PRINCIPAL_ID, FsOperation, Request};
 
 const BOX_NAMESPACE: &str = "Box";
 const FIXED_ACTION_TYPE: &str = "Box::Action";
@@ -92,7 +92,6 @@ pub(crate) const FS_OTHER_OPERATION_TYPE: &str = "Box::FsOtherOperation";
 /// The enum entity type carrying how an effect ended, on the `output` of every
 /// filesystem response event.
 pub(crate) const FS_RESPONSE_RESULT_TYPE: &str = "Box::FsResponseResult";
-pub(crate) const WEBSOCKET_OPCODE_TYPE: &str = "Box::WebSocketOpcode";
 
 /// The fixed resource id. The resource carries no policy information.
 pub(crate) const UNUSED_RESOURCE_ID: &str = "unused";
@@ -120,8 +119,6 @@ pub(crate) mod action {
     pub(crate) const NET_CONNECT: &str = "net:connect";
     /// `http:request` — the L7 HTTP decision; its one `::response` carries the reply's `status`.
     pub(crate) const HTTP_REQUEST: &str = "http:request";
-    pub(crate) const WEBSOCKET_SEND: &str = "websocket:send";
-    pub(crate) const WEBSOCKET_RECEIVE: &str = "websocket:receive";
     /// `mcp:call` — one tool call on a connected MCP server.
     pub(crate) const MCP_CALL: &str = "mcp:call";
     /// `shell:exec` — a resolved command line whose program the Shell implements.
@@ -296,12 +293,11 @@ pub(crate) mod attr {
     pub(crate) const REPLY: &str = "reply";
     /// A tool's declared `structuredContent`, on its own `::response`.
     pub(crate) const STRUCTURED: &str = "structured";
-    /// `context.input.body_bytes` — HTTP body or WebSocket message length.
+    /// `context.input.body_bytes` — HTTP body length (`http:request`).
     pub(crate) const BODY_BYTES: &str = "body_bytes";
     /// `context.input.intercepted` — whether HTTP was seen through TLS interception.
     pub(crate) const INTERCEPTED: &str = "intercepted";
     pub(crate) const UPGRADE: &str = "upgrade";
-    pub(crate) const OPCODE: &str = "opcode";
     /// `context.input.server` — the MCP server a tool call names (`mcp:call`).
     pub(crate) const SERVER: &str = "server";
     /// `context.input.tool` — the tool a `tools/call` names (`mcp:call`).
@@ -389,11 +385,13 @@ pub(crate) fn fs_operation_entity(operation: FsOperation) -> (&'static str, &'st
     (entity_type, operation.as_str())
 }
 
-/// The value `id` of the schema enum `entity_type`. The type names parse once; each caller
-/// takes `id` from a closed set, so it always names a declared enum value.
-fn enum_expr(entity_type: &str, id: &str) -> Result<RestrictedExpression, PolicyError> {
+/// The operation entity value for one kernel verb. The type names parse once; the eid
+/// comes from the closed [`FsOperation::as_str`] set, so it always names a declared
+/// enum value.
+fn fs_operation_expr(operation: FsOperation) -> Result<RestrictedExpression, PolicyError> {
     static TYPE_NAMES: OnceLock<Result<Vec<(&'static str, EntityTypeName)>, String>> =
         OnceLock::new();
+    let (entity_type, verb) = fs_operation_entity(operation);
     let type_names = TYPE_NAMES
         .get_or_init(|| {
             [
@@ -402,7 +400,6 @@ fn enum_expr(entity_type: &str, id: &str) -> Result<RestrictedExpression, Policy
                 FS_DELETE_OPERATION_TYPE,
                 FS_MOVE_OPERATION_TYPE,
                 FS_OTHER_OPERATION_TYPE,
-                WEBSOCKET_OPCODE_TYPE,
             ]
             .into_iter()
             .map(|name| {
@@ -418,9 +415,9 @@ fn enum_expr(entity_type: &str, id: &str) -> Result<RestrictedExpression, Policy
         .iter()
         .find(|(name, _)| *name == entity_type)
         .map(|(_, parsed)| parsed)
-        .ok_or_else(|| PolicyError::Schema(format!("unknown enum type: {entity_type}")))?;
+        .ok_or_else(|| PolicyError::Schema(format!("unknown operation type: {entity_type}")))?;
     Ok(RestrictedExpression::new_entity_uid(
-        EntityUid::from_type_name_and_id(type_name.clone(), EntityId::new(id)),
+        EntityUid::from_type_name_and_id(type_name.clone(), EntityId::new(verb)),
     ))
 }
 
@@ -452,9 +449,9 @@ fn fixed_action_uid(id: &str) -> Result<EntityUid, PolicyError> {
 }
 
 /// Every action id, in one place, so the cached UIDs cover exactly the closed set
-/// [`action_id`] can return. The twelve actions the box raises: five filesystem verbs,
-/// four network decisions, two shell command decisions, and `mcp:call`. The schema has no
-/// group actions, so every id here is one a request names directly.
+/// [`action_id`] can return. The nine actions the box raises: five filesystem verbs,
+/// two network decisions, and two shell command decisions. The schema has no group
+/// actions, so every id here is one a request names directly.
 ///
 /// **There is no response action.** The response leg is `http:request`'s response phase: it
 /// records what came back and takes no decision, so it names no action of its own.
@@ -466,8 +463,6 @@ const ACTION_IDS: &[&str] = &[
     action::FS_OTHER,
     action::NET_CONNECT,
     action::HTTP_REQUEST,
-    action::WEBSOCKET_SEND,
-    action::WEBSOCKET_RECEIVE,
     action::SHELL_EXEC,
     action::SHELL_SPAWN,
     action::MCP_CALL,
@@ -480,18 +475,10 @@ pub(crate) fn action_id(req: &Request<'_>) -> &'static str {
         Request::Fs { operation, .. } => fs_action_id(*operation),
         Request::Connect { .. } => action::NET_CONNECT,
         Request::Http { .. } => action::HTTP_REQUEST,
-        Request::WebSocket { direction, .. } => websocket_action_id(*direction),
         Request::ShellExec { .. } => action::SHELL_EXEC,
         // A tool call with arguments uses [`ActionIdentity::McpTool`].
         Request::McpCall { .. } => action::MCP_CALL,
         Request::ShellSpawn { .. } => action::SHELL_SPAWN,
-    }
-}
-
-pub(crate) fn websocket_action_id(direction: WebSocketDirection) -> &'static str {
-    match direction {
-        WebSocketDirection::Send => action::WEBSOCKET_SEND,
-        WebSocketDirection::Receive => action::WEBSOCKET_RECEIVE,
     }
 }
 
@@ -558,8 +545,7 @@ fn context_for(
                 attr::PATH.to_string(),
                 RestrictedExpression::new_string(path.reported().into_owned()),
             )];
-            let (entity_type, verb) = fs_operation_entity(*operation);
-            fields.push((attr::OPERATION.to_string(), enum_expr(entity_type, verb)?));
+            fields.push((attr::OPERATION.to_string(), fs_operation_expr(*operation)?));
             fields
         }
         Request::Connect { host, ip, port } => {
@@ -618,35 +604,6 @@ fn context_for(
             (
                 attr::UPGRADE.to_string(),
                 RestrictedExpression::new_string((*upgrade).to_string()),
-            ),
-        ],
-        Request::WebSocket {
-            host,
-            port,
-            path,
-            opcode,
-            body_bytes,
-            ..
-        } => vec![
-            (
-                attr::HOST.to_string(),
-                RestrictedExpression::new_string((*host).to_string()),
-            ),
-            (
-                attr::PORT.to_string(),
-                RestrictedExpression::new_long(i64::from(*port)),
-            ),
-            (
-                attr::PATH.to_string(),
-                RestrictedExpression::new_string((*path).to_string()),
-            ),
-            (
-                attr::OPCODE.to_string(),
-                enum_expr(WEBSOCKET_OPCODE_TYPE, opcode.as_str())?,
-            ),
-            (
-                attr::BODY_BYTES.to_string(),
-                RestrictedExpression::new_long(usize_to_cedar_long(*body_bytes)?),
             ),
         ],
         Request::McpCall {
@@ -871,14 +828,6 @@ mod tests {
                 intercepted: true,
                 upgrade: "",
             },
-            Request::WebSocket {
-                direction: WebSocketDirection::Receive,
-                host: "h",
-                port: 443,
-                path: "/",
-                opcode: crate::request::WebSocketOpcode::Close,
-                body_bytes: 2,
-            },
             // Two arguments, so both optional positions are exercised.
             Request::ShellExec {
                 command: "rm -rf /tmp/x",
@@ -913,30 +862,6 @@ mod tests {
             assert!(
                 to_cedar_request(&principal, r, &identity, schema).is_ok(),
                 "failed to map {r:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn every_websocket_opcode_is_a_declared_schema_value() {
-        use crate::request::WebSocketOpcode::{Binary, Close, Ping, Pong, Text};
-        let schema = schema().expect("shipped schema");
-        for opcode in [Text, Binary, Ping, Pong, Close] {
-            match opcode {
-                Text | Binary | Ping | Pong | Close => {}
-            }
-            let request = Request::WebSocket {
-                direction: WebSocketDirection::Send,
-                host: "h",
-                port: 443,
-                path: "/",
-                opcode,
-                body_bytes: 0,
-            };
-            let identity = ActionIdentity::for_request(&request);
-            assert!(
-                to_cedar_request(&Principal::agent(), &request, &identity, schema).is_ok(),
-                "{opcode:?}"
             );
         }
     }

@@ -397,12 +397,12 @@ pub(super) fn write_request(
         }
         push_header_line(&mut out, name, value);
     }
-    if upgrade {
-        out.push_str("Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+    out.push_str(if upgrade {
+        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
     } else {
-        out.push_str("Connection: close\r\n");
-        write_content_length_and_terminator(&mut out, method, body_len);
-    }
+        "Connection: close\r\n"
+    });
+    write_content_length_and_terminator(&mut out, method, body_len);
     Ok(out)
 }
 
