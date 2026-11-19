@@ -18,7 +18,9 @@ A box with no `[telemetry]` table writes one file inside its own box directory:
 
 That target receives every record except tool calls: each effective denial, each effective permit,
 the box's own control-plane records and MCP routing diagnostics, and the workload's relayed spans,
-log records, and metrics. The workload cannot reach the file.
+log records, and metrics. A relayed payload can be refused while Box writes a full batch of its own
+records to the file; see [Errors and exit codes](#errors-and-exit-codes). The workload cannot reach
+the file.
 
 The file grows for as long as the box is used. Rotate or remove it as the operator's own task.
 
