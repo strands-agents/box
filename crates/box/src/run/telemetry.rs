@@ -1752,7 +1752,7 @@ mod tests {
             );
         }
         let collector = Arc::new(telemetry::open(config).expect("open the collector"));
-        let recorder = DecisionRecorder::over(Arc::clone(&collector));
+        let recorder = DecisionRecorder::over(Arc::clone(&collector), None);
         (collector, recorder)
     }
 

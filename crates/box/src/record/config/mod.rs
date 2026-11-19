@@ -3399,6 +3399,7 @@ env = {}
                     "local".to_string(),
                     telemetry::TelemetryEntry::file("/tmp/records.jsonl", Some(include)),
                 )]),
+                false,
             )
         };
         assert_eq!(version(true), TOOL_CALLS_RECORD_VERSION);
