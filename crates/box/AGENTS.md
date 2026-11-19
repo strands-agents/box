@@ -296,9 +296,12 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   re-parsing, no second reserved-name check at projection time. `EgressRoute` carries
   `provisioned_name` so the scheme is interpreted in one place.
 - **A `[tool.<name>]` whose program is not installed is left out, in one place.**
-  `commands::leave_out_absent` removes it from the run's `Record` after `configure` stores the
-  record, so every later consumer sees one set of tools: credential disclosure, grammar binding,
-  bare names, approved reach, tool selection, and leaf translation. Not installed means nothing exists,
+  `commands::leave_out_absent` removes it from the run's copy of the `Record`, in
+  `command::run::settle_tools`, and `configure` stores the record as written. So every consumer
+  of the run sees one set of tools: the check of the secret sources, credential disclosure,
+  grammar binding, bare names, approved reach, tool selection, and leaf translation. The
+  `left out` lines and a refusal of the choice come after `configure` stores the record.
+  Not installed means nothing exists,
   after links are followed, at an absolute path or at a bare name in any absolute search-path entry that Box can search.
   So a non-executable or non-regular match still reaches its real refusal. Any other failure still
   stops the box, and so does a program that holds `${` or an argument that no run can expand. The policy keeps the tool's grammar actions so a policy that names them still loads. The
@@ -342,14 +345,142 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     declaration is looked up with their scheme. A reference that `Locator` refuses has no
     scheme, so no source reads it: `op://` with nothing after it is refused as a locator on a
     route, and as a reference in no scheme on a telemetry target.
-    `a_declared_source_reads_a_reference_by_the_scheme_that_credentials_routes` pins it.
+    `a_declared_source_reads_a_reference_by_the_scheme_that_credentials_routes` pins it. At a
+    run, `SecretSources::locator` is the second place that asks `Locator`: it parses each
+    reference once and each read keeps that value, so the scheme that finds the program and the
+    reference that `Backend::resolve` gets are one value.
+    `the_sources_read_a_reference_by_the_scheme_that_credentials_routes` pins it.
   - A record that holds a declaration or a `secret.env` key is `SECRET_SOURCE_RECORD_VERSION`.
-  - **This build reads no secret through a declaration.** `command::run::refuse_declared_sources`
-    stops a run after the load checks, and `read_remote_mcp_servers` stops `policy generate-schema`
-    for a remote MCP server whose secret names a declared scheme. Without them `Backend::local()`
-    runs the built-in `op://` source and ignores the declaration. Remove each refusal only together
-    with the step that reads the secret through `Backend::declared`.
-  - `reads` and `deny` are stored and judged for shape only. No grant is checked against them yet.
+  - **A run reads each declared secret once, before a workload starts.**
+    `run::secret_sources` owns the path, and its three types hold the order of startup. Keep
+    each part:
+    - **The order is `SecretSources::check`, `SecretSources::fetch_telemetry`,
+      `TelemetrySecrets::fetch_routes`, then the vaults, which consume `RouteSecrets`.** Each step
+      takes the value of the step before it, and only that step returns it. So no caller gets the
+      sources of a run without the check, gives `telemetry::open` a value from before the first
+      read, or gives `credential::project` a value from before the second. `SecretSources` gives
+      no backend, and `TelemetrySecrets::backend` and `RouteSecrets::backend` are
+      `pub(in crate::run)`, for the collector and the vaults. So `command::run` gets no backend
+      from the sources of a run, and reads through them by the two read steps alone.
+      `policy generate-schema` has no record and no read step, so
+      `SecretSources::check_for_references` returns `SchemaSecrets`, which gives `reads` and the
+      backend, and which no read step and no vault of a run takes. What the types do not hold, in
+      three places. First, a function of `crate::run` that gets `&TelemetrySecrets` can read a
+      route's secret through that backend before the second read. Only `run::telemetry::open` gets
+      one, so give it to no other function. Second, `check_for_references` and
+      `SchemaSecrets::backend` are `pub(crate)`, because `command::policy` is not in `crate::run`.
+      So each module of the crate can build a second set of checked sources and read through it,
+      with no read step and no record. Only `command::policy` calls it. Third,
+      `credentials::Backend::declared` is public, so a second call in this crate builds sources
+      with no check. `SecretSources::open` holds the one call.
+      `only_generate_schema_reads_a_declared_secret_with_no_read_step` pins the second and the
+      third. The module has no other function that builds or reads, no visible field, and no
+      test-only item: each test door is in its `tests` module. Do not add a constructor, a
+      `Clone`, or a `Default` to one of the four types, do not give `SecretSources` a backend
+      accessor, and do not make `open`, `refuse_writable_programs`, `disclose`, or `fetch` visible
+      outside the module. A wrong order is then a compile error, which no test can show, so
+      `only_the_check_builds_the_sources_and_only_they_read` pins the list of doors.
+    - `SecretSources::check` first loads each program through `ConfiguredCommand::load`, the
+      check of a configured tool command, and gives the opened file to
+      `credentials::Backend::declared`. A configuration with no declaration gets
+      `Backend::local()`.
+    - `ConfiguredCommands::load` holds the program of each declaration beside the tool commands,
+      so `validate_reach` refuses a write grant over it and `mutation_refusal` refuses a change
+      through the Shell or Monty. The record stores no program identity, so between two runs
+      this is the only protection of the program. Without it a workload replaces the program,
+      and the next run starts that file outside every sandbox.
+      `a_secret_source_program_is_protected_like_a_configured_tool_command` pins it.
+    - A source program also holds each symbolic link that the resolution of its path passes
+      through (`links_on_the_way`), so a write grant over a link in the middle of a chain, or
+      over a folder link, is refused. Homebrew and the AWS CLI installer make such chains. A
+      tool command holds the path as written and the canonical file only; do not widen that
+      without approval, because it adds a refusal to a configuration that loads today.
+      `each_link_on_the_way_to_a_secret_source_program_is_protected` pins both.
+    - Residual: the protection covers element 0 of `command` alone. It does not cover a file
+      that the program loads or that an argument names, such as a script after an interpreter.
+    - `SecretSources::check` then judges the write grants of each process table against the
+      source programs, and last writes one line for each source. A refusal returns no value, so
+      no program starts and no line names a source. `run` and `policy generate-schema` both get
+      their sources from this one order. `ApprovedReach::judge_with` makes the same check of the
+      grants, but it runs after both read steps, so alone it refuses a box whose program has
+      already run with the vault's credentials. A configuration with no declaration skips the
+      early check, so the order of its refusals does not change. Both judgements take their
+      tables from `Record::process_tables`, so a table that one judges, the other judges too.
+      `a_write_grant_over_a_secret_source_program_is_refused` asserts that the program did not
+      start, and `a_write_grant_over_a_source_program_is_refused_and_starts_no_program` that the
+      check wrote no line.
+    - One backend serves the run: the telemetry secret, each vault of `run::credential`, and
+      `policy generate-schema`. A second backend would run a program twice for one secret. Do not
+      call `Backend::local()` in those paths. The one exception is `telemetry::preflight_aws`: an
+      `aws://` reference is in no declared scheme, and a signed route reads nothing through the
+      backend.
+    - **`command::run::prepare_contract` calls `SecretSources::check` before
+      `BoxRoot::initialize_first_use` commits the record.** The check reads the tables of the
+      record, starts no program, and reads no box state, so a refusal stores nothing, as a
+      refusal of the configuration does.
+      `settle_tools` leaves out each tool whose program is not installed before the check, once
+      for the run. So the check and `ApprovedReach::judge_with` judge the tables of one record,
+      and a list of a left-out tool refuses no run. A check of the record as written would judge
+      a list that `docs/user/config.md` says Box does not check. Do not choose the tools a second
+      time after the check: a tool that the check did not judge would then run.
+      `the_secret_source_check_judges_no_table_of_a_left_out_tool` pins it.
+      Residual: the choice comes before the run writes `bin/` into a new box directory. So a
+      tool whose program is a file that Box writes there, such as `<box_dir>/bin/sh`, is left
+      out on the first run of that directory, and each later run refuses it ("the grant would
+      expose the Box's own directory"). A left-out tool gets no grant, so nothing is exposed.
+      `run_config.rs::a_tool_program_that_box_writes_is_left_out_on_the_first_run_alone` pins
+      it, so it fails when the gap closes: remove it and this residual together.
+      After the commit and before `hosted` opens the policy, the box directory has a record and
+      no history, and `verify_history_matches_record` refuses the next run of that directory. So
+      a refusal there on the first run of a new box directory needs a wipe: do not move a check
+      of the sources after the commit.
+      `a_new_box_directory_starts_after_the_cause_of_a_secret_source_refusal_is_gone` pins it.
+      Residual: the read of a telemetry secret runs a program, so it holds the run lock, which
+      exists only after the commit. A telemetry secret that the program does not return on the
+      first run still needs a wipe, as each refusal of `telemetry::open` does.
+      `a_telemetry_secret_that_is_not_returned_on_a_first_run_still_strands_the_box_directory`
+      pins that limit, so it fails when the gap closes: remove it, this residual, and the
+      sentence of `docs/user/config.md` together.
+    - `command::run::execute` reads in two steps. The telemetry secrets come before
+      `telemetry::open`, because the collector needs them. The others come in `hosted`, after
+      these checks, which need no secret: the policy, the credsd preflight, the `aws://` telemetry
+      preflight, the tool commands, and the tool grammars. A vault program can ask the operator
+      to sign in, so it runs after them. `HostedBox::open` judges each table against the tool
+      commands and the Box installation after the read, so those refusals can follow a sign-in.
+      A read that fails in the first step has no collector, so stderr alone states it.
+      `policy generate-schema` checks the programs and reads each declared secret before it starts
+      a stdio MCP server, which is a workload-named program. It has no record, so it calls
+      `SecretSources::check_for_references`, which checks no table when no remote MCP server
+      names a secret in a declared scheme, and it reads through `SchemaSecrets::backend`.
+    - `SecretSources::fetch`, which the two read steps call, is the only place that reads a
+      declared secret for a run. It writes the error of `credentials` to stderr and returns
+      `ConfigError::SecretFetch`, which holds no text of that error. The `box_stopped` record
+      takes its reason from the returned error, so a `credentials` error in it would put the
+      program's stderr in a record. `op` prints the item and vault names there.
+      `a_failed_fetch_names_its_entry_and_stops_the_later_reads` pins it. A vault that opens
+      before the route read runs the program itself, and its failure
+      (`Internal::CredentialProjection`) holds the `credentials` error. So `credential::project`
+      is the only function of `run::credential` that another module can call to open a route
+      vault, and it takes `RouteSecrets`. Keep `workspace` and `backend_capabilities` private.
+      `only_project_opens_a_route_vault_for_another_module` pins it.
+    - A `secret_fetched` record states one read of one configuration entry: the entry, the
+      source, the program, and the reference with its body redacted. Two entries with one secret
+      give two records and one run of the program.
+    - `credential::project` consumes `RouteSecrets`, and `HostedBox::open` calls `project`. The
+      drop of `SecretSources`, which each later type holds, calls `Backend::close_declared`. So
+      the sources close when `project` returns, with no call that a caller can forget. Each
+      vault holds its secret by then, and a closed backend refuses each later read through a
+      declared source, also through a clone that an earlier step kept. A run that stops before
+      the vaults open closes the sources too.
+      `the_sources_read_no_secret_after_the_vaults_take_them` pins it.
+    - Each failure names the entry that holds the reference, because `credentials` redacts the
+      reference body and never names a `#FIELD`.
+    - A route in a declared scheme provisions its `secret.env` variable through
+      `checked_provisioned_name_without_value`, so the operator's own value of that variable is
+      never read.
+  - `reads` and `deny` are stored and judged for shape only. No grant is checked against them yet,
+    and no workload `env` is checked against `pass-secret-env`. `docs/user/config.md` ("What Box
+    protects") tells the operator. Remove that text with the change that adds the checks.
   - The `pass-secret-env` refusal covers `env://NAME` and `secret://NAME` only. A bare `aws://`
     route signs with the ambient AWS identity, also when a `pass-secret-env` entry names an AWS
     key. The design pairs that route with a source that reads AWS Secrets Manager under the same

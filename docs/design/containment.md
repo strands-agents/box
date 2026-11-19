@@ -241,7 +241,7 @@ floors](decisions.md#the-deny-only-floors-run-beneath-every-backend). The floors
   disclosed](decisions.md#direct-filesystem-reach-is-declared-and-disclosed).
 - Box refuses direct writable grants that can overwrite a configured command or replace its path,
   including its symbolic-link route and enclosing directories. The check covers the agent, every
-  tool, and every local MCP server.
+  tool, and every local MCP server. The program of a declared secret source gets the same check.
 - Box refuses writable grants that can change its executable, containment launcher, socket-alias
   image, or the macOS package launcher when present. This includes hard-link names, mounted aliases,
   and enclosing directories. The check covers every process's grants. See [installation
@@ -739,10 +739,10 @@ one policy engine decides for the whole box. See [the interpreters run in the bo
 process](decisions.md#the-interpreters-run-in-the-trusted-process).
 
 Each one asks policy before it touches a file, then applies the reachable paths check. This check also refuses changes to
-configured tool programs and the installed trusted binaries, including changes to their enclosing
-paths. Before changing a directory, it also scans for hard-link names of commands admitted through
-the startup scan. Reads remain subject to policy. These checks are separate from the agent's own
-grants.
+configured tool programs, the programs of declared secret sources, and the installed trusted
+binaries, including changes to their enclosing paths. Before changing a directory, it also scans
+for hard-link names of commands admitted through the startup scan. Reads remain subject to policy.
+These checks are separate from the agent's own grants.
 
 No additional check protects credential paths from the interpreters. A broad `fs:read` permit lets
 Strands Shell read `~/.aws`, even though no grant could give the agent that path. See [credential

@@ -1,5 +1,6 @@
 //! [`Backend`] — where a secret comes from, and the one way to dereference a locator.
 
+use std::fs::File;
 use std::sync::Arc;
 
 use zeroize::Zeroizing;
@@ -51,10 +52,24 @@ impl Backend {
         }
     }
 
-    /// The local source set plus one source for each declaration, where a declared `op` takes the
-    /// place of the built-in `op://` source.
-    pub fn declared(declarations: impl IntoIterator<Item = SecretSourceCommand>) -> Result<Self> {
-        Self::with_command_sources(declarations.into_iter().map(CommandSource::new))
+    /// The local source set plus one source for each declaration and the opened program file that
+    /// the caller checked for it, where a declared `op` takes the place of the built-in `op://`
+    /// source.
+    pub fn declared(
+        declarations: impl IntoIterator<Item = (SecretSourceCommand, File)>,
+    ) -> Result<Self> {
+        Self::with_command_sources(
+            declarations
+                .into_iter()
+                .map(|(declaration, program)| CommandSource::new(declaration, program)),
+        )
+    }
+
+    /// Wipe each secret that a declared source holds, and refuse each later read through one.
+    pub fn close_declared(&self) {
+        match &*self.profile {
+            Profile::Local { registry } | Profile::Declared { registry } => registry.close(),
+        }
     }
 
     /// [`declared`](Self::declared) over built sources, so a test supplies the environment.

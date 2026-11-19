@@ -265,7 +265,8 @@ and its fixed arguments match the leading arguments of the command. When several
 the one with the longest `command` is used. When a table names the file and none matches the
 arguments, the program is refused.
 
-Configured tool programs remain protected from writes and replacement for the run.
+Configured tool programs and the programs of declared secret sources remain protected from writes
+and replacement for the run.
 Box checks direct writable grants before startup and refuses changes through the Shell after policy permits them.
 [Configured command integrity](config.md#configured-command-integrity) lists the startup constraints and the procedure for operator updates.
 

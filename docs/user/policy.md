@@ -949,6 +949,9 @@ record says it has not run but the history holds events:
 strands-box: error: policy staging failed: the box record is committed, but the history /Users/dev/.box/<name>/private/dogwood.redb is absent. Wipe the box directory to start again.
 ```
 
+A first run that stops after Box stores the record and before it opens the history leaves the box
+in this state too.
+
 The text varies: the record `is committed` or `is not committed`, and the history `is absent`,
 `is empty`, or `holds <n> bytes`. The run also refuses when the engine cannot read the history
 file, with `policy staging failed: ` and the engine's own reason, and the file is left as found.

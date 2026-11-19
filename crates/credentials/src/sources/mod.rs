@@ -86,6 +86,10 @@ pub(crate) trait SecretSource: Send + Sync {
     /// Parse+validate the locator and fetch the secret as a [`Secret`]
     /// (docs/design/decisions.md#an-unusable-secret-value-is-unrepresentable).
     fn fetch(&self, loc: &Locator) -> Result<Secret>;
+
+    /// Wipe each secret this source holds, and refuse each later fetch; a source that holds none
+    /// does nothing.
+    fn close(&self) {}
 }
 
 /// A scheme→source registry: routes a reference to the source whose [`scheme`](SecretSource::scheme)
@@ -112,6 +116,11 @@ impl SourceRegistry {
         }
         self.sources.insert(scheme, source);
         Ok(())
+    }
+
+    /// Close each registered source.
+    pub(crate) fn close(&self) {
+        self.sources.values().for_each(|source| source.close());
     }
 
     /// Whether a source is registered for `scheme` (the routing key, not a full reference).

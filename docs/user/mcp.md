@@ -79,7 +79,7 @@ budgets and can satisfy response-based rules; they do not establish tool success
 | `type` | string | required | `"stdio"`. |
 | `command` | string array | required | Element 0 is a bare program name or an absolute executable path, and the rest are its arguments. The box places an alias named for the executable's filename in its `bin/`, on the agent's `PATH`. Arguments match exactly unless you enable [argument wildcards](#argument-wildcards). |
 | `workspace` | path | the agent's workspace | The server's initial working directory. |
-| `env` | table | empty | Variables the server receives. The server also receives `PATH` and `HOME` from the host OS's shell that runs `box run`, unless `env` sets them, and a placeholder for each `env://` credential. |
+| `env` | table | empty | Variables the server receives. The server also receives `PATH` and `HOME` from the host OS's shell that runs `box run`, unless `env` sets them, and a placeholder for each credential that has one: in `NAME` for an `env://NAME` route, and in the `secret.env` variable for a route in a declared scheme. |
 | `filesystem` | table | empty | The paths the server's own system calls reach. See [Filesystem](#filesystem). |
 | `network.contain_egress` | bool | `true` | How the server reaches the network. See [Network](#network). |
 
@@ -405,6 +405,12 @@ refuses a `[mcp.<name>]` with a backend by name, which stops the whole run. Gene
 `policy generate-schema` also runs the load checks of `box run` on each remote MCP server. A server
 whose `secret`, destinations, or name the loader rejects stops the whole run.
 
+When a server's `secret.ref` names a scheme that a
+[`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table declares, `policy generate-schema`
+runs that table's program to read the secret, as `box run` does, and prints the same line on stderr
+first. It reads that secret before it starts a stdio server. A program that returns no secret
+stops the whole run, and the error names the server.
+
 ## Errors and exit codes
 
 `box run` exits with an error before the agent starts when the configuration loader rejects a table.
@@ -414,6 +420,7 @@ whose `secret`, destinations, or name the loader rejects stops the whole run.
 | A configuration error that names `[mcp.<name>]` | A key is unknown, a required key is missing, or the name or the program breaks a rule on this page. A `backends` key on a `type = "stdio"` table is an unknown field. |
 | `` `[mcp.<a>]` and `[mcp.<b>]` declare the same command "<command>" `` | Two tables declare the same exact command or wildcard pattern on one alias. Remove one, or change its arguments. |
 | A `secret` error (a scheme that no table declares, a declared scheme with no `secret.env`, a `secret.env` while `secret-sources` is off, two entries with one placeholder variable and different secrets, or a reference to a `pass-secret-env` variable) | A remote MCP server's `secret` follows the egress secret rules. See [Errors in the egress guide](./egress.md#errors-and-exit-codes). |
+| `` `[mcp.<name>] secret.ref` names a secret that the secret source `<scheme>` (<program>) did not return `` | The program of a declared secret source returned no secret when the box started. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |
 | A backend error (more than one backend, a bad backend `url`, a signed `secret` beside a backend, or a refused backend `auth`) | A remote MCP backend follows the egress backend rules. See [Errors in the egress guide](./egress.md#errors-and-exit-codes). |
 | `MCP server "<name>" failed during <step>` | The server failed while the box read its tool list. stderr names the step. |
 | `modern MCP requests require ...` | The client omitted required protocol metadata. Update the client to one that sends the fields on every request. |

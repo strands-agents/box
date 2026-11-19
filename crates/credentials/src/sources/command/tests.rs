@@ -49,6 +49,11 @@ impl StandIn {
         .expect("a valid declaration")
     }
 
+    /// The declaration for `scheme` with the opened shell, as a caller that checked it gives both.
+    fn checked(&self, scheme: &str) -> (SecretSourceCommand, File) {
+        (self.declaration(scheme), shell())
+    }
+
     /// How many times the program started.
     fn runs(&self) -> usize {
         self.read("runs").lines().count()
@@ -64,6 +69,11 @@ impl Drop for StandIn {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.directory);
     }
+}
+
+/// The opened shell, which is the checked program file of each stand-in.
+fn shell() -> File {
+    File::open(SHELL).expect("the shell opens")
 }
 
 /// The bounds a test runs under, unless it tests a bound.
@@ -84,9 +94,10 @@ fn source(
         .collect();
     CommandSource {
         declaration,
+        program: shell(),
         environment: Box::new(move || operator.clone()),
         bounds,
-        held: Mutex::default(),
+        held: Mutex::new(Some(HashMap::new())),
     }
 }
 
@@ -513,6 +524,7 @@ fn a_failure_hides_a_passed_credential_that_is_not_utf8() {
         .expect("a valid pass list");
     let source = CommandSource {
         declaration,
+        program: shell(),
         environment: Box::new(|| {
             vec![(
                 OsString::from("TOKEN"),
@@ -520,7 +532,7 @@ fn a_failure_hides_a_passed_credential_that_is_not_utf8() {
             )]
         }),
         bounds: TEST_BOUNDS,
-        held: Mutex::default(),
+        held: Mutex::new(Some(HashMap::new())),
     };
     assert_eq!(
         refusal(&backend_of(source), "vault://item"),
@@ -621,21 +633,23 @@ fn a_reader_keeps_the_first_bytes_or_the_last_bytes_of_a_long_output() {
 }
 
 #[test]
-fn a_program_that_does_not_exist_is_a_failure_that_names_it() {
-    let declaration = SecretSourceCommand::new(
-        "vault",
-        SecretSourceCommand::PROTOCOL,
-        &[
-            "/nonexistent/box-test/vault".to_string(),
-            "{ref}".to_string(),
-        ],
-    )
-    .expect("valid");
+fn a_program_that_cannot_start_is_a_failure_that_names_it() {
+    // The checked file has no execute permission.
+    let program = StandIn::new("cannot-start", "printf never");
+    let script = program.directory.join("program.sh");
+    let command = [script.to_str().expect("a UTF-8 temp dir"), "{ref}"].map(str::to_string);
+    let declaration =
+        SecretSourceCommand::new("vault", SecretSourceCommand::PROTOCOL, &command).expect("valid");
+    let checked = File::open(&script).expect("the script opens");
+    let backend = Backend::declared([(declaration, checked)]).expect("the scheme is free");
     assert_eq!(
-        refusal(&backend(declaration), "vault://item"),
-        "credential error: the secret source \"vault\" (\"/nonexistent/box-test/vault\") for \
-         vault://[REDACTED] did not start (entity not found)"
+        refusal(&backend, "vault://item"),
+        format!(
+            "credential error: the secret source \"vault\" ({script:?}) for vault://[REDACTED] \
+             did not start (permission denied)"
+        )
     );
+    assert_eq!(program.runs(), 0);
 }
 
 // --- The reference ----------------------------------------------------------------------------
@@ -847,11 +861,8 @@ fn a_wipe_empties_each_string_of_a_parsed_value() {
 fn a_declared_backend_resolves_each_declared_scheme_through_its_program() {
     let first = StandIn::new("declared-first", "printf \"first:$1\"");
     let second = StandIn::new("declared-second", "printf \"second:$1\"");
-    let backend = Backend::declared([
-        first.declaration("vault"),
-        second.declaration("aws-secretsmanager"),
-    ])
-    .expect("two schemes");
+    let backend = Backend::declared([first.checked("vault"), second.checked("aws-secretsmanager")])
+        .expect("two schemes");
     assert_eq!(secret(&backend, "vault://a/b"), "first:a/b");
     assert_eq!(
         secret(&backend, "aws-secretsmanager://box/telemetry"),
@@ -862,7 +873,7 @@ fn a_declared_backend_resolves_each_declared_scheme_through_its_program() {
 #[test]
 fn a_declared_op_takes_the_place_of_the_built_in_source() {
     let program = StandIn::new("declared-op", "printf \"declared:$1\"");
-    let backend = Backend::declared([program.declaration("op")]).expect("op is free to declare");
+    let backend = Backend::declared([program.checked("op")]).expect("op is free to declare");
     // The built-in source refuses a reference with two segments, and never reads `{ref}`.
     assert_eq!(secret(&backend, "op://vault/item"), "declared:vault/item");
     assert_eq!(
@@ -875,7 +886,7 @@ fn a_declared_op_takes_the_place_of_the_built_in_source() {
 #[test]
 fn a_declared_backend_keeps_the_built_in_op_when_no_declaration_names_op() {
     let program = StandIn::new("built-in-op", "printf ok");
-    let backend = Backend::declared([program.declaration("vault")]).expect("valid");
+    let backend = Backend::declared([program.checked("vault")]).expect("valid");
     // The built-in source refuses this reference before it starts `op`.
     assert_eq!(
         refusal(&backend, "op://vault/item"),
@@ -892,7 +903,7 @@ fn a_declared_backend_keeps_the_built_in_op_when_no_declaration_names_op() {
 #[test]
 fn two_declarations_of_one_scheme_are_refused() {
     let program = StandIn::new("duplicate", "printf ok");
-    let error = Backend::declared([program.declaration("vault"), program.declaration("vault")])
+    let error = Backend::declared([program.checked("vault"), program.checked("vault")])
         .expect_err("one scheme has one declaration");
     assert_eq!(
         error.to_string(),
@@ -904,7 +915,7 @@ fn two_declarations_of_one_scheme_are_refused() {
 fn a_declared_backend_reads_a_file_reference_and_reports_an_unset_variable_as_soft() {
     let program = StandIn::new("local-sources", "printf ok");
     std::fs::write(program.directory.join("token"), "file-token\n").expect("written");
-    let backend = Backend::declared([program.declaration("vault")]).expect("valid");
+    let backend = Backend::declared([program.checked("vault")]).expect("valid");
     let file = format!("file://{}", program.directory.join("token").display());
     assert_eq!(secret(&backend, &file), "file-token");
     let unset = resolve(&backend, "env://BOX_COMMAND_SOURCE_TEST_UNSET")
@@ -981,4 +992,127 @@ fn debug_shows_the_scheme_and_the_program_and_no_secret() {
         format!("{source:?}"),
         "CommandSource { scheme: \"vault\", program: \"/bin/sh\", .. }"
     );
+}
+
+// --- The checked program file, and the end of the fetches -------------------------------------
+
+/// A stand-in whose program path is a link to the shell, so a test can point it at another file.
+fn linked(test: &str, script: &str) -> (StandIn, Backend) {
+    let program = StandIn::new(test, script);
+    let link = program.directory.join("tool");
+    std::os::unix::fs::symlink(SHELL, &link).expect("the link is made");
+    let mut command = program.command(&["{ref}"]);
+    command[0] = link.to_str().expect("a UTF-8 temp dir").to_string();
+    let declaration = SecretSourceCommand::new("vault", SecretSourceCommand::PROTOCOL, &command)
+        .expect("a valid declaration");
+    let backend = Backend::declared([(declaration, shell())]).expect("the scheme is free");
+    (program, backend)
+}
+
+/// The start of each failure of a [`linked`] stand-in.
+fn linked_failed(program: &StandIn, reason: &str) -> String {
+    format!(
+        "credential error: the secret source \"vault\" ({:?}) for vault://[REDACTED] {reason}",
+        program.directory.join("tool")
+    )
+}
+
+#[test]
+fn a_program_path_that_names_another_file_after_the_check_does_not_start() {
+    let (program, backend) = linked("replaced", "printf \"tok-$1\"");
+    // A link to the checked file is the checked program.
+    assert_eq!(secret(&backend, "vault://first"), "tok-first");
+    assert_eq!(program.runs(), 1);
+
+    let link = program.directory.join("tool");
+    std::fs::remove_file(&link).expect("the link is removed");
+    std::os::unix::fs::symlink("/bin/cat", &link).expect("the link names another file");
+    assert_eq!(
+        refusal(&backend, "vault://second"),
+        linked_failed(
+            &program,
+            "did not start: its program file changed after the box checked it"
+        )
+    );
+    assert_eq!(program.runs(), 1);
+    // The secret that the checked program returned stays held.
+    assert_eq!(secret(&backend, "vault://first"), "tok-first");
+
+    // A path that names nothing is not the checked file.
+    std::fs::remove_file(&link).expect("the link is removed");
+    assert_eq!(
+        refusal(&backend, "vault://second"),
+        linked_failed(
+            &program,
+            "did not start: its program file changed after the box checked it"
+        )
+    );
+    assert_eq!(program.runs(), 1);
+}
+
+#[test]
+fn a_program_path_that_changes_while_the_program_runs_gives_no_secret() {
+    let (program, backend) = linked(
+        "replaced-while-running",
+        "rm \"$D/tool\"\nln -s /bin/cat \"$D/tool\"\nprintf \"tok-$1\"",
+    );
+    assert_eq!(
+        refusal(&backend, "vault://item"),
+        linked_failed(
+            &program,
+            "ran, and its output is not read: its program file changed before it exited"
+        )
+    );
+    assert_eq!(program.runs(), 1);
+    // The output of that run is not held.
+    assert_eq!(
+        refusal(&backend, "vault://item"),
+        linked_failed(
+            &program,
+            "did not start: its program file changed after the box checked it"
+        )
+    );
+    assert_eq!(program.runs(), 1);
+}
+
+#[test]
+fn a_closed_backend_holds_no_secret_and_reads_no_declared_scheme() {
+    let program = printer("closed");
+    let backend = Backend::declared([program.checked("vault")]).expect("valid");
+    let clone = backend.clone();
+    assert_eq!(secret(&backend, "vault://plain"), "tok-plain");
+    assert_eq!(program.runs(), 1);
+
+    clone.close_declared();
+    let closed = failed("is closed: the box reads each secret once, before the workload starts");
+    // A held secret is gone, and no reference starts the program again, through each clone.
+    assert_eq!(refusal(&backend, "vault://plain"), closed);
+    assert_eq!(refusal(&clone, "vault://other"), closed);
+    assert_eq!(program.runs(), 1);
+
+    // The built-in sources hold no secret, so they still read.
+    std::fs::write(program.directory.join("token"), "file-token\n").expect("written");
+    let file = format!("file://{}", program.directory.join("token").display());
+    assert_eq!(secret(&backend, &file), "file-token");
+    Backend::local().close_declared();
+}
+
+#[test]
+fn a_closed_source_drops_each_held_secret() {
+    let program = printer("closed-held");
+    let source = source(program.declaration("vault"), &[], TEST_BOUNDS);
+    source
+        .fetch(&Locator::Uri("vault://object#A".to_string()))
+        .expect("resolves");
+    let held = |source: &CommandSource| {
+        source
+            .held
+            .lock()
+            .expect("the lock is free")
+            .as_ref()
+            .map(|held| held.keys().cloned().collect::<Vec<_>>())
+    };
+    assert_eq!(held(&source), Some(vec!["object".to_string()]));
+    source.close();
+    assert_eq!(held(&source), None);
 }

@@ -882,7 +882,9 @@ tool's `env` for non-secret literals.
 
 Box checks grants in `[agent]`, every `[tool.<name>]` it does not
 [leave out](#a-tool-whose-program-is-not-installed), and every local `[mcp.<name>]` table against
-those programs.
+those programs. The program of each [`[secret-source.<scheme>]`](#secret-sourcescheme) table gets
+the same checks. The write-grant refusal names that table. The hard-link refusals and the
+refusals through Strands Shell and Monty say `configured tool command` for it too.
 
 | Condition | Refusal text | Next action |
 |---|---|---|
@@ -1090,8 +1092,7 @@ because Box strips that placeholder.
 
 ## `[secret-source.<scheme>]`
 
-> **Status.** Experimental, and macOS only. Box loads, checks, and stores a declaration. This build
-> does not read a secret through one, so a box that declares a source does not start.
+> **Status.** Experimental, and macOS only.
 
 Each table declares one host program that reads a secret, and the table's name is the scheme of
 the references that the program serves. Box runs the program itself, outside every sandbox, with
@@ -1166,10 +1167,84 @@ Each of these is refused when the configuration loads:
 A box that declares a source stores its record at version 39, and so does a box with a
 `secret.env` key. An older build refuses that record.
 
-A configuration that passes these checks stops before the workload starts, with ``
-`[secret-source.op]` loaded, but this build cannot yet read a secret from a declared secret source,
-so the box does not start``. `policy generate-schema` stops with the same message for a remote MCP
-server whose secret names a declared scheme.
+### How a run reads the secrets
+
+When the box starts, it checks the program file of each table and prints one line for each on
+stderr:
+
+```text
+strands-box: [secret-source.op]: reads each op:// secret with /opt/homebrew/bin/op, which runs outside every sandbox
+```
+
+Box then runs the program once for each secret that the configuration names, before the workload
+starts. Two references that differ only in `#FIELD` name one secret, so they share one run. Box
+reads the secrets of telemetry targets first and opens its records. Then it reads the others. It
+keeps each secret in memory for the run and writes none to disk. It reads no secret again during
+the run, so a secret that changes in the vault takes effect at the next start.
+
+The program gets no stdin. Its environment is your `HOME`, the `PATH` `/usr/bin:/bin`, and each
+variable that `pass-env` and `pass-secret-env` name. It must exit with status 0 within 30 seconds
+and print at most 1 MiB. Box removes one trailing newline from what it prints.
+
+A program that keeps a file under your temporary folder needs `TMPDIR` in `pass-env`, because it
+gets no other variable. The example passes it for `op`, which keeps the session of
+`eval "$(op signin)"` in `$TMPDIR/com.agilebits.op.<uid>`. Without `TMPDIR`, `op` says that no
+session is active. That folder is not in the `reads` of the example, so a workload with a grant on
+your temporary folder can reach it. To close that, add the full path of the folder to `deny`.
+
+`policy generate-schema` reads the secret of a remote MCP server in the same way. It checks the
+program files and prints the lines only when a server names a secret in a declared scheme. It
+does both before it starts a stdio MCP server.
+
+Each of these stops the box before the workload starts:
+
+- The program file is missing or is not an executable file: ``invalid `[secret-source.op]` table:
+  its program cannot run: executable is not an executable regular file: /opt/homebrew/bin/op``.
+- The program returns no secret: it exits with another status, runs too long, or prints a value
+  that Box can't use. Box prints two lines. The first holds the reason and the last words of the
+  program on its stderr. The second names the entry that holds the reference:
+
+  ```text
+  strands-box: [egress.github] secret.ref: credential error: the secret source "op" ("/opt/homebrew/bin/op") for op://[REDACTED] exited unsuccessfully (exit status: 1): [ERROR] "GitHub" isn't an item in the "Personal" vault
+  strands-box: error: `[egress.github] secret.ref` names a secret that the secret source `op` (/opt/homebrew/bin/op) did not return, so the box does not start
+  ```
+
+  Sign in to the vault or correct the reference, then start the box again. When the entry is a
+  `[telemetry.<name>]` target and the run is the first one of a new box directory, also remove
+  the box directory before you start the box again. Box stores the box record before it reads
+  that secret, so the next run otherwise stops and says that
+  [the history is absent](policy.md#a-reused-box-whose-history-and-record-disagree).
+- A write grant covers the program, a symbolic link on the way to it, or a folder that holds
+  one of them: ``this write grant can change
+  [secret-source.op] command /opt/homebrew/Caskroom/1password-cli/2.42.0/op or its path. Keep the
+  program of each secret source outside every process's write grants``. Narrow the grant.
+- A reference that the program can't take: the text after `<scheme>://` starts with `-`, names
+  no secret, or ends with an empty `#FIELD`. Box starts no program for it.
+- A secret that is a JSON object, on a reference with no `#FIELD`. Name one field.
+- The program path names another file than the one Box checked when the run started: ``did not
+  start: its program file changed after the box checked it``. Start the box again.
+
+### What Box protects
+
+Box keeps the program file away from the workload as it does for a
+[configured tool program](#configured-command-integrity). The program file is element 0 of
+`command`. A write grant in `[agent]`, a `[tool.<name>]` table that the run does not
+[leave out](#a-tool-whose-program-is-not-installed), or a local `[mcp.<name>]` table can't cover
+that path, the file that it resolves to, a symbolic link on the way, or a folder that holds one of
+them. The Shell and Monty can't change them. Box checks the grants before it starts the program
+for the first time, in `box run` and in `policy generate-schema`, so a box with such a grant never
+runs the program. `policy generate-schema` leaves no tool out, so it checks each `[tool.<name>]`
+table.
+
+That check covers the program file and its path. It doesn't cover a file that the program loads
+or that an argument names, such as a script, a library, or an interpreter. Keep those outside
+every write grant yourself.
+
+Box doesn't yet protect the rest of the vault from the workload. It doesn't check a grant against
+`reads` and `deny`, and it doesn't check a workload's `env` against the `pass-secret-env`
+variables. Until it does, don't grant a workload a path that those lists name, don't permit
+`fs:read` or `fs:write` on those paths, and don't put the value of a `pass-secret-env` variable in
+a table's `env`.
 
 ## `[mcp.<name>]`
 
