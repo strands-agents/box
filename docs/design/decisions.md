@@ -719,7 +719,9 @@ first group runs from `fe80` to `febf`. EC2's IPv6 endpoint uses the single `ip6
 `fd00:ec2::254`, without the surrounding unique-local range.
 
 A box has this protection only if its policy contains the forbids. A policy without them can reach
-metadata. A new metadata endpoint is a policy change, not a Core release, and it reaches an existing
+metadata. The gateway's one fixed refusal is its own listening address, which is self-dial protection
+and not a destination choice ([the gateway never dials its own
+listener](#the-gateway-never-dials-its-own-listener)). A new metadata endpoint is a policy change, not a Core release, and it reaches an existing
 box only when that box's policy is edited.
 
 <a id="deny-overrides-composition-with-no-compiled-rule-tier"></a>
@@ -910,7 +912,8 @@ same host. A bare `aws://` body parses and names the AWS default credential prov
 binding can sign with the host's ambient identity; this is not silent, because the box warns on every
 such request and records a distinct default-chain acquisition. See
 [a bare aws:// resolves the default credential chain](#a-bare-aws-resolves-the-default-credential-chain).
-A secret travels over TLS only. See [credentials require TLS](#a-secret-rides-only-tls).
+A secret travels over TLS only, except to `host.box.internal`. See [credentials require
+TLS](#a-secret-rides-only-tls).
 
 <a id="temporal-rules-ride-the-closed-context"></a>
 <a id="a-temporal-rule-rides-the-same-closed-context-as-an-ordinary-rule"></a>
@@ -2230,13 +2233,52 @@ cleartext hazard at once, but it also blocks a legitimate local `http://` endpoi
 reach any host the policy permits, including hosts beyond loopback. The accepted residual risk is
 that the box carries cleartext to a permitted host, so anything on that path can read the traffic.
 
+<a id="host-box-internal-names-the-surrounding-oss-loopback"></a>
+### `host.box.internal` names the surrounding OS's loopback, and policy grants it per port
+
+Inside a box, `localhost` stays the box's own loopback. The reserved name `host.box.internal` means
+the surrounding OS's loopback: the gateway decides the name, maps it to `127.0.0.1` with no DNS
+lookup, and decides that address before it dials. The name is not in `NO_PROXY`, and no starter
+policy permits it. The name follows the `host.docker.internal` convention, and the `box` label
+avoids a real machine named `host.internal`.
+
+**Rejected.** An operator override of `NO_PROXY`: it sends all of the agent's loopback traffic to
+the host, which breaks a server the agent starts in the box, and it cannot name one port.
+
+**Cost.** IPv4 only, so a service that listens only on `::1` is out of reach. A `forbid` on a
+loopback `ip4` also refuses the name, and a wildcard host permit includes it. Under a containerized
+Box, the name reaches the container's loopback.
+
+<a id="the-gateway-never-dials-its-own-listener"></a>
+### The gateway never dials its own listener
+
+The gateway refuses a dial to its own listening address, in any local spelling, before policy
+decides the address. Such a dial connects the gateway to itself, so the request meets the gateway in
+place of a service and holds a second connection slot. `host.box.internal` or a literal `127.0.0.1`
+reaches that address. The refusal is a deny-only floor beneath policy, and it decides no other
+destination.
+
+**Rejected.** Leaving the self-dial to policy: a wildcard port permit on the name would open it, and
+the gateway's port changes on each run, so a rule cannot name it.
+
+**Cost.** The gateway holds one fixed refusal of its own. The telemetry collector's port stays
+reachable through the name when a policy permits it.
+
 <a id="a-secret-rides-only-tls"></a>
-### Credentials require TLS
+### Credentials require TLS, except to `host.box.internal`
 
 A bare-host credential pattern matches port 80 as well as 443, and a target carries no scheme, so a
 cleartext request to a credential-bound host would otherwise receive the real secret. The plain-HTTP
-path therefore refuses with `403` when any credential control matches the destination, before the gateway applies request controls. The destination determines this refusal. Request content cannot opt out of it. An
-operator cannot bind a credential to a plain `http://` upstream, not even a local one.
+path therefore refuses with `403` when any credential control matches the destination, before the
+gateway applies request controls. The destination determines this refusal, and request content
+cannot opt out of it. The one exception, which the maintainer approved, is `host.box.internal`
+when every matching route names it exactly and no backend re-routes it. That cleartext stays on the
+surrounding OS, and a local LLM gateway that asks for a key seldom speaks TLS.
+
+**Rejected.** Exempting every loopback destination: a literal `127.0.0.1` or a name that a resolver
+maps to loopback is not a name Box defines, and a wildcard route could reach the exception.
+
+**Cost.** Anything on the surrounding OS that can read loopback traffic can read that secret.
 
 <a id="the-plain-path-binds-its-own-destination-and-reports-its-transport"></a>
 ### The plain path binds its own destination and reports its transport truthfully

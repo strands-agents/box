@@ -235,7 +235,38 @@ deployment that must pin the identity writes `aws://PROFILE` rather than a bare 
 > can write there is trusted** — that is the box's only mitigation for either form.
 
 The gateway adds a credential only over HTTPS. A plain `http://` request to a destination a route
-names is refused.
+names is refused. The one exception is a service on your own machine, at `host.box.internal`; see
+[a service on your machine](#a-service-on-your-machine).
+
+## A service on your machine
+
+Inside a box, `localhost` is the box itself. To reach a service that listens on your machine's
+loopback, such as a local LLM gateway on `127.0.0.1:4259`, point the agent at
+`http://host.box.internal:4259`, for example with `[agent] env.ANTHROPIC_BASE_URL`. The gateway
+sends the request to `127.0.0.1:4259` on your machine. Your policy must permit the name and the port,
+because no starter policy does; [reach a service on your
+machine](policy.md#reach-a-service-on-your-machine) shows the rules.
+
+If the service asks for a key, a route can add it, also over plain `http://`:
+
+```toml
+[egress.local_llm]
+destinations = ["host.box.internal:4259"]
+secret.ref   = "env://LOCAL_LLM_KEY"
+```
+
+The gateway adds a secret to a plain request only when every route that matches it names
+`host.box.internal` exactly and no backend re-routes it. A wildcard such as `*.box.internal`, a
+literal address such as `127.0.0.1:4259`, and every other host still get
+`credential not permitted on a plaintext request`.
+
+- Use `http://`. With `https://`, the gateway checks the service's certificate for
+  `host.box.internal` against public roots, and a local service seldom has one, so the request
+  fails.
+- The name maps to IPv4 `127.0.0.1` alone. A service that listens only on `::1` is out of reach.
+- When Box runs in a container, the name reaches the container's loopback, not the machine that
+  runs the container.
+- The gateway refuses a request to its own port with a 403 that names `the gateway's own listener`.
 
 ## Networks that re-sign TLS
 
@@ -348,7 +379,8 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 |---|---|
 | The policy decision, naming the rule | `net:connect` or `http:request` refused the request. |
 | `blocked by egress control` | A request to a route's destinations lacks the placeholder, carries a different value, or can't be signed. A bare `aws://` chain that resolved at startup but later stops (a rotated-away credential, a `credential_process` that begins to fail) can't be signed and refuses here; one that is already broken at startup stops `box run` instead. |
-| `credential not permitted on a plaintext request` | A plain `http://` request went to a route's destination, including one the gateway [upgrades to HTTPS](#upgrade-plain-http-to-https). |
+| `credential not permitted on a plaintext request` | A plain `http://` request went to a route's destination, including one the gateway [upgrades to HTTPS](#upgrade-plain-http-to-https). A route that names [`host.box.internal`](#a-service-on-your-machine) exactly is the one exception. |
+| `<host>:<port> dials <address>, the gateway's own listener; refused so the gateway does not connect to itself` | The request named the gateway's own port, through `host.box.internal` or `127.0.0.1`. |
 | `request authority rejected` | The request inside a `CONNECT` named a different host. |
 | `response blocked by egress control` | The server sent a compressed response to a credentialed request. |
 

@@ -184,6 +184,47 @@ needs two `forbid` rules on `net:connect`: one for the metadata hostnames `metad
 and `metadata.azure.internal`, and one for the metadata addresses `169.254.*`, `fd00:ec2::254`,
 Azure WireServer `168.63.129.16`, Alibaba Cloud `100.100.100.200`, and the IPv6 link-local range.
 
+### A service on the operator's machine
+
+Inside a box, `localhost` is the box's own loopback, and `NO_PROXY` keeps that traffic local. The
+reserved name `host.box.internal` is the surrounding OS's loopback instead. It isn't in `NO_PROXY`,
+so a client sends it to the gateway like any other host. See [`host.box.internal` names the
+surrounding OS's loopback](decisions.md#host-box-internal-names-the-surrounding-oss-loopback).
+
+1. The gateway decides `net:connect` on `host == "host.box.internal"` and the port, before any
+   mapping. A deny ends the request, and no DNS query leaves for the name.
+2. The gateway maps the name to `127.0.0.1` with no DNS lookup. There is no IPv6 form, so a service
+   that listens only on `::1` is out of reach.
+3. The gateway decides `net:connect` again on the address, with `ip4 = "127.0.0.1"`, then dials
+   `127.0.0.1:<port>` from its own process, outside every sandbox.
+
+No starter policy permits the name, so a box reaches the operator's machine only through a permit
+that names it. Because the address decision sees `127.0.0.1`, a `forbid` on `ip4 like "127.*"` also
+refuses `host.box.internal`. To keep such a forbid and still permit the name, add
+`&& context.input.host != "host.box.internal"` to the forbid. A permit on the name doesn't admit
+`CONNECT 127.0.0.1:<port>`, because that request is decided on its own host, `127.0.0.1`. A wildcard
+permit, such as `host like "*.internal"`, includes the name.
+
+A backend on the name wins over the mapping: the gateway dials the backend, as for any re-routed
+host. Strands Shell `curl` and Monty `fetch()` don't refuse the name, because it isn't `localhost`
+or a literal address, so their requests reach the gateway and policy decides them as it decides
+the workload's.
+
+Only plain `http://` works in practice. An `https://` request reaches the gateway as a `CONNECT`, and
+the gateway checks the local service's certificate for `host.box.internal` against its public roots,
+which a local service seldom passes. When Box itself runs in a container, the surrounding OS is the
+container, so the name reaches the container's loopback and not the machine that runs it.
+
+### The gateway's own listener
+
+The gateway never dials its own listening address. A request to `host.box.internal:<gateway port>`,
+to `127.0.0.1:<gateway port>`, or to another spelling of a local address on that port, would connect
+the gateway to itself: the request meets the gateway in place of a service and holds a second
+connection slot. The gateway refuses such a dial with a 403 before policy decides the address, so no
+permit can open it. This is a floor beneath policy, not a destination list: every other address is
+still decided by policy alone. See [the gateway never dials its own
+listener](decisions.md#the-gateway-never-dials-its-own-listener).
+
 ## How responses reach the workload
 
 The gateway streams response bodies as they arrive, using bounded buffers. This includes
@@ -305,7 +346,11 @@ A placeholder sent anywhere else authenticates nothing. The gateway forwards it 
 destination with no route. The random value reveals no real credential to the receiving server.
 
 The gateway adds a secret only over TLS. It refuses a plain HTTP request to a bound destination
-before it adds any credential. See [credentials require TLS](decisions.md#a-secret-rides-only-tls).
+before it adds any credential. The one exception is `host.box.internal`: when every route that
+matches the request names that host exactly, with no wildcard, and no backend re-routes it, the
+gateway adds the secret to a plain request, because the request never leaves the surrounding OS. A
+literal loopback address, a wildcard route, and every other host still need TLS. See [credentials
+require TLS](decisions.md#a-secret-rides-only-tls).
 
 `secret.placement` selects a header, HTTP basic auth, or a query parameter for the secret. See
 [placement keys](../user/egress.md#placement), [the operator selects the credential

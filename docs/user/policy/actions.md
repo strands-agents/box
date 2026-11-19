@@ -132,6 +132,10 @@ with `expected ipaddr but saw String`.
 A rule on `path` has caveats for repeated slashes and `%2F`.
 [Forbid one URL path on a host](../policy.md#forbid-one-url-path-on-a-host) lists them.
 
+The host `host.box.internal` is the loopback of the machine that runs the box. Its address decision
+carries `ip4 = "127.0.0.1"`, so a `forbid` on a loopback `ip4` also refuses it.
+[Reach a service on your machine](../policy.md#reach-a-service-on-your-machine) shows the rules.
+
 Cloud metadata and link-local protection is two `forbid` rules on `net:connect`;
 [what Box always enforces](../security.md#what-box-always-enforces) lists them.
 

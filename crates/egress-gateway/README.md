@@ -273,6 +273,13 @@ upstream leg speaks TLS against the same roots, with the host as SNI and `Host`.
 matches the host on 443 still re-routes it. The workload's leg stays plain, so `intercepted` is
 `false` and a credential-matched request is refused.
 
+`dns_overrides` maps a host to one address with no DNS lookup; the host decision runs before the
+map, and the address decision on the mapped address. A plain `http://` request to a
+credential-matched destination is refused, with one exception: `host.box.internal`, when the
+override maps it to a loopback address, no backend re-routes it, and every matching credential
+pattern names it exactly. The gateway never dials its own TCP listening address: it refuses that
+dial before policy decides the address, so a permit cannot make the gateway connect to itself.
+
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
 `env_vars()`, `upstream_host_roots()`, and `shutdown()`. `upstream_host_roots()` returns a
 `#[non_exhaustive]` `HostRoots`, with the roots added from the host, the certificates skipped, and

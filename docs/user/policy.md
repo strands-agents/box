@@ -425,6 +425,43 @@ policy denied this operation on 'example.com:443' [default-deny]: No permit poli
 A `[egress.<name>]` table with no matching permit leaves the host unreachable. A permit with no
 binding sends the request with a placeholder in place of the secret, which the provider rejects.
 
+### Reach a service on your machine
+
+The agent reaches a local LLM gateway that listens on `127.0.0.1:4259` on your machine, and no other
+port there. The agent names it `http://host.box.internal:4259`;
+[a service on your machine](egress.md#a-service-on-your-machine) covers the agent's side.
+
+```text
+@id("local_llm_connect")
+permit (principal, action == Box::Action::"net:connect", resource)
+when { context.input.host == "host.box.internal" && context.input.port == 4259 };
+
+@id("local_llm_request")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "host.box.internal" && context.input.port == 4259 };
+```
+
+The gateway decides `net:connect` twice: on the name, and then on the address it dials, with
+`ip4 = "127.0.0.1"`. So a policy that forbids loopback addresses also refuses the name. To keep
+that forbid, exclude the name from it:
+
+```text
+@id("no_loopback")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when {
+  context.input has ip4 && context.input.ip4 like "127.*" &&
+  context.input.host != "host.box.internal"
+};
+```
+
+| Request | Decision | Rule |
+|---|---|---|
+| `http://host.box.internal:4259/v1/models` | Permitted | `local_llm_connect`, `local_llm_request` |
+| `http://host.box.internal:5432/` | Refused | No permit |
+| `http://127.0.0.1:4259/v1/models` | Refused | No permit: the host is `127.0.0.1`, not the name |
+
+A wildcard permit, such as `context.input.host like "*.internal"`, includes `host.box.internal`.
+
 ## History persistence and process crashes
 
 Box batches policy-history writes by default. Accepted events affect decisions during

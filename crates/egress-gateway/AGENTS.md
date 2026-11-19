@@ -47,6 +47,18 @@ The gateway holds no destination deny list. A metadata or link-local address is 
 `forbid` on `context.input.ip4` or `context.input.ip6`, decided on the pinned address
 ([metadata protection is policy](../../docs/design/decisions.md#the-ssrf-and-metadata-floor-is-compiled-beneath-policy)).
 
+- **The one fixed refusal is the gateway's own listener.** `SharedState::is_own_listener` refuses
+  a dial to the bound TCP address, in any local spelling, before the address decision, because
+  the gateway would connect to itself. It is a deny-only floor, approved by the maintainer
+  ([the gateway never dials its own listener](../../docs/design/decisions.md#the-gateway-never-dials-its-own-listener)).
+  Do not grow it into a list of other addresses.
+- **The plaintext-credential floor has one exception, and it stays exact.**
+  `SharedState::is_mapped_host_loopback` and `CapabilitySet::every_match_names_host` admit a
+  credential on plain HTTP only for `HOST_LOOPBACK_NAME`, mapped by a `dns_overrides` entry to a
+  loopback address, with no backend, and with every matching pattern naming the host exactly
+  ([credentials require TLS](../../docs/design/decisions.md#a-secret-rides-only-tls)). A wildcard
+  route, a literal loopback address, and a re-route each still refuse. Box's `run/hosted.rs` sets
+  the mapping and spells the name a second time; keep the two spellings equal.
 - **`CapabilitySet` holds the credential mutators, not a second authority.** A capability returns
   its mutations or a fault, and it has **no allow**. The fold applies the mutations only in the
   *absence* of a fault.
