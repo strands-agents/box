@@ -26,7 +26,7 @@ pub use effect::{
     EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, McpFrame, McpListReply,
     ReplyObserver,
 };
-pub use error::{PROXY_ORIGIN_HEADER, PROXY_ORIGIN_VALUE, ProxyError, Result};
+pub use error::{PROXY_FAILURE_VALUE, PROXY_ORIGIN_HEADER, PROXY_ORIGIN_VALUE, ProxyError, Result};
 pub use mcp::{
     McpTarget, McpTargetIdentity, canonicalize_mcp_frame, mcp_denial_response,
     refuse_duplicate_mcp_keys,

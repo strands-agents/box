@@ -38,15 +38,19 @@ pub enum ProxyError {
 
 /// The header naming a response as the gateway's own.
 ///
-/// The gateway forges the origin's leaf certificate on interception, so a refusal it synthesises
+/// The gateway forges the origin's leaf certificate on interception, so a response it synthesises
 /// inside its own tunnel is otherwise indistinguishable from the origin answering with the same
 /// status. Set on the responses the gateway originates and on nothing it relays, so there is no
-/// upstream hop to forward it to. A trusted client turns a response carrying it into a refusal and
+/// upstream hop to forward it to. A trusted client turns a response carrying it into an error and
 /// never renders it.
 pub const PROXY_ORIGIN_HEADER: &str = "x-strands-box-egress";
 
-/// The one value [`PROXY_ORIGIN_HEADER`] carries: the question is only whether the gateway wrote it.
+/// The [`PROXY_ORIGIN_HEADER`] value on a request the gateway refused.
 pub const PROXY_ORIGIN_VALUE: &str = "refused";
+
+/// The [`PROXY_ORIGIN_HEADER`] value on a request the gateway did not refuse, but could not
+/// complete.
+pub const PROXY_FAILURE_VALUE: &str = "failed";
 
 impl ProxyError {
     /// The HTTP status code this error maps to when the proxy must answer the workload: `403` for

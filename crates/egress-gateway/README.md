@@ -15,7 +15,7 @@ operators inspecting egress decisions.
 
 ## Public Interface
 
-The crate root is the complete public API — 36 names, 31 unconditional and 5
+The crate root is the complete public API — 37 names, 32 unconditional and 5
 behind the `tls-intercept` feature:
 
 | Area | Items |
@@ -27,7 +27,7 @@ behind the `tls-intercept` feature:
 | Effect lifecycle | `EffectAttempt`, `EffectInterceptor`, `EffectOutcome`, `EffectPermit`, `McpFrame`, `McpListReply`, `ReplyObserver` |
 | Remote MCP | `McpTarget`, `McpTargetIdentity`, `canonicalize_mcp_frame`, `mcp_denial_response`, `refuse_duplicate_mcp_keys` |
 | Audit seam | `Emitter`, `StubEmitter` |
-| Errors | `PROXY_ORIGIN_HEADER`, `PROXY_ORIGIN_VALUE`, `ProxyError`, `Result` |
+| Errors | `PROXY_ORIGIN_HEADER`, `PROXY_ORIGIN_VALUE`, `PROXY_FAILURE_VALUE`, `ProxyError`, `Result` |
 | Default adapter | `BackendDial`, `MitmConfig`, `MitmHandle`, `MitmInterceptor`, `ResponseLimits` |
 
 `AuditDecision` is the one renamed export: the item is `audit::Decision`.

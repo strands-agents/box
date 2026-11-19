@@ -162,6 +162,10 @@ A request the gateway refuses gets a 403 with the header `x-strands-box-egress: 
 that says why. A `net:connect` refusal of a `CONNECT` arrives before the `200`, so the client never
 starts TLS. A policy refusal of a request to an HTTP MCP server gets a JSON-RPC error body.
 
+A request the gateway doesn't refuse, but can't complete, gets a 502 with the header
+`x-strands-box-egress: failed`, and a body that says why. The header says that the gateway wrote
+the response. It doesn't say whether the request reached the server.
+
 ### Cloud instance metadata
 
 For gateway traffic, policy provides the only check on metadata endpoints. The gateway has no

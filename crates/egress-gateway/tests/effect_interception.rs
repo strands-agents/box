@@ -16,7 +16,7 @@ use credentials::{
 use egress_gateway::{
     AuditDecision, CapabilitySet, CredentialCapability, EffectAttempt, EffectInterceptor,
     EffectOutcome, EffectPermit, EgressDecision, Emitter, McpFrame, MitmConfig, MitmInterceptor,
-    StubEmitter,
+    PROXY_FAILURE_VALUE, PROXY_ORIGIN_HEADER, StubEmitter,
 };
 
 use harness::{TlsUpstream, WorkloadClient};
@@ -300,6 +300,17 @@ fn wait_for_event_count(events: &Arc<Mutex<Vec<Event>>>, expected: usize) -> Vec
         );
         std::thread::sleep(Duration::from_millis(1));
     }
+}
+
+/// Assert that `response` is the gateway's own failure, and that it names `reason`.
+fn assert_gateway_failure(response: &str, reason: &str) {
+    assert!(response.starts_with("HTTP/1.1 502 "), "{response}");
+    assert_eq!(
+        harness::header_value(response, PROXY_ORIGIN_HEADER),
+        Some(PROXY_FAILURE_VALUE),
+        "{response}"
+    );
+    assert!(response.contains(reason), "{response}");
 }
 
 #[test]
@@ -603,7 +614,7 @@ fn a_request_with_no_reply_records_its_delivery_without_a_status() {
 
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
     client.send_request("POST", "/no-reply", &[], b"effect");
-    assert_eq!(client.read_response(), "", "no reply reaches the workload");
+    assert_gateway_failure(&client.read_response(), "upstream exchange");
 
     let events = wait_for_event_count(&shared, 5);
     assert_eq!(
@@ -1450,7 +1461,7 @@ fn an_upstream_that_never_replies_is_bounded_by_the_read_deadline() {
     let started = Instant::now();
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
     client.send_request("POST", "/silent", &[], b"effect");
-    assert_eq!(client.read_response(), "", "no reply reaches the workload");
+    assert_gateway_failure(&client.read_response(), "upstream deadline passed");
     assert!(
         started.elapsed() < Duration::from_secs(10),
         "the deadline bounds the wait: {:?}",
@@ -1500,11 +1511,7 @@ fn an_upstream_that_drips_its_reply_is_bounded_by_the_read_deadline() {
     let started = Instant::now();
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
     client.send_request("GET", "/drip", &[], b"");
-    assert_eq!(
-        client.read_response(),
-        "",
-        "a dripped reply is not released"
-    );
+    assert_gateway_failure(&client.read_response(), "upstream deadline passed");
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "the deadline bounds the exchange as a whole: {:?}",
@@ -1545,11 +1552,7 @@ fn an_upstream_that_never_drains_the_request_is_bounded_by_the_write_deadline() 
     let body = vec![b'x'; 12 << 20];
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
     client.send_request("POST", "/deaf", &[], &body);
-    assert_eq!(
-        client.read_response(),
-        "",
-        "an undelivered request gets no reply"
-    );
+    assert_gateway_failure(&client.read_response(), "upstream deadline passed");
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "the deadline bounds the write: {:?}",
@@ -1600,11 +1603,7 @@ fn an_upstream_that_sips_the_request_is_bounded_by_the_write_deadline() {
     let body = vec![b'x'; 12 << 20];
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
     client.send_request("POST", "/sip", &[], &body);
-    assert_eq!(
-        client.read_response(),
-        "",
-        "an undelivered request gets no reply"
-    );
+    assert_gateway_failure(&client.read_response(), "upstream deadline passed");
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "the deadline bounds the writes as a whole: {:?}",
@@ -1685,7 +1684,7 @@ fn an_upstream_that_sips_a_plain_request_is_bounded_by_the_write_deadline() {
     proxy.write_all(&body).unwrap();
     let mut reply = Vec::new();
     let _ = proxy.read_to_end(&mut reply);
-    assert!(reply.is_empty(), "an undelivered request gets no reply");
+    assert_gateway_failure(&String::from_utf8_lossy(&reply), "upstream deadline passed");
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "the deadline bounds the writes as a whole: {:?}",

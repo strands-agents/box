@@ -391,6 +391,30 @@ fn a_marked_refusal_inside_a_tunnel_fails_curl() {
 }
 
 #[test]
+fn a_marked_failure_fails_curl_on_both_schemes() {
+    for scheme in Scheme::BOTH {
+        let (routing, _requests) = scheme.scripted(std::iter::repeat(response(
+            "502 Bad Gateway",
+            &[("x-strands-box-egress", "failed")],
+            "io error: upstream deadline passed",
+        )));
+
+        let (status, stdout, stderr) = run(
+            Some(routing),
+            &format!("curl -sS {}", scheme.url("a.example/")),
+        );
+
+        assert_eq!(status, 1, "{scheme:?}: {stdout} {stderr}");
+        assert_eq!(
+            stderr.trim(),
+            "curl: io error: upstream deadline passed",
+            "{scheme:?}"
+        );
+        assert!(stdout.is_empty(), "{scheme:?}: {stdout}");
+    }
+}
+
+#[test]
 fn an_oversized_refusal_keeps_its_reason_on_both_schemes() {
     let late = format!("{}late reason\n", "\n".repeat(16 * 1024));
     for scheme in Scheme::BOTH {

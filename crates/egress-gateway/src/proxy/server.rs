@@ -123,7 +123,7 @@ async fn first_request(
         Ok(opened) => opened,
         Err(refusal) => return Ok(*refusal),
     };
-    l7::forward_plain(
+    let forwarded = l7::forward_plain(
         upstream,
         backend.as_ref(),
         &connect,
@@ -134,7 +134,19 @@ async fn first_request(
         correlation,
         completion,
     )
-    .await
+    .await;
+    Ok(answered(&connect, forwarded))
+}
+
+/// The forwarded response, or a failure that says why, with the reason also on stderr.
+fn answered(connect: &ConnectRequest, forwarded: Result<WorkloadResponse>) -> WorkloadResponse {
+    forwarded.unwrap_or_else(|error| {
+        eprintln!(
+            "strands-box: warning: egress request to {}:{} failed: {error}",
+            connect.host, connect.port
+        );
+        WorkloadResponse::failure(error.http_status(), error.to_string().as_bytes())
+    })
 }
 
 /// The token check, then the connect decisions and the pinned upstream socket. The optional
@@ -174,7 +186,7 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
     serve(client, completion, |request, head| async move {
         let max_body = state.config.response_limits.max_body_bytes;
         let parsed = http1::read_request(&head, request.into_body(), max_body).await?;
-        l7::forward_tls(
+        let forwarded = l7::forward_tls(
             parsed,
             upstream,
             backend.as_ref(),
@@ -183,7 +195,8 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
             correlation,
             completion,
         )
-        .await
+        .await;
+        Ok(answered(&connect, forwarded))
     })
     .await
 }

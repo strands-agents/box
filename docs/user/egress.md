@@ -321,7 +321,22 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 | `request authority rejected` | The request inside a `CONNECT` named a different host. |
 | `response blocked by egress control` | The server sent a compressed response to a credentialed request. |
 
-A 502 with no `x-strands-box-egress` header means the gateway couldn't resolve or reach the server.
+A request the gateway doesn't refuse, but can't complete, gets an HTTP 502 with the header
+`x-strands-box-egress: failed`. The body says why, for example:
+
+| Body | Cause |
+|---|---|
+| `io error: upstream TLS handshake: <reason>` | The gateway doesn't trust the server's certificate, or the TLS handshake failed. |
+| `io error: upstream exchange: <reason>` | The server closed the connection before it replied. |
+| `io error: upstream deadline passed` | The server didn't reply within the upstream deadline. |
+| `effect interceptor unavailable` | The box's policy check failed. |
+
+Except for `effect interceptor unavailable`, policy permitted the request, so it may have reached
+the server. The box also prints the reason on stderr:
+`strands-box: warning: egress request to <host>:<port> failed: <reason>`.
+
+A 502 with no `x-strands-box-egress` header answers a `CONNECT`, or a plain `http://` request, that
+the gateway couldn't resolve or connect to. Any other 502 without the header comes from the server.
 
 Responses arrive progressively, including on credentialed routes. Credential redaction retains a
 short tail until more bytes arrive or the response completes cleanly. Requests and HTTP MCP
