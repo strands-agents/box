@@ -825,8 +825,8 @@ pub(super) fn uname() -> SystemInfo {
     };
     let kernel_name = field(&name.sysname);
     SystemInfo {
-        // `uname(2)` has no operating-system field. GNU's `uname -o` prints `GNU/Linux`, and
-        // macOS's prints the kernel name.
+        // `uname(2)` has no operating-system field. GNU's `uname -o` prints `GNU/Linux`. macOS's
+        // prints nothing, so the kernel name stands in.
         operating_system: if cfg!(target_os = "linux") {
             "GNU/Linux".into()
         } else {
@@ -863,22 +863,24 @@ mod tests {
 
     #[test]
     fn the_host_uname_is_what_the_uname_program_prints() {
+        let printed = |flag| {
+            let output = std::process::Command::new("uname")
+                .arg(flag)
+                .output()
+                .expect("run uname");
+            String::from_utf8_lossy(&output.stdout)
+                .trim_end()
+                .to_string()
+        };
         let system = uname();
-        let printed = std::process::Command::new("uname")
-            .arg("-snrmo")
-            .output()
-            .expect("run uname");
-        assert_eq!(
-            format!(
-                "{} {} {} {} {}\n",
-                system.kernel_name,
-                system.node_name,
-                system.kernel_release,
-                system.machine,
-                system.operating_system
-            ),
-            String::from_utf8_lossy(&printed.stdout)
-        );
+        assert_eq!(system.kernel_name, printed("-s"));
+        assert_eq!(system.node_name, printed("-n"));
+        assert_eq!(system.kernel_release, printed("-r"));
+        assert_eq!(system.kernel_version, printed("-v"));
+        assert_eq!(system.machine, printed("-m"));
+        // macOS's `uname -o` prints nothing to compare with.
+        #[cfg(target_os = "linux")]
+        assert_eq!(system.operating_system, printed("-o"));
     }
 
     struct Fixture {
