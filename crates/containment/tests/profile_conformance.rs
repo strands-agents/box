@@ -409,8 +409,9 @@ fn the_profile_reads_exactly_seven_named_sysctls() {
 /// The profile reaches one POSIX shared-memory name: libomp's registration object,
 /// `__KMP_REGISTERED_LIB_<pid>`, through the four operations registration and its cleanup use.
 ///
-/// libomp 15 and older abort at load when that open fails. No other object is reachable, so a
-/// shared-memory segment of another program, such as a notification center's, stays refused.
+/// libomp 15 and older abort at load when that open fails. Any other name, such as a notification
+/// center's segment, stays refused. The name matches for every PID, though, including PIDs no
+/// process holds yet, and `crates/containment/AGENTS.md` records what that costs.
 #[test]
 fn the_profile_reaches_only_openmp_registration_shared_memory() {
     let (_directory, config) = fixed_config();

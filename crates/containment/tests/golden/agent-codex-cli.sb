@@ -129,7 +129,9 @@
 ; OpenMP's runtime, libomp, registers itself when it loads, in a POSIX shared-memory object named
 ; for the process: __KMP_REGISTERED_LIB_<pid>. libomp 15 and older abort when that open fails, so
 ; torch, and any program built with OpenMP, stops before its first line. The four operations are
-; the ones registration and its cleanup use, and the name allows that object and no other.
+; the ones registration and its cleanup use. They reach no other name, but they reach this name for
+; every PID, including PIDs no process holds yet, and an object outlives the box. So a workload can
+; make a later host process that loads libomp abort. crates/containment/AGENTS.md records that cost.
 (allow ipc-posix-shm-write-create (ipc-posix-name-regex #"^/?__KMP_REGISTERED_LIB_[0-9]+$"))
 (allow ipc-posix-shm-read-data (ipc-posix-name-regex #"^/?__KMP_REGISTERED_LIB_[0-9]+$"))
 (allow ipc-posix-shm-write-data (ipc-posix-name-regex #"^/?__KMP_REGISTERED_LIB_[0-9]+$"))
