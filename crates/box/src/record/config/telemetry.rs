@@ -3,8 +3,9 @@
 //! A declared target REPLACES the box's default destination, so this module owns both halves — what
 //! an operator may write, and the collector request a run builds from what was stored.
 //!
-//! An absent `include` means every signal, so a target receives the harness's own spans, logs and
-//! metrics without naming one. The five words below are how an operator NARROWS that.
+//! An absent `include` means every signal except `mcp_tool_calls`, so a target receives the harness's own
+//! spans, logs and metrics without naming one, and a tool call's values only when it names the word.
+//! The six words below are how an operator narrows or extends that.
 //!
 //! The `telemetry` crate's own items are imported by name rather than qualified, because this module
 //! shares its spelling and `telemetry::Signal` would read as `self::Signal`.
@@ -114,6 +115,8 @@ pub(crate) enum SignalGroup {
     Logs,
     /// The agent's own metrics.
     Metrics,
+    /// Each MCP tool call's own arguments, and how it ended.
+    McpToolCalls,
 }
 
 impl SignalGroup {
@@ -125,17 +128,19 @@ impl SignalGroup {
             Self::Trace => vec![Signal::AgentTrace, Signal::ControlPlane],
             Self::Logs => vec![Signal::AgentLogs, Signal::McpUnmatched],
             Self::Metrics => vec![Signal::AgentMetrics],
+            Self::McpToolCalls => vec![Signal::McpToolCalls],
         }
     }
 
     /// Every word an operator may write, for a refusal that lists them.
-    fn every() -> [Self; 5] {
+    fn every() -> [Self; 6] {
         [
             Self::Deny,
             Self::Permit,
             Self::Trace,
             Self::Logs,
             Self::Metrics,
+            Self::McpToolCalls,
         ]
     }
 
@@ -147,6 +152,7 @@ impl SignalGroup {
             Self::Trace => "trace",
             Self::Logs => "logs",
             Self::Metrics => "metrics",
+            Self::McpToolCalls => "mcp_tool_calls",
         }
     }
 }
@@ -243,6 +249,44 @@ pub(crate) struct TelemetryEntry {
     /// The AWS region a CloudWatch target sends to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) region: Option<String>,
+}
+
+impl TelemetryEntry {
+    /// A `file` target at `destination` naming `include`, with every other key absent.
+    #[cfg(test)]
+    pub(crate) fn file(destination: &str, include: Option<Vec<SignalGroup>>) -> Self {
+        Self {
+            kind: TelemetryKind::File,
+            destination: destination.to_string(),
+            include,
+            secret: None,
+            accepts: None,
+            headers: None,
+            log_group: None,
+            log_stream: None,
+            project: None,
+            region: None,
+        }
+    }
+
+    /// Where this target sends records, as a disclosure names it: its destination, or its kind
+    /// when the kind supplies the address.
+    pub(crate) fn shown_destination(&self) -> String {
+        let destination = self.destination.trim();
+        if destination.is_empty() {
+            format!("the {} endpoint", self.kind.spelling())
+        } else {
+            destination.to_string()
+        }
+    }
+
+    /// Whether this target names `mcp_tool_calls`, the only way it receives a tool call's values.
+    pub(crate) fn takes_tool_calls(&self) -> bool {
+        self.include
+            .iter()
+            .flatten()
+            .any(|group| *group == SignalGroup::McpToolCalls)
+    }
 }
 
 /// Which secret a telemetry target attaches, and under which header.
@@ -966,7 +1010,6 @@ pub(crate) fn checked(
                 refuse_a_credential_header(headers, placement.as_ref())
                     .map_err(|reason| refuse(name, reason))?;
             }
-
             // **Every remaining rule belongs to the collector, so ask it rather than restate it.**
             // Two copies disagreed on `HTTPS://`, so `configure` refused what `run` accepted. The
             let probe = target_for(
@@ -987,6 +1030,14 @@ pub(crate) fn checked(
         accepted.insert(name.clone(), entry.clone());
     }
     Ok(accepted)
+}
+
+/// Whether an authored `[telemetry]` table names `mcp_tool_calls`, which an older build cannot honour.
+///
+/// Called before the targets are checked, so it reads the tables as authored; a table `checked`
+/// refuses fails the whole file there.
+pub(crate) fn names_tool_calls(telemetry: &BTreeMap<String, TelemetryEntry>) -> bool {
+    telemetry.values().any(TelemetryEntry::takes_tool_calls)
 }
 
 #[cfg(test)]
@@ -1338,13 +1389,15 @@ mod tests {
         assert!(refusal.to_string().contains("decisions"), "{refusal}");
     }
 
-    /// **`trace` names both the agent's spans and the control plane**, so neither is selectable on
-    /// its own, and the five words together name every signal the box files.
+    /// `trace` names both the agent's spans and the control plane, so neither is selectable on
+    /// its own, and the six words together name every signal the box files.
     ///
-    /// `logs` and `metrics` are separate words rather than part of `trace`, because a harness log is
-    /// not a span and an operator narrowing to spans must not silently also take metrics.
+    /// `logs` and `metrics` are separate words rather than part of `trace`, because a harness log
+    /// is not a span and an operator narrowing to spans must not silently also take metrics.
+    /// `mcp_tool_calls` is its own word, and the only way a target receives tool-call records, because
+    /// their values are in clear text.
     #[test]
-    fn the_five_words_expand_through_the_production_path() {
+    fn the_six_words_expand_through_the_production_path() {
         assert_eq!(
             signals_for(&[SignalGroup::Deny]),
             vec![Signal::PolicyDenied]
@@ -1365,20 +1418,64 @@ mod tests {
             signals_for(&[SignalGroup::Metrics]),
             vec![Signal::AgentMetrics]
         );
+        assert_eq!(
+            signals_for(&[SignalGroup::McpToolCalls]),
+            vec![Signal::McpToolCalls]
+        );
 
         // Every signal is reachable through an include word.
         let every = signals_for(&SignalGroup::every());
         assert_eq!(every.len(), Signal::every().len(), "{every:?}");
     }
 
+    /// A target whose `include` names `mcp_tool_calls` receives the signal, and one whose `include`
+    /// leaves it out does not.
+    #[test]
+    fn an_include_list_selects_or_leaves_out_tool_calls() {
+        let entry =
+            |include: Option<Vec<SignalGroup>>| TelemetryEntry::file("/tmp/records.jsonl", include);
+        let naming = target_for(
+            &entry(Some(vec![SignalGroup::McpToolCalls])),
+            None,
+            Path::new("/var/lib/boxes/codex"),
+            None,
+        )
+        .expect("the entry is well formed");
+        assert_eq!(naming.signals(), &[Signal::McpToolCalls]);
+        let other = target_for(
+            &entry(Some(vec![SignalGroup::Deny])),
+            None,
+            Path::new("/var/lib/boxes/codex"),
+            None,
+        )
+        .expect("the entry is well formed");
+        assert!(!other.signals().contains(&Signal::McpToolCalls));
+    }
+
+    /// A record that stores a target naming `mcp_tool_calls` carries `TOOL_CALLS_RECORD_VERSION`, so
+    /// an older build refuses the box rather than resuming it with values silently dropped.
+    #[test]
+    fn names_tool_calls_finds_only_a_target_naming_the_word() {
+        let telemetry = BTreeMap::from([(
+            "decisions".to_string(),
+            TelemetryEntry::file("/tmp/records.jsonl", Some(vec![SignalGroup::McpToolCalls])),
+        )]);
+        assert!(names_tool_calls(&telemetry));
+        let other = BTreeMap::from([(
+            "decisions".to_string(),
+            TelemetryEntry::file("/tmp/records.jsonl", Some(vec![SignalGroup::Deny])),
+        )]);
+        assert!(!names_tool_calls(&other));
+    }
+
     /// **An absent `include` takes every signal**, so an operator who names nothing still receives
-    /// the harness's own logs and metrics.
+    /// the harness's own logs and metrics, and never a tool call, whose values are in clear text.
     ///
     /// Read through `target_for`, which is the one path a run takes, rather than through
     /// `Signal::default_signals` — the box could otherwise call `receiving` with a narrower set and
     /// this assertion would still pass.
     #[test]
-    fn an_absent_include_takes_every_signal() {
+    fn an_absent_include_takes_every_signal_but_tool_calls() {
         let entry = TelemetryEntry {
             kind: TelemetryKind::File,
             destination: "/tmp/records.jsonl".to_string(),
@@ -1395,9 +1492,13 @@ mod tests {
             .expect("the entry is well formed");
         assert_eq!(
             target.signals().len(),
-            Signal::every().len(),
-            "an absent include must reach every signal: {:?}",
+            Signal::every().len() - 1,
+            "an absent include must reach every signal but mcp_tool_calls: {:?}",
             target.signals()
+        );
+        assert!(
+            !target.signals().contains(&Signal::McpToolCalls),
+            "a tool call reaches only a target that names mcp_tool_calls"
         );
         for expected in [
             Signal::AgentLogs,
@@ -1416,7 +1517,7 @@ mod tests {
     /// **An empty `include` and a repeated word are both refused in the operator's own vocabulary**,
     /// because the collector's own messages name the record spellings instead.
     #[test]
-    fn an_empty_or_repeated_include_is_refused_naming_the_five_words() {
+    fn an_empty_or_repeated_include_is_refused_naming_the_six_words() {
         let entry = |include: Vec<SignalGroup>| TelemetryEntry {
             kind: TelemetryKind::File,
             destination: "/tmp/records.jsonl".to_string(),
@@ -1438,7 +1539,14 @@ mod tests {
         .expect_err("an empty include names no signal")
         .to_string();
         assert!(empty.contains("no signal"), "{empty}");
-        for word in ["deny", "permit", "trace", "logs", "metrics"] {
+        for word in [
+            "deny",
+            "permit",
+            "trace",
+            "logs",
+            "metrics",
+            "mcp_tool_calls",
+        ] {
             assert!(
                 empty.contains(word),
                 "the refusal must list {word}, which an operator may write: {empty}"

@@ -1137,6 +1137,18 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   harness does — which is also why that suite does not assert `/bin/bash` is denied: it holds the
   *workload's* own exec grant.
 
+### An MCP tool call's records go through one `McpToolCallRecord`
+
+`DecisionRecorder::mcp_tool_called` records a call and returns the `McpToolCallRecord` that owes its
+end; it returns `None` when no target takes `mcp_tool_calls`, so a default box builds nothing. The
+stdio broker and the gateway both end it the same way: `completed` with the reply, or `refused` when
+the call never ran. The record keeps the call's correlation, so the completion joins the call on
+every transport without rebuilding it. **A record dropped while open records `indeterminate`**, so a
+new reply or refusal path that forgets to end it still ends the call; carry the record, do not call
+the collector directly. Over http the emitter leaves it in the permit's `ToolCallSlot` for
+`ObservedToolReply`. `an_unended_tool_call_records_indeterminate_and_a_refused_one_records_nothing`
+pins the drop, and it fails when `Drop` records nothing.
+
 ## The lifecycle verbs are gone, and must not come back by halves
 
 `ls`, `stop`, `rm`, and `reset` are deleted, with the `$HOME/.strands-box/b/` namespace they read.

@@ -811,6 +811,9 @@ fn monty_default() -> bool {
 fn is_true(value: &bool) -> bool {
     *value
 }
+/// The record version of a record whose telemetry targets name `mcp_tool_calls`, so an older build
+/// refuses the box rather than resuming it with those records dropped.
+const TOOL_CALLS_RECORD_VERSION: u32 = 40;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -878,7 +881,9 @@ fn record_version<'a>(
     secret_source_keys: bool,
 ) -> u32 {
     let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
-    if secret_source_keys {
+    if telemetry::names_tool_calls(targets) {
+        TOOL_CALLS_RECORD_VERSION
+    } else if secret_source_keys {
         SECRET_SOURCE_RECORD_VERSION
     } else if specs
         .clone()
@@ -1202,6 +1207,7 @@ impl Record {
             MONTY_OFF_RECORD_VERSION,
             DENY_WRITE_RECORD_VERSION,
             SECRET_SOURCE_RECORD_VERSION,
+            TOOL_CALLS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -3369,10 +3375,41 @@ env = {}
         );
     }
 
+    /// A record whose targets name `mcp_tool_calls` is stamped with its own version, so an older build
+    /// refuses the box rather than resuming it without those records.
+    #[test]
+    fn a_target_naming_tool_calls_stamps_its_record_version() {
+        let version = |tool_calls_target: bool| {
+            let include = vec![telemetry::SignalGroup::Deny]
+                .into_iter()
+                .chain(tool_calls_target.then_some(telemetry::SignalGroup::McpToolCalls))
+                .collect();
+            record_version(
+                "box-0123456789abcdef",
+                false,
+                true,
+                &ExperimentalFeatures::default(),
+                &Limits::default(),
+                std::iter::empty(),
+                &[],
+                None,
+                false,
+                &Gateway::default(),
+                &BTreeMap::from([(
+                    "local".to_string(),
+                    telemetry::TelemetryEntry::file("/tmp/records.jsonl", Some(include)),
+                )]),
+                false,
+            )
+        };
+        assert_eq!(version(true), TOOL_CALLS_RECORD_VERSION);
+        assert_eq!(version(false), RECORD_VERSION);
+    }
+
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, SECRET_SOURCE_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, TOOL_CALLS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

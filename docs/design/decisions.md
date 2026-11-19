@@ -2638,31 +2638,78 @@ settings written out.
 <a id="every-box-records-by-default"></a>
 ### Every box records by default, to a file the workload cannot reach
 
-An absent `telemetry` key means one `file` target that takes every signal: every effective denial
-and permit, the box's own control-plane records and MCP routing diagnostics, and the harness's
-relayed spans, logs, and metrics.
-A box that makes a thousand decisions without recording any cannot be audited. The default provides
-those records even when the operator has configured nothing. The file sits in the box's own private
-tree, which a deny-only floor refuses to the workload whatever a permit says. A declared target
-replaces the default instead of adding to it. The file has no size bound or rotation.
+An absent `telemetry` key means one `file` target that takes every signal but tool calls: every
+effective denial and permit, the box's own control-plane records and MCP routing diagnostics, and
+the harness's relayed spans, logs, and metrics. A box that makes a thousand decisions without
+recording any cannot be audited. The default provides those records even when the operator has
+configured nothing. The file sits in the box's own private tree, which a deny-only floor refuses to
+the workload whatever a permit says. A declared target replaces the default instead of adding to it.
+The file has no size bound or rotation.
 
 <a id="a-target-names-a-set-of-signals"></a>
-### A target names a set of signals, an absent list takes every signal, and `accepts` narrows by payload
+### A target names a set of signals, an absent list takes every signal but tool calls, and `accepts` narrows by payload
 
-`[telemetry.<label>] include` takes five words: `deny` and `permit` name the two effective verdicts,
+`[telemetry.<label>] include` takes six words: `deny` and `permit` name the two effective verdicts,
 `trace` names the agent's relayed spans and the box's own control-plane records. `logs` names the
 agent's relayed log records and the box's unmatched MCP routing diagnostics. `metrics` names the
-agent's relayed metric records. A target names a set, with no ordering, and no signal contains
-another. A target that names no `include` receives every signal, which
-`an_absent_include_takes_every_signal` pins. An empty list, a repeated word, and a misspelled word
-are each refused before the box exists. The agent's log records and metrics reach every target
-whatever `include` names. `accepts` on an `otlp` target is a second filter, by OTLP payload and not
-by signal: the exporter sends no `traces`, `logs`, or `metrics` batch that the list leaves out,
-which `a_traces_only_target_is_sent_no_other_payload` pins. Each vendor kind stores one payload, so
-a Langfuse target receives no log or metric batch, because Langfuse answers `404` on those routes
-and each batch would count as a loss. The cost is that an operator who reads only `include` can
-expect a log record that an `accepts` list keeps out. The box relays harness signals without
-producing them. The harness's exporter settings determine whether those records exist.
+agent's relayed metric records. `mcp_tool_calls` names each MCP tool call and how it ended. A target
+names a set, with no ordering, and no signal contains another. A target that names no `include`
+receives every signal except `mcp_tool_calls`, which
+`an_absent_include_takes_every_signal_but_tool_calls` pins; see [MCP tool-call values reach only a
+target that asks for them](#mcp-tool-call-values-reach-only-a-target-that-asks-for-them). An empty
+list, a repeated word, and a misspelled word are each refused before the box exists. The agent's log
+records and metrics reach every target whatever `include` names. `accepts` on an `otlp` target is a
+second filter, by OTLP payload and not by signal: the exporter sends no `traces`, `logs`, or
+`metrics` batch that the list leaves out, which `a_traces_only_target_is_sent_no_other_payload`
+pins. Each vendor kind stores one payload, so a Langfuse target receives no log or metric batch,
+because Langfuse answers `404` on those routes and each batch would count as a loss. The cost is
+that an operator who reads only `include` can expect a log record that an `accepts` list keeps out.
+The box relays harness signals without producing them. The harness's exporter settings determine
+whether those records exist.
+
+<a id="mcp-tool-call-values-reach-only-a-target-that-asks-for-them"></a>
+### MCP tool-call values reach only a target that asks for them, in clear text
+
+A policy author, or a tool that drafts policy from the decision log, learns rules from what an
+agent's tool calls carried and how they ended. So the box records each MCP tool call's arguments
+when the call is decided, and how it ended with its `structuredContent` when it ends, on stdio and
+http alike. These values are what the agent and the server chose, so either can hold a secret, and a
+target can be a vendor's endpoint.
+
+The values go on a `strands-box.mcp` log record, never on a decision or its span, as maps of
+flattened fields in clear text. Only a target that names `mcp_tool_calls` in its `include` receives
+that record. A target with no `include`, including the box's own default file, doesn't, and at
+startup Box prints one stderr line for each target that does. Naming the word is the operator's
+choice of who may read every argument and output. The record is a log and never a span, so a target
+that accepts no logs, such as a Langfuse target, can't name the word
+(`tool_calls_need_a_target_that_accepts_logs`). Keys arrive as the tool wrote them.
+`only_a_target_naming_tool_calls_receives_them_in_clear_text` and
+`startup_discloses_each_telemetry_target_that_takes_tool_calls` pin both halves.
+
+This follows managed MCP gateways, which log each `tools/call` request and response body whole to
+the customer's own log store and leave access to its permissions. Box can't assume a target is the
+operator's own, so the opt-in is per target, absent by default, and disclosed.
+
+The cost is that a target naming `mcp_tool_calls` receives any secret a tool takes or returns. Over
+http it also makes Box read every tool reply, and those copies share the gateway's budget with the
+replies per-tool rules read, so under many concurrent large replies a rule's read can be abandoned
+and record `indeterminate`, which fails closed. `a_reply_is_read_when_a_target_takes_tool_calls`
+pins the read. A call refused before the per-tool check, by `mcp:call` or because the tool isn't
+listed, is recorded too, because it shows what the agent tried. Values keep their JSON type, so
+`true` and `"true"` stay apart.
+
+Rejected:
+
+- **A list of fields per server and tool.** Operators rarely wrote the MCP servers they run, so they
+  can't know which fields are sensitive, and each list goes stale as the server changes.
+- **Field names to every target, values only where named.** A key can be data, such as a token used
+  as a map key, and no rule of shape tells it from a plain name.
+- **A sensitivity marker from the MCP server.** MCP has no field-level marker. The open proposal,
+  SEP-1913, marks a whole call or result. A marker the author forgot would reveal the field.
+- **Exporting from policy history.** Dogwood removes every raw event at each snapshot and keeps only
+  the state its rules read, and a run holds the history file locked.
+- **Values on the decision record.** One record reaches every target that receives its verdict, and
+  its span carries it too.
 
 <a id="the-strands-box-namespace-is-reserved"></a>
 ### `strands.box.` is reserved, and the collector strips it from an agent's payload at every level
@@ -2737,9 +2784,11 @@ A decision uses caller-supplied context to join the caller's trace: the alias en
 Shell or Monty call, the request headers for HTTP egress, and `params._meta` for an MCP frame. Every
 box record carries `strands.box.run.id`, generated once per `run`. The box copies named fields only,
 bounds their size, and validates before it retains anything. Tool arguments, prompts, authorization
-headers, and arbitrary baggage are excluded, and a caller-supplied identifier is never evidence of
-caller identity. Roughly half of all decisions arrive unparented and join by `strands.box.run.id`
-alone.
+headers, and arbitrary baggage are excluded from correlation context, and a caller-supplied
+identifier is never evidence of caller identity. A tool call's arguments are recorded only on its
+own record, and reach only a target that names `mcp_tool_calls`; see [MCP tool-call values reach
+only a target that asks for them](#mcp-tool-call-values-reach-only-a-target-that-asks-for-them).
+Roughly half of all decisions arrive unparented and join by `strands.box.run.id` alone.
 
 <a id="the-policy-attribute-names-are-this-products-own"></a>
 ### The policy attribute names are this product's own, and the set is fixed
@@ -2750,7 +2799,8 @@ authorization, so this namespace is authoritative here, and the set is fixed bec
 indexes on these keys. Standard keys identify the operation where one exists: `server.address`,
 `server.port`, `http.request.method`, `file.path`, `process.command`, `process.command_args`, and
 `process.working_directory`. `url.full` and `process.command_line` stay excluded, because each
-routinely carries a secret.
+routinely carries a secret. A tool call's arguments and answer stay off the decision for the same
+reason, and go on a tool-call record under `strands.box.mcp.tool.*`.
 
 `.cause` is mandatory and must agree with `.verdict`. `DecisionRecord` holds a `DecisionCause`
 rather than an option. A permit defaults to `Permitted`, a deny defaults to `Forbidden`, and
