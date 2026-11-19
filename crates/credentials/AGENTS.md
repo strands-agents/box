@@ -132,7 +132,7 @@ views, and `redaction.rs` owns incremental response matching. `opened.rs` owns t
 `audit.rs` and `diagnostic.rs` own secret-free
 observability. `error.rs` owns the soft-versus-hard classification.
 
-There is no OAuth2 mint provider, and `sources/oauth2.rs` is deleted. Add a route constructor, a
+There is no OAuth2 mint provider. Add a route constructor, a
 dispatch path, and a token lifecycle before any provider; unreachable mint machinery reads as a
 wired feature.
 
@@ -153,7 +153,7 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
 `[dev-dependencies]` entry, so `cargo build` misses it. Run the required artifact critics. Modify
 `Cargo.lock` only for a dependency this crate added.
 
-## Lessons from the content-and-placement work
+## Sealing, refusal, and test practice
 
 - Put `#[non_exhaustive]` on each *variant*; on the enum it seals only added variants, so a caller
   still writes `InjectMode::Header { .. }`. A private witness must be `pub` to appear there, so it
@@ -294,8 +294,8 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
 - `env://` refuses every `DENYLIST` name (`src/sources/env.rs`), case-insensitively and hard, so a
   manifest cannot exfiltrate ambient credentials or process-injection state. It is a floor, not a
   catalogue. A bare `aws://` default chain reads those `AWS_*` names on purpose, through the SDK.
-- Do not merge `DENYLIST` with `reserved_workload_environment` (`box/src/define/config.rs`), which
-  governs what a credential may claim in the workload environment and refuses at `create`.
+- Do not merge `DENYLIST` with `reserved_workload_environment` (`box/src/record/config/env.rs`),
+  which governs what a credential may claim in the workload environment and refuses at `create`.
 - `op://` has no soft tier; `op read` cannot signal absence, so every failure is hard. A declared
   source has none for the same reason.
 - Read `file://` before sandbox activation, or every such route skips instead of erroring. The

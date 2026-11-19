@@ -8,7 +8,7 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
 
 - **Contract, in precedence order.** The diff is the claim; the decisions, the spec, and the tests
   are the contract. Judge the claim against the contract, not against your own taste.
-  0. **The `strands-box` interface freeze** (2026-08-10, while it holds): see the
+  0. **The `strands-box` interface freeze**: see the
      "`strands-box` is interface-frozen" section of `AGENTS.md`. An unapproved interface change or
      foundational-premise change in `crates/**` is a **BLOCKER**, and outranks everything below.
      Check this **first**, before requirements or design: a diff can satisfy every spec and still
@@ -83,7 +83,7 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
    - The four box inputs (policy, credentials, name, workload). A fifth input, or a key naming a
      host path, a working directory, an env overlay, a proxy port, or a mechanism value, is a
      BLOCKER against the box contract in `crates/box/AGENTS.md`.
-   - On-disk records: `Record`/`RECORD_VERSION`, `LiveRecord`/`LIVE_VERSION`: a field added,
+   - On-disk records: `Record`/`RECORD_VERSION`, `BoxLive`/`LIVE_VERSION`: a field added,
      removed, or retyped **without** a version bump is the worst case, since an old artifact then
      parses as if it were new. Confirm the bump; if the shape changed and the const did not, quote
      both lines.
@@ -116,7 +116,7 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
    launcher registry); validate-once-then-act-on-the-approved-identity (`confine` returning a
    canonical path, never validating one spelling and reopening another); environment composed not
    inherited with box-owned values last; absent policy is default-deny; a credential binding is not
-   an authorization; the daemon's memory hardened as the only plaintext-secret holder, reached by
+   an authorization; the box's trusted process hardened as the only plaintext-secret holder, reached by
    mediation rather than a process boundary.
 
    **Test deletion is the tell, and check for it explicitly.** A deleted, renamed, or newly
@@ -171,7 +171,7 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
    classes:
    - **Trust-boundary violations:** does anything trust input from the sandboxed workload or
      child? Untrusted input reaching a decode or dispatch path must degrade, never panic or desync.
-   - **Sandbox escape or capability leak:** Seatbelt or Landlock profile too permissive; egress
+   - **Sandbox escape or capability leak:** Seatbelt profile or Linux namespace view too permissive; egress
      that bypasses the proxy; `NetworkMode` not restricted where the design requires it; an fd or
      handle that leaks a policy-exempt channel to a grandchild (CLOEXEC).
    - **Secret handling:** does the agent or handler ever *hold* a real secret (violates the
@@ -229,7 +229,7 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
    These are DESIGN-tier findings (they do not change behavior): report them, but never let them
    outrank a correctness or security issue.
 9. **Doc-comment length: the rationale belongs in `AGENTS.md`, not above the signature.** The
-   crate's inline docs were cut from ~3,800 lines to ~900 on 2026-08-09 (see the "Inline docs are
+   crate's inline docs are short (see the "Inline docs are
    short" section of [`crates/box/AGENTS.md`](../../../crates/box/AGENTS.md)), and a diff that
    re-grows them is a regression even when every sentence is true. The split:
    - `///` on an item: **one paragraph**: what it is, plus any refusal a caller must expect.
@@ -286,14 +286,14 @@ remove that directory after the pins finish.
 
 ### Platforms: the host gates are blind to other platforms
 
-A green macOS run proves nothing about `cfg(target_os = "linux")` code. Measured 2026-08-23: host
-suite green, then the Dry Run Build failed with **39 errors** in Linux-only *test* code. Libraries
-compiled; the `#[cfg(test)]` modules inside them never did.
+A green macOS run proves nothing about `cfg(target_os = "linux")` code: a host suite can pass while
+Linux-only *test* code fails to compile. Libraries compile on the host; the Linux-only
+`#[cfg(test)]` modules inside them never do.
 
 - The command for the other platform is
   `cargo check -p <crate> --target x86_64-unknown-linux-gnu --all-features`. It is cheap and works
-  on macOS, but covers the **library only**. `--all-targets` (the test modules, where those 39
-  errors were) dies in `ring`'s build script for want of a C cross-compiler. **Never report this as
+  on macOS, but covers the **library only**. `--all-targets` (which includes the test modules)
+  dies in `ring`'s build script for want of a C cross-compiler. **Never report this as
   full coverage.**
 - The real cross-platform compiler is continuous integration, which builds and tests both
   platforms on every pull request. A local host cannot stand in for it.
@@ -315,7 +315,7 @@ First, before `BLOCKERS`:
 
 ```
 FREEZE   (always present for a crates/** diff, even when clean)
-- surfaces checked: CLI | box.toml | four inputs | Record/LiveRecord | wire protocol
+- surfaces checked: CLI | box.toml | four inputs | Record/BoxLive | wire protocol
   | alias names | policy vocabulary | crate façades | box library | workload env | operator-facing docs
 - interface changes: none  (or: path/to/file.rs:12 : <surface> <what moved>; approved by <KD/spec> | UNAPPROVED)
 - premise changes: none    (or: path/to/file.rs:34 : weakens <premise>; UNAPPROVED)
@@ -327,7 +327,7 @@ FREEZE   (always present for a crates/** diff, even when clean)
 ```
 - host: macOS : build/test/clippy/fmt green (numbers below)
 - other targets: <cargo check --target … result> | NOT COMPILED
-- dry-run build: <build URL + pass/fail> | not submitted, so cfg(linux) is UNVERIFIED
+- continuous integration: <run URL + pass/fail> | not run, so cfg(linux) is UNVERIFIED
 ```
 
 `GATES` lines:

@@ -12,7 +12,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 ## Read This First: Durable Dogwood History
 
 - The engine is Dogwood: the published `dogwood-language` and `dogwood-local-engine` crates.
-  Cedar's authorizer is deleted. Issue #59 lists what 1.0.0 lacks and where the box covers it.
+  Cedar is not the authorizer; its types supply the schema and the request gate. Issue #59 lists
+  what 1.0.0 lacks and where the box covers it.
 - The code and its tests own the commit, recovery, policy-change, and time contract.
   [History is durable per box](../../docs/design/decisions.md#history-is-durable-per-box-and-has-no-rewind)
   records why. Do not restate that contract here.
@@ -222,11 +223,13 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   and a plain path outside every root is `Unresolvable` when its parent is missing and `Unreachable`
   when it is not. This is the existence-oracle class on host binds. Give one reason for every
   refusal of a path the caller may not reach.
-- LIVE GAP: `like` is case-sensitive and macOS is not, so `policy.DW` stays exposed. Do not widen
-  the pattern to `*.dw`, which over-denies an ordinary `.dw` file.
-- `SELF_DEFENDED_FILES` is `["box.toml", "policy.dw"]`, and it is public so tests and
-  `box/src/define/layout.rs` derive from it. Add no `*.cedar` rule and no speculative entry. A
-  defended filename costs an escalation chain, as `mcp.toml` did.
+- `SELF_DEFENDED_FILES` is `["box.toml", "policy.dw"]`. It is a public export that nothing in the
+  workspace reads, so an entry defends nothing. The box pins each loaded authority source by
+  identity in `run::contain::boundary::protect_authorities`. A tree grant that strictly encloses the
+  directory holding that source also has the directory subtracted
+  (`a_project_entry_subtracts_the_directory_holding_this_boxs_authority`). The private copies,
+  `RECORD_FILE` and `POLICY_FILE` in `box/src/record/layout.rs`, are refused by
+  `require_private_state_absent`.
 - Raise three legs for a `FilesystemPair`: the source as the pair operation, the source as
   `fs:read_content`, and the destination. Do not reduce it to two. A rename whose destination
   exists raises a fourth, `fs:delete` on the destination, because the rename removes what it held.
@@ -256,8 +259,9 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Refuse `Mkdir` with `parents == true`, because `ScriptPermit` cannot bound the ancestors.
 - Keep `classify` exhaustive. If upstream marks `OsFunctionCall` `non_exhaustive`, add `_ => None`,
   denied.
-- Keep `Admitted::Clock` bounded to `date.today()` and `datetime.now()`, decided by nobody and
-  recorded nowhere.
+- Keep `Admitted::Ungoverned` bounded to the arms `classify` lists under "not governed":
+  `DateToday`, `DateTimeNow`, `Time`, `Urandom`, and the four sleep calls. Nobody decides them and
+  nothing records them.
 - Map `Stat`, `Exists`, `IsFile`, `IsDir`, and `IsSymlink` to `fs:read_metadata`. The
   vocabulary does not separate follow from no-follow.
 - Do not align the Script adapter with upstream `monty-dogwood`, which leaves an unmapped call
@@ -269,8 +273,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - A dropped `ScriptPermit` submits `FsResult::Indeterminate` from `Drop`. Keep `#[must_use]`, claim
   `reported` before you submit, and discard a `Drop` recording failure. `EffectPermit` and
   `KernelPermit` mirror it.
-- The engine differential is deleted with Cedar (528 verdicts, 0 divergences). It caught the
-  missing request gate (32 verdicts), so the gate lives in `decide`.
+- The request gate lives in `decide`. It validates each request against the schema before the
+  engine decides, so a catch-all `permit` cannot allow a request outside the vocabulary.
 - Parse the schema at `open`, never lazily: a lazy parse costs the first call ~1.5 ms and turns a
   load error into a first-request deny. `cached_uid` saves ~7 µs per verdict and still yields
   `PolicyError::Schema`.

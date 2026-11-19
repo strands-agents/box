@@ -28,8 +28,8 @@ box's trusted half alive for one run, and `command/` is the argv parser plus one
 
 `command/{policy,run}` is **two modules for two verbs**. `command/cli.rs` holds the clap derive tree
 and nothing else, and `run/configure` owns **no verb at all**: it is the creation mechanism `run`
-calls, and it is not operator-facing. `list`, `stop`, and `remove` are deleted with the verbs they
-implemented — see "The lifecycle verbs are gone" below before adding one back.
+calls, and it is not operator-facing. Read "A box has no lifecycle verbs" below before you add a
+verb that finds, lists, stops, removes, or resets a box.
 
 The three `record/` modules each answer one question. `config` is `box.toml`: the two wire records,
 plus one module per vocabulary. The modules are `process`, `filesystem`, `egress`, `env`, `mcp`,
@@ -228,8 +228,10 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   no `fs:*` decision in the path. That is exactly what a project entry buys and what the startup
   disclosure names. `box_filesystem.rs::the_workspace_is_enterable_and_unreadable_until_listed`
   pins the default, and
-  `record::config::filesystem::a_project_entry_subtracts_every_boxs_own_authority` pins that such an
-  entry still holds no box's `.strands-box`.
+  `record::config::filesystem::a_project_entry_subtracts_the_directory_holding_this_boxs_authority`
+  pins that such an entry never reaches the directory holding this box's authority, that a sibling
+  box's directory under the same grant stays reachable, and that the startup disclosure names the
+  grant that reaches it.
 
   **A tool's workspace and reach come from its own `[tool.<name>]` table.** One translator reads
   both specs, so a tool holds what it declares and nothing the agent declared.
@@ -245,7 +247,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   containment, and it sat inside the project where the starter policy permits `fs:write` — so a
   workload wrote an entry, the next `run` materialized an alias, and `shell:spawn` decided a
   program the *workload* picked. `box.toml` was already defended.
-  `policy::SELF_DEFENDED_FILES` is two entries for the same reason.
+  `policy.dw` is the second authority file, and both are protected by identity in
+  `run::contain::boundary::protect_authorities`.
 - **`ConfigureRequest` is the interface; `ConfigFile` is the wire record.** `ConfigureRequest` is the
   validated four-input request that composition consumes, and `Record` is what `configure` stores.
   `ConfigFile`/`EgressEntry` are the private `Deserialize` shapes and hold strings. Keep the serde
@@ -694,9 +697,6 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   correct, compare the granted spelling against the one in the workload's environment before looking
   anywhere else. Every fixture and shipped script canonicalizes its own `box_dir` for this reason —
   `fixture.rs`'s `short_operator_home` and `boxes_parent` both do.
-
-  `the_root_is_canonical_when_the_operator_home_is_a_symlink` covered the box-canonicalizes-it half
-  and is deleted with it.
 - **The workload's environment is composed, never inherited, and box-owned values go last.** So a
   phantom cannot displace proxy routing, CA trust, or the fixed identity.
   `reserved_workload_environment` is what a credential may not claim: every loader hook and every
@@ -1137,18 +1137,13 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   harness does — which is also why that suite does not assert `/bin/bash` is denied: it holds the
   *workload's* own exec grant.
 
-## The lifecycle verbs are gone, and must not come back by halves
+## A box has no lifecycle verbs
 
 `ls`, `stop`, `rm`, and `reset` are deleted, with the `$HOME/.strands-box/b/` namespace they read.
 Every one of them found a box by enumerating that namespace or by resolving a name into it, so with
 `box_dir` required there is nothing for them to enumerate: **Box cannot locate a box it was not
 handed.** The caller that created the directory holds the path and owns the lifecycle — end the `run`
 process to stop a box, remove the directory to delete one.
-
-What went with them: `command/{list,stop,remove}.rs`, `layout::{every_box_name, boxes_namespace,
-box_root_path, default_box_directory}`, `BoxRoot::{sited, open}`, `config::selected_box_or_project`,
-`lock::{is_running, running_port, stop}`, `LayoutError::NotConfigured`, and
-`DaemonError::LoadedBoxes`.
 
 **A verb that takes a `box_dir` argument is a new interface, not a restoration.** If one is wanted,
 argue it as an addition and note what `ls` cannot mean any more: there is no set of boxes to list, so
@@ -1271,8 +1266,8 @@ Do not treat any of these as settled by the code existing.
   encloses `box_dir` is refused, which was the same defect reached through a home rather than a grant.
 
   What still holds, and what a reader must not over-read from it: a box cannot reach its **own**
-  private tree, `~/.strands-box`, or the machine state; and both `SELF_DEFENDED_FILES` stay protected
-  by identity rather than by path, so the *authored* config and policy of a running box are refused
+  private tree, `~/.strands-box`, or the machine state; and both authority files, `box.toml` and `policy.dw`, stay
+  protected by identity rather than by path, so the *authored* config and policy of a running box are refused
   even when the file is reachable.
 - **The telemetry destination guard narrowed with it.** `record/config/telemetry.rs` refuses a
   destination inside **this** `box_dir` outside `private/`; it used to refuse one inside any box's
