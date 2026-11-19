@@ -138,9 +138,9 @@ impl MountView {
             } else {
                 MountKind::Fresh { fstype: "proc" }
             },
-            // Keep process inspection available, but do not allow `/proc/*/mem` to write through
-            // the executable-memory syscall restrictions. The shared procfs is read-only too, so
-            // the workload cannot write any other process's `/proc` file either.
+            // Keep process inspection available, but refuse writes through `/proc/*/mem`, which
+            // ignore page protections and can reach another process's memory. The shared procfs
+            // is read-only too, so the workload cannot write any other process's `/proc` file.
             writable: false,
             executable: false,
             origin: MountOrigin::Scaffold,

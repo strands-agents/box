@@ -203,12 +203,10 @@ The permit set includes `copy_file_range` and `sendfile`, which Node uses to cop
 Both calls move data from a file that the workload already has open, to a file, pipe, or connected socket that it already has open.
 So they reach only what the filesystem grants and the network restrictions already allow.
 
-The filter rejects simultaneous writable and executable memory mappings.
 The `mprotect` and `pkey_mprotect` system calls change memory access permissions.
-The filter refuses `mprotect` requests whose permissions include executable access, including requests that retain that access.
-It refuses every `pkey_mprotect` request.
-A runtime that compiles code during execution can fail under these restrictions.
-Tool execution from writable files does not remove these memory restrictions.
+Writable-and-executable `mmap` and `mprotect` with `PROT_EXEC` are permitted on Linux, so a JIT runtime runs the code it compiles.
+The permit set omits `pkey_mprotect`, so the filter refuses it.
+See [the executable memory decision](decisions.md#a-jit-runtime-maps-executable-memory-on-linux).
 
 ## Terminal controls
 

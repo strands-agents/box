@@ -34,7 +34,7 @@ if want rust; then
 bold "== Rust workspace (cargo test --workspace --all-features) =="
 # Report skipped tests from their captured output.
 rust_log="$log_dir/rust.log"
-if cargo test --workspace --all-features --no-fail-fast -- --nocapture 2>&1 | tee "$rust_log"; then
+if cargo test --workspace --all-features --no-fail-fast -- --show-output 2>&1 | tee "$rust_log"; then
   ok "Rust workspace passed"
 else
   err "Rust workspace FAILED"; failures=$((failures + 1))

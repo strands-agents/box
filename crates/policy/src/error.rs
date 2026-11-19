@@ -46,7 +46,7 @@ pub enum PolicyError {
     UnsupportedClause(String),
 
     /// The durable engine could not open or recover its store, install sources,
-    /// or submit an event.
+    /// submit an event, or flush history.
     #[error("policy history failure: {0}")]
     Evaluation(String),
 

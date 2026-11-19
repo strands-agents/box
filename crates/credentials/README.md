@@ -97,7 +97,9 @@ Declare signed patterns that do not overlap.
 returned secret and its lifetime.
 
 `Backend::declared(declarations)` is the local source set plus one source for each
-`SecretSourceCommand`. See [Declared secret sources](#declared-secret-sources).
+`SecretSourceCommand` and the opened program file that the caller checked for it.
+`Backend::close_declared()` wipes each secret that those sources hold and refuses each later read
+through one. See [Declared secret sources](#declared-secret-sources).
 
 ## Credential references
 
@@ -119,7 +121,8 @@ than an error.
 ## Declared secret sources
 
 A `SecretSourceCommand` declares one host program that prints one secret on stdout. A caller
-builds one for each scheme, and `Backend::declared` registers them:
+builds one for each scheme, opens and checks the program file, and gives both to
+`Backend::declared`:
 
 ```rust
 use credentials::{Backend, Locator, SecretSourceCommand};
@@ -128,8 +131,12 @@ let command = ["/opt/homebrew/bin/op", "read", "op://{ref}"].map(String::from);
 let declaration = SecretSourceCommand::new("op", SecretSourceCommand::PROTOCOL, &command)?
     .pass_env(["OP_ACCOUNT", "TMPDIR"])?
     .pass_secret_env(["OP_SERVICE_ACCOUNT_TOKEN", "OP_SESSION_*"])?;
-let backend = Backend::declared([declaration])?;
+// The caller opens the file that the path resolves to, and checks it before this call.
+let program = std::fs::File::open("/opt/homebrew/bin/op")?;
+let backend = Backend::declared([(declaration, program)])?;
 let secret = backend.resolve(&Locator::parse_uri("op://Private/GitHub/token")?)?;
+// Each vault that needs the secret is open, so no declared source reads again.
+backend.close_declared();
 ```
 
 The example passes `TMPDIR`, because `op` keeps the session of `op signin` in a folder under it.
@@ -140,11 +147,12 @@ The example passes `TMPDIR`, because `op` keeps the session of `op signin` in a 
 | Protocol | `SecretSourceCommand::PROTOCOL`, which is `box.secret-source.v1`. Any other value is refused. |
 | Command | The program, then its arguments. The program is an absolute path. The source runs it with no shell. A command with no `{ref}` in its arguments is refused. |
 | `{ref}` | The source replaces `{ref}` inside each argument with `NAME`, the text after `SCHEME://` without `#FIELD`. A reference whose text after `SCHEME://` starts with `-` is refused, so the program cannot read it as a flag. |
-| Environment | `HOME` when the operator has one, `PATH=/usr/bin:/bin`, and each variable in `pass_env` or `pass_secret_env` that is set. An entry that ends with `*` passes each variable with that prefix. No entry replaces `HOME` or `PATH`. The entries `*`, `PATH`, and `HOME` are refused, and so is an entry with a `*` before its end. |
+| Environment | `HOME` when the operator has one, `PATH=/usr/bin:/bin`, and each variable in `pass_env` or `pass_secret_env` that is set. An entry that ends with `*` passes each variable with that prefix. No entry replaces `HOME` or `PATH`. The entries `*`, `PATH`, and `HOME` are refused, and so is an entry with a `*` before its end. `SecretSourceCommand::passes_as_secret` says whether `pass_secret_env` names a variable, by an exact entry or by a prefix entry. |
 | Bounds | No stdin. The working directory is `/`. A run of more than 30 seconds, or more than 1 MiB of stdout, stops the program and fails the fetch. A non-zero exit fails the fetch. |
 | `output` | `text` (the default): stdout is the secret. `json`: stdout is one JSON string, and the decoded string is the secret. Any other JSON value, such as `null`, is refused. The source strips one trailing `\n` or `\r\n` first. With each form, the `#FIELD` rule then applies to the secret. |
 | `#FIELD` | The source parses the secret as a JSON object and returns that one string field. Without `#FIELD`, a secret that is a JSON object is refused with each `output`, so that one destination never gets all the keys. The built-in `op://` source returns such a secret whole, so a declared `op` differs from it here. |
-| One fetch | The backend keeps each fetched secret until its last clone drops. Two references that differ only in `#FIELD` name one secret, so the program runs once for both. `Backend` is `Clone`, and each clone shares the fetch. A run that fails, or whose output the source cannot read, is not kept. A run whose output is read is kept, also when the `#FIELD` step or the content check then refuses the value. |
+| Program file | The source keeps the opened file of each declaration. It starts the program only while the declared path names that file, by device and inode, and it compares again after the program exits. When the path names another file, or no file, the fetch fails and the output of that run is not read. |
+| One fetch | The backend keeps each fetched secret until `close_declared`, or until its last clone drops. Two references that differ only in `#FIELD` name one secret, so the program runs once for both. `Backend` is `Clone`, and each clone shares the fetch. A run that fails, or whose output the source cannot read, is not kept. A run whose output is read is kept, also when the `#FIELD` step or the content check then refuses the value. |
 
 A failure names the scheme, the program, and the redacted reference. After a non-zero exit it also
 carries the last bytes of the program's stderr, at most 512, as one line. The reference name and the value
@@ -153,8 +161,10 @@ character. A program that prints one part of the reference name on its own, such
 segment, still shows that part. No failure carries stdout.
 
 The program runs in the caller's process context, outside every sandbox, so declare only a program
-that the operator chose. This crate does not check the program's identity and does not protect its
-files; the caller owns both.
+that the operator chose. The caller checks the program file before it opens the backend, and this
+crate holds the program to that file. The source starts the program by its path, so a replacement
+between its comparison and the start of the program is not seen until the program exits. This
+crate does not protect the program's files; the caller owns that.
 
 ## What this crate refuses
 

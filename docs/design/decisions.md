@@ -83,7 +83,7 @@ requirements, process hardening, filesystem grants, and containment checks still
 invalid configuration still fails before a workload starts.
 
 Every release, stable or Linux preview, includes macOS and Linux ARM64. The release workflow has no
-input that omits Linux ARM64, and only Linux x86-64 is opt-in, through `publish_linux_x86`. An input
+input that omits Linux ARM64, and only the Linux x86-64 archive is optional, through `publish_linux_x86`. An input
 that omits ARM64 would let a release drop a supported platform by accident.
 `test_stable_and_preview_publish_arm64_with_x86_off_by_default` pins the release contents. The
 release owner must establish Linux readiness before each release. Linux previews leave the latest
@@ -92,19 +92,18 @@ acceptance. The native filesystem policy experiment retains its separate configu
 feature controls.
 
 <a id="linux-x86-startup-requires-explicit-consent"></a>
-### Linux x86-64 startup requires an explicit experimental opt-in
+### Linux x86-64 startup does not require an environment opt-in
 
-Box requires `EXPERIMENTAL_X86_SUPPORT=TRUE` in its operator environment before executing a command
-on Linux x86-64. When the variable is missing or has any other value, Box refuses `run` and
-`policy generate-schema` before configuration reads, host callbacks, process hardening, or workload
-startup. The same check applies to the Rust library functions `run` and `generate_policy_schema`.
-Help and version output remain available.
+The Linux x86-64 command line and library use configuration-driven startup without a separate
+consent variable. `EXPERIMENTAL_X86_SUPPORT` has no effect, including when an existing script sets
+it to `TRUE`. Filesystem grants, syscall restrictions, and operating system prerequisites still apply.
 
-We accept the separate consent step for x86-64 callers and tests while support remains experimental.
-Enabling it by default would run workloads on x86-64 before the remaining compatibility and release
-checks are complete. This gate does not change filesystem grants, syscall permissions, or release
-readiness. It does not apply to ARM64, macOS, or the standalone containment library. The retired
-`EXPERIMENTAL_LINUX_SUPPORT` variable remains inactive.
+**Rejected.** The former experimental startup variable required a separate step for each caller
+and test without changing what the sandbox permits.
+
+**Cost.** The variable no longer prevents accidental x86-64 execution. Operators must qualify their
+environment and workloads; removing the gate does not authorize publication or establish security
+acceptance. The release workflow keeps its separate `publish_linux_x86` archive selector.
 
 <a id="native-filesystem-policy-requires-explicit-selection"></a>
 ### Native filesystem policy requires explicit selection
@@ -983,10 +982,10 @@ Callers must retain each token until its effect ends, and existing unlabeled eve
 `durable_http_history_preserves_one_identifier_for_each_operation` pins request/result pairing.
 
 <a id="history-is-durable-per-box-and-has-no-rewind"></a>
-### History is durable per box, and it offers no rewind and no audit record
+### Box batches history by default and accepts loss before a completed flush
 
 One box owns one engine, one policy source set, and one history file, and a restart reuses that
-file. `open` recovers a decision-equivalent history before returning an authority. If recovery
+file. `open` recovers decision-equivalent state from the saved history before returning an authority. If recovery
 fails, it returns an error. The box never falls back to empty or partial history. The engine
 timestamps each event from the trusted system wall clock. Callers cannot supply timestamps. If the
 clock steps backwards, each append advances one nanosecond until it catches up. This can keep a
@@ -1001,6 +1000,49 @@ still hold timestamps ahead for up to five minutes. A policy edit applies prospe
 identity that still matches keeps its state, and an unmatched identity starts empty. The contract
 excludes checkpoint, rewind, branch, tamper evidence, an audit record, atomic commit across an
 external effect, and any history shared between boxes.
+
+Box enables the `experimental-idle-flush` Cargo feature by default to reduce per-event
+persistence work. Hosted `run` selects Dogwood's periodic durability interface and starts an
+independent timer on the existing policy engine, so pending history can be flushed even when
+events stop arriving. It checks thresholds of 1,000 events or one second when an event arrives
+and uses a separate one-second timer. A build with `--no-default-features` retains per-event
+persistence. The default accepts the loss of recent
+requests and outcomes if the process crashes before a successful flush; after restart, a history
+rule can admit requests that those missing events would have denied. The timer's interval is a
+polling cadence, not a maximum persistence delay. After successful startup, explicit hosted
+shutdown stops the workload and
+joins the broker, discovery, native monitoring, and gateway connection workers before stopping
+the timer and performing its final flush. Gateway shutdown interrupts client sockets and joins
+workers after their existing outcome handling finishes, in both persistence modes. Recorded timer
+failures stop the workload; final-flush failures make the run fail. Each flush retries completed
+outcomes retained after a recording failure, then persists events the engine has already accepted.
+Explicit and final flushes return an error if any outcome remains refused. Timer ticks keep retrying
+an outcome delayed only by a backward clock change without treating that delay as a failure.
+Other recording and storage failures remain errors. An earlier run failure remains visible alongside
+a shutdown failure. If native monitoring cannot stop, Box reports the failure and joins the timer
+without an additional final flush. Cleanup after a startup error remains best effort: a native-monitor
+stop failure can leave callbacks active while the timer destructor attempts a flush. Startup
+still returns an error; this path does not certify that all producers stopped. Destruction
+remains a fallback that reports failures to stderr.
+
+The policy crate's matching feature exposes `PolicyEngine::set_periodic_history` to select
+persistence thresholds, `PolicyEngine::flush_history` to persist submitted history explicitly,
+and `PolicyEngine::start_history_flusher` to start one owned timer for that engine.
+`HistoryFlusher` owns the timer: `HistoryFlusher::snapshot` observes completed calls, and
+`HistoryFlusher::shutdown` joins the worker, attempts a final flush, and returns observed errors.
+`HistoryFlusher::stop` joins without that final flush when producers cannot stop.
+`HistoryFlushSnapshot` carries call counts, elapsed time, and retained errors, not a count of
+persisted events. These interfaces keep Dogwood's engine-library types private. The policy
+crate's feature alone does not change `PolicyEngine::open`: it uses per-event persistence until
+its caller selects periodic persistence. Box makes that selection in its default composition. See the
+[policy persistence interface](../../crates/policy/README.md#experimental-idle-history-flushing)
+for the caller contract.
+
+`a_timer_calls_flush_without_event_submissions` pins idle timer calls, and
+`killing_before_the_first_timer_tick_still_loses_pending_history` pins the accepted crash-loss
+boundary. `idle_timer_preserves_history_after_sigkill` checks recovery after completed timer
+flushes.
+
 
 <a id="a-temporal-rule-names-one-action"></a>
 ### A temporal rule names one action, so a budget does not span a family
@@ -1728,6 +1770,30 @@ retains its existing execution restrictions. Linux keeps automatic temporary mou
 and protected files non-executable. `cn_x_04` tests execution and library loading from tool output,
 with agent denials on both platforms.
 
+<a id="a-jit-runtime-maps-executable-memory-on-linux"></a>
+#### A JIT runtime maps executable memory on Linux
+
+A JIT runtime such as Node, Java, or Bun writes the code it compiles into memory and then runs it.
+Linux refused that memory, so V8 and the JVM aborted, Bun fell back to its interpreter, and Python
+`ctypes` could not build a libffi callback. A box now permits writable-and-executable `mmap` and
+`mprotect` with `PROT_EXEC` in every process. `memfd_create`, descriptor `execveat`,
+`pkey_mprotect`, and the `noexec` mounts stay refused, so the kernel never maps or starts a file
+outside the process's exec grants.
+
+The cost is that a process can run code it writes into memory, not only code its mount view admits.
+A runtime that calls native code, such as Python through `ctypes` or Java through its foreign
+function API, can run any bytes this way, including a readable program it copies into memory. For
+such a runtime, a read grant on a program works like an exec grant. That code is still bound by the
+system-call filter, the filesystem grants, and the network policy. This gives up a hardening
+measure, not an authority, and its effect on kernel-exploit risk is not quantified.
+
+We chose this over a per-table opt-in for two reasons. macOS has no counterpart rule: Seatbelt does
+not govern anonymous memory, so a macOS box already lets every process write code and run it. And
+the exec view already treats a granted interpreter or FFI runtime as able to run any authored data,
+so a key would add a setting without closing a route.
+`a_box_runs_generated_code_that_stays_contained` pins that generated code runs and stays inside the
+other restrictions.
+
 <a id="native-egress-is-an-operator-declared-leaf-escape"></a>
 #### Native egress is an operator-declared escape from a tool's or server's sandbox, recorded as a downgrade
 
@@ -2446,10 +2512,17 @@ remain in its heap without wiping.
 <a id="an-undeliverable-credential-is-refused-at-load"></a>
 ### A credential the box cannot deliver is refused when the config loads
 
-A box egress entry may name the `env://` or `aws://` credential scheme. Every other scheme is
-refused when the config loads, and the message names the accepted set. The credentials crate also
-resolves `file://` and `op://`. Box cannot deliver those credentials, so egress entries cannot name
-those schemes. `an_undeliverable_credential_scheme_is_refused` pins the refusal.
+A box egress entry can name the `env://`, `aws://`, or `credsd://` credential scheme, or a scheme
+that a `[secret-source.<scheme>]` table declares. Every other scheme is refused when the config
+loads, and the message names the accepted set. A provider scheme such as `op://` is valid only when
+its provider is declared: the declaration names the host program that reads the secret, and
+`secret.env` names the variable that holds the placeholder. The credentials crate also resolves
+`file://`, and it has a built-in `op://` source. Box does not use them for a route. `file` is a
+reserved scheme that no table can declare. The built-in `op://` source has no declaration, so Box
+does not know which program runs, or which paths and variables hold the credential of the vault.
+So an entry cannot name `file://`, and it cannot name `op://` without a declaration. The cost is
+that an operator declares each provider, because Box finds no provider from a scheme alone.
+`an_undeliverable_credential_scheme_is_refused` pins the refusal.
 
 <a id="endpoint-breadth-is-refused-by-the-parsed-pattern"></a>
 ### Endpoint breadth is refused by the parsed pattern, and never by its text

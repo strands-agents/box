@@ -8,7 +8,6 @@ The source must belong to `main` history for publication.
 
 Every release, in both channels, publishes macOS Apple silicon and the Amazon Linux 2023 ARM64 archive.
 To add the x86-64 archive after target qualification, set the workflow input `publish_linux_x86=true`. This input defaults to `false`.
-Linux x86-64 remains experimental. Its separate runtime opt-in is described below.
 
 | Version input | GitHub release | Latest stable release |
 |---|---|---|
@@ -48,7 +47,10 @@ python3 scripts/check-linux-package.py stage/box-core --target x86_64-unknown-li
 ```
 
 Omit `--target` to check ARM64. These checks do not run workloads or qualify an installed x86-64 release.
-Box workloads on Linux x86-64 still require the `EXPERIMENTAL_X86_SUPPORT=TRUE` environment setting.
+
+Before the x86-64 package check, the workflow removes the retired `EXPERIMENTAL_LINUX_SUPPORT` and `EXPERIMENTAL_X86_SUPPORT` variables from the environment.
+It requires the staged executable to reject a missing configuration, which catches a selected source that still requires an opt-in.
+This startup check does not run a workload.
 
 ## Publish
 
@@ -102,9 +104,8 @@ If the release omits your Linux architecture, select a tag that includes its arc
 The downloader does not fall back to an older release or a prerelease automatically.
 For ARM64, manual checksum verification and extraction from the release notes remain an alternative.
 Keep `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` together.
-On x86-64, set `EXPERIMENTAL_X86_SUPPORT=TRUE` in the environment before running workloads.
 Verify the reported version, an allowed operation, and a denied operation on each published Linux architecture using the approved test configuration.
 Record the release URL, source commit, archive hash, host baseline, commands, and results.
 
-Linux ARM64 startup requires no environment opt-in.
+Linux ARM64 and x86-64 startup require no environment opt-in.
 A stable version does not establish security acceptance.

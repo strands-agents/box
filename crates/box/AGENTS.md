@@ -6,7 +6,7 @@ Read the **"`strands-box` is interface-frozen"** section of the
 [repository guidance](../../AGENTS.md) before changing anything here. A change to an
 observable surface — the `strands-box` verbs and flags, `box.toml`'s keys, the four box inputs,
 the on-disk records (`Record` at `RECORD_VERSION` and each later record version through
-`TELEMETRY_EXPORT_RECORD_VERSION`, with the `box_id` grammar `valid_box_identity` accepts,
+`SECRET_SOURCE_RECORD_VERSION`, with the `box_id` grammar `valid_box_identity` accepts,
 `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
 `PROTOCOL_VERSION`, the alias names and their socket derivation, the
 policy action vocabulary, the composed workload environment — or to a foundational premise,
@@ -31,8 +31,9 @@ and nothing else, and `run/configure` owns **no verb at all**: it is the creatio
 calls, and it is not operator-facing. `list`, `stop`, and `remove` are deleted with the verbs they
 implemented — see "The lifecycle verbs are gone" below before adding one back.
 
-The three `record/` modules each answer one question. `config` is `box.toml` — the two wire records,
-plus one module per vocabulary: `process`, `filesystem`, `egress`, `env`, `mcp`, and `telemetry`.
+The three `record/` modules each answer one question. `config` is `box.toml`: the two wire records,
+plus one module per vocabulary. The modules are `process`, `filesystem`, `egress`, `env`, `mcp`,
+`secret_source`, and `telemetry`.
 `process` holds `ProcessSpec`, the one shape `[agent]` and each `[tool.<name>]` take, and the
 `Filesystem` that spec carries. `filesystem` translates the nine lists into containment cells.
 `layout` sites the filesystem. `config/mcp` is `box.toml`'s MCP
@@ -91,15 +92,17 @@ now, because `run` takes one `--config` path and searches nowhere. **That direct
   and hands off to `dispatch`, which takes one verb per arm. A fifth step, or an inline
   `insert`/`join`/`if let`, belongs in a phase. If either file grows, the phase boundary is
   wrong.
-- **Linux x86 command execution requires explicit operator consent.** `command::execute` calls
-  `platform::preflight` before hardening, runtime creation, host callbacks, or configuration reads.
-  The operator must set `EXPERIMENTAL_X86_SUPPORT` to the exact value `TRUE`. This check covers
-  the CLI and the library's `run` and `generate_policy_schema` calls. Help and version output
-  finish during argument parsing, before this check. ARM and other targets retain their startup
-  behavior. `EXPERIMENTAL_LINUX_SUPPORT` remains unused. The opt-in changes no containment
-  control and is not inherited into the workload environment.
-  `linux_startup::linux_commands_require_exact_x86_opt_in_only_on_x86` and
-  `box_library::x86_startup_matrix` cover admission and refusal through both entry paths.
+- **Linux startup requires no environment opt-in.** The command line and the library's `run`
+  and `generate_policy_schema` calls perform normal configuration validation.
+  `EXPERIMENTAL_X86_SUPPORT` and `EXPERIMENTAL_LINUX_SUPPORT` have no effect. Preserve process
+  hardening and containment controls. On x86-64, Box still refuses configurations that enable
+  `native-filesystem-policy`.
+  See the [startup decision](../../docs/design/decisions.md#linux-x86-startup-requires-explicit-consent).
+  `linux_startup::linux_commands_validate_configuration_regardless_of_x86_opt_in`,
+  `linux_startup::linux_workload_runs_without_startup_opt_ins`, and
+  `box_library::linux_library_ignores_retired_x86_opt_in` cover startup without the retired gate.
+  `linux_startup::x86_native_policy_is_refused_before_state_or_schema_creation` preserves the
+  separate native filesystem policy refusal.
 - **No stringly-typed catch-all error.** A new failure gets a variant on the owning phase's
   enum, never a `format!` into a general one.
 
@@ -135,6 +138,11 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   - **No public signature names or returns a `PolicyEngine`**, an environment overlay, or a proxy
     port, and none returns a host path or working directory the box resolved. So nothing outside
     the box holds an authority object.
+  - **A policy decision channel only receives.** `PolicyDecisionSender` has no public method: the
+    box sends on it from `DecisionRecorder::record` with `try_send`, and a full channel counts the
+    decision as dropped. So a caller that reads slowly, or never, cannot block or delay a decision.
+    `decisions.rs::a_full_channel_drops_and_counts_without_waiting` pins this. A `PolicyDecision`
+    is a copy of the record's values, with no principal, so it cannot change a verdict.
 
   **A library caller shares the box's trusted process, so the caller is trusted.** It still
   **cannot** open a `PolicyEngine`, build a `ContainmentConfig`, hold a proxy handle, or resolve a
@@ -167,9 +175,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   caller wanting determinism passes an absolute program path).
 
   **`tests/four_inputs.rs` is the guard.** It asserts both halves: no withheld flag is a box
-  argument, and `ConfigFile` carries exactly **twelve** keys — `agent`, `box_dir`, `egress`, `mcp`,
-  `name`, `policy`, `telemetry`, `tool`, `experimental-features`, `file-attributes`, `limits`, and
-  `gateway`. That is the `box.toml` key set, and it is
+  argument, and `ConfigFile` carries exactly **fifteen** keys: `agent`, `box_dir`, `egress`, `mcp`,
+  `name`, `policy`, `secret-source`, `telemetry`, `tool`, `experimental-features`,
+  `file-attributes`, `limits`, `gateway`, `monty`, and `containment`. That is the `box.toml` key set, and it is
   **not** the stored `Record`'s key set: `Record` adds `version` and `box_id`, which no operator
   authors. Read
   which one a passage means before you change a count. The withheld-flag guard is split in two —
@@ -256,10 +264,10 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   about one box. **Do not reintroduce `--name`**; reconciling a flag against the file is the shape in
   which the file's key became silently dead once already.
 
-  **`box.toml` carries fourteen top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
-  `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-  `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, `monty`, and `[containment]`.** The experimental settings select native file
-  checks and tool grammars. They add no authority beyond the authored policy. `file-attributes` adds
+  **`box.toml` carries fifteen top-level keys: `name`, `box_dir`, `policy`, `[agent]`,
+  `[tool.<label>]`, `[egress.<name>]`, `[secret-source.<scheme>]`, `[mcp.<name>]`,
+  `[telemetry.<kind>]`, `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, `monty`, and `[containment]`.** The experimental settings select native file
+  checks, tool grammars, ingress, and secret sources. They add no authority beyond the authored policy. `file-attributes` adds
   no grant: it widens what the workload's own `write` lists allow on macOS, so it is part of the
   workload input, and each process discloses it. `[gateway] upgrade_http` adds no grant either:
   policy decides each upgraded request on port 443, as it decides a `CONNECT` to that host. `[containment]`
@@ -296,9 +304,12 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   re-parsing, no second reserved-name check at projection time. `EgressRoute` carries
   `provisioned_name` so the scheme is interpreted in one place.
 - **A `[tool.<name>]` whose program is not installed is left out, in one place.**
-  `commands::leave_out_absent` removes it from the run's `Record` after `configure` stores the
-  record, so every later consumer sees one set of tools: credential disclosure, grammar binding,
-  bare names, approved reach, tool selection, and leaf translation. Not installed means nothing exists,
+  `commands::leave_out_absent` removes it from the run's copy of the `Record`, in
+  `command::run::settle_tools`, and `configure` stores the record as written. So every consumer
+  of the run sees one set of tools: the check of the secret sources, credential disclosure,
+  grammar binding, bare names, approved reach, tool selection, and leaf translation. The
+  `left out` lines and a refusal of the choice come after `configure` stores the record.
+  Not installed means nothing exists,
   after links are followed, at an absolute path or at a bare name in any absolute search-path entry that Box can search.
   So a non-executable or non-regular match still reaches its real refusal. Any other failure still
   stops the box, and so does a program that holds `${` or an argument that no run can expand. The policy keeps the tool's grammar actions so a policy that names them still loads. The
@@ -312,6 +323,223 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   that line: one exact host, no wildcard, no path, locator required, one credential authority per
   destination, and `aws://` taking no header or prefix. A key that narrows or widens *which
   requests* are governed makes this file a second authority — that is the defect, not the syntax.
+- **A `[secret-source.<scheme>]` table is part of the credentials input, and it is experimental.**
+  It names the host program that reads the secret of a reference in that scheme, and it permits no
+  request. `record::config::secret_source` owns the table. Keep each part:
+  - `DeclaredSources::check` is the one check, on load and on record read. Its order is the
+    operating system (macOS only, until protection for Linux exists), the
+    `[experimental-features] secret-sources` switch, the scheme, the `protocol` key, the
+    `credentials::SecretSourceCommand` constructor, and the shape of `reads` and `deny`. Do not
+    restate a rule that the constructor owns.
+  - An entry's own rules need no declarations: `SecretScheme::Declared` is each scheme that
+    `SecretSourceCommand::check_scheme` accepts. `validate_pairs` holds the rules that need them:
+    a scheme that no table declares, a reference to a `pass-secret-env` variable, one
+    placeholder variable with two references, and a placeholder in a variable that a signed route
+    fills (`SIGNING_PLACEHOLDER_VARIABLES`), for an entry with no backend. Each path that builds
+    routes calls it, so add no second place that decides whether a scheme is declared.
+  - `secret.env` names the placeholder variable. A declared scheme on a route or a remote MCP
+    server requires it, `env://NAME` takes only `NAME`, and a signed secret, a backend `auth`, and
+    a telemetry target take none. A re-routed entry's own secret stays `env://`.
+    `validate_pairs` refuses the key while the switch is off, also on `env://NAME` where it has
+    no effect, so no key of the feature loads and no record moves to its version without the
+    switch. `grammar` and `[[agent.ingress]]` refuse themselves the same way.
+  - A refusal of a telemetry `secret.ref` echoes no part of the value, the scheme included.
+  - **`secret_source::routed_scheme` is the one place that finds the scheme of a reference for
+    a declared source.** It asks `credentials::Locator`, which is what `Backend::resolve` routes
+    by, so Box and the backend cannot name two schemes for one reference.
+    `DeclaredSources::source_of` answers "which declared source reads this reference" for each
+    caller. Do not split a reference on `://` to ask that question. `EgressSecret::deliverable`
+    and `validate_secret` split to sort a reference into its kind and to word a refusal, and no
+    declaration is looked up with their scheme. A reference that `Locator` refuses has no
+    scheme, so no source reads it: `op://` with nothing after it is refused as a locator on a
+    route, and as a reference in no scheme on a telemetry target.
+    `a_declared_source_reads_a_reference_by_the_scheme_that_credentials_routes` pins it. At a
+    run, `SecretSources::locator` is the second place that asks `Locator`: it parses each
+    reference once and each read keeps that value, so the scheme that finds the program and the
+    reference that `Backend::resolve` gets are one value.
+    `the_sources_read_a_reference_by_the_scheme_that_credentials_routes` pins it.
+  - A record that holds a declaration or a `secret.env` key is `SECRET_SOURCE_RECORD_VERSION`.
+  - **A run reads each declared secret once, before a workload starts.**
+    `run::secret_sources` owns the path, and its three types hold the order of startup. Keep
+    each part:
+    - **The order is `SecretSources::check`, `SecretSources::fetch_telemetry`,
+      `TelemetrySecrets::fetch_routes`, then the vaults, which consume `RouteSecrets`.** Each step
+      takes the value of the step before it, and only that step returns it. So no caller gets the
+      sources of a run without the check, gives `telemetry::open` a value from before the first
+      read, or gives `credential::project` a value from before the second. `SecretSources` gives
+      no backend, and `TelemetrySecrets::backend` and `RouteSecrets::backend` are
+      `pub(in crate::run)`, for the collector and the vaults. So `command::run` gets no backend
+      from the sources of a run, and reads through them by the two read steps alone.
+      `policy generate-schema` has no record and no read step, so
+      `SecretSources::check_for_references` returns `SchemaSecrets`, which gives `reads` and the
+      backend, and which no read step and no vault of a run takes. What the types do not hold, in
+      three places. First, a function of `crate::run` that gets `&TelemetrySecrets` can read a
+      route's secret through that backend before the second read. Only `run::telemetry::open` gets
+      one, so give it to no other function. Second, `check_for_references` and
+      `SchemaSecrets::backend` are `pub(crate)`, because `command::policy` is not in `crate::run`.
+      So each module of the crate can build a second set of checked sources and read through it,
+      with no read step and no record. Only `command::policy` calls it. Third,
+      `credentials::Backend::declared` is public, so a second call in this crate builds sources
+      with no check. `SecretSources::open` holds the one call.
+      `only_generate_schema_reads_a_declared_secret_with_no_read_step` pins the second and the
+      third. The module has no other function that builds or reads, no visible field, and no
+      test-only item: each test door is in its `tests` module. Do not add a constructor, a
+      `Clone`, or a `Default` to one of the four types, do not give `SecretSources` a backend
+      accessor, and do not make `open`, `refuse_exposure`, `disclose`, or `fetch` visible outside
+      the module. A wrong order is then a compile error, which no test can show, so
+      `only_the_check_builds_the_sources_and_only_they_read` pins the list of doors.
+    - `SecretSources::check` first loads each program through `ConfiguredCommand::load`, the
+      check of a configured tool command, and gives the opened file to
+      `credentials::Backend::declared`. A configuration with no declaration gets
+      `Backend::local()`.
+    - `ConfiguredCommands::load` holds the program of each declaration beside the tool commands,
+      so `validate_reach` refuses a write grant over it and `mutation_refusal` refuses a change
+      through the Shell or Monty. The record stores no program identity, so between two runs
+      this is the only protection of the program. Without it a workload replaces the program,
+      and the next run starts that file outside every sandbox.
+      `a_secret_source_program_is_protected_like_a_configured_tool_command` pins it.
+    - A source program also holds each symbolic link that the resolution of its path passes
+      through (`links_on_the_way`), so a write grant over a link in the middle of a chain, or
+      over a folder link, is refused. Homebrew and the AWS CLI installer make such chains. A
+      tool command holds the path as written and the canonical file only; do not widen that
+      without approval, because it adds a refusal to a configuration that loads today.
+      `each_link_on_the_way_to_a_secret_source_program_is_protected` pins both.
+    - Box holds no file that a later element of `command` names, such as a script after an interpreter, and no file that the program loads by itself. A hold of each argument that is the absolute path of a regular file was built and removed after review: neither shipped plugin names a file, and the hold cannot see a path inside `--config=/x`, a folder, or a file that an interpreter loads. An operator who needs a script makes it the program, which this bullet list protects. Do not add the hold again without approval.
+    - `SecretSources::check` then judges each process table (`refuse_exposure`): its lists
+      against the source programs and the `reads` and `deny` paths.
+      Last it writes one line
+      for each source. A refusal returns no value, so no program starts and no line names a
+      source. `run` and `policy generate-schema` both get their sources from this one order.
+      `ApprovedReach::judge_with` judges the lists again, but it runs after both read steps, so
+      alone it refuses a box whose program has already run with the vault's credentials. A
+      configuration with no declaration skips the early check, so the order of its refusals
+      does not change. Both judgements take their tables and the protected paths from
+      `Record::process_tables`, so a table or a path that one judges, the other judges too.
+      `a_write_grant_over_a_secret_source_program_is_refused` and
+      `a_grant_over_a_path_of_a_secret_source_is_refused` assert that the program did not
+      start, and `a_write_grant_over_a_source_program_is_refused_and_starts_no_program` that the
+      check wrote no line.
+    - One backend serves the run: the telemetry secret, each vault of `run::credential`, and
+      `policy generate-schema`. A second backend would run a program twice for one secret. Do not
+      call `Backend::local()` in those paths. The one exception is `telemetry::preflight_aws`: an
+      `aws://` reference is in no declared scheme, and a signed route reads nothing through the
+      backend.
+    - **`command::run::prepare_contract` calls `SecretSources::check` before
+      `BoxRoot::initialize_first_use` commits the record.** The check reads the tables of the
+      record, starts no program, and reads no box state, so a refusal stores nothing, as a
+      refusal of the configuration does.
+      `settle_tools` leaves out each tool whose program is not installed before the check, once
+      for the run. So the check and `ApprovedReach::judge_with` judge the tables of one record,
+      and a list of a left-out tool refuses no run. A check of the record as written
+      would judge a list that `docs/user/config.md` says Box does not check. Do not choose the
+      tools a second time after the check: a tool that the check did not judge would then run.
+      `the_secret_source_check_judges_no_table_of_a_left_out_tool` pins it.
+      Residual: the choice comes before the run writes `bin/` into a new box directory. So a
+      tool whose program is a file that Box writes there, such as `<box_dir>/bin/sh`, is left
+      out on the first run of that directory, and each later run refuses it ("the grant would
+      expose the Box's own directory"). A left-out tool gets no grant, so nothing is exposed.
+      `run_config.rs::a_tool_program_that_box_writes_is_left_out_on_the_first_run_alone` pins
+      it, so it fails when the gap closes: remove it and this residual together.
+      After the commit and before `hosted` opens the policy, the box directory has a record and
+      no history, and `verify_history_matches_record` refuses the next run of that directory. So
+      a refusal there on the first run of a new box directory needs a wipe: do not move a check
+      of the sources after the commit.
+      `a_new_box_directory_starts_after_the_cause_of_a_secret_source_refusal_is_gone` pins it.
+      Residual: the read of a telemetry secret runs a program, so it holds the run lock, which
+      exists only after the commit. A telemetry secret that the program does not return on the
+      first run still needs a wipe, as each refusal of `telemetry::open` does.
+      `a_telemetry_secret_that_is_not_returned_on_a_first_run_still_strands_the_box_directory`
+      pins that limit, so it fails when the gap closes: remove it, this residual, and the
+      sentence of `docs/user/config.md` together.
+    - `command::run::execute` reads in two steps. The telemetry secrets come before
+      `telemetry::open`, because the collector needs them. The others come in `hosted`, after
+      these checks, which need no secret: the policy, the credsd preflight, the `aws://` telemetry
+      preflight, the tool commands, and the tool grammars. A vault program can ask the operator
+      to sign in, so it runs after them. `HostedBox::open` judges each table against the tool
+      commands and the Box installation after the read, so those refusals can follow a sign-in.
+      A read that fails in the first step has no collector, so stderr alone states it.
+      `policy generate-schema` checks the programs and reads each declared secret before it starts
+      a stdio MCP server, which is a workload-named program. It has no record, so it calls
+      `SecretSources::check_for_references`, which checks no table when no remote MCP server
+      names a secret in a declared scheme, and it reads through `SchemaSecrets::backend`.
+    - `SecretSources::fetch`, which the two read steps call, is the only place that reads a
+      declared secret for a run. It writes the error of `credentials` to stderr and returns
+      `ConfigError::SecretFetch`, which holds no text of that error. The `box_stopped` record
+      takes its reason from the returned error, so a `credentials` error in it would put the
+      program's stderr in a record. `op` prints the item and vault names there.
+      `a_failed_fetch_names_its_entry_and_stops_the_later_reads` pins it. A vault that opens
+      before the route read runs the program itself, and its failure
+      (`Internal::CredentialProjection`) holds the `credentials` error. So `credential::project`
+      is the only function of `run::credential` that another module can call to open a route
+      vault, and it takes `RouteSecrets`. Keep `workspace` and `backend_capabilities` private.
+      `only_project_opens_a_route_vault_for_another_module` pins it.
+    - A `secret_fetched` record states one read of one configuration entry: the entry, the
+      source, the program, and the reference with its body redacted. Two entries with one secret
+      give two records and one run of the program.
+    - `credential::project` consumes `RouteSecrets`, and `HostedBox::open` calls `project`. The
+      drop of `SecretSources`, which each later type holds, calls `Backend::close_declared`. So
+      the sources close when `project` returns, with no call that a caller can forget. Each
+      vault holds its secret by then, and a closed backend refuses each later read through a
+      declared source, also through a clone that an earlier step kept. A run that stops before
+      the vaults open closes the sources too.
+      `the_sources_read_no_secret_after_the_vaults_take_them` pins it.
+    - Each failure names the entry that holds the reference, because `credentials` redacts the
+      reference body and never names a `#FIELD`.
+    - A route in a declared scheme provisions its `secret.env` variable through
+      `checked_provisioned_name_without_value`, so the operator's own value of that variable is
+      never read.
+  - **No sandbox reaches a `reads` or `deny` path.** `filesystem::direct_grants` owns the
+    check, so each judgement of a list makes it. Keep each part:
+    - `require_outside_source_paths` refuses an authorizing entry that is at a protected path,
+      inside it, or above it. It runs before `containment::validate_grant`, so the refusal names
+      the source also for a credential store such as `~/.aws`, which has no exact-name exception
+      here. It compares the entry as written and as it resolves, by spelling and by on-disk
+      identity (`layout::lies_within`), so a link in either path does not hide the overlap.
+      A `deny_write` entry authorizes nothing, as a `deny` entry, so it does not pass through
+      this check. It needs a `write` tree around it, and that tree is refused when it reaches a
+      protected path. `a_deny_write_entry_is_judged_against_no_path_of_a_secret_source` pins it.
+    - A protected path resolves through each symbolic link, also one whose target is not there
+      yet (`layout::resolved_through_links`). `canonicalize` stops at such a link, and the
+      sandbox checks the path that a name resolves to. So without the walk, a socket that a
+      vault's app makes behind a link has no refusal: `~/.1password/agent.sock` names a socket
+      in a group container that exists only while the app runs.
+      `a_grant_that_reaches_a_path_of_a_secret_source_through_a_link_is_refused` pins it.
+    - Each link on the way is held as a program's link is: no write grant reaches the
+      folder that holds it. Without this, a
+      chain such as `~/.aws` to `~/dotfiles/aws` to `~/keys/aws` lets a write grant on
+      `~/dotfiles` point the middle link at a folder that the workload wrote, and the operator's
+      own `aws` reads it. A read grant there stays: it reaches only the denied target. A link in
+      a folder at the top, such as `/var`, is held by `/`, which no grant reaches.
+      `a_grant_that_reaches_a_path_of_a_secret_source_through_a_link_is_refused` pins it.
+    - Compare a link by its spelling alone. Its on-disk identity is the folder or file that it
+      names, so an identity compare refuses each write grant inside that folder, such as each
+      path under `/private/var` for an entry under `/var`.
+    - `direct_grants` also gives each process a `Refusal` on each spelling of each protected
+      path, with no pinned identity. The sandbox then denies the path under the cells that Box
+      adds itself, under a tool's discovery of the home, and when the path appears after the box
+      starts. An absent path is not an error. Do not pin an identity there: a vault program can
+      make its socket again during a run, and a pinned one would refuse the next spawn.
+    - `DeclaredSources::check` refuses an entry with a `..` component, a second `/` after `~`,
+      a control character, or a character that a filesystem list refuses (`*`, `?`, `[`, `]`,
+      `{`, `}`). The compare and the `Refusal` need one place, `~//x` names `/x` after a join,
+      and the macOS profile cannot spell `{{` or a control character. Without the last rule the
+      profile fails to render after each source program has run.
+    - The grant check needs no case fold: a grant on an absent path is refused as absent, and a
+      grant above one is found by identity.
+    - **Stated limit: Strands Shell and Monty do not refuse a read or a change of a protected path, or a change of a link on the way to one.** `Reach` asks `ConfiguredCommands::mutation_refusal`, which holds the source programs and no `reads` or `deny` path, so policy alone decides, as on `main` for any path. A workload with an `fs:write` permit on `~/.aws/config` adds a `credential_process`, which the `aws` child of Box then starts outside every sandbox. A path matcher behind that hook was built and removed after review: it needed the folded spellings, the links on the way, and a compare for an absent path, and it still had gaps. The planned place is a floor beneath policy for the well-known credential stores (pull request #434, open), with the operator's policy for another vault. A `forbid` rule must name the path as policy reads it: the Shell gives policy a path with each symbolic link resolved, but for the last name of a deletion, a rename, or a new link, which stays as typed. The decision [no credential floor sits beneath the interpreters](../../docs/design/decisions.md#no-credential-floor-sits-beneath-the-interpreters) covers a credential store in the same way. `reach.rs::the_interpreters_leave_a_path_of_a_secret_source_to_policy` and the Shell half of `box_credentials.rs::a_tool_cannot_see_a_path_of_a_secret_source_and_policy_decides_the_shell` pin the limit, so they fail when a floor in `Reach` refuses one of these paths: change them, this bullet, `docs/user/config.md` ("What Box protects"), `docs/design/limitations.md`, and `docs/design/credentials.md` together. The store list of `containment::floors` holds no 1Password folder, and this change adds none: adding them is planned as a change of its own.
+    - `ProtectedPath::spellings` is the one place that expands and resolves an entry.
+      `filesystem::under_home` owns the `~` rule for it and for
+      `expand_home`.
+    - On Linux, an absent protected path has no lowering, and `require_interpreter_route`
+      cannot resolve it. Decide both before a declaration loads there.
+  - **Box does not look for the operator's value of a `pass-secret-env` variable in a process table.** `credentials` passes those variables to the source program alone, and a workload gets no variable of the operator but `HOME` and `PATH`, which no exact `pass-secret-env` entry can name. So a workload holds such a value only when the operator, or a tool that writes `box.toml`, puts the value in a table. A compare of each `env` value and `command` element with those values was built and removed after review: it caught that one mistake, it missed a value in another encoding, and it kept a copy of each credential in memory for the check. Do not add it again without approval. `box_credentials.rs::a_workload_holds_a_placeholder_under_the_name_of_a_vault_credential` pins that the program gets the value and the workload does not.
+  - The `pass-secret-env` refusal covers `env://NAME` and `secret://NAME` only. A bare `aws://`
+    route signs with the ambient AWS identity, also when a `pass-secret-env` entry names an AWS
+    key. The design pairs that route with a source that reads AWS Secrets Manager under the same
+    identity, so Box does not refuse the pair.
+  - `read_remote_mcp_servers` runs `validate_egress_and_remote`, because `policy generate-schema`
+    sends each remote MCP server's credential itself. Without that call, a server that names the
+    variable of a `pass-secret-env` entry gets the vault's own credential at discovery.
 - **This crate holds no list of credential paths, and must not grow one back.** `~/.aws`, `~/.ssh`,
   a keychain, a browser profile — every one lives in `containment`'s `FORBIDDEN_PATHS`, judged
   beneath every grant the translator renders, through `containment::validate_grant`. Two lists in
@@ -491,8 +719,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   rule at all — its exec set is whatever the mount view leaves runnable, which is every `+x` file
   on a read-only bind. Measured with one `bash` workload and four aliases: **14 execve-able paths
   against 5 grants**, the extras being the ELF loader, seven mode-`0755` libraries, and the
-  workload bound under both spellings. None can run workload-authored bytes, because W^X's
-  `noexec` refuses the mapping, so it is a premise gap rather than a hole.
+  workload bound under both spellings. None can run workload-authored bytes *as a file*, because
+  W^X's `noexec` refuses the mapping, so it is a premise gap rather than a hole.
   `containment`'s `view.rs::the_view_leaves_exactly_the_intended_paths_executable` bounds it, and
   narrowing it is deferred. Do not restate this bullet as a cross-platform guarantee.
 

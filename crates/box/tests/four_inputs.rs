@@ -34,7 +34,7 @@
 //! guards, in the file whose own header calls that spelling load-bearing. It now calls
 //! `parser_source::fields_of`, which takes the last token before the colon.
 //!
-//! # The configuration holds fourteen keys, and the four inputs still stand
+//! # The configuration holds fifteen keys, and the four inputs still stand
 //!
 //! `policy` and credentials are authority, `name` and `box_dir` select state, and `[agent] command`
 //! plus the trailing argv select the workload. `[mcp]`, `[telemetry]`, `[tool]`, `[agent.ingress]`,
@@ -44,6 +44,11 @@
 //! It grants no authority and widens no reach the policy judges: every `fs:*`, `shell:*`, and egress
 //! decision is unchanged. The processes it shows cannot be signalled, traced, or have their memory,
 //! environment, or descriptors read, and the shared `/proc` is read-only.
+//!
+//! `[secret-source.<scheme>]` is part of the credentials input. It names the host program that
+//! reads the secret of a reference in that scheme, and a reference is still attached only where an
+//! `[egress.<name>]` entry, an `[mcp.<name>]` entry, or a `[telemetry.<label>]` target names it.
+//! So the key decides where a secret comes from, and it permits no request.
 //!
 //! `[agent] env` names variables the box adds to the composed environment. It cannot name a
 //! reserved variable, so it cannot reach proxy routing, CA trust, or the fixed identity, and it
@@ -215,13 +220,15 @@ fn the_config_record_carries_only_the_four_inputs() {
             "monty",
             "name",
             "policy",
+            "secret_source",
             "telemetry",
             "tool"
         ],
-        "the fourteen config keys include execution limits, explicit experimental enforcement selection, \
+        "the fifteen config keys include execution limits, explicit experimental enforcement selection, \
          `file-attributes`, which widens only the workload's own write grants, `[gateway]`, \
          whose upgraded requests policy still decides, `monty`, which selects what a bare \
-         `python3` runs and grants nothing, and `containment`, which grants no authority and \
+         `python3` runs and grants nothing, `[secret-source]`, which names where a \
+         credential comes from and permits no request, and `containment`, which grants no authority and \
          widens no reach the policy judges: `private_proc = false` shows the workload the \
          container's process list, read-only, and every `fs:*`, `shell:*`, and egress decision \
          is unchanged. \
@@ -292,7 +299,10 @@ fn telemetry_names_a_destination_and_grants_nothing() {
         .expect("the function closes")
         .0;
     assert!(
-        telemetry_block.contains("Backend::local()") && telemetry_block.contains("Locator::"),
+        telemetry_block.contains("backend: &credentials::Backend")
+            && telemetry_block.contains("credentials::Vault::open")
+            && telemetry_block.contains("backend.clone()")
+            && telemetry_block.contains("Locator::"),
         "a telemetry secret must resolve through `credentials`, which owns the `env://` denylist"
     );
     // **Comment lines are stripped first.** The code carries a comment naming `std::env::var` to say
@@ -303,6 +313,11 @@ fn telemetry_names_a_destination_and_grants_nothing() {
         .filter(|line| !line.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
+    assert!(
+        !telemetry_code.contains("Backend::local()"),
+        "a telemetry secret reads through the one backend of the run, so a target and a route \
+         with one secret share one run of a declared program"
+    );
     assert!(
         !telemetry_code.contains("std::env::var"),
         "reading the variable directly bypasses that denylist, which is how an ambient AWS \

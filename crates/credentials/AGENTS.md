@@ -39,12 +39,19 @@ the scrub of an echoed secret. `strands-box-egress-gateway` applies the edits to
 - Add no destination, tenant, or request-id parameter to `Backend::resolve`; ingress has none, so
   the seam fabricates them.
 - Keep backend selection a named `Backend` profile over a private enum. Return no trait object.
-- Keep `Backend::declared` the one way a caller names a program, and keep `SecretSourceCommand`'s
+- Keep `Backend::declared` the one way a caller names a program, and keep its item a declaration
+  with the opened program file that the caller checked. A declared source with no checked file
+  cannot exist, so no caller can skip the check. Keep `SecretSourceCommand`'s
   fields sealed behind `new`, `output`, `pass_env`, and `pass_secret_env`. Export no output enum;
-  `output` takes the `box.toml` word.
+  `output` takes the `box.toml` word. `passes_as_secret` is the one read of a declaration: it
+  answers for one variable name, so the box refuses a reference to the credential of a vault with
+  the prefix rule of this crate. Return no pass list from an accessor.
 - Keep `Backend` `Clone` over one shared profile, so each clone of a declared backend shares each
   fetched secret. Give the held secrets no accessor: they leave through `Backend::resolve` alone,
   and their key is a reference name, never a destination or a tenant.
+- Keep `Backend::close_declared` final: it wipes each held secret, and a closed source refuses
+  each later fetch. A source that fetched again after the close would start a host program while
+  a workload runs. `a_closed_backend_holds_no_secret_and_reads_no_declared_scheme` pins it.
 - Keep `Backend::local()` at `env`, `file`, and the built-in `op`.
 - Declare no `pub trait`, and keep `SecretSource` and `Emitter` `pub(crate)`, so no caller supplies
   an unreviewed backend.
@@ -315,6 +322,17 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   `pass_secret_env` matches it, so its value is hidden in a failure.
 - Start the program in `/`. The trusted process can start in a workspace that a workload writes,
   and a program can read configuration from its working directory.
+- Compare the declared path with the checked program file before the spawn and after the exit, by
+  device and inode. macOS has no call that starts a program from an open file, so the path is what
+  the runner starts. The comparison after the exit refuses the output of a program that was
+  replaced between the first comparison and the spawn. Keep the file open, so its inode names one
+  file for the run. `a_program_path_that_names_another_file_after_the_check_does_not_start` and
+  `a_program_path_that_changes_while_the_program_runs_gives_no_secret` pin both sides.
+- Residual: a program that is replaced after the first comparison still starts once, with the
+  passed credentials. Its output is not read, and the fetch fails.
+- Residual: the comparison is by device and inode. A write into the checked file itself keeps
+  both, so the runner starts the changed content. The caller keeps the file away from each writer
+  that it does not trust.
 - Hold the lock for the whole fetch, so two callers that ask for one secret run the program once.
   Keep no failed run, and no run whose output `decode` refuses. A run that `decode` accepts is
   kept, also when `select` or `Secret::new` then refuses the value.
@@ -355,8 +373,8 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
 - Residual: `is_json_object` reads a secret that `serde_json` cannot parse as plain text. An object
   nested more than 128 levels deep is such a secret, so it leaves without `#FIELD`.
 - Residual: the held secret of a JSON object holds each field, also a field that no reference
-  names. It stays until the last clone of the backend drops, and a vault keeps its backend for the
-  run.
+  names. It stays until the caller closes the declared sources, or until the last clone of the
+  backend drops, and a vault keeps its backend for the run.
 - Wipe each value of the environment snapshot: a value that does not pass in `compose`, and a
   passed value when its `ChildVariable` drops. A value that does not pass can be a credential of
   another source. No test can observe these wipes.

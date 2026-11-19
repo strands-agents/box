@@ -5,12 +5,14 @@
 //! |---|---|
 //! | Split the reference into the name and the field | [`split_reference`] |
 //! | Compose the program's environment | [`compose`] |
+//! | Start only the program file that the caller checked | [`CommandSource::program_is_unchanged`] |
 //! | Spawn the program and bound its time and output | [`run`] |
 //! | Read stdout as text or as one JSON string | [`CommandSource::decode`] |
 //! | Take one field, or refuse a whole JSON object | [`select`] |
 
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -121,24 +123,40 @@ impl Failure {
 /// Reads secrets for one declared scheme by running its program, once for each secret.
 pub(crate) struct CommandSource {
     declaration: SecretSourceCommand,
+    /// The program file that the caller checked, open so that its device and inode name one file.
+    program: File,
     environment: Environment,
     bounds: Bounds,
-    /// Each fetched secret, before the field step, keyed by the reference name.
-    held: Mutex<HashMap<String, Zeroizing<String>>>,
+    /// Each fetched secret, before the field step, keyed by the reference name; `None` after
+    /// the source closed.
+    held: Mutex<Option<HashMap<String, Zeroizing<String>>>>,
 }
 
 impl CommandSource {
-    /// The source for `declaration`, over the process environment.
-    pub(crate) fn new(declaration: SecretSourceCommand) -> Self {
+    /// The source for `declaration` and its checked `program` file, over the process environment.
+    pub(crate) fn new(declaration: SecretSourceCommand, program: File) -> Self {
         Self {
             declaration,
+            program,
             environment: Box::new(|| std::env::vars_os().collect()),
             bounds: Bounds {
                 timeout: TIMEOUT,
                 stdout: STDOUT_LIMIT,
             },
-            held: Mutex::default(),
+            held: Mutex::new(Some(HashMap::new())),
         }
+    }
+
+    /// Whether the declared path names the program file that the caller checked.
+    fn program_is_unchanged(&self) -> bool {
+        use std::os::unix::fs::MetadataExt as _;
+        let identity = |metadata: std::io::Result<std::fs::Metadata>| {
+            metadata
+                .ok()
+                .map(|metadata| (metadata.dev(), metadata.ino()))
+        };
+        let checked = identity(self.program.metadata());
+        checked.is_some() && checked == identity(std::fs::metadata(self.declaration.program()))
     }
 
     /// What went wrong, with the scheme, the program, and the redacted reference.
@@ -164,6 +182,12 @@ impl CommandSource {
             .iter()
             .map(|argument| argument.replace(SECRET_REFERENCE_TOKEN, name))
             .collect();
+        if !self.program_is_unchanged() {
+            return Err(self.refusal(
+                reference,
+                "did not start: its program file changed after the box checked it",
+            ));
+        }
         let environment = compose(&self.declaration, (self.environment)());
         let stdout = run(
             self.declaration.program(),
@@ -182,6 +206,14 @@ impl CommandSource {
                 None => described,
             })
         })?;
+        // No call starts a program by an open file on macOS, so the path is compared on each side
+        // of the run.
+        if !self.program_is_unchanged() {
+            return Err(self.refusal(
+                reference,
+                "ran, and its output is not read: its program file changed before it exited",
+            ));
+        }
         self.decode(&stdout, reference)
     }
 
@@ -226,12 +258,23 @@ impl SecretSource for CommandSource {
 
         // The lock is held for the run, so two callers that ask for one secret run the program once.
         let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(held) = held.as_mut() else {
+            return Err(self.refusal(
+                reference,
+                "is closed: the box reads each secret once, before the workload starts",
+            ));
+        };
         if !held.contains_key(name) {
             let fetched = self.fetch_once(name, reference)?;
             held.insert(name.to_string(), fetched);
         }
         let value = select(&held[name], field).map_err(|reason| self.refusal(reference, reason))?;
         Secret::new(value, reference)
+    }
+
+    fn close(&self) {
+        // Each held secret is wiped as the map drops.
+        *self.held.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 }
 

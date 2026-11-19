@@ -4,8 +4,9 @@
 
 use std::fs::File;
 use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -200,6 +201,23 @@ impl Run {
         }
     }
 
+    fn foreground_group(&self) -> libc::pid_t {
+        let descriptor = self.input.as_ref().unwrap().as_raw_fd();
+        // SAFETY: the terminal master remains open through the query.
+        let group = unsafe { libc::tcgetpgrp(descriptor) };
+        assert_ne!(group, -1, "read the terminal foreground group");
+        group
+    }
+
+    fn interrupt(&mut self, terminal: bool) {
+        if terminal {
+            self.input.as_mut().unwrap().write_all(b"\x03").unwrap();
+        } else {
+            // SAFETY: the pid belongs to the child this test owns.
+            assert_eq!(unsafe { libc::kill(self.child.id() as _, libc::SIGINT) }, 0);
+        }
+    }
+
     fn signal(&self) {
         // SAFETY: the pid belongs to the child this test owns.
         assert_eq!(
@@ -328,4 +346,158 @@ fn piped_core_diagnostics_remain_live() {
     drop(client);
     box_.release_workload();
     assert!(run.finish().success());
+}
+
+struct StalledResponse {
+    origin: TcpStream,
+    client: TcpStream,
+}
+
+impl StalledResponse {
+    fn start(box_: &RuntimeMcpBox) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let live: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(box_.live_record()).unwrap()).unwrap();
+        let proxy_port = u16::try_from(live["proxy_port"].as_u64().unwrap()).unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", proxy_port)).unwrap();
+        client.set_read_timeout(Some(SHUTDOWN)).unwrap();
+        client.set_write_timeout(Some(SHUTDOWN)).unwrap();
+        write!(client, "GET http://127.0.0.1:{port}/shutdown HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n").unwrap();
+        let deadline = Instant::now() + SHUTDOWN;
+        let mut origin = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "gateway did not reach the origin"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept the gateway request: {error}"),
+            }
+        };
+        origin.set_read_timeout(Some(SHUTDOWN)).unwrap();
+        origin.set_write_timeout(Some(SHUTDOWN)).unwrap();
+        let request = read_http_head(&mut origin);
+        assert!(request.starts_with(b"GET /shutdown HTTP/1.1\r\n"));
+        origin
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nx")
+            .unwrap();
+        let response = read_http_head(&mut client);
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+        let mut prefix = [0];
+        client.read_exact(&mut prefix).unwrap();
+        assert_eq!(prefix, *b"x", "the incomplete body reached the client");
+        Self { origin, client }
+    }
+
+    fn wait_for_shutdown(&mut self) {
+        let mut byte = [0];
+        match self.client.read(&mut byte) {
+            Ok(0) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                ) => {}
+            result => panic!("gateway did not close its client during shutdown: {result:?}"),
+        }
+    }
+
+    fn assert_origin_is_held(&self) {
+        let mut byte = [0];
+        self.origin.set_nonblocking(true).unwrap();
+        let result = self.origin.peek(&mut byte);
+        self.origin.set_nonblocking(false).unwrap();
+        assert!(
+            matches!(result, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "gateway abandoned the unfinished origin response before interruption"
+        );
+    }
+}
+
+fn read_http_head(stream: &mut TcpStream) -> Vec<u8> {
+    let mut head = Vec::new();
+    let mut byte = [0];
+    while !head.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).unwrap();
+        head.push(byte[0]);
+        assert!(head.len() <= 4096, "HTTP header exceeded the fixture limit");
+    }
+    head
+}
+
+fn interrupt_stalled_shutdown(terminal: bool, interrupt_workload: bool) {
+    let box_ = RuntimeMcpBox::new("shutdown-interrupt");
+    box_.write_workspace(
+        r#"permit (principal, action == Box::Action::"net:connect", resource);
+permit (principal, action == Box::Action::"http:request", resource);"#,
+        &[],
+        r#"set -eu
+trap ': > "$HOME/workload.exited"' EXIT
+trap 'trap - EXIT; exit 130' INT
+: > "$HOME/workload.started"
+while [ ! -e "$HOME/release" ]; do :; done
+"#,
+    );
+    let mut run = Run::start(box_.command_for_run(), terminal);
+    run.wait_file(&box_.workload_path("workload.started"));
+    if terminal {
+        run.wait_for(
+            |run| run.foreground_group() != run.child.id() as libc::pid_t,
+            STARTUP,
+        );
+    }
+    let mut response = StalledResponse::start(&box_);
+    if interrupt_workload {
+        // Interrupted workloads need not run EXIT traps. The fixture clears its trap
+        // so this branch must observe gateway shutdown instead of shell cleanup.
+        run.interrupt(terminal);
+    } else {
+        box_.release_workload();
+        run.wait_file(&box_.workload_path("workload.exited"));
+    }
+    response.wait_for_shutdown();
+    assert!(
+        run.child.try_wait().unwrap().is_none(),
+        "Box must still await the unfinished gateway response"
+    );
+    response.assert_origin_is_held();
+    if terminal {
+        assert_eq!(
+            run.foreground_group(),
+            run.child.id() as libc::pid_t,
+            "restore the terminal before joining the stalled gateway"
+        );
+    }
+    run.interrupt(terminal);
+    let status = run.finish();
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGINT),
+        "a shutdown interrupt must terminate Box before the origin sends its final byte"
+    );
+}
+
+#[test]
+fn stalled_gateway_shutdown_restores_the_terminal_and_accepts_ctrl_c() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    for interrupt_workload in [false, true] {
+        interrupt_stalled_shutdown(true, interrupt_workload);
+    }
+}
+
+#[test]
+fn stalled_gateway_shutdown_accepts_direct_sigint_with_piped_stderr() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    for interrupt_workload in [false, true] {
+        interrupt_stalled_shutdown(false, interrupt_workload);
+    }
 }

@@ -9,7 +9,7 @@ mod fixture;
 
 #[cfg(unix)]
 fn main() {
-    if reload_tests::dispatch() {
+    if reload_tests::dispatch() || decision_tests::dispatch() {
         return;
     }
     #[cfg(target_os = "macos")]
@@ -34,9 +34,6 @@ fn main() {
     }
     #[cfg(target_os = "linux")]
     if std::env::args().any(|argument| argument == "--linux-startup") {
-        let admitted = !cfg!(target_arch = "x86_64")
-            || std::env::var_os("EXPERIMENTAL_X86_SUPPORT").as_deref()
-                == Some(std::ffi::OsStr::new("TRUE"));
         // SAFETY: this isolated probe holds no Box credentials or workload.
         assert_eq!(unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) }, 0);
         let mut called = false;
@@ -54,15 +51,12 @@ fn main() {
             ),
             std::process::ExitCode::FAILURE
         );
-        assert_eq!(
-            called, admitted,
-            "only admitted startup reaches the callback"
-        );
+        assert!(called, "startup reaches the callback without an opt-in");
         // SAFETY: PR_GET_DUMPABLE reads this isolated process's current setting.
         assert_eq!(
             unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0) },
-            i32::from(!admitted),
-            "platform refusal precedes hardening"
+            0,
+            "startup applies process hardening without an opt-in"
         );
         assert_eq!(
             strands_box::generate_policy_schema(
@@ -148,7 +142,7 @@ fn main() {
     let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
         .arg("--probe")
         .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
-        .env("EXPERIMENTAL_X86_SUPPORT", "TRUE")
+        .env_remove("EXPERIMENTAL_X86_SUPPORT")
         .output()
         .expect("run the library probe");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -163,7 +157,7 @@ fn main() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("--callback-error")
         .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
-        .env("EXPERIMENTAL_X86_SUPPORT", "TRUE")
+        .env_remove("EXPERIMENTAL_X86_SUPPORT")
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -177,7 +171,7 @@ fn main() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("--callback-config")
         .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
-        .env("EXPERIMENTAL_X86_SUPPORT", "TRUE")
+        .env_remove("EXPERIMENTAL_X86_SUPPORT")
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -194,7 +188,7 @@ fn main() {
         command
             .arg("--linux-startup")
             .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
-            .env("EXPERIMENTAL_X86_SUPPORT", "TRUE");
+            .env_remove("EXPERIMENTAL_X86_SUPPORT");
         if let Some(value) = value {
             command.env("EXPERIMENTAL_LINUX_SUPPORT", value);
         }
@@ -206,10 +200,11 @@ fn main() {
         assert!(!stderr.contains("EXPERIMENTAL_LINUX_SUPPORT"), "{stderr}");
     }
     #[cfg(target_os = "linux")]
-    x86_startup_matrix();
+    linux_library_ignores_retired_x86_opt_in();
     #[cfg(target_os = "macos")]
     a_supplied_box_id_names_the_box_and_its_telemetry();
     reload_tests::suite();
+    decision_tests::suite();
 }
 
 /// **A caller-supplied box ID names a new box, its record, and its telemetry, and a configured box
@@ -253,7 +248,7 @@ fn a_supplied_box_id_names_the_box_and_its_telemetry() {
             .arg(config)
             .args(box_id)
             .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
-            .env("EXPERIMENTAL_X86_SUPPORT", "TRUE");
+            .env_remove("EXPERIMENTAL_X86_SUPPORT");
         let output = command.output().expect("run the box ID probe");
         (
             output.status.success(),
@@ -307,7 +302,7 @@ fn a_supplied_box_id_names_the_box_and_its_telemetry() {
         .arg("claude-code-wit-AAAAAAAAAAAAAAAA")
         .arg(retried)
         .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
-        .env("EXPERIMENTAL_X86_SUPPORT", "TRUE")
+        .env_remove("EXPERIMENTAL_X86_SUPPORT")
         .output()
         .expect("run the box ID retry probe");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -330,8 +325,8 @@ fn a_supplied_box_id_names_the_box_and_its_telemetry() {
 }
 
 #[cfg(target_os = "linux")]
-fn x86_startup_matrix() {
-    use std::ffi::{OsStr, OsString};
+fn linux_library_ignores_retired_x86_opt_in() {
+    use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
     for value in [
@@ -345,12 +340,10 @@ fn x86_startup_matrix() {
         Some(OsString::from("TRUE ")),
         Some(OsString::from_vec(vec![0xff])),
     ] {
-        let admitted =
-            !cfg!(target_arch = "x86_64") || value.as_deref() == Some(OsStr::new("TRUE"));
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
             .arg("--linux-startup")
-            .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
+            .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
             .env_remove("EXPERIMENTAL_X86_SUPPORT");
         if let Some(value) = value {
             command.env("EXPERIMENTAL_X86_SUPPORT", value);
@@ -358,14 +351,9 @@ fn x86_startup_matrix() {
         let output = command.output().expect("run the platform startup probe");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{stderr}");
-        if admitted {
-            assert!(stderr.contains("missing-linux-library.toml"), "{stderr}");
-            assert!(stderr.contains("missing-linux-schema.toml"), "{stderr}");
-            assert!(!stderr.contains("EXPERIMENTAL_X86_SUPPORT"), "{stderr}");
-        } else {
-            let refusal = "strands-box: refusing to run: x86 support on Linux is experimental. Set EXPERIMENTAL_X86_SUPPORT=TRUE to enable it.";
-            assert_eq!(stderr.lines().collect::<Vec<_>>(), [refusal, refusal]);
-        }
+        assert!(stderr.contains("missing-linux-library.toml"), "{stderr}");
+        assert!(stderr.contains("missing-linux-schema.toml"), "{stderr}");
+        assert!(!stderr.contains("EXPERIMENTAL_X86_SUPPORT"), "{stderr}");
         assert!(!stderr.contains("EXPERIMENTAL_LINUX_SUPPORT"), "{stderr}");
     }
 }
@@ -599,8 +587,8 @@ mod reload_tests {
             .arg(configured.config())
             .arg(configured.box_home())
             .env("HOME", configured.operator_home())
-            .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
-            .env("EXPERIMENTAL_X86_SUPPORT", "TRUE");
+            .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+            .env_remove("EXPERIMENTAL_X86_SUPPORT");
         let output = bounded_output::bounded_output(command);
         assert!(
             output.status.success(),
@@ -757,6 +745,270 @@ mod reload_tests {
         while !path.exists() {
             assert!(Instant::now() < deadline, "timed out waiting for {path:?}");
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// **A caller's policy decision channel receives every decision the run records, with the same
+/// values, while the run is still going.**
+#[cfg(unix)]
+mod decision_tests {
+    use super::{bounded_output, fixture};
+    use std::collections::BTreeMap;
+    use std::path::Path;
+    use std::process::{Command, ExitCode};
+    use std::time::{Duration, Instant, UNIX_EPOCH};
+
+    const POLICY: &str = r#"
+    permit(principal, action, resource);
+    @id("no_target")
+    forbid(principal, action == Box::Action::"fs:read", resource)
+    when { context.input.path == "~/workspace/target.txt" };
+    "#;
+
+    type Row = (
+        u128,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+    );
+
+    pub(super) fn dispatch() -> bool {
+        let arguments: Vec<_> = std::env::args().collect();
+        match arguments.get(1).map(String::as_str) {
+            Some("--decisions-workload") => workload(),
+            Some("--decisions-run") => {
+                running_box(Path::new(&arguments[2]), Path::new(&arguments[3]));
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    pub(super) fn suite() {
+        if !fixture::namespace_launcher_is_usable() {
+            eprintln!("skipping: live policy decisions require a usable containment backend");
+            return;
+        }
+        let executable = tempfile::Builder::new()
+            .prefix("box-decisions-probe-")
+            .tempfile_in(fixture::box_binary().parent().unwrap())
+            .unwrap()
+            .into_temp_path();
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let configured = fixture::Request::with_config("library-decisions", POLICY, "").expect();
+        configured.write_command(executable.to_str().unwrap());
+        std::fs::write(configured.workspace().join("target.txt"), "refused\n").unwrap();
+        std::fs::write(configured.workspace().join("other.txt"), "permitted\n").unwrap();
+        let mut command = Command::new(&executable);
+        command
+            .arg("--decisions-run")
+            .arg(configured.config())
+            .arg(configured.box_home())
+            .env("HOME", configured.operator_home())
+            .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+            .env_remove("EXPERIMENTAL_X86_SUPPORT");
+        let output = bounded_output::bounded_output(command);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "decision probe failed:\n{stderr}");
+        let received: Vec<Row> = stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("received-decision "))
+            .map(|line| serde_json::from_str::<Vec<Option<String>>>(line).unwrap())
+            .map(|row| {
+                let text = |index: usize| row[index].clone().unwrap();
+                (
+                    text(0).parse().unwrap(),
+                    text(1),
+                    text(2),
+                    text(3),
+                    text(4),
+                    text(5),
+                    text(6),
+                    row[7].clone(),
+                )
+            })
+            .collect();
+        let records =
+            std::fs::read_to_string(configured.root().join("private/telemetry/records.jsonl"))
+                .unwrap();
+        let recorded = recorded_decisions(&records);
+        assert!(
+            recorded.iter().any(|row| row.1 == "deny"
+                && row.2 == "fs:read"
+                && row.3.ends_with("/workspace/target.txt")
+                && row.4 == "no_target"
+                && row.5 == "forbidden"),
+            "the forbidden read must be recorded: {recorded:?}"
+        );
+        assert!(
+            recorded
+                .iter()
+                .any(|row| row.1 == "permit" && row.3.ends_with("/workspace/other.txt")),
+            "the permitted read must be recorded: {recorded:?}"
+        );
+        assert_eq!(sorted(received), sorted(recorded));
+    }
+
+    fn sorted(mut rows: Vec<Row>) -> Vec<Row> {
+        rows.sort();
+        rows
+    }
+
+    /// Each policy decision the records hold, as time, verdict, action, resource, rule, cause,
+    /// category, and reason.
+    fn recorded_decisions(records: &str) -> Vec<Row> {
+        let mut rows = Vec::new();
+        for line in records.lines() {
+            let batch: serde_json::Value = serde_json::from_str(line).unwrap();
+            for resource in batch["resourceLogs"].as_array().into_iter().flatten() {
+                for scope in resource["scopeLogs"].as_array().into_iter().flatten() {
+                    if scope["scope"]["name"] != "strands-box.policy" {
+                        continue;
+                    }
+                    for record in scope["logRecords"].as_array().into_iter().flatten() {
+                        let attributes: BTreeMap<&str, &str> = record["attributes"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter_map(|attribute| {
+                                Some((
+                                    attribute["key"].as_str()?,
+                                    attribute["value"]["stringValue"].as_str()?,
+                                ))
+                            })
+                            .collect();
+                        let read = |key: &str| attributes[key].to_string();
+                        let reason = attributes
+                            .get("strands.box.policy.reason")
+                            .map(|text| (*text).to_string());
+                        rows.push((
+                            record["timeUnixNano"].as_str().unwrap().parse().unwrap(),
+                            read("strands.box.policy.verdict"),
+                            read("strands.box.policy.action"),
+                            read("strands.box.policy.resource"),
+                            read("strands.box.policy.rule"),
+                            read("strands.box.policy.cause"),
+                            read("strands.box.policy.category"),
+                            reason,
+                        ));
+                    }
+                }
+            }
+        }
+        rows
+    }
+
+    fn running_box(config: &Path, home: &Path) {
+        let (sender, receiver) = strands_box::policy_decisions(4096);
+        let mut received = Vec::new();
+        let mut receiver = Some(receiver);
+        let (code, receiver) = std::thread::scope(|scope| {
+            let reader = std::cell::Cell::new(None);
+            let code = strands_box::run(
+                config.into(),
+                vec!["--decisions-workload".into()],
+                strands_box::RunOptions {
+                    policy_decisions: Some(sender),
+                    on_ready: Some(Box::new(|| {
+                        let receiver = receiver.take().unwrap();
+                        reader.set(Some(scope.spawn(move || watch(receiver, home))));
+                        Ok(())
+                    })),
+                    ..Default::default()
+                },
+            );
+            let (receiver, watched) = reader.take().unwrap().join().unwrap();
+            received.extend(watched);
+            (code, receiver)
+        });
+        assert_eq!(code, ExitCode::SUCCESS);
+        loop {
+            match receiver.recv_timeout(Duration::from_secs(5)) {
+                Ok(decision) => received.push(decision),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("the channel stayed open after the run ended")
+                }
+            }
+        }
+        assert_eq!(receiver.dropped(), 0);
+        for decision in received {
+            let time = decision
+                .time
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                .to_string();
+            let verdict = if decision.permitted { "permit" } else { "deny" };
+            eprintln!(
+                "received-decision {}",
+                serde_json::json!([
+                    time,
+                    verdict,
+                    decision.action,
+                    decision.resource,
+                    decision.rule,
+                    decision.cause,
+                    decision.category,
+                    decision.reason
+                ])
+            );
+        }
+    }
+
+    /// Receive decisions until the forbidden read arrives, then tell the waiting workload.
+    fn watch(
+        receiver: strands_box::PolicyDecisionReceiver,
+        home: &Path,
+    ) -> (
+        strands_box::PolicyDecisionReceiver,
+        Vec<strands_box::PolicyDecision>,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut received = Vec::new();
+        while Instant::now() < deadline {
+            let decision = match receiver.recv_timeout(Duration::from_millis(50)) {
+                Ok(decision) => decision,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            let refused = !decision.permitted && decision.resource.ends_with("/target.txt");
+            received.push(decision);
+            if refused {
+                std::fs::write(home.join("refusal-received"), "").unwrap();
+                break;
+            }
+        }
+        (receiver, received)
+    }
+
+    /// Read the forbidden file, wait until the caller has received that refusal, then read the
+    /// permitted one.
+    fn workload() {
+        let home = std::env::var_os("HOME").unwrap();
+        let signal = Path::new(&home).join("refusal-received");
+        for (file, allowed) in [("target.txt", false), ("other.txt", true)] {
+            let output = Command::new("bash")
+                .args(["-c", &format!("cat {file}")])
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.success(), allowed, "{file}: {stderr}");
+            if !allowed {
+                let deadline = Instant::now() + Duration::from_secs(15);
+                while !signal.exists() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the caller did not receive the refusal while the workload ran"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
         }
     }
 }

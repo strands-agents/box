@@ -461,35 +461,85 @@ impl DecisionRecord {
         }
     }
 
+    /// The action, as `strands.box.policy.action` states it.
+    #[must_use]
+    pub fn action(&self) -> &str {
+        vocabulary_term(&self.action)
+    }
+
+    /// The namespace of the action, as `strands.box.policy.category` states it.
+    #[must_use]
+    pub fn category(&self) -> &str {
+        action_category(&self.action)
+    }
+
+    /// The resource, as `strands.box.policy.resource` states it.
+    #[must_use]
+    pub fn resource(&self) -> &str {
+        &self.resource
+    }
+
+    /// Whether the decision is a permit.
+    #[must_use]
+    pub fn permitted(&self) -> bool {
+        self.permitted
+    }
+
+    /// The class of result, as `strands.box.policy.cause` states it.
+    #[must_use]
+    pub fn cause(&self) -> DecisionCause {
+        self.cause
+    }
+
+    /// The governing rule, as `strands.box.policy.rule` states it.
+    #[must_use]
+    pub fn rule(&self) -> &str {
+        // An authored policy is named only when one actually decided, which the cause states. A
+        // fault keeps its attribution while the engine reaches `<default-deny>`, so naming the first
+        // entry there would report a policy that did not decide.
+        self.governing()
+            .map_or(self.rule.as_str(), |policy| policy.id.as_str())
+    }
+
+    /// The reason for a refusal, as `strands.box.policy.reason` states it.
+    #[must_use]
+    pub fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+
+    /// The time of the decision, which is the record's timestamp.
+    #[must_use]
+    pub fn time(&self) -> SystemTime {
+        UNIX_EPOCH
+            + std::time::Duration::from_nanos(u64::try_from(self.unix_nanos).unwrap_or(u64::MAX))
+    }
+
     /// The attributes a consumer reads, in the order the box states them.
     pub(crate) fn attributes(&self) -> Vec<(&'static str, AnyValue)> {
-        let action = vocabulary_term(&self.action);
         let mut pairs: Vec<(&'static str, AnyValue)> = vec![
             ("strands.box.policy.principal", PRINCIPAL.into()),
-            ("strands.box.policy.action", action.to_string().into()),
-            ("strands.box.policy.resource", self.resource.clone().into()),
+            (
+                "strands.box.policy.action",
+                self.action().to_string().into(),
+            ),
+            (
+                "strands.box.policy.resource",
+                self.resource().to_string().into(),
+            ),
             ("strands.box.policy.verdict", self.verdict().into()),
         ];
-        pairs.push(("strands.box.policy.cause", self.cause.as_str().into()));
-        if self.cause == DecisionCause::InternalFault {
+        pairs.push(("strands.box.policy.cause", self.cause().as_str().into()));
+        if self.cause() == DecisionCause::InternalFault {
             pairs.push(("error.type", "strands.box.policy.evaluation_error".into()));
         }
-        if let Some(reason) = &self.reason {
-            pairs.push(("strands.box.policy.reason", reason.clone().into()));
+        if let Some(reason) = self.reason() {
+            pairs.push(("strands.box.policy.reason", reason.to_string().into()));
         }
 
-        // The governing rule, under this product's own namespace. An authored policy is named only
-        // when one actually decided, which the cause states. A fault keeps its attribution while the
-        // engine reaches `<default-deny>`, so naming the first entry there would report a policy
-        // that did not decide.
+        // The governing rule, under this product's own namespace.
         let governing = self.governing();
-        pairs.push((
-            RULE,
-            governing
-                .map_or_else(|| self.rule.clone(), |policy| policy.id.clone())
-                .into(),
-        ));
-        pairs.push((CATEGORY, action_category(&self.action).to_string().into()));
+        pairs.push((RULE, self.rule().to_string().into()));
+        pairs.push((CATEGORY, self.category().to_string().into()));
         if let Some(description) = governing
             .and_then(|policy| policy.description.as_deref())
             .filter(|text| !text.is_empty())
@@ -540,7 +590,7 @@ impl DecisionRecord {
     }
 
     pub(crate) fn verdict(&self) -> &'static str {
-        if self.permitted { "permit" } else { "deny" }
+        if self.permitted() { "permit" } else { "deny" }
     }
 
     pub(crate) fn unix_nanos(&self) -> u128 {
@@ -651,6 +701,8 @@ pub enum ControlOperation {
     BoxStarted,
     /// This run is giving the box up.
     BoxStopped,
+    /// The box read one secret of a configuration entry through a declared secret source.
+    SecretFetched,
 }
 
 impl ControlOperation {
@@ -664,6 +716,7 @@ impl ControlOperation {
             Self::DiscoveryComplete => "discovery_complete",
             Self::BoxStarted => "box_started",
             Self::BoxStopped => "box_stopped",
+            Self::SecretFetched => "secret_fetched",
         }
     }
 }
@@ -980,6 +1033,32 @@ mod tests {
             "strands.box.control.reason",
             "the schema does not validate".to_string()
         )));
+    }
+
+    /// **Each control operation keeps its wire spelling**, which a consumer selects records by.
+    #[test]
+    fn each_control_operation_keeps_its_wire_spelling() {
+        assert_eq!(
+            [
+                ControlOperation::PolicyInstalled,
+                ControlOperation::PolicyRefused,
+                ControlOperation::SchemaInstalled,
+                ControlOperation::DiscoveryComplete,
+                ControlOperation::BoxStarted,
+                ControlOperation::BoxStopped,
+                ControlOperation::SecretFetched,
+            ]
+            .map(ControlOperation::as_str),
+            [
+                "policy_installed",
+                "policy_refused",
+                "schema_installed",
+                "discovery_complete",
+                "box_started",
+                "box_stopped",
+                "secret_fetched",
+            ]
+        );
     }
 
     /// **Every signal carries its own severity**, because that is what routes a record to a lane.

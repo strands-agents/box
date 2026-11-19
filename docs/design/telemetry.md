@@ -55,9 +55,11 @@ workload supplies that context. Box bounds and validates it but never treats it 
 authority. See [correlation context is a
 hint](decisions.md#correlation-context-is-a-hint-and-never-authority).
 
-Six control-plane records describe policy installation or refusal, tool vocabulary installation,
-completed discovery, and box startup or shutdown. They show which authority was in force at a given
-moment, so they share a file with the decisions.
+Seven control-plane records describe policy installation or refusal, tool vocabulary installation,
+completed discovery, box startup or shutdown, and each read of a secret through a declared secret
+source. They show which authority was in force at a given moment, so they share a file with the
+decisions. The record of a read names the configuration entry, the source, and its program. It
+carries no word that the program printed, because a vault program can print the name of an item.
 
 Each decision and control-plane record is both a span and a log record, with one shared trace
 identifier and span identifier. See [decision and control records produce both
@@ -73,6 +75,17 @@ execution status. See [the unmatched-route record](../user/telemetry.md#an-unmat
 OpenTelemetry lets a caller mark a trace as not sampled to reduce performance data volume. Box
 ignores that mark for its own decisions and always writes them. The workload supplies the trace
 context, so honoring the mark would let it suppress records of its own refusals.
+
+### Policy decisions for a library caller
+
+A program that runs a box through the `strands-box` library can also receive each effective
+decision in memory, through a channel it passes in `RunOptions::policy_decisions`. The enforcement
+point's recorder puts a copy of the decision's record values on that channel just before the
+collector queues the record, so the caller sees the decision without reading a target. The channel
+is bounded and Box sends without waiting. When it is full, Box drops the copy, counts it on the
+receiver, and still records the decision. A slow caller therefore cannot delay a decision or remove
+it from the records. The channel is not a target: it has no file, no drain at shutdown, and no
+place in `include`.
 
 ### Receiver
 

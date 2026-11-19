@@ -52,6 +52,113 @@ env:
   RUSTFLAGS: "-C debuginfo=0"
 
 jobs:
+  history-persistence:
+    name: History persistence (${{ matrix.mode }}, ${{ matrix.os }})
+    # Exercise the batched default and the per-event opt-out independently of all-feature builds.
+    if: ${{ inputs.filter == '' }}
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    # Dispatched runs can select a different revision; deny cache writes from that code.
+    cache-mode: read
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_FEATURE_ARGS: ${{ matrix.mode == 'per-event' && '--no-default-features' || '' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os) }}
+        mode: [default, per-event]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Enable experimental x86 runtime tests
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: echo "EXPERIMENTAL_X86_SUPPORT=TRUE" >> "$GITHUB_ENV"
+
+      - name: Require Linux namespace support
+        if: runner.os == 'Linux'
+        run: |
+          case "$(uname -m)" in
+            aarch64|x86_64) ;;
+            *) echo "Unsupported Linux test architecture" >&2; exit 1 ;;
+          esac
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$knob" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount --pid --fork --mount-proc true
+
+      - name: Build Box and launcher binaries for the selected persistence mode
+        run: cargo build --locked -p strands-box -p strands-box-containment --bins $CARGO_FEATURE_ARGS
+
+      - name: Install launcher images beside test binaries (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          install -m 0755 target/debug/strands-box-sock-alias target/debug/deps/strands-box-sock-alias
+          install -m 0755 target/debug/strands-box-contain-trampoline target/debug/deps/strands-box-contain-trampoline
+
+      - name: Test crash recovery for the selected persistence mode
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+          cargo test --locked -p strands-box $CARGO_FEATURE_ARGS --test box_killed_run -- --show-output \
+            2>&1 | tee crash-recovery.log
+          test_status=$?
+          set -e
+          if [ "$test_status" -ne 0 ]; then
+            exit "$test_status"
+          fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            python3 scripts/check-linux-test-output.py crash-recovery.log | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import re
+
+          output = Path("crash-recovery.log").read_text()
+          output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+          results = re.findall(r"^test result:.*$", output, re.MULTILINE)
+          expected = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;"
+          if len(results) != 1 or not results[0].startswith(expected):
+              raise SystemExit("Expected one passing crash-recovery test with no ignored or filtered cases.")
+          PYTHON
+
+      - name: Test the default idle history timer
+        if: matrix.mode == 'default'
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p strands-box --lib \
+            run::hosted::tests::hosted_idle_timer_flushes_pending_history_without_shutdown \
+            -- --exact --show-output 2>&1 | tee default-idle-history.log
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import re
+
+          output = Path("default-idle-history.log").read_text()
+          output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+          expected = "test run::hosted::tests::hosted_idle_timer_flushes_pending_history_without_shutdown ... ok"
+          if expected not in output or not re.search(r"^test result: ok\. 1 passed; 0 failed; 0 ignored;", output, re.MULTILINE):
+              raise SystemExit("Expected the default build to execute and pass the idle history test.")
+          PYTHON
+
+      - name: Upload history persistence output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: history-persistence-${{ matrix.mode }}-${{ matrix.os }}
+          path: |
+            crash-recovery.log
+            default-idle-history.log
+          if-no-files-found: warn
+
   unit-test:
     name: Unit Tests (${{ matrix.os }})
     permissions:
@@ -78,10 +185,6 @@ jobs:
         if: runner.os == 'Linux'
         # Free space for the all-targets build on the disposable Ubuntu runner.
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
-
-      - name: Enable experimental x86 runtime tests
-        if: runner.os == 'Linux' && runner.arch == 'X64'
-        run: echo "EXPERIMENTAL_X86_SUPPORT=TRUE" >> "$GITHUB_ENV"
 
       - name: Require Linux namespace support
         if: runner.os == 'Linux'
@@ -227,9 +330,11 @@ jobs:
           cargo fmt --manifest-path test-native-filesystem/Cargo.toml --check
           cargo clippy --manifest-path test-native-filesystem/Cargo.toml --locked --all-targets --all-features -- -D warnings
 
-      - name: Test native startup without the Cargo feature (macOS only)
+      - name: Test native startup without native enforcement in both history modes (macOS only)
         if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.filter == '' }}
-        run: cargo test --locked -p strands-box --no-default-features --test macos_file_enforcement
+        run: |
+          cargo test --locked -p strands-box --test macos_file_enforcement
+          cargo test --locked -p strands-box --no-default-features --test macos_file_enforcement
 
       - name: Test signed receipt checker (macOS only)
         if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.filter == '' }}

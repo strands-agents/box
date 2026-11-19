@@ -540,6 +540,47 @@ fn a_tool_whose_program_is_not_installed_is_left_out_and_the_box_starts() {
     assert!(!marker.exists(), "the planted file ran: {text}");
 }
 
+/// **A tool whose program is a file that Box writes into the box directory is left out on the
+/// first run of a new box directory alone**: a run chooses its tools before it writes that file,
+/// and each later run refuses the tool, because its program is in the box directory.
+#[test]
+fn a_tool_program_that_box_writes_is_left_out_on_the_first_run_alone() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let fixture = ContractFixture::new();
+    let inside = fixture.box_directory.join("bin/sh").display().to_string();
+    fixture.write_document(
+        None,
+        no_op_program(),
+        "",
+        &format!("[tool.inside]\ncommand = [{inside:?}]\n"),
+    );
+
+    let first = fixture.run(&fixture.config, &[]);
+    let second = fixture.run(&fixture.config, &[]);
+
+    assert!(first.status.success(), "{}", text(&first));
+    assert!(
+        text(&first).contains(&format!(
+            "strands-box: [tool.inside] left out: {inside} not found"
+        )),
+        "{}",
+        text(&first)
+    );
+    assert!(!second.status.success(), "{}", text(&second));
+    assert!(!text(&second).contains("left out"), "{}", text(&second));
+    // The refusal that Linux gives; another check of the program can come first on macOS.
+    if cfg!(target_os = "linux") {
+        assert!(
+            text(&second).contains("Box's own directory"),
+            "{}",
+            text(&second)
+        );
+    }
+}
+
 #[test]
 fn a_tool_grant_cannot_expose_private_state() {
     if !namespace_launcher_is_usable() {
