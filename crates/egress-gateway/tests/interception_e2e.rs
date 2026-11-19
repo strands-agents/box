@@ -946,6 +946,93 @@ fn aws_sigv4_signs_the_accept_encoding_that_reaches_upstream() {
     panic!("no two requests were signed in the same second");
 }
 
+/// The trace and agent headers get to the upstream with no change, and the signature does not
+/// include them.
+#[test]
+fn aws_sigv4_forwards_trace_headers_and_does_not_sign_them() {
+    let _env = harness::AwsEnvGuard::set(
+        "AKIDEXAMPLE",
+        "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+        None,
+    );
+    let host = "gw.gateway.bedrock-agentcore.us-east-1.amazonaws.com";
+    let upstream = TlsUpstream::start(host);
+    let port = upstream.port();
+    let aws_auth = Locator::structured(
+        [("source".to_string(), "aws".to_string())]
+            .into_iter()
+            .collect(),
+    )
+    .unwrap();
+    let store = Arc::new(
+        Vault::open(
+            VaultConfig::new(Backend::local(), "t").route(
+                RouteSpec::signed_aws(pat(host, port), aws_auth)
+                    .aws_scope("bedrock-agentcore", "us-east-1"),
+            ),
+        )
+        .unwrap()
+        .into_vault(),
+    );
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(pat(host, port), store)]);
+    let handle = start_gateway(host, &upstream, controls, FixedPolicy::allowing(&[host]));
+
+    let forwarded = [
+        (
+            "X-Amzn-Trace-Id",
+            "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1",
+        ),
+        (
+            "traceparent",
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+        ),
+        ("TraceState", "rojo=00f067aa0ba902b7"),
+        ("Baggage", "userId=alice"),
+        ("User-Agent", "Boto3/1.40.0 md/Botocore#1.43.127"),
+    ];
+    let mut headers = vec![("Content-Type", "application/json")];
+    headers.extend(forwarded);
+    let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    let mut client = WorkloadClient::connect_to_ip(proxy_port(&handle), host, port);
+    client.send_request("POST", "/mcp", &headers, body);
+    assert_eq!(client.read_status(), 200);
+
+    let seen = upstream.last_request();
+    for (name, value) in forwarded {
+        assert_eq!(
+            seen.header(name).as_deref(),
+            Some(value),
+            "{name} reaches upstream"
+        );
+    }
+    let authz = seen.header("authorization").expect("a signed request");
+    let field = |key: &str| {
+        authz
+            .split(',')
+            .find_map(|part| {
+                part.find(key)
+                    .map(|i| part[i + key.len()..].trim().to_string())
+            })
+            .unwrap_or_else(|| panic!("the Authorization names {key}: {authz}"))
+    };
+    let signed_headers = field("SignedHeaders=");
+    assert_eq!(
+        signed_headers, "accept-encoding;content-type;host;x-amz-date",
+        "{authz}"
+    );
+    assert_eq!(
+        field("Signature="),
+        recompute_sigv4(
+            &seen,
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            &field("Credential="),
+            &signed_headers,
+            body,
+        ),
+        "the signature is valid over the request the upstream received"
+    );
+}
+
 // ============================================================================================
 // NEGATIVE: the PDP governs — an unauthorized host is refused at CONNECT without opening a socket
 // ============================================================================================

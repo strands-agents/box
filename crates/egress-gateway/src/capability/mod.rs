@@ -106,7 +106,8 @@ impl CapabilitySet {
             return Ok(Vec::new());
         }
         // Sign over the headers already present (backend `Host`, phantom stripped) plus forced
-        // `identity`, the forwarded target, and the forwarded body — exactly the bytes that leave.
+        // `identity`, the forwarded target, and the forwarded body — the bytes that leave, less the
+        // headers that botocore does not sign.
         let headers = credential::headers_for_signing(req_headers);
         let scheme = if backend.tls { "https" } else { "http" };
         let default_port = if backend.tls { 443 } else { 80 };

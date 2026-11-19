@@ -134,7 +134,8 @@ impl Vault {
         // branch left to get wrong here.
         let credentials = &*resolution.credentials;
 
-        // Strip-then-sign: assemble the cleaned header set, then sign over exactly those headers.
+        // Strip-then-sign: assemble the cleaned header set. The signer signs these headers, but not
+        // the headers in `UNSIGNED_HEADERS`.
         let clean_headers: Vec<(String, String)> = req
             .headers
             .iter()
@@ -498,6 +499,73 @@ mod tests {
         assert!(
             scoped.is_empty(),
             "a scoped-profile sign emits no warning: {scoped:?}"
+        );
+    }
+
+    /// A signed route strips no trace, agent, or hop-by-hop header, and signs none of them.
+    #[test]
+    fn a_signed_route_keeps_unsigned_headers_on_the_request_and_out_of_the_signature() {
+        let unsigned = [
+            "X-Amzn-Trace-Id",
+            "traceparent",
+            "TraceState",
+            "Baggage",
+            "User-Agent",
+            "Expect",
+            "Keep-Alive",
+        ];
+        let mut headers = vec![
+            (
+                "Host".to_string(),
+                "bedrock-runtime.us-east-1.amazonaws.com".to_string(),
+            ),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+        headers.extend(
+            unsigned
+                .iter()
+                .map(|name| (name.to_string(), "workload-value".to_string())),
+        );
+        let vault = Vault::open_with_aws_provider(
+            VaultConfig::new(Backend::local(), "tenant-a").route(RouteSpec::signed_aws(
+                DestinationPattern::parse("*.amazonaws.com").unwrap(),
+                Locator::parse_uri("aws://prod").unwrap(),
+            )),
+            Arc::new(FixedProvider),
+        )
+        .expect("the signed route opens with the injected provider")
+        .into_vault();
+        let attachment = vault
+            .attach_for(Outbound {
+                destination: Destination {
+                    host: "bedrock-runtime.us-east-1.amazonaws.com",
+                    port: 443,
+                    path: "/model/m/invoke",
+                },
+                method: "POST",
+                url: "https://bedrock-runtime.us-east-1.amazonaws.com/model/m/invoke",
+                query: "",
+                headers: &headers,
+                body: b"{}",
+            })
+            .expect("the signed route attaches")
+            .expect("a credential is bound for this destination");
+
+        let stripped: Vec<&str> = attachment.strip_headers().collect();
+        for name in unsigned {
+            assert!(
+                !stripped.iter().any(|s| s.eq_ignore_ascii_case(name)),
+                "{name} must stay on the request: {stripped:?}"
+            );
+        }
+        let authorization = attachment
+            .set_headers()
+            .find(|(name, _)| *name == "Authorization")
+            .map(|(_, value)| value.to_string())
+            .expect("a signature");
+        assert!(
+            authorization.contains("SignedHeaders=content-type;host;x-amz-date,"),
+            "{authorization}"
         );
     }
 
