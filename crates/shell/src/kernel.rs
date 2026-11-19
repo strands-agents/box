@@ -9,7 +9,7 @@ use std::time::SystemTime;
 use strands_shell::Shell;
 use strands_shell::os::{
     CommandFallback, CommandRequest, DirEntry, Fd, FileStat, FileTimes, HttpRequest, HttpResponse,
-    Kernel, OpenFlags, Process,
+    Kernel, OpenFlags, Process, SystemInfo,
 };
 use strands_shell::vfs_kernel::VfsKernel;
 
@@ -924,6 +924,11 @@ impl Kernel for ShellKernel {
         SystemTime::now()
     }
 
+    /// The host's own system, so an agent sees the system its host programs were built for.
+    fn uname(&self) -> SystemInfo {
+        host_system().unwrap_or_default()
+    }
+
     fn check_url(&self, url: &str) -> io::Result<()> {
         self.route(url).map(drop)
     }
@@ -1035,6 +1040,33 @@ fn denied(error: io::Error) -> io::Error {
     io::Error::new(error.kind(), format!("effect denied: {error}"))
 }
 
+/// The host's `uname` fields. The host has no operating-system field, so it repeats the kernel
+/// name.
+fn host_system() -> Option<SystemInfo> {
+    let mut name = std::mem::MaybeUninit::<libc::utsname>::uninit();
+    // SAFETY: name is written before it is read.
+    if unsafe { libc::uname(name.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: uname returned 0, so name is initialized and each field holds a NUL-terminated string.
+    let name = unsafe { name.assume_init() };
+    let field = |chars: &[libc::c_char]| {
+        // SAFETY: each utsname field is NUL-terminated within its array.
+        unsafe { std::ffi::CStr::from_ptr(chars.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let kernel_name = field(&name.sysname);
+    Some(SystemInfo {
+        operating_system: kernel_name.clone(),
+        kernel_name,
+        node_name: field(&name.nodename),
+        kernel_release: field(&name.release),
+        kernel_version: field(&name.version),
+        machine: field(&name.machine),
+    })
+}
+
 impl Drop for ShellKernel {
     fn drop(&mut self) {
         let running = std::mem::take(
@@ -1053,5 +1085,24 @@ impl Drop for ShellKernel {
         for (_, decided) in decided {
             decided.drop_unrun();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_host_system_is_what_the_hosts_uname_reports() {
+        let system = super::host_system().expect("uname");
+        let host = std::process::Command::new("uname")
+            .arg("-snrm")
+            .output()
+            .expect("run uname");
+        assert_eq!(
+            format!(
+                "{} {} {} {}\n",
+                system.kernel_name, system.node_name, system.kernel_release, system.machine
+            ),
+            String::from_utf8_lossy(&host.stdout)
+        );
     }
 }
