@@ -7,6 +7,7 @@
 //! | [`lock`] | which process owns a box, and the record naming it |
 //! | [`hardening`] | refusing another process that `PolicyEngine`, the CA key, and the secrets |
 //! | [`credential`] | dereferencing a stored locator into a phantom |
+//! | [`secret_sources`] | the declared secret sources: each checked program and the one backend |
 //! | [`broker`] | the one socket, its protocol, and both interpreters |
 //! | [`configure`] | writing a validated authority to disk, for `run` |
 //! | [`decisions`] | the channel that gives a library caller each policy decision as it is made |
@@ -37,4 +38,5 @@ pub(crate) use macos_enforcement as native_enforcement;
 pub(crate) mod native_enforcement;
 #[cfg(target_os = "linux")]
 pub(crate) mod netns_relay;
+pub(crate) mod secret_sources;
 pub(crate) mod telemetry;

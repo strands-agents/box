@@ -732,16 +732,18 @@ fn credential_destination(destination: &str) -> Result<credentials::DestinationP
 /// One target's vault, and the header that presents its phantom when the credential has one.
 type ResolvedCredential = (Arc<credentials::Vault>, Option<(String, String)>);
 
-/// The vault holding one target's credential, which it reads through the local sources of
-/// `credentials` and keeps apart from the egress gateway's so no workload request can carry it, and
-/// the header presenting its phantom.
+/// The vault holding one target's credential, which it reads through `backend` in a configuration
+/// that declares `sources` and keeps apart from the egress gateway's so no workload request can
+/// carry it, and the header presenting its phantom.
 fn resolved_secret(
     label: &str,
     destination: &str,
     secret: &TelemetrySecret,
+    sources: &DeclaredSources,
+    backend: &credentials::Backend,
 ) -> Result<ResolvedCredential, BoxError> {
     let refused = |reason: String| -> BoxError { refuse(label, reason).into() };
-    let uri = telemetry_secret_uri(&secret.reference, &DeclaredSources::none()).map_err(refused)?;
+    let uri = telemetry_secret_uri(&secret.reference, sources).map_err(refused)?;
     let locator = credentials::Locator::parse_uri(&uri).map_err(|source| ConfigError::Locator {
         locator: "<telemetry secret>".to_string(),
         source,
@@ -756,12 +758,9 @@ fn resolved_secret(
         None => credentials::RouteSpec::signed_aws(pattern, locator),
     };
     let opened = credentials::Vault::open(
-        credentials::VaultConfig::new(
-            credentials::Backend::local(),
-            format!("strands-box-telemetry-{label}"),
-        )
-        .route(route)
-        .require_every_route(),
+        credentials::VaultConfig::new(backend.clone(), format!("strands-box-telemetry-{label}"))
+            .route(route)
+            .require_every_route(),
     )
     .map_err(|source| ConfigError::Locator {
         locator: "<telemetry secret>".to_string(),
@@ -781,11 +780,14 @@ fn resolved_secret(
     Ok((Arc::new(opened.into_vault()), presented))
 }
 
-/// The stored telemetry entries as one collector request.
+/// The stored telemetry entries as one collector request, with each secret read through `backend`
+/// in a configuration that declares `sources`.
 pub(crate) fn config_for(
     box_name: &str,
     entries: &BTreeMap<String, TelemetryEntry>,
     layout: &crate::record::layout::BoxRoot,
+    sources: &DeclaredSources,
+    backend: &credentials::Backend,
 ) -> Result<TelemetryConfig, BoxError> {
     let mut request = TelemetryConfig::for_box(box_name);
     if entries.is_empty() {
@@ -799,7 +801,8 @@ pub(crate) fn config_for(
         let mut target = target_for(entry, layout.operator_home(), layout.root(), None)
             .map_err(|reason| refuse(name, reason))?;
         if let Some(secret) = &entry.secret {
-            let (vault, presented) = resolved_secret(name, entry.destination.trim(), secret)?;
+            let (vault, presented) =
+                resolved_secret(name, entry.destination.trim(), secret, sources, backend)?;
             target = target.with_vault(vault);
             if let Some((header, value)) = presented {
                 target = target.with_header(header, value);
@@ -842,7 +845,14 @@ pub(crate) fn preflight_aws(targets: &BTreeMap<String, TelemetryEntry>) -> Resul
         };
         let refused = |reason: String| -> BoxError { refuse(name, reason).into() };
         let destination = entry.destination.trim();
-        let (vault, _) = resolved_secret(name, destination, secret)?;
+        // An `aws://` reference is in no declared scheme, and its vault signs on each request.
+        let (vault, _) = resolved_secret(
+            name,
+            destination,
+            secret,
+            &DeclaredSources::none(),
+            &credentials::Backend::local(),
+        )?;
         let url = url::Url::parse(&dialed(destination))
             .map_err(|_| refused("the destination is not a URL".to_string()))?;
         let port = url
@@ -1851,6 +1861,8 @@ secret.ref = "aws://runtime"
             "langfuse",
             "https://cloud.langfuse.com/api/public/otel",
             &secret(Some(BASIC_AUTH_PLACEMENT), None),
+            &DeclaredSources::none(),
+            &credentials::Backend::local(),
         )
         .expect("resolves");
         let (header, value) = presented.expect("a Basic phantom");
@@ -1869,6 +1881,8 @@ secret.ref = "aws://runtime"
             "langsmith",
             "https://api.smith.langchain.com/otel",
             &secret(None, Some("x-api-key")),
+            &DeclaredSources::none(),
+            &credentials::Backend::local(),
         )
         .expect("resolves");
         let (header, value) = presented.expect("a header phantom");
@@ -1878,9 +1892,14 @@ secret.ref = "aws://runtime"
             "no prefix on a named header: {value}"
         );
 
-        let (_, presented) =
-            resolved_secret("bearer", "https://vendor.example", &secret(None, None))
-                .expect("resolves");
+        let (_, presented) = resolved_secret(
+            "bearer",
+            "https://vendor.example",
+            &secret(None, None),
+            &DeclaredSources::none(),
+            &credentials::Backend::local(),
+        )
+        .expect("resolves");
         let (header, value) = presented.expect("a bearer phantom");
         assert_eq!(header, DEFAULT_HEADER);
         assert!(value.starts_with("Bearer strands_box_"), "{value}");
@@ -1894,6 +1913,8 @@ secret.ref = "aws://runtime"
                 prefix: None,
                 placement: None,
             },
+            &DeclaredSources::none(),
+            &credentials::Backend::local(),
         )
         .expect("a signed route resolves per request, not at open");
         assert!(
@@ -1918,5 +1939,55 @@ secret.ref = "aws://runtime"
             .expect("no targets is not an error")
             .is_empty()
         );
+    }
+
+    /// **A target's secret in a declared scheme is read through the given backend**, so a target
+    /// and a route with one secret share one run of the program.
+    #[test]
+    fn a_target_secret_in_a_declared_scheme_is_read_through_the_given_backend() {
+        use crate::run::secret_sources::tests::{PRINTER, StandIn, printer_sources};
+        let program = StandIn::new(PRINTER);
+        let secrets = printer_sources(&program);
+        let secret = |reference: &str| TelemetrySecret {
+            reference: reference.to_string(),
+            header: Some("x-api-key".to_string()),
+            prefix: None,
+            placement: None,
+        };
+        let (_, presented) = resolved_secret(
+            "otlp",
+            "https://vendor.example",
+            &secret("aws-secretsmanager://object#A"),
+            &declared(),
+            secrets.backend(),
+        )
+        .expect("the program supplies the secret");
+        // The target presents a phantom, and its vault holds the secret.
+        let (header, value) = presented.expect("a header phantom");
+        assert_eq!(header, "x-api-key");
+        assert!(value.starts_with("strands_box_"), "{value}");
+        assert_eq!(program.runs(), 1);
+        // A second read of that secret, as a route makes it, starts no program.
+        secrets
+            .backend()
+            .resolve(
+                &credentials::Locator::parse_uri("aws-secretsmanager://object#B")
+                    .expect("the reference parses"),
+            )
+            .expect("the backend holds the secret");
+        assert_eq!(program.runs(), 1);
+        // A scheme that no table declares stays refused, and starts no program.
+        let error = match resolved_secret(
+            "otlp",
+            "https://vendor.example",
+            &secret("vault://kv/key"),
+            &declared(),
+            secrets.backend(),
+        ) {
+            Ok(_) => panic!("the scheme is not declared"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("names no scheme this box reads"), "{error}");
+        assert_eq!(program.runs(), 1);
     }
 }

@@ -290,7 +290,10 @@ fn telemetry_names_a_destination_and_grants_nothing() {
         .expect("the function closes")
         .0;
     assert!(
-        telemetry_block.contains("Backend::local()") && telemetry_block.contains("Locator::"),
+        telemetry_block.contains("backend: &credentials::Backend")
+            && telemetry_block.contains("credentials::Vault::open")
+            && telemetry_block.contains("backend.clone()")
+            && telemetry_block.contains("Locator::"),
         "a telemetry secret must resolve through `credentials`, which owns the `env://` denylist"
     );
     // **Comment lines are stripped first.** The code carries a comment naming `std::env::var` to say
@@ -301,6 +304,11 @@ fn telemetry_names_a_destination_and_grants_nothing() {
         .filter(|line| !line.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
+    assert!(
+        !telemetry_code.contains("Backend::local()"),
+        "a telemetry secret reads through the one backend of the run, so a target and a route \
+         with one secret share one run of a declared program"
+    );
     assert!(
         !telemetry_code.contains("std::env::var"),
         "reading the variable directly bypasses that denylist, which is how an ambient AWS \

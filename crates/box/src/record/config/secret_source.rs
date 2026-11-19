@@ -5,9 +5,10 @@
 //! | [`SecretSourceEntry`] | one `[secret-source.<scheme>]` table, as the operator writes it |
 //! | [`DeclaredSources`] | the checked declarations that each secret reference is judged against |
 //! | [`routed_scheme`] | the one place that finds the scheme of a secret reference, as `credentials` routes it |
+//! | [`ProtectedPath`] | one `reads` or `deny` entry, which no grant may reach |
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use credentials::{CredentialError, Locator, SecretSourceCommand};
 use serde::{Deserialize, Serialize};
@@ -38,11 +39,11 @@ pub(crate) struct SecretSourceEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) pass_secret_env: Vec<String>,
 
-    /// The paths that the program reads, which no workload may reach.
+    /// The paths that the program reads, which no grant may reach.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) reads: Vec<String>,
 
-    /// The other paths to the vault, which no workload may reach.
+    /// The other paths to the vault, which no grant may reach.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) deny: Vec<String>,
 }
@@ -74,20 +75,100 @@ impl SecretSourceEntry {
             })
             .map_err(refused)?;
         for (list, entries) in [("reads", &self.reads), ("deny", &self.deny)] {
-            if let Some(entry) = entries.iter().find(|entry| !protectable(entry)) {
-                return Err(refuse(format!(
-                    "`{list}` entry {entry:?} is not a path that Box can protect; write an \
-                     absolute path, or one that begins with `~/`"
-                )));
+            for entry in entries {
+                if let Some(advice) = unprotectable(entry) {
+                    return Err(refuse(format!(
+                        "`{list}` entry {entry:?} is not a path that Box can protect; {advice}"
+                    )));
+                }
             }
         }
         Ok(declaration)
     }
 }
 
-/// Whether `entry` names one host path: an absolute path, the operator's home, or a path under it.
-fn protectable(entry: &str) -> bool {
-    entry == "~" || entry.starts_with("~/") || Path::new(entry).is_absolute()
+/// What to write in place of `entry`, when it does not name one host path that each sandbox can
+/// spell: an absolute path, the operator's home, or a path under it, with no `..`, no control
+/// character, and no pattern.
+fn unprotectable(entry: &str) -> Option<&'static str> {
+    let under_home = entry.strip_prefix("~/");
+    if entry != "~" && under_home.is_none() && !Path::new(entry).is_absolute() {
+        return Some("write an absolute path, or one that begins with `~/`");
+    }
+    // A second `/` makes the rest an absolute path, which is not under the home.
+    if under_home.is_some_and(|rest| rest.starts_with('/')) {
+        return Some("write one `/` after `~`");
+    }
+    if Path::new(entry)
+        .components()
+        .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Some("write the path without `..`");
+    }
+    if entry.chars().any(char::is_control) {
+        return Some("write the path without a control character");
+    }
+    // The characters that a filesystem list refuses, so a sandbox can spell each entry.
+    if entry.contains(['*', '?', '[', ']', '{', '}']) {
+        return Some(
+            "Box reads no pattern, so write each path without `*`, `?`, `[`, `]`, `{`, or `}`",
+        );
+    }
+    None
+}
+
+/// One `reads` or `deny` entry of a `[secret-source.<scheme>]` table, which no grant may reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProtectedPath {
+    /// The scheme of the table that holds the entry.
+    pub(crate) scheme: String,
+    /// The key that holds the entry: `reads` or `deny`.
+    pub(crate) list: &'static str,
+    /// The entry as the operator wrote it.
+    pub(crate) entry: String,
+}
+
+impl ProtectedPath {
+    /// This path as written under `operator_home` and as it resolves through each symbolic link,
+    /// also a link whose target is not there yet, then each link on the way.
+    pub(crate) fn spellings(
+        &self,
+        operator_home: &Path,
+    ) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ConfigError> {
+        let refuse = |reason: String| ConfigError::SecretSource {
+            scheme: self.scheme.clone(),
+            reason: format!("`{}` entry {:?} {reason}", self.list, self.entry),
+        };
+        let written = super::filesystem::under_home(&self.entry, operator_home)
+            .ok_or_else(|| refuse("is not an absolute path or one under `~`".to_string()))?;
+        // The sandbox checks the path that a name resolves to, so a file that appears behind a
+        // link must be closed too.
+        let (resolved, links) = crate::record::layout::resolved_through_links(&written)
+            .map_err(|error| refuse(format!("cannot be inspected: {error}")))?;
+        let mut spellings = vec![written];
+        if !spellings.contains(&resolved) {
+            spellings.push(resolved);
+        }
+        Ok((spellings, links))
+    }
+}
+
+/// Each `reads` and `deny` entry of `entries`.
+pub(crate) fn protected_paths(entries: &BTreeMap<String, SecretSourceEntry>) -> Vec<ProtectedPath> {
+    entries
+        .iter()
+        .flat_map(|(scheme, entry)| {
+            [("reads", &entry.reads), ("deny", &entry.deny)]
+                .into_iter()
+                .flat_map(move |(list, paths)| {
+                    paths.iter().map(move |path| ProtectedPath {
+                        scheme: scheme.clone(),
+                        list,
+                        entry: path.clone(),
+                    })
+                })
+        })
+        .collect()
 }
 
 /// The checked declarations of one configuration, keyed by scheme.
@@ -161,6 +242,11 @@ impl DeclaredSources {
         self.declarations
             .get_key_value(&scheme)
             .map(|(declared, _)| declared.as_str())
+    }
+
+    /// Each checked declaration with its scheme, for the backend that reads through it.
+    pub(crate) fn into_declarations(self) -> impl Iterator<Item = (String, SecretSourceCommand)> {
+        self.declarations.into_iter()
     }
 
     /// The scheme of a source whose `pass-secret-env` names the variable `name`.
@@ -471,6 +557,62 @@ pub(crate) mod tests {
             "[secret-source.op]\n{PROTOCOL}{COMMAND}reads = [\"~\", \"~/.config/op\", \"/etc/op\"]\n"
         ));
         DeclaredSources::check_on(&entries, true, true).expect("each spelling names one host path");
+    }
+
+    #[test]
+    fn a_reads_or_deny_entry_that_does_not_name_one_place_is_refused() {
+        const PATTERN: &str =
+            "Box reads no pattern, so write each path without `*`, `?`, `[`, `]`, `{`, or `}`";
+        for (list, entry, advice) in [
+            ("reads", "~/.config/../op", "write the path without `..`"),
+            ("deny", "/var/run/op/..", "write the path without `..`"),
+            ("reads", "~/.config/op*", PATTERN),
+            ("deny", "/var/run/op-?.sock", PATTERN),
+            ("deny", "~/Library/Group Containers/[A-Z", PATTERN),
+            ("deny", "/var/run/op]", PATTERN),
+            // The sandbox profile of macOS cannot hold these two.
+            ("reads", "~/.config/{{op", PATTERN),
+            ("reads", "~/.config/op}", PATTERN),
+            (
+                "reads",
+                "~/.config/op\nconfig",
+                "write the path without a control character",
+            ),
+            // A second `/` after `~` names a path under `/`, not under the home.
+            ("reads", "~//.config/op", "write one `/` after `~`"),
+            ("deny", "~//", "write one `/` after `~`"),
+        ] {
+            assert_eq!(
+                refusal(&format!("{PROTOCOL}{COMMAND}{list} = [{entry:?}]\n")),
+                format!(
+                    "invalid `[secret-source.op]` table: `{list}` entry {entry:?} is not a path \
+                     that Box can protect; {advice}"
+                )
+            );
+        }
+        // A name that only holds two dots is one place.
+        let entries = entries(&format!(
+            "[secret-source.op]\n{PROTOCOL}{COMMAND}reads = [\"~/.config/op..d\", \"/etc/..op\"]\n"
+        ));
+        DeclaredSources::check_on(&entries, true, true).expect("no `..` component, no refusal");
+    }
+
+    #[test]
+    fn each_reads_and_deny_entry_is_a_protected_path_of_its_scheme() {
+        let protected = |scheme: &str, list: &'static str, entry: &str| ProtectedPath {
+            scheme: scheme.to_string(),
+            list,
+            entry: entry.to_string(),
+        };
+        assert_eq!(
+            protected_paths(&entries(DECLARED)),
+            [
+                protected("op", "reads", "~/.config/op"),
+                protected("op", "deny", "/var/run/op"),
+            ],
+            "the `aws-secretsmanager` table of the fixture names no path"
+        );
+        assert_eq!(protected_paths(&BTreeMap::new()), []);
     }
 
     #[test]

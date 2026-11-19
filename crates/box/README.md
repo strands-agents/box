@@ -38,12 +38,9 @@ strands-box run    --config <file> [-- <args>...]
 strands-box policy generate-schema --config <file> --output-dir <dir>
 ```
 
-On Linux x86-64, both verbs require the operator environment variable
-`EXPERIMENTAL_X86_SUPPORT=TRUE`. If the variable is unset or has any other value,
-Box refuses execution before reading the configuration or starting a workload. `--help` and `--version`
-remain available. The same check applies to the Rust library functions `run` and
-`generate_policy_schema`; set the variable before starting the host application.
-ARM64 does not require the flag. This startup opt-in does not change sandbox permissions.
+On Linux ARM64 and x86-64, neither verb requires an environment opt-in. The Rust
+library functions `run` and `generate_policy_schema` follow the same startup behavior.
+Configuration validation and sandbox requirements still apply.
 
 There are two verbs. The caller that created `box_dir` owns its lifecycle: it holds the path, so it
 stops a box by ending the `run` process and deletes one by removing the directory.
@@ -355,9 +352,16 @@ only. The `secret.env` key needs the same switch, on each operating system. The 
 then valid on an egress route and a remote MCP server (with `secret.env`), and on a backend
 `auth.ref` and a telemetry `secret.ref` (with no placeholder variable). An `env://NAME` or
 `secret://NAME` reference is refused when a `pass-secret-env` entry names `NAME`. The record stores
-each declaration at record version 39. This build reads no secret through a declaration: `run`
-stops after the load checks, and `policy generate-schema` stops for a remote MCP server whose secret
-names a declared scheme. `record::config::secret_source` holds the table and its checks.
+each declaration at record version 39. `record::config::secret_source` holds the table and its
+checks. When a run starts, `run::secret_sources` checks each program file, prints one line for each
+source on stderr, and runs each program once for each secret before a workload starts: the secrets
+of telemetry targets first, then the others. The workload gets a placeholder in the `secret.env`
+variable. `policy generate-schema` reads the secret of a remote MCP server through the same
+declarations. `run::commands` protects each source program as it protects a configured tool
+command: no write grant covers it, and no interpreter changes it. Before a program first starts,
+`run::secret_sources` also refuses a grant that reaches a `reads` or `deny` path. Each
+sandbox denies the `reads` and `deny` paths. The interpreters do not: policy alone decides a
+read or a change of those paths through Strands Shell or Monty.
 
 **A host pattern is not a reachability claim.** An entry says only what is
 attached to a request the policy already permitted, so widening one attaches a

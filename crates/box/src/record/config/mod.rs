@@ -62,7 +62,7 @@ use self::env::{reserved_workload_environment, valid_environment_name};
 use self::gateway::Gateway;
 use self::limits::Limits;
 use self::process::{ContainedMcp, ProcessSpec};
-use self::secret_source::{DeclaredSources, SecretSourceEntry};
+use self::secret_source::{DeclaredSources, ProtectedPath, SecretSourceEntry};
 use credentials::DestinationPattern;
 
 /// The default credential header, and the one whose convention carries a prefix.
@@ -133,21 +133,9 @@ pub(crate) fn read_remote_mcp_servers(path: &Path) -> Result<Vec<RemoteMcpServer
     // Discovery attaches each server's credential itself, so each server's secret is judged here
     // as a run judges it.
     let remote_mcp = remote_mcp_entries(remote_mcp);
-    let declared = file.declared_sources()?;
-    validate_egress_and_remote(&file.egress, &remote_mcp, &declared)?;
+    validate_egress_and_remote(&file.egress, &remote_mcp, &file.declared_sources()?)?;
     let mut servers = Vec::new();
     for (name, remote) in remote_mcp {
-        // No step here reads a secret through a declared program.
-        if let Some(scheme) = remote
-            .secret
-            .as_ref()
-            .and_then(|secret| declared.source_of(&secret.reference))
-        {
-            return Err(ConfigError::SecretSourceFetch {
-                scheme: scheme.to_string(),
-            }
-            .into());
-        }
         // A re-routed server is reachable only through the backend, and that re-route — with its
         // SigV4/`env://` backend auth — happens at `run` time in the egress gateway. Offline
         // `generate-schema` has no gateway, so it cannot discover a re-routed server; refuse by name
@@ -175,6 +163,69 @@ pub(crate) fn read_remote_mcp_servers(path: &Path) -> Result<Vec<RemoteMcpServer
         });
     }
     Ok(servers)
+}
+
+/// Each process table of one configuration, with what judges its filesystem lists.
+pub(crate) struct ProcessTables {
+    /// `[agent]`, each `[tool.<name>]`, and each stdio `[mcp.<name>]`, by table name.
+    pub(crate) tables: Vec<(String, ProcessSpec)>,
+    /// The policy file of the configuration.
+    pub(crate) policy: Option<PathBuf>,
+    /// Whether the configuration declares a stdio MCP server.
+    pub(crate) declares_stdio_mcp: bool,
+    /// Each path that a secret source of the configuration keeps from each workload.
+    pub(crate) source_paths: Vec<ProtectedPath>,
+}
+
+impl ProcessTables {
+    fn of<'a>(
+        agent: Option<&'a ProcessSpec>,
+        tool: &'a BTreeMap<String, ProcessSpec>,
+        contained_mcp: &'a BTreeMap<String, ContainedMcp>,
+        policy: Option<PathBuf>,
+        declares_stdio_mcp: bool,
+        secret_source: &BTreeMap<String, SecretSourceEntry>,
+    ) -> Self {
+        let agent = agent.into_iter().map(|spec| ("[agent]".to_string(), spec));
+        let tools = tool
+            .iter()
+            .map(|(label, spec)| (format!("[tool.{label}]"), spec));
+        let servers = contained_mcp
+            .iter()
+            .map(|(label, server)| (format!("[mcp.{label}]"), &server.spec));
+        Self {
+            tables: agent
+                .chain(tools)
+                .chain(servers)
+                .map(|(table, spec)| (table, spec.clone()))
+                .collect(),
+            policy,
+            declares_stdio_mcp,
+            source_paths: secret_source::protected_paths(secret_source),
+        }
+    }
+}
+
+/// The secret sources of one workspace config: its `[secret-source.<scheme>]` tables, whether its
+/// `[experimental-features] secret-sources` is on, and its process tables.
+pub(crate) fn read_secret_sources(
+    path: &Path,
+) -> Result<(BTreeMap<String, SecretSourceEntry>, bool, ProcessTables), BoxError> {
+    let file = ConfigFile::read(path)?;
+    let contained = mcp::contained_specs(&file.mcp);
+    let tables = ProcessTables::of(
+        file.agent.as_ref(),
+        &file.tool,
+        &contained,
+        file.policy_path(path),
+        !contained.is_empty(),
+        &file.secret_source,
+    );
+    Ok((
+        file.secret_source,
+        file.experimental_features.secret_sources,
+        tables,
+    ))
 }
 
 /// Each remote MCP server as the egress entry that routes it, keyed by the server's name.
@@ -1235,6 +1286,23 @@ impl Record {
     /// destination, so the gateway learns every plain-HTTP credential and every remote MCP host.
     pub(crate) fn egress_routes(&self) -> Result<Vec<EgressRoute>, BoxError> {
         routes_for_and_remote(&self.egress, &self.remote_mcp, &self.declared_sources()?)
+    }
+
+    /// Each stored process table, with what judges its filesystem lists.
+    pub(crate) fn process_tables(&self) -> ProcessTables {
+        ProcessTables::of(
+            self.agent.as_ref(),
+            &self.tool,
+            &self.contained_mcp,
+            self.policy.clone(),
+            self.declares_stdio_mcp(),
+            &self.secret_source,
+        )
+    }
+
+    /// Whether this record declares a stdio MCP server.
+    pub(crate) fn declares_stdio_mcp(&self) -> bool {
+        !self.mcp.is_empty()
     }
 
     /// The stored `[secret-source.<scheme>]` tables, checked again.
@@ -4172,6 +4240,68 @@ env = {}
         ));
     }
 
+    /// **The process tables of a configuration are `[agent]`, each `[tool.<name>]`, and each
+    /// stdio `[mcp.<name>]`**, for a stored record and for the file that offline schema generation
+    /// reads.
+    #[test]
+    fn the_process_tables_are_the_agent_each_tool_and_each_stdio_mcp_server() {
+        const BODY: &str = "[agent]\ncommand = [\"/bin/bash\"]\n\
+             [tool.build]\ncommand = [\"/usr/bin/make\"]\n\
+             [mcp.local]\ntype = \"stdio\"\ncommand = [\"mcp-server-fetch\"]\n\
+             [mcp.remote]\ntype = \"http\"\ndestinations = [\"mcp.example.com\"]\n";
+        let names = |tables: &ProcessTables| {
+            tables
+                .tables
+                .iter()
+                .map(|(table, _)| table.clone())
+                .collect::<Vec<_>>()
+        };
+        let stored = pinned_record(BODY).process_tables();
+        assert_eq!(names(&stored), ["[agent]", "[tool.build]", "[mcp.local]"]);
+        assert!(stored.declares_stdio_mcp);
+        assert_eq!(
+            stored.policy.as_deref(),
+            Some(Path::new("/etc/boxes/policy.dw"))
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("box.toml");
+        std::fs::write(
+            &path,
+            format!("name = \"test\"\nbox_dir = \"/var/lib/box\"\n{BODY}"),
+        )
+        .unwrap();
+        let (_, _, read) = read_secret_sources(&path).unwrap();
+        assert_eq!(names(&read), ["[agent]", "[tool.build]", "[mcp.local]"]);
+        assert!(read.declares_stdio_mcp);
+        assert_eq!(read.policy, None);
+        // A configuration with no stdio server searches no program directory.
+        let none = pinned_record("[agent]\ncommand = [\"/bin/bash\"]\n").process_tables();
+        assert_eq!(names(&none), ["[agent]"]);
+        assert!(!none.declares_stdio_mcp);
+
+        // Each path that a secret source protects goes with the tables, so each judgement of a
+        // list compares its grants with them.
+        assert_eq!(stored.source_paths, []);
+        assert_eq!(read.source_paths, []);
+        let mut declaring = pinned_record(BODY);
+        declaring.secret_source = secret_source::tests::entries(
+            "[secret-source.op]\nprotocol = \"box.secret-source.v1\"\n\
+             command = [\"/opt/op\", \"read\", \"op://{ref}\"]\n\
+             reads = [\"~/.config/op\"]\ndeny = [\"/var/run/op\"]\n",
+        );
+        assert_eq!(
+            declaring.process_tables().source_paths,
+            [("reads", "~/.config/op"), ("deny", "/var/run/op")].map(|(list, entry)| {
+                ProtectedPath {
+                    scheme: "op".to_string(),
+                    list,
+                    entry: entry.to_string(),
+                }
+            })
+        );
+    }
+
     /// Servers on distinct programs store the record an earlier build stored.
     #[test]
     fn servers_on_distinct_programs_store_a_byte_identical_record() {
@@ -5236,10 +5366,10 @@ command = ["mcp-server-fetch"]
         );
     }
 
-    /// **Offline schema generation reads no secret through a declared program**, so it refuses a
-    /// remote MCP server whose secret names a declared scheme.
+    /// **Offline schema generation gets a remote MCP server whose secret a declared source reads,
+    /// with the declarations of that file**, and refuses the credential of the vault itself.
     #[test]
-    fn offline_schema_generation_refuses_a_declared_secret_source() {
+    fn offline_schema_generation_reads_a_server_whose_secret_names_a_declared_scheme() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("box.toml");
         let server = |secret: &str| {
@@ -5253,15 +5383,34 @@ command = ["mcp-server-fetch"]
             server("secret.ref = \"op://Personal/Web/token\"\nsecret.env = \"WEB_TOKEN\"\n"),
         )
         .unwrap();
-        let error = match read_remote_mcp_servers(&path) {
-            Ok(_) => panic!("a declared scheme must be refused, not read"),
-            Err(error) => error.to_string(),
-        };
+        let read = read_remote_mcp_servers(&path).map(|servers| {
+            servers
+                .into_iter()
+                .map(|server| (server.name, server.secret.map(|secret| secret.reference)))
+                .collect::<Vec<_>>()
+        });
         if cfg!(target_os = "macos") {
             assert_eq!(
-                error,
-                "`[secret-source.op]` loaded, but this build cannot yet read a secret from a \
-                 declared secret source, so the box does not start"
+                read.map_err(|error| error.to_string()),
+                Ok(vec![(
+                    "web".to_string(),
+                    Some("op://Personal/Web/token".to_string())
+                )])
+            );
+            let (sources, enabled, tables) = read_secret_sources(&path).unwrap();
+            assert!(tables.tables.is_empty() && !tables.declares_stdio_mcp);
+            assert_eq!(sources.keys().collect::<Vec<_>>(), ["op"]);
+            assert!(enabled);
+            // The paths of the source go with the tables of the file, as they do for a record.
+            assert_eq!(
+                tables.source_paths,
+                [("reads", "~/.config/op"), ("deny", "/var/run/op")].map(|(list, entry)| {
+                    ProtectedPath {
+                        scheme: "op".to_string(),
+                        list,
+                        entry: entry.to_string(),
+                    }
+                })
             );
             // A server that names no declared scheme is read beside the declaration.
             std::fs::write(&path, server("")).unwrap();
@@ -5283,7 +5432,10 @@ command = ["mcp-server-fetch"]
                  `pass-secret-env` names it), so no env:// or secret:// reference can read it"
             );
         } else {
-            assert_eq!(error, UNPROTECTED);
+            assert_eq!(
+                read.map_err(|error| error.to_string()),
+                Err(UNPROTECTED.to_string())
+            );
         }
     }
 }

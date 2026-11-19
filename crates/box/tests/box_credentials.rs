@@ -375,52 +375,178 @@ fn declared_source(switch: bool, program: &str, rest: &str) -> String {
 const DECLARED_ROUTE: &str = "[egress.c]\ndestinations = [\"api.example.test\"]\n\
      secret.ref = \"op://Personal/GitHub/token\"\nsecret.env = \"GH_TOKEN\"\n";
 
-/// **A declared secret source loads and is stored, and the box does not start.**
-///
-/// The stand-in program writes a marker when it runs, so the absent marker proves that no step
-/// ran it: this build checks and stores a declaration, and reads no secret through one.
+/// The secret that a stand-in program prints, which must never appear inside the box.
+#[cfg(target_os = "macos")]
+const DECLARED_SECRET: &str = "sk_live_declared_realsecret_9b3d";
+
+/// The workload variable that holds the placeholder of a declared secret, which no test sets.
+#[cfg(target_os = "macos")]
+const DECLARED_VARIABLE: &str = "STRANDS_BOX_E2E_DECLARED_TOKEN";
+
+/// A stand-in for a vault program, which appends its arguments to `runs` each time it starts.
+#[cfg(target_os = "macos")]
+struct StandInProgram {
+    directory: tempfile::TempDir,
+}
+
+#[cfg(target_os = "macos")]
+impl StandInProgram {
+    /// Write the program, whose shell text after the `runs` line is `body`.
+    fn new(body: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = fixture::short_temporary_home();
+        let program = directory.path().join("vault-stand-in");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\n{body}\n",
+                directory.path().join("runs").display()
+            ),
+        )
+        .expect("write the stand-in program");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("make the stand-in program executable");
+        Self { directory }
+    }
+
+    fn path(&self) -> String {
+        self.directory
+            .path()
+            .join("vault-stand-in")
+            .display()
+            .to_string()
+    }
+
+    /// The arguments of each start of the program, in order.
+    fn runs(&self) -> Vec<String> {
+        std::fs::read_to_string(self.directory.path().join("runs"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+/// A route to `endpoint` whose secret the declared `op://` source reads.
+#[cfg(target_os = "macos")]
+fn declared_route(endpoint: &str, reference: &str) -> String {
+    format!(
+        "[egress.c]\ndestinations = [\"{endpoint}\"]\nsecret.ref = \"{reference}\"\n\
+         secret.env = \"{DECLARED_VARIABLE}\"\n"
+    )
+}
+
+/// Each `secret_fetched` record in `records`: its outcome, subject, detail, and reason.
+#[cfg(target_os = "macos")]
+fn secret_fetch_records(records: &str) -> Vec<[String; 4]> {
+    let mut fetched = Vec::new();
+    for line in records.lines() {
+        let batch: Value = serde_json::from_str(line).expect("OTLP batch");
+        for resource in batch["resourceLogs"].as_array().into_iter().flatten() {
+            for scope in resource["scopeLogs"].as_array().into_iter().flatten() {
+                for record in scope["logRecords"].as_array().into_iter().flatten() {
+                    let attribute = |name: &str| {
+                        record["attributes"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .find(|attribute| attribute["key"] == name)
+                            .and_then(|attribute| attribute["value"]["stringValue"].as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    };
+                    if attribute("strands.box.control.operation") == "secret_fetched" {
+                        fetched.push(
+                            ["outcome", "subject", "detail", "reason"]
+                                .map(|name| attribute(&format!("strands.box.control.{name}"))),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    fetched
+}
+
+/// Each file under `directory` that holds `needle`.
+#[cfg(target_os = "macos")]
+fn files_holding(directory: &std::path::Path, needle: &str) -> Vec<std::path::PathBuf> {
+    let mut holding = Vec::new();
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                pending.push(path);
+            } else if kind.is_file()
+                && std::fs::read(&path).is_ok_and(|bytes| {
+                    bytes
+                        .windows(needle.len())
+                        .any(|window| window == needle.as_bytes())
+                })
+            {
+                holding.push(path);
+            }
+        }
+    }
+    holding
+}
+
+/// **A run reads a declared secret once before the workload starts**: the workload holds a
+/// placeholder in a variable that the operator did not set, the read is recorded, the record
+/// stores the declaration, and no file under the operator's home holds the secret.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_declared_secret_source_is_stored_and_the_box_does_not_start() {
+fn a_declared_secret_is_read_at_startup_and_the_workload_holds_a_placeholder() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let scratch = fixture::short_temporary_home();
-    let marker = scratch.path().join("the-program-ran");
-    let program = scratch.path().join("op-stand-in");
-    std::fs::write(
-        &program,
-        format!(
-            "#!/bin/sh\ntouch {:?}\nprintf 'secret\\n'\n",
-            marker.display().to_string()
-        ),
-    )
-    .expect("write the stand-in program");
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-            .expect("make the stand-in program executable");
-    }
+    let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+    let upstream = RecordingUpstream::start();
+    let endpoint = format!("localhost:{}", upstream.port);
     let (box_, output) = Request::with_config(
-        "declared-source",
-        &permit_egress_to("api.example.test", 443),
-        &declared_source(true, &program.display().to_string(), DECLARED_ROUTE),
+        "declared-read",
+        &permit_egress_to("localhost", upstream.port),
+        &declared_source(
+            true,
+            &program.path(),
+            &declared_route(&endpoint, "op://Personal/GitHub/token"),
+        ),
     )
     .attempt();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "the box must not start: {stderr}");
+    assert!(output.status.success(), "the box must start: {stderr}");
     assert!(
-        stderr.contains(
-            "`[secret-source.op]` loaded, but this build cannot yet read a secret from a \
-             declared secret source, so the box does not start"
-        ),
+        stderr.contains(&format!(
+            "strands-box: [secret-source.op]: reads each op:// secret with {}, which runs \
+             outside every sandbox\n",
+            program.path()
+        )),
         "{stderr}"
     );
-    assert!(!marker.exists(), "no step may run the declared program");
+    assert_eq!(program.runs(), ["read op://Personal/GitHub/token"]);
+    let records = std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl"))
+        .expect("the records of the creating run");
+    assert_eq!(
+        secret_fetch_records(&records),
+        [[
+            "ok".to_string(),
+            "[egress.c] secret.ref".to_string(),
+            format!(
+                "source `op`, program {}, reference op://[REDACTED]",
+                program.path()
+            ),
+            String::new(),
+        ]]
+    );
 
+    // The stored record holds the declaration and the route, at the version of the feature.
     let record = std::fs::read_to_string(box_.root().join("private/box.toml"))
-        .expect("the load checks passed, so the record is stored");
+        .expect("the box started, so the record is stored");
     let record: toml::Value = toml::from_str(&record).expect("the record is TOML");
     assert_eq!(record["version"].as_integer(), Some(39));
     assert_eq!(
@@ -432,14 +558,741 @@ fn a_declared_secret_source_is_stored_and_the_box_does_not_start() {
          command = [{:?}, \"read\", \"op://{{ref}}\"]\n\
          pass-secret-env = [\"OP_SERVICE_ACCOUNT_TOKEN\", \"OP_SESSION_*\"]\n\
          reads = [\"~/.config/op\"]\n",
-        program.display().to_string()
+        program.path()
     ))
     .expect("the expected table is TOML");
     assert_eq!(record["secret-source"]["op"], expected);
-    let expected: toml::Value =
-        toml::from_str("ref = \"op://Personal/GitHub/token\"\nenv = \"GH_TOKEN\"\n")
-            .expect("the expected table is TOML");
+    let expected: toml::Value = toml::from_str(&format!(
+        "ref = \"op://Personal/GitHub/token\"\nenv = \"{DECLARED_VARIABLE}\"\n"
+    ))
+    .expect("the expected table is TOML");
     assert_eq!(record["egress"]["c"]["secret"], expected);
+
+    let output = box_.run(&["/usr/bin/env"]);
+    let environment = String::from_utf8_lossy(&output.stdout).into_owned();
+    let held = environment
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{DECLARED_VARIABLE}=")))
+        .unwrap_or_default();
+    assert!(
+        held.starts_with("strands_box_"),
+        "the workload must hold a minted placeholder, got {held:?}"
+    );
+    assert!(
+        !environment.contains(DECLARED_SECRET),
+        "the secret must never enter the workload's environment"
+    );
+
+    // The request with the placeholder passes the boundary: a refusal would be `status=403`.
+    let output = probe(
+        &box_,
+        DECLARED_VARIABLE,
+        &format!("https://{endpoint}/v1/charge"),
+    );
+    let seen = format!("{output:?}");
+    assert!(!seen.contains("status=403"), "{seen}");
+    assert!(!seen.contains("is not set"), "{seen}");
+    assert!(!seen.contains(DECLARED_SECRET), "{seen}");
+
+    assert_eq!(
+        program.runs().len(),
+        3,
+        "each of the three runs reads the secret once"
+    );
+    assert_eq!(
+        files_holding(box_.operator_home(), DECLARED_SECRET),
+        Vec::<std::path::PathBuf>::new(),
+        "no file of the box, the workspace, or the agent's home holds the secret"
+    );
+}
+
+/// **A write grant over the program of a secret source stops the box before the program
+/// starts**, for a route and for a telemetry target, so no workload can replace a program that
+/// Box runs.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_write_grant_over_a_secret_source_program_is_refused() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    for (name, secret) in [
+        (
+            "declared-writable",
+            declared_route("api.example.test", "op://Personal/GitHub/token"),
+        ),
+        (
+            // The fixture adds `-<pid>`, and a box name holds at most 32 bytes.
+            "declared-writable-otlp",
+            "[telemetry.vendor]\nkind = \"otlp\"\ndestination = \"http://127.0.0.1:9\"\n\
+             secret.ref = \"op://box/keys#TELEMETRY\"\n"
+                .to_string(),
+        ),
+    ] {
+        let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+        let folder = program
+            .directory
+            .path()
+            .canonicalize()
+            .expect("the program folder resolves");
+        let (box_, output) = Request::with_config(
+            name,
+            &permit_egress_to("api.example.test", 443),
+            &declared_source(true, &program.path(), &secret),
+        )
+        .agent_read(&[&folder])
+        .agent_write(&[&folder])
+        .attempt();
+        assert_refused(
+            &box_,
+            &output,
+            &[&format!(
+                "this write grant can change [secret-source.op] command {} or its path. Keep \
+                 the program of each secret source outside every process's write grants",
+                folder.join("vault-stand-in").display()
+            )],
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("reads each op:// secret"), "{stderr}");
+        assert_eq!(
+            program.runs(),
+            Vec::<String>::new(),
+            "{name}: the program must not start in a box that lets a workload replace it"
+        );
+    }
+}
+
+/// The body of a configuration whose `op://` source runs `program` for one route and protects
+/// `~/.config/op`, and whose `aws-secretsmanager://` source protects `~/.aws` and a path that is
+/// not there, with `rest` after them.
+#[cfg(target_os = "macos")]
+fn protecting_sources(program: &str, rest: &str) -> String {
+    let route = declared_route("api.example.test", "op://Personal/GitHub/token");
+    format!(
+        "{}[secret-source.aws-secretsmanager]\nprotocol = \"box.secret-source.v1\"\n\
+         command = [{program:?}, \"get\", \"{{ref}}\"]\n\
+         pass-secret-env = [\"AWS_SECRET_ACCESS_KEY\"]\nreads = [\"~/.aws\"]\n\
+         deny = [\"~/Library/Group Containers/vault\"]\n{rest}",
+        declared_source(true, program, &route)
+    )
+}
+
+/// The refusal of a grant that reaches `path`, which the `list` entry `entry` of the source
+/// `scheme` protects.
+#[cfg(target_os = "macos")]
+fn source_path_refusal(path: &std::path::Path, scheme: &str, list: &str, entry: &str) -> String {
+    format!(
+        "is refused: this grant reaches {}, which the secret source `{scheme}` keeps from each \
+         workload (its `{list}` entry {entry:?}). Keep each grant outside the paths that a \
+         secret source names in `reads` and `deny`",
+        path.display()
+    )
+}
+
+/// **A grant that reaches a path of a secret source stops the box before a program starts**:
+/// a credential store that a tool names exactly, a folder of the agent that holds the path, and
+/// a path that is not there under a stdio MCP server.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_grant_over_a_path_of_a_secret_source_is_refused() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let tool = "[tool.aws]\ncommand = [\"/usr/bin/true\"]\n\
+                [tool.aws.filesystem]\nread = [\"~/.aws\"]\n";
+    let server = "[mcp.files]\ntype = \"stdio\"\ncommand = [\"files-server\"]\n\
+                  [mcp.files.filesystem]\nread = [\"~/Library/Group Containers/vault/t\"]\n";
+    for (name, rest, agent_reads) in [
+        ("protected-store", tool, None),
+        ("protected-folder", "", Some(".config")),
+        ("protected-absent", server, None),
+    ] {
+        let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+        let mut request = Request::with_config(
+            name,
+            &permit_egress_to("api.example.test", 443),
+            &protecting_sources(&program.path(), rest),
+        );
+        let home = request
+            .operator_home()
+            .canonicalize()
+            .expect("the operator home resolves");
+        for folder in [".aws", ".config/op"] {
+            std::fs::create_dir_all(home.join(folder)).expect("create a folder of the vault");
+        }
+        let expected = match name {
+            "protected-store" => format!(
+                "`[tool.aws]` filesystem entry \"~/.aws\" {}",
+                source_path_refusal(&home.join(".aws"), "aws-secretsmanager", "reads", "~/.aws")
+            ),
+            "protected-folder" => format!(
+                "`[agent]` filesystem entry {:?} {}",
+                home.join(".config").display().to_string(),
+                source_path_refusal(&home.join(".config/op"), "op", "reads", "~/.config/op")
+            ),
+            _ => format!(
+                "`[mcp.files]` filesystem entry \"~/Library/Group Containers/vault/t\" {}",
+                source_path_refusal(
+                    &home.join("Library/Group Containers/vault"),
+                    "aws-secretsmanager",
+                    "deny",
+                    "~/Library/Group Containers/vault"
+                )
+            ),
+        };
+        if let Some(folder) = agent_reads {
+            request = request.agent_read(&[&home.join(folder)]);
+        }
+        let (box_, output) = request.attempt();
+        assert_refused(&box_, &output, &[&expected]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("reads each op:// secret"), "{stderr}");
+        assert_eq!(
+            program.runs(),
+            Vec::<String>::new(),
+            "{name}: no program starts in a box that lets a workload reach the vault"
+        );
+    }
+}
+
+/// The value of a vault credential of the operator, which must never appear inside the box.
+#[cfg(target_os = "macos")]
+const VAULT_CREDENTIAL: &str = "ops_vault_credential_of_the_operator_41c7";
+
+/// **The program of a source gets the operator's value of a `pass-secret-env` variable, and a
+/// workload does not**: the box starts, and the workload holds its own value under that name.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_workload_holds_a_placeholder_under_the_name_of_a_vault_credential() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let program = StandInProgram::new(&format!(
+        "printf '%s' \"$OP_SERVICE_ACCOUNT_TOKEN\" > \"$0.credential\"\n\
+         printf '%s\\n' {DECLARED_SECRET}"
+    ));
+    let (box_, output) = Request::with_config(
+        "protected-run",
+        &permit_egress_to("api.example.test", 443),
+        &protecting_sources(&program.path(), ""),
+    )
+    .env("OP_SERVICE_ACCOUNT_TOKEN", VAULT_CREDENTIAL)
+    .agent_env("OP_SERVICE_ACCOUNT_TOKEN", "a-placeholder-of-the-profile")
+    .attempt();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "the box must start: {stderr}");
+    assert_eq!(program.runs(), ["read op://Personal/GitHub/token"]);
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.credential", program.path()))
+            .expect("the program wrote what it received"),
+        VAULT_CREDENTIAL,
+        "the program of the source receives the credential of the vault"
+    );
+
+    let output = box_.run(&["/usr/bin/env"]);
+    let environment = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        environment.contains("OP_SERVICE_ACCOUNT_TOKEN=a-placeholder-of-the-profile\n"),
+        "{environment}"
+    );
+    assert!(!environment.contains(VAULT_CREDENTIAL), "{environment}");
+}
+
+/// **A tool cannot see a path of a secret source, and policy alone decides the Shell there**: a
+/// tool with no grant of its own reads the size of an ordinary file under the home and gets
+/// nothing for a file that a source protects. Stated limit: a write that policy permits changes
+/// a file of one source through the Shell, and a `forbid` rule keeps the file of the other.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tool_cannot_see_a_path_of_a_secret_source_and_policy_decides_the_shell() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    const POLICY: &str = r#"
+permit(principal, action == Box::Action::"shell:exec", resource);
+permit(principal, action == Box::Action::"shell:spawn", resource)
+when { context.input.program == "stat" };
+permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource);
+forbid(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource)
+when { context.input.path == "~/.aws" || context.input.path like "~/.aws/*" };
+"#;
+    const SETTINGS: &str = "the settings of the vault";
+    let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+    let request = Request::with_config(
+        "protected-tool",
+        POLICY,
+        &protecting_sources(&program.path(), "[tool.stat]\ncommand = [\"stat\"]\n"),
+    );
+    let home = request
+        .operator_home()
+        .canonicalize()
+        .expect("the operator home resolves");
+    let (plain, settings, forbidden) = (
+        home.join("notes.txt"),
+        home.join(".config/op/config"),
+        home.join(".aws/config"),
+    );
+    for folder in [".config/op", ".aws"] {
+        std::fs::create_dir_all(home.join(folder)).expect("create a folder of a vault");
+    }
+    std::fs::write(&plain, "0123456789").expect("write an ordinary file");
+    for file in [&settings, &forbidden] {
+        std::fs::write(file, SETTINGS).expect("write the settings");
+    }
+    let box_ = request.expect();
+
+    let output = box_.bash(&format!(
+        "zsh -lc 'stat -f plain=%z \"{plain}\"'; echo \"plain_rc=$?\"\n\
+         zsh -lc 'stat -f vault=%z \"{settings}\"'; echo \"vault_rc=$?\"\n\
+         zsh -lc 'printf changed > \"{plain}\"'; echo \"plain_write_rc=$?\"\n\
+         zsh -lc 'printf changed > \"{settings}\"'; echo \"vault_write_rc=$?\"\n\
+         zsh -lc 'printf changed > \"{forbidden}\"'; echo \"forbidden_write_rc=$?\"\n",
+        plain = plain.display(),
+        settings = settings.display(),
+        forbidden = forbidden.display()
+    ));
+    let seen = String::from_utf8_lossy(&output.stdout).into_owned();
+    let printed = |line: &str| seen.lines().any(|printed| printed == line);
+    assert!(
+        printed("plain=10") && printed("plain_rc=0"),
+        "the tool must see an ordinary file, so that the next refusal means something: {output:?}"
+    );
+    assert!(!seen.contains("vault="), "{output:?}");
+    assert!(printed("vault_rc=1"), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(&plain).expect("the ordinary file"),
+        "changed",
+        "the Shell must change an ordinary file, so that the next refusal means something: \
+         {output:?}"
+    );
+    // The stated limit. When a floor beneath policy refuses this change, remove this half and
+    // the limit in `docs/user/config.md` and `docs/design/limitations.md` together.
+    assert_eq!(
+        std::fs::read_to_string(&settings).expect("the settings of the vault"),
+        "changed",
+        "no floor refuses a change that policy permits: {output:?}"
+    );
+    // What an operator can do today.
+    assert_eq!(
+        std::fs::read_to_string(&forbidden).expect("the settings of the other vault"),
+        SETTINGS,
+        "{output:?}"
+    );
+    assert!(!printed("forbidden_write_rc=0"), "{output:?}");
+}
+
+/// **A tool that the run leaves out brings no table to the check of the secret sources**: its
+/// write grant over the program of a source stops no box, and the same table stops the box when
+/// its program is installed.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_left_out_tool_with_a_write_grant_over_a_secret_source_program_stops_no_box() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let attempt = |name: &str, tool_program: &dyn Fn(&std::path::Path) -> String| {
+        let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+        let folder = program
+            .directory
+            .path()
+            .canonicalize()
+            .expect("the program folder resolves");
+        let tool_program = tool_program(&folder);
+        let grant = folder.display().to_string();
+        let tool = format!(
+            "[tool.spare]\ncommand = [{tool_program:?}]\n[tool.spare.filesystem]\n\
+             read = [{grant:?}]\nwrite = [{grant:?}]\n"
+        );
+        let (box_, output) = Request::with_config(
+            name,
+            &permit_egress_to("api.example.test", 443),
+            &declared_source(
+                true,
+                &program.path(),
+                &format!(
+                    "{}{tool}",
+                    declared_route("api.example.test", "op://Personal/GitHub/token")
+                ),
+            ),
+        )
+        .attempt();
+        (program, folder, tool_program, box_, output)
+    };
+
+    let (program, folder, _, box_, output) =
+        attempt("declared-tool-kept", &|_| "/usr/bin/true".to_string());
+    assert_refused(
+        &box_,
+        &output,
+        &[
+            "`[tool.spare]` filesystem entry",
+            &format!(
+                "this write grant can change [secret-source.op] command {} or its path",
+                folder.join("vault-stand-in").display()
+            ),
+        ],
+    );
+    assert_eq!(program.runs(), Vec::<String>::new());
+
+    let (program, _, absent, _box, output) = attempt("declared-tool-left-out", &|folder| {
+        folder.join("absent-tool").display().to_string()
+    });
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "the box must start: {stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "strands-box: [tool.spare] left out: {absent} not found\n"
+        )),
+        "{stderr}"
+    );
+    assert_eq!(program.runs(), ["read op://Personal/GitHub/token"]);
+}
+
+/// The stderr of the first run of a new box directory, which must stop, each entry that the
+/// run left in that directory, and the next run in it after `fix` removes the cause.
+#[cfg(target_os = "macos")]
+fn first_run_then_fixed(
+    name: &str,
+    body: &str,
+    request: impl FnOnce(Request) -> Request,
+    fix: impl FnOnce(),
+) -> (String, Vec<String>, Output) {
+    let (box_, output) = request(Request::with_config(
+        name,
+        &permit_egress_to("api.example.test", 443),
+        body,
+    ))
+    .attempt();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        !output.status.success(),
+        "{name}: the first run must stop: {stderr}"
+    );
+    let mut stored: Vec<String> = std::fs::read_dir(box_.root())
+        .expect("the box directory lists")
+        .map(|entry| {
+            entry
+                .expect("an entry of the box directory")
+                .file_name()
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    stored.sort();
+    fix();
+    let next = box_.run(&["/bin/bash", "-c", "printf 'READY\\n'"]);
+    (stderr, stored, next)
+}
+
+/// **A run that the check of the secret sources refuses stores nothing in a new box
+/// directory**: the operator removes the cause, and the next run starts in the same directory.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_new_box_directory_starts_after_the_cause_of_a_secret_source_refusal_is_gone() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let route = declared_route("api.example.test", "op://Personal/GitHub/token");
+
+    // The program file is absent, and then the operator installs it.
+    let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+    let installed = std::path::PathBuf::from(program.path());
+    let later = installed.with_extension("later");
+    std::fs::rename(&installed, &later).expect("the program is not installed yet");
+    let (stderr, stored, next) = first_run_then_fixed(
+        "first-run-absent",
+        &declared_source(true, &program.path(), &route),
+        |request| request,
+        || std::fs::rename(&later, &installed).expect("the operator installs the program"),
+    );
+    assert!(stderr.contains("its program cannot run"), "{stderr}");
+    assert_eq!(
+        stored,
+        Vec::<String>::new(),
+        "the refused run stores nothing"
+    );
+    assert_ran(&next);
+
+    // A write grant covers the file that the program path resolves to, and then the operator
+    // points the path at a copy outside the grant.
+    let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+    let outside = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+    let links = fixture::short_temporary_home();
+    let link = links.path().join("op");
+    std::os::unix::fs::symlink(program.path(), &link).expect("the program path is a link");
+    let folder = program
+        .directory
+        .path()
+        .canonicalize()
+        .expect("the program folder resolves");
+    let (stderr, stored, next) = first_run_then_fixed(
+        "first-run-writable",
+        &declared_source(true, &link.display().to_string(), &route),
+        |request| request.agent_read(&[&folder]).agent_write(&[&folder]),
+        || {
+            std::fs::remove_file(&link).expect("the link is removed");
+            std::os::unix::fs::symlink(outside.path(), &link).expect("the link names the copy");
+        },
+    );
+    assert!(
+        stderr.contains("this write grant can change [secret-source.op] command"),
+        "{stderr}"
+    );
+    assert_eq!(
+        stored,
+        Vec::<String>::new(),
+        "the refused run stores nothing"
+    );
+    assert_ran(&next);
+    assert_eq!(program.runs(), Vec::<String>::new());
+
+    // The control: a route secret that the source does not return, and then returns.
+    let program = StandInProgram::new(&format!(
+        "test -e \"$(dirname \"$0\")/signed-in\" || {{ echo 'not signed in' >&2; exit 3; }}\n\
+         printf '%s\\n' {DECLARED_SECRET}"
+    ));
+    let marker = program.directory.path().join("signed-in");
+    let (stderr, stored, next) = first_run_then_fixed(
+        "first-run-route",
+        &declared_source(true, &program.path(), &route),
+        |request| request,
+        || std::fs::write(&marker, "").expect("the operator signs in"),
+    );
+    assert!(
+        stderr.contains("did not return, so the box does not start"),
+        "{stderr}"
+    );
+    assert!(stored.contains(&"private".to_string()), "{stored:?}");
+    assert_ran(&next);
+}
+
+/// **The limit: a telemetry secret that the program does not return on the first run of a new
+/// box directory leaves a record with no history**, so the next run stops until the operator
+/// empties the directory, because the read runs a program and so comes after Box stores the
+/// record.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_telemetry_secret_that_is_not_returned_on_a_first_run_still_strands_the_box_directory() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let program = StandInProgram::new(&format!(
+        "test -e \"$(dirname \"$0\")/signed-in\" || {{ echo 'not signed in' >&2; exit 3; }}\n\
+         printf '{{\"TELEMETRY\":\"%s\"}}\\n' {DECLARED_SECRET}"
+    ));
+    let marker = program.directory.path().join("signed-in");
+    let (stderr, stored, next) = first_run_then_fixed(
+        "first-run-otlp",
+        &declared_source(
+            true,
+            &program.path(),
+            "[telemetry.vendor]\nkind = \"otlp\"\ndestination = \"http://127.0.0.1:9\"\n\
+             secret.ref = \"op://box/keys#TELEMETRY\"\n",
+        ),
+        |request| request,
+        || std::fs::write(&marker, "").expect("the operator signs in"),
+    );
+    assert!(
+        stderr.contains("`[telemetry.vendor] secret.ref` names a secret that the secret source"),
+        "{stderr}"
+    );
+    assert!(stored.contains(&"private".to_string()), "{stored:?}");
+    let refusal = String::from_utf8_lossy(&next.stderr);
+    assert!(!next.status.success(), "{refusal}");
+    assert!(
+        refusal.contains("the box record is committed, but the history")
+            && refusal.contains("is absent. Wipe the box directory to start again."),
+        "{refusal}"
+    );
+    assert_eq!(program.runs().len(), 1, "the next run stops before a read");
+}
+
+/// **A telemetry target and a route that name one secret run the program once**, the target
+/// receives its field of that secret, and both reads are recorded after the collector opens.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_telemetry_target_and_a_route_with_one_secret_run_the_program_once() {
+    use std::io::{BufRead as _, BufReader};
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a stand-in telemetry endpoint");
+    let port = listener.local_addr().expect("its port").port();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(8) {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut head = String::new();
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+                head.push_str(&line);
+            }
+            let mut body = vec![0u8; length];
+            reader.read_exact(&mut body).ok();
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+            let _ = sender.send(head);
+        }
+    });
+
+    let program = StandInProgram::new(
+        r#"printf '{"TELEMETRY":"vendor-key-declared","ROUTE":"route-key-declared"}\n'"#,
+    );
+    let records = program.directory.path().join("records.jsonl");
+    let (_box, output) = Request::with_config(
+        "declared-shared",
+        &permit_egress_to("api.example.test", 443),
+        &declared_source(
+            true,
+            &program.path(),
+            &format!(
+                "{}[telemetry.vendor]\nkind = \"otlp\"\n\
+                 destination = \"http://127.0.0.1:{port}\"\n\
+                 secret.ref = \"op://box/keys#TELEMETRY\"\nsecret.header = \"x-vendor-team\"\n\
+                 [telemetry.file]\nkind = \"file\"\ndestination = {:?}\n",
+                declared_route("api.example.test", "op://box/keys#ROUTE"),
+                records.display().to_string()
+            ),
+        ),
+    )
+    .attempt();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "the box must start: {stderr}");
+    assert_eq!(
+        program.runs(),
+        ["read op://box/keys"],
+        "one secret is one run of the program, with no field in its argument"
+    );
+    let head = receiver
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the target receives a batch")
+        .to_ascii_lowercase();
+    assert!(
+        head.contains("x-vendor-team: vendor-key-declared"),
+        "the target receives its field of the secret: {head}"
+    );
+    assert!(!head.contains("route-key-declared"), "{head}");
+    let records = std::fs::read_to_string(&records).expect("the file target holds the records");
+    let detail = format!(
+        "source `op`, program {}, reference op://[REDACTED]",
+        program.path()
+    );
+    assert_eq!(
+        secret_fetch_records(&records),
+        ["[telemetry.vendor] secret.ref", "[egress.c] secret.ref"].map(|entry| [
+            "ok".to_string(),
+            entry.to_string(),
+            detail.clone(),
+            String::new()
+        ])
+    );
+    assert!(
+        records.find("box_started") < records.find("secret_fetched"),
+        "the record of the start comes first"
+    );
+}
+
+/// **A secret source that returns no secret stops the box before the workload starts**: stderr
+/// holds the words of the program and names the entry, and no record holds those words.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_secret_source_that_fails_stops_the_box_before_the_workload() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let program = StandInProgram::new("echo 'no item BoxTest in the vault Personal' >&2\nexit 3");
+    let said = format!(
+        "credential error: the secret source \"op\" ({:?}) for op://[REDACTED] exited \
+         unsuccessfully (exit status: 3): no item BoxTest in the vault Personal\n",
+        program.path()
+    );
+    let refusal = |entry: &str| {
+        format!(
+            "strands-box: error: `{entry}` names a secret that the secret source `op` ({}) did \
+             not return, so the box does not start\n",
+            program.path()
+        )
+    };
+
+    // A route: the collector is open, so the read is recorded, without the program's words.
+    let (box_, output) = Request::with_config(
+        "declared-fails",
+        &permit_egress_to("api.example.test", 443),
+        &declared_source(
+            true,
+            &program.path(),
+            &declared_route("api.example.test", "op://Personal/GitHub/token"),
+        ),
+    )
+    .attempt();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "the box must not start: {stderr}");
+    assert!(
+        stderr.ends_with(&format!(
+            "strands-box: [egress.c] secret.ref: {said}{}",
+            refusal("[egress.c] secret.ref")
+        )),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("strands-box: starting workload"),
+        "{stderr}"
+    );
+    let records = std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl"))
+        .expect("the records of the refused run");
+    assert_eq!(
+        secret_fetch_records(&records),
+        [[
+            "refused".to_string(),
+            "[egress.c] secret.ref".to_string(),
+            format!(
+                "source `op`, program {}, reference op://[REDACTED]",
+                program.path()
+            ),
+            "the secret source returned no secret; the standard error of the box holds the \
+             reason"
+                .to_string(),
+        ]]
+    );
+    assert!(!records.contains("BoxTest"), "{records}");
+
+    // A telemetry target: no collector exists yet, so stderr alone states the failed read.
+    let (box_, output) = Request::with_config(
+        "declared-telemetry-fails",
+        &permit_egress_to("api.example.test", 443),
+        &declared_source(
+            true,
+            &program.path(),
+            "[telemetry.vendor]\nkind = \"otlp\"\ndestination = \"http://127.0.0.1:9\"\n\
+             secret.ref = \"op://box/keys#TELEMETRY\"\n",
+        ),
+    )
+    .attempt();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "the box must not start: {stderr}");
+    assert!(
+        stderr.ends_with(&format!(
+            "strands-box: [telemetry.vendor] secret.ref: {said}{}",
+            refusal("[telemetry.vendor] secret.ref")
+        )),
+        "{stderr}"
+    );
+    assert_eq!(
+        files_holding(&box_.root(), "secret_fetched"),
+        Vec::<std::path::PathBuf>::new(),
+        "no collector opened, so no file holds a record of the read"
+    );
+    assert_eq!(
+        program.runs().len(),
+        2,
+        "each refused run starts the program once"
+    );
 }
 
 /// **Each unsafe secret source configuration is refused through the shipped binary**, before a

@@ -46,6 +46,7 @@ use crate::run::contain::boundary::{
 };
 use crate::run::credential;
 use crate::run::lock::{BoxLive, Lock};
+use crate::run::secret_sources::RouteSecrets;
 use crate::run::telemetry;
 
 type RunningPolicy = (Arc<PolicyEngine>, Arc<telemetry::Collector>);
@@ -814,6 +815,7 @@ impl HostedBox {
         commands: Arc<ConfiguredCommands>,
         collector: Arc<telemetry::Collector>,
         policy_decisions: Option<crate::PolicyDecisionSender>,
+        secrets: RouteSecrets,
         protected_sources: &[AuthoritySource],
         owned: Lock,
         workspace: &Path,
@@ -840,15 +842,17 @@ impl HostedBox {
 
         let telemetry_port = collector.port();
         let recorder = telemetry::DecisionRecorder::over(Arc::clone(&collector), policy_decisions);
-        let projection = credential::workspace(&record.egress_routes()?)?;
         // A backend entry opens one vault holding its strip-phantom destination secret (a phantom is
         // provisioned to the workload and stripped at the gateway) and its box-owned backend token
         // (attached at the gateway, never placed in the workload environment). One control per
         // destination.
-        let credential::Projection {
-            capabilities: backend_capabilities,
-            workload_environment: backend_environment,
-        } = credential::backend_capabilities(&record.backend_credentials()?)?;
+        let (
+            projection,
+            credential::Projection {
+                capabilities: backend_capabilities,
+                workload_environment: backend_environment,
+            },
+        ) = credential::project(record, secrets)?;
         let capabilities = CapabilitySet::new(
             projection
                 .capabilities
@@ -2083,6 +2087,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             commands,
             Arc::clone(&collector),
             None,
+            RouteSecrets::none(),
             &[],
             owned,
             &workspace,
@@ -2160,6 +2165,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
                 Arc::new(ConfiguredCommands::load(&record).expect("the commands load")),
                 collector,
                 None,
+                RouteSecrets::none(),
                 &[],
                 owned,
                 &workspace,

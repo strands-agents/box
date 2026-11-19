@@ -698,6 +698,8 @@ pub enum ControlOperation {
     BoxStarted,
     /// This run is giving the box up.
     BoxStopped,
+    /// The box read one secret of a configuration entry through a declared secret source.
+    SecretFetched,
 }
 
 impl ControlOperation {
@@ -711,6 +713,7 @@ impl ControlOperation {
             Self::DiscoveryComplete => "discovery_complete",
             Self::BoxStarted => "box_started",
             Self::BoxStopped => "box_stopped",
+            Self::SecretFetched => "secret_fetched",
         }
     }
 }
@@ -1027,6 +1030,32 @@ mod tests {
             "strands.box.control.reason",
             "the schema does not validate".to_string()
         )));
+    }
+
+    /// **Each control operation keeps its wire spelling**, which a consumer selects records by.
+    #[test]
+    fn each_control_operation_keeps_its_wire_spelling() {
+        assert_eq!(
+            [
+                ControlOperation::PolicyInstalled,
+                ControlOperation::PolicyRefused,
+                ControlOperation::SchemaInstalled,
+                ControlOperation::DiscoveryComplete,
+                ControlOperation::BoxStarted,
+                ControlOperation::BoxStopped,
+                ControlOperation::SecretFetched,
+            ]
+            .map(ControlOperation::as_str),
+            [
+                "policy_installed",
+                "policy_refused",
+                "schema_installed",
+                "discovery_complete",
+                "box_started",
+                "box_stopped",
+                "secret_fetched",
+            ]
+        );
     }
 
     /// **Every signal carries its own severity**, because that is what routes a record to a lane.

@@ -776,6 +776,7 @@ happen after the box directory is created and before the workload starts.
 | A writable grant at or above a directory on the operator's `PATH` | `<path> is at or above <path>, which is on the search path this box resolves a bare-name MCP program against` (excerpt). Keep the directory and its parents outside write grants. |
 | A writable grant can change an installed Box program, a hard-link name, or an enclosing directory | `this write grant can change trusted Box executable <path> or its path. Keep the Box installation outside every process's write grants` |
 | A system directory or a credential store the box always refuses | `<path> is refused beneath every grant: <reason>` |
+| A path that a [`[secret-source.<scheme>]`](#what-box-protects) table lists in `reads` or `deny`, a path inside it, or a folder that holds it | ``this grant reaches <path>, which the secret source `<scheme>` keeps from each workload (its `reads` entry "<entry>"). Keep each grant outside the paths that a secret source names in `reads` and `deny` `` |
 
 Create the path first, or name the existing directory above it. A `[tool.<name>] command` that names
 a file the workload has not built yet is not refused: Box
@@ -882,7 +883,9 @@ tool's `env` for non-secret literals.
 
 Box checks grants in `[agent]`, every `[tool.<name>]` it does not
 [leave out](#a-tool-whose-program-is-not-installed), and every local `[mcp.<name>]` table against
-those programs.
+those programs. The program of each [`[secret-source.<scheme>]`](#secret-sourcescheme) table gets
+the same checks. The write-grant refusal names that table. The hard-link refusals and the
+refusals through Strands Shell and Monty say `configured tool command` for it too.
 
 | Condition | Refusal text | Next action |
 |---|---|---|
@@ -1090,8 +1093,7 @@ because Box strips that placeholder.
 
 ## `[secret-source.<scheme>]`
 
-> **Status.** Experimental, and macOS only. Box loads, checks, and stores a declaration. This build
-> does not read a secret through one, so a box that declares a source does not start.
+> **Status.** Experimental, and macOS only.
 
 Each table declares one host program that reads a secret, and the table's name is the scheme of
 the references that the program serves. Box runs the program itself, outside every sandbox, with
@@ -1123,8 +1125,8 @@ secret.env   = "GH_TOKEN"
 | `output` | string | How Box reads the program's stdout: `text` (default) or `json`, where stdout is one JSON string. |
 | `pass-env` | string array | Plain settings from your environment that the program receives when they are set, such as `AWS_REGION`. An entry that ends with `*` names each variable with that prefix. |
 | `pass-secret-env` | string array | Credentials from your environment that the program receives when they are set, such as `OP_SERVICE_ACCOUNT_TOKEN`. An entry that ends with `*` names each variable with that prefix. No `env://` or `secret://` reference can read one of these variables. |
-| `reads` | string array | The paths that the program reads, such as its configuration directory. Each is absolute, is `~`, or begins with `~/`. |
-| `deny` | string array | Other paths to the vault, such as the directory of an authentication socket. Each is absolute, is `~`, or begins with `~/`. |
+| `reads` | string array | The paths that the program reads, such as its configuration directory. Each is absolute, is `~`, or begins with `~/`. No grant can reach them, and each sandbox denies them. See [what Box protects](#what-box-protects). |
+| `deny` | string array | Other paths to the vault, such as the directory of an authentication socket. Each is absolute, is `~`, or begins with `~/`. No grant can reach them, and each sandbox denies them. |
 
 The scheme is a lowercase letter, then lowercase letters, digits, `+`, `.`, or `-`. A table can
 declare `op`, and no table can declare a scheme that Box reserves: `env`, `file`, `aws`, `credsd`,
@@ -1145,6 +1147,11 @@ Each of these is refused when the configuration loads:
 - A `pass-env` or `pass-secret-env` entry that is empty, is `*`, is `PATH` or `HOME`, holds `=`, or
   holds a `*` before its end. The program always gets your `HOME` and a fixed `PATH`.
 - A `reads` or `deny` entry that is not absolute, is not `~`, and does not begin with `~/`.
+- A `reads` or `deny` entry that holds `..`, a control character, a second `/` after `~`, or one
+  of the characters `*`, `?`, `[`, `]`, `{`, and `}`: ``invalid `[secret-source.op]` table:
+  `reads` entry "~/.config/op*" is not a path that Box can protect; Box reads no pattern, so
+  write each path without `*`, `?`, `[`, `]`, `{`, or `}` ``. Each entry names one path. A path
+  that is absent is fine.
 - A reference in a scheme that no table declares: ``secret scheme "op" has no `[secret-source.op]`
   table``.
 - A reference in a scheme that a table can declare, with nothing after `://`, such as `op://`. A
@@ -1166,10 +1173,128 @@ Each of these is refused when the configuration loads:
 A box that declares a source stores its record at version 39, and so does a box with a
 `secret.env` key. An older build refuses that record.
 
-A configuration that passes these checks stops before the workload starts, with ``
-`[secret-source.op]` loaded, but this build cannot yet read a secret from a declared secret source,
-so the box does not start``. `policy generate-schema` stops with the same message for a remote MCP
-server whose secret names a declared scheme.
+### How a run reads the secrets
+
+When the box starts, it checks the program file of each table and prints one line for each on
+stderr:
+
+```text
+strands-box: [secret-source.op]: reads each op:// secret with /opt/homebrew/bin/op, which runs outside every sandbox
+```
+
+Box then runs the program once for each secret that the configuration names, before the workload
+starts. Two references that differ only in `#FIELD` name one secret, so they share one run. Box
+reads the secrets of telemetry targets first and opens its records. Then it reads the others. It
+keeps each secret in memory for the run and writes none to disk. It reads no secret again during
+the run, so a secret that changes in the vault takes effect at the next start.
+
+The program gets no stdin. Its environment is your `HOME`, the `PATH` `/usr/bin:/bin`, and each
+variable that `pass-env` and `pass-secret-env` name. It must exit with status 0 within 30 seconds
+and print at most 1 MiB. Box removes one trailing newline from what it prints.
+
+A program that keeps a file under your temporary folder needs `TMPDIR` in `pass-env`, because it
+gets no other variable. The example passes it for `op`, which keeps the session of
+`eval "$(op signin)"` in `$TMPDIR/com.agilebits.op.<uid>`. Without `TMPDIR`, `op` says that no
+session is active. That folder is not in the `reads` of the example, so a workload with a grant on
+your temporary folder can reach it. To close that, add the full path of the folder to `deny`.
+
+`policy generate-schema` reads the secret of a remote MCP server in the same way. It checks the
+program files and prints the lines only when a server names a secret in a declared scheme. It
+does both before it starts a stdio MCP server.
+
+Each of these stops the box before the workload starts:
+
+- The program file is missing or is not an executable file: ``invalid `[secret-source.op]` table:
+  its program cannot run: executable is not an executable regular file: /opt/homebrew/bin/op``.
+- The program returns no secret: it exits with another status, runs too long, or prints a value
+  that Box can't use. Box prints two lines. The first holds the reason and the last words of the
+  program on its stderr. The second names the entry that holds the reference:
+
+  ```text
+  strands-box: [egress.github] secret.ref: credential error: the secret source "op" ("/opt/homebrew/bin/op") for op://[REDACTED] exited unsuccessfully (exit status: 1): [ERROR] "GitHub" isn't an item in the "Personal" vault
+  strands-box: error: `[egress.github] secret.ref` names a secret that the secret source `op` (/opt/homebrew/bin/op) did not return, so the box does not start
+  ```
+
+  Sign in to the vault or correct the reference, then start the box again. When the entry is a
+  `[telemetry.<name>]` target and the run is the first one of a new box directory, also remove
+  the box directory before you start the box again. Box stores the box record before it reads
+  that secret, so the next run otherwise stops and says that
+  [the history is absent](policy.md#a-reused-box-whose-history-and-record-disagree).
+- A write grant covers the program, a symbolic link on the way to it, or a folder that holds
+  one of them: ``this write grant can change
+  [secret-source.op] command /opt/homebrew/Caskroom/1password-cli/2.42.0/op or its path. Keep the
+  program of each secret source outside every process's write grants``. Narrow the grant.
+- A `reads` or `deny` entry passes through symbolic links that don't end, or through a folder
+  that Box can't search: ``invalid
+  `[secret-source.op]` table: `deny` entry "~/.op/socket" cannot be inspected: the path passes
+  through too many symbolic links``.
+- A write grant covers the folder that holds a symbolic link on the way to a `reads` or `deny`
+  path, such as `~/dotfiles` when `~/.aws` names `~/dotfiles/aws`: ``this write grant can change
+  /Users/me/dotfiles/aws, a symbolic link on the way to /Users/me/keys/aws, which the secret
+  source `aws-secretsmanager` keeps from each workload (its `reads` entry "~/.aws"). Keep each
+  write grant outside the folders that hold a link on the way to a path that a secret source
+  names in `reads` and `deny` ``. Narrow the grant.
+- A grant reaches a `reads` or `deny` path: ``this grant reaches /Users/me/.aws, which the secret
+  source `aws-secretsmanager` keeps from each workload (its `reads` entry "~/.aws"). Keep each
+  grant outside the paths that a secret source names in `reads` and `deny` ``. Remove the grant.
+- A reference that the program can't take: the text after `<scheme>://` starts with `-`, names
+  no secret, or ends with an empty `#FIELD`. Box starts no program for it.
+- A secret that is a JSON object, on a reference with no `#FIELD`. Name one field.
+- The program path names another file than the one Box checked when the run started: ``did not
+  start: its program file changed after the box checked it``. Start the box again.
+
+### What Box protects
+
+A workload must not go around Box to the vault. So Box protects the files and the paths that the
+table names, in `[agent]`, each `[tool.<name>]` table that the run does not
+[leave out](#a-tool-whose-program-is-not-installed), and each local `[mcp.<name>]` table. It
+checks each one before it starts a program for the first time, in `box run` and in
+`policy generate-schema`, so a box that fails a check never runs the program.
+`policy generate-schema` leaves no tool out, so it checks each `[tool.<name>]` table.
+
+**The program file.** Box keeps the program file away from the workload as it does for a
+[configured tool program](#configured-command-integrity). The program file is element 0 of
+`command`. A write grant can't cover that path, the file that it resolves to, a symbolic link on
+the way, or a folder that holds one of them. The Shell and Monty can't change them.
+
+**The arguments.** The program file is the one file of `command` that Box protects. Box doesn't protect a file that a later element names, such as the script in `command = ["/bin/sh", "/Users/me/tools/vault.sh", "{ref}"]`. A workload that can write that script changes what runs outside the sandbox. So make a script the program: give it a `#!` line and the execute bit, and write `command = ["/Users/me/tools/vault.sh", "{ref}"]`. Box also doesn't know about a file that the program loads by itself, such as a library, a module, or a settings file. Keep each of those outside every write grant yourself, or list it in `reads`.
+
+**The `reads` and `deny` paths.** No grant can reach one of these paths. Box refuses a
+filesystem entry in any list except `deny` and `deny_write` that names the path, a path inside
+it, or a folder that holds it. That includes a credential store that a grant can otherwise name
+exactly: with `reads = ["~/.aws"]`, a tool can't take `read = ["~/.aws"]`. A `deny_write` entry
+at such a path grants nothing, and Box refuses the `write` entry that it needs around it. Each
+sandbox also denies these
+paths, as it denies an entry of its own `deny` list. So a path that is absent when the box starts
+stays closed if it appears later. An entry that is a symbolic link protects the link and the path
+that it names, also when nothing is there yet, such as a socket that an app makes when it starts.
+No write grant can reach the folder that holds a symbolic link on the way to the path, because a
+change to the link writes that folder. This protection is for the sandboxes. Strands Shell and
+Monty run outside every sandbox, and the first limit below is about them.
+
+**The `pass-secret-env` variables.** Box gives your value of each of these variables to the program, and to no workload. The environment of a workload holds what the `env` of its table states and what Box adds. But for `HOME` and `PATH`, nothing comes from your shell. No `env://` or `secret://` reference can read one of these variables, so no route and no telemetry target can send the credential out. An entry that ends with `*` covers each of your variables with that prefix. A `pass-env` variable has no such rule.
+
+These limits remain:
+
+- Strands Shell and Monty don't protect a `reads` or `deny` path, or a symbolic link on the way to one. Policy alone decides a read or a change there. A rule that permits `fs:read` on such a path lets the workload read the vault's files through the Shell or Python. A rule that permits `fs:write`, `fs:delete`, or `fs:move` there lets it change them, and a changed settings file can change what the program of the source runs. So give each `fs:*` permit a path condition that holds no path of the vault, and add a `forbid` for those paths:
+
+  ```cedar
+  @id("vault_files")
+  forbid (
+    principal,
+    action in [
+      Box::Action::"fs:read", Box::Action::"fs:write",
+      Box::Action::"fs:delete", Box::Action::"fs:move"
+    ],
+    resource
+  )
+  when { context.input.path == "~/.config/op" || context.input.path like "~/.config/op/*" };
+  ```
+
+  The rule names the path and each path inside it. It compares each letter exactly, so it doesn't match another case of a name. The path conditions of your `fs:*` permits protect the vault, and this rule is a second check. From Strands Shell, [policy reads a path](policy/actions.md#filesystem) with each symbolic link resolved. So when the path is a symbolic link or passes through one, write the rule for the path that it resolves to, and for each link on the way. The rule doesn't match a move or a deletion of a folder above the path or above a link on the way, so don't permit those on your home, on `~/.config`, or on a folder that holds such a link. No check beneath policy refuses these paths in the Shell or Monty. The [limits page](../design/limitations.md#a-secret-source-runs-outside-every-sandbox) says more.
+- Box doesn't compare the `env` or the `command` of a table with your values of the `pass-secret-env` variables. A workload holds one of those values only when you write the value in a table of `box.toml` or type it after `box run`. Don't do either. A workload can use the same name for a value of its own, such as the placeholder of a signed `aws://` route in `AWS_ACCESS_KEY_ID`.
+- Each check covers one box. Keep each program and each `reads` path outside every folder that
+  any other box can write.
 
 ## `[mcp.<name>]`
 

@@ -802,16 +802,23 @@ fn deny_reason(reason: &DenyReason) -> &'static str {
     }
 }
 
-/// Open this box's collector from its stored record.
+/// Open this box's collector from its stored record, with each target's secret read through
+/// `secrets`.
 pub(crate) fn open(
     layout: &crate::record::layout::BoxRoot,
     stored: &crate::record::config::Record,
+    secrets: &crate::run::secret_sources::TelemetrySecrets,
 ) -> Result<Arc<Collector>, BoxError> {
     let directory = layout.telemetry_directory();
     layout.create_child_directory(&directory)?;
 
-    let mut request =
-        crate::record::config::telemetry::config_for(&stored.box_id, &stored.telemetry, layout)?;
+    let mut request = crate::record::config::telemetry::config_for(
+        &stored.box_id,
+        &stored.telemetry,
+        layout,
+        &stored.declared_sources()?,
+        secrets.backend(),
+    )?;
     if std::env::var_os(FAILURE_REPORT_VARIABLE).is_some_and(|value| !value.is_empty()) {
         request = request.reporting_failures();
     }

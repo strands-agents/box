@@ -217,12 +217,6 @@ pub(crate) enum RelayError {
 /// The four inputs could not be read, parsed, or validated.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigError {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    #[error(
-        "x86 support on Linux is experimental. Set EXPERIMENTAL_X86_SUPPORT=TRUE to enable it."
-    )]
-    ExperimentalX86Support,
-
     #[error(
         "experimental feature `{feature}` requires a supported macOS or Linux ARM64 build with `native-filesystem-policy`"
     )]
@@ -304,12 +298,16 @@ pub(crate) enum ConfigError {
     #[error("invalid `[secret-source.{scheme}]` table: {reason}")]
     SecretSource { scheme: String, reason: String },
 
-    /// The declarations loaded, and this build has no step that reads a secret through one.
+    /// A declared secret source read no secret for one entry; the reason went to stderr alone.
     #[error(
-        "`[secret-source.{scheme}]` loaded, but this build cannot yet read a secret from a \
-         declared secret source, so the box does not start"
+        "`{entry}` names a secret that the secret source `{scheme}` ({program}) did not return, \
+         so the box does not start"
     )]
-    SecretSourceFetch { scheme: String },
+    SecretFetch {
+        entry: String,
+        scheme: String,
+        program: String,
+    },
 
     #[error("credential locator {locator:?} is invalid: {source}")]
     Locator {

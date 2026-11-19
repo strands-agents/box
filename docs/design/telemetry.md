@@ -55,9 +55,11 @@ workload supplies that context. Box bounds and validates it but never treats it 
 authority. See [correlation context is a
 hint](decisions.md#correlation-context-is-a-hint-and-never-authority).
 
-Six control-plane records describe policy installation or refusal, tool vocabulary installation,
-completed discovery, and box startup or shutdown. They show which authority was in force at a given
-moment, so they share a file with the decisions.
+Seven control-plane records describe policy installation or refusal, tool vocabulary installation,
+completed discovery, box startup or shutdown, and each read of a secret through a declared secret
+source. They show which authority was in force at a given moment, so they share a file with the
+decisions. The record of a read names the configuration entry, the source, and its program. It
+carries no word that the program printed, because a vault program can print the name of an item.
 
 Each decision and control-plane record is both a span and a log record, with one shared trace
 identifier and span identifier. See [decision and control records produce both
