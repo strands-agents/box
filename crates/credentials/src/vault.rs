@@ -21,10 +21,10 @@ use crate::{
 const LOAD_CORRELATION: &str = "credential-store-load";
 
 /// The `cmd://` scheme, refused at open because no request-time capture path is wired.
-const CMD_SCHEME: &str = "cmd";
+pub(crate) const CMD_SCHEME: &str = "cmd";
 
 /// The deferred-mint scheme an operator config could once name.
-const OAUTH2_SCHEME: &str = "oauth2";
+pub(crate) const OAUTH2_SCHEME: &str = "oauth2";
 
 /// One resolved opaque binding: the secret, how it attaches, and the phantom standing in for it.
 pub(crate) struct OpaqueBinding {

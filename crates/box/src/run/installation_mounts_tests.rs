@@ -760,6 +760,7 @@ fn real_mount_aliases_preserve_link_counts_and_refuse_overlapping_write_grants()
                 policy: None,
                 authority_directories: Vec::new(),
                 program_search_directories: Vec::new(),
+                source_paths: &[],
             },
         )
         .unwrap()

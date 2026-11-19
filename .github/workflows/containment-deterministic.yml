@@ -34,13 +34,13 @@ jobs:
     # than running to the 6-hour default -- CN-* cases spawn real subprocesses
     # under a cage, and a wedged one would otherwise burn the whole budget.
     timeout-minutes: 45
-    # Every runner affects CI Gate, including experimental Linux x86-64.
+    # Every runner affects CI Gate, including Linux x86-64. The
+    # macOS leg runs inside the unit-test job of rust-test-lint.yml.
     strategy:
-      # Report every OS's outcome even if one fails. A Linux failure is not a
-      # reason to hide the macOS one.
+      # Report every OS's outcome even if one fails.
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04-arm, ubuntu-24.04, macos-latest]
+        os: [ubuntu-24.04-arm, ubuntu-24.04]
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -63,10 +63,6 @@ jobs:
       - name: Free disk (linux only)
         if: ${{ startsWith(matrix.os, 'ubuntu') }}
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
-
-      - name: Enable experimental x86 runtime tests
-        if: runner.os == 'Linux' && runner.arch == 'X64'
-        run: echo "EXPERIMENTAL_X86_SUPPORT=TRUE" >> "$GITHUB_ENV"
 
       # The Linux cage cannot be built without unprivileged user namespaces.
       # Ubuntu 23.10+ gates them behind an AppArmor profile; hosted runners
@@ -111,11 +107,6 @@ jobs:
       - name: Build strands-box and the containment trampoline
         run: cargo build -p strands-box -p strands-box-containment --release --locked --features test-support
 
-      # The macOS downloader tests share this runner instead of taking their own.
-      - name: Check downloader behavior (macos only)
-        if: ${{ startsWith(matrix.os, 'macos') }}
-        run: python3 -m unittest discover -s scripts -p 'test_download.py' -v
-
       - name: Test filesystem modes on a supported backend
         run: cargo test -p strands-box --release --locked --all-features --test filesystem_modes -- --nocapture
 
@@ -135,7 +126,7 @@ jobs:
         id: suite
         env:
           DET_RESULTS_DIR: ${{ github.workspace }}/det-results
-          PLATFORM: ${{ matrix.os == 'macos-latest' && 'macos' || 'linux' }}
+          PLATFORM: linux
         run: |
           echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
           export PATH="$GITHUB_WORKSPACE/target/release:$PATH"

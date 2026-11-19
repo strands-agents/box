@@ -33,6 +33,11 @@ on:
         required: false
         type: boolean
         default: true
+      containment_macos:
+        description: "Run the deterministic containment suite on the macOS unit-test runner, so a push holds one macOS runner. Linux runs the suite in containment-deterministic.yml."
+        required: false
+        type: boolean
+        default: false
 
 env:
   # Colorize cargo output in Actions logs (from the starter template).
@@ -53,8 +58,9 @@ jobs:
       contents: read
     runs-on: ${{ matrix.os }}
     # Allow a cold build and the complete workspace suite on slower runners.
-    # The x86 runner can still be making progress after 30 minutes.
-    timeout-minutes: 45
+    # The x86 runner can still be making progress after 30 minutes. The macOS
+    # runner also runs the deterministic containment suite when asked to.
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && inputs.containment_macos && 70 || 45 }}
     strategy:
       # Report every OS's outcome even if one fails. A single Linux failure
       # is not a reason to hide the macOS one.
@@ -72,10 +78,6 @@ jobs:
         if: runner.os == 'Linux'
         # Free space for the all-targets build on the disposable Ubuntu runner.
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
-
-      - name: Enable experimental x86 runtime tests
-        if: runner.os == 'Linux' && runner.arch == 'X64'
-        run: echo "EXPERIMENTAL_X86_SUPPORT=TRUE" >> "$GITHUB_ENV"
 
       - name: Require Linux namespace support
         if: runner.os == 'Linux'
@@ -98,6 +100,18 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Cache cargo for the deterministic suite (macOS only)
+        if: ${{ matrix.os == 'macos-latest' && inputs.containment_macos }}
+        # A distinct shared-key keeps the release target and the standalone
+        # test-integ crate apart from the unit-test cache above.
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: containment-deterministic
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          workspaces: |
+            .
+            test-integ
 
       - name: Fetch locked dependencies for offline metadata
         run: cargo fetch --locked
@@ -171,8 +185,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--cfg box_native_adapter_tests" \
-            cargo test --locked -p strands-box-containment --lib --all-features \
+          cargo test --locked -p strands-box-containment --lib --all-features \
             backend::linux::namespace::filesystem_queries::forwarding_tests:: \
             -- --test-threads=1 2>&1 | tee linux-native-forwarding-tests.log
           grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' linux-native-forwarding-tests.log
@@ -231,6 +244,53 @@ jobs:
         run: |
           echo "Native adapter, configuration, and startup tests passed. The full signed native enforcement suite did not run." >> "$GITHUB_STEP_SUMMARY"
           echo "Signed receipt freshness: ${RECEIPT_OUTCOME} (informational only)." >> "$GITHUB_STEP_SUMMARY"
+
+      # The deterministic containment suite (test-integ/) on macOS. These steps
+      # are the macOS leg of containment-deterministic.yml, run here so a push
+      # holds one macOS runner. They run after a unit-test failure, and each
+      # one waits for the one before it, as in a job of their own.
+      - name: Build strands-box and the containment trampoline (macOS only)
+        id: det_build
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment_macos }}
+        run: cargo build -p strands-box -p strands-box-containment --release --locked --features test-support
+
+      - name: Check downloader behavior (macOS only)
+        id: det_download
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment_macos && steps.det_build.outcome == 'success' }}
+        run: python3 -m unittest discover -s scripts -p 'test_download.py' -v
+
+      - name: Test filesystem modes on a supported backend (macOS only)
+        id: det_filesystem_modes
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment_macos && steps.det_download.outcome == 'success' }}
+        run: cargo test -p strands-box --release --locked --all-features --test filesystem_modes -- --nocapture
+
+      - name: Run the deterministic suite (macOS only)
+        id: det_suite
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment_macos && steps.det_filesystem_modes.outcome == 'success' }}
+        env:
+          DET_RESULTS_DIR: ${{ github.workspace }}/det-results
+          PLATFORM: macos
+        run: |
+          echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
+          export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
+          command -v strands-box
+          bash test-integ/run.sh
+
+      - name: Summarize the verdict (macOS only)
+        if: ${{ always() && matrix.os == 'macos-latest' && inputs.containment_macos }}
+        run: python3 test-integ/tools/summarize-verdict.py "$GITHUB_WORKSPACE/det-results/verdict.json"
+
+      - name: Upload verdict and logs (macOS only)
+        if: ${{ always() && matrix.os == 'macos-latest' && inputs.containment_macos }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: deterministic-${{ matrix.os }}
+          path: |
+            det-results/verdict.json
+            det-results/cargo-test.log
+            det-results/*.jsonl
+          if-no-files-found: warn
+          retention-days: 14
 
   lint:
     name: Lint

@@ -9,7 +9,6 @@
 //! caller.
 
 pub(crate) mod cli;
-mod platform;
 pub(crate) mod policy;
 pub(crate) mod run;
 
@@ -20,11 +19,6 @@ use crate::error::BoxError;
 use crate::run::hardening::Hardening;
 
 pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
-    if let Err(error) = platform::preflight() {
-        eprintln!("strands-box: refusing to run: {error}");
-        return ExitCode::FAILURE;
-    }
-
     // Disable core dumps and restrict process-memory inspection before Box starts its runtime or loads credentials.
     if matches!(cli.command, Command::Run { .. })
         && let Err(error) = Hardening::apply()
@@ -33,11 +27,7 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     let native_setup = match &cli.command {
         Command::Run { config, .. } => {
             match run::prepare_native(config, options.on_ready.is_some()) {
@@ -77,11 +67,7 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
             options.terminal,
             signals,
             options.box_id.as_deref(),
-            #[cfg(all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            ))]
+            #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
             native_setup,
         )
         .await
@@ -100,12 +86,9 @@ async fn dispatch(
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
     box_id: Option<&str>,
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
-    native_setup: Option<run::NativeSetup>,
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))] native_setup: Option<
+        run::NativeSetup,
+    >,
 ) -> Result<ExitCode, BoxError> {
     match &cli.command {
         Command::Run { config, workload } => {
@@ -115,11 +98,7 @@ async fn dispatch(
                 terminal,
                 signals,
                 box_id,
-                #[cfg(all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                ))]
+                #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
                 native_setup.expect("native capabilities prepared before runtime startup"),
             )
             .await

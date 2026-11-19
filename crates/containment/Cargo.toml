@@ -105,6 +105,11 @@ path = "tests/working_folder_linux.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "root_links_linux"
+path = "tests/root_links_linux.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "inherited_handles_macos"
 path = "tests/inherited_handles_macos.rs"
 required-features = ["test-support"]
@@ -125,5 +130,4 @@ path = "tests/nested_user_namespace_linux.rs"
 required-features = ["test-support"]
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(box_native_adapter_tests)"] }
 unused_must_use = "deny"

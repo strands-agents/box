@@ -12,10 +12,6 @@ Audience: an operator who has run [getting started](../getting-started.md) and
 [`examples/codex-cli`](../../../examples/codex-cli/) in the repository, and
 this page walks through them. This example uses Codex 0.160.1.
 
-> **Status.** The action vocabulary and the context fields can change before 1.0.0. Pin the Box
-> build you install (`./box-core/box --version`), and read [troubleshooting load
-> failures](../policy.md#troubleshooting-load-failures) after an upgrade.
-
 ## Before you start
 
 - The box from [getting started](../getting-started.md) under `~/box-tutorial`: Box in

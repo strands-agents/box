@@ -233,6 +233,17 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   and `/dev/null` as an ordinary file grant inside a forbidden tree. **A path carries one scope**, so
   the two `/tmp` cells serve different harnesses and no box may ask for both: a Bun-compiled agent
   takes the entry read, and V8 takes the descendant stat it needs to reserve its code range.
+- **The runtime minimum spells its `/tmp` cell as the link, `/tmp`, and not as `/private/tmp`.** A
+  `Metadata` + `Root` cell renders a metadata rule on the caller's spelling only when that spelling
+  differs from the resolved one, so `/private/tmp` renders no rule on the `/tmp` link node.
+  Measured 2026-11-17 on macOS 26.7.3 arm64: with that spelling, `lstat("/tmp")`,
+  `realpath("/tmp")`, and every path through `/tmp` failed with `EPERM` in the agent and in a tool,
+  also under a grant on `/private/tmp/<dir>`, and no list entry can add the rule. The box's
+  workspace check compares each minimum cell by identity for the same reason: by spelling, a
+  workspace at `/tmp` got an entry cell on `/private/tmp`, which the floor refuses. Guards:
+  `os_paths.rs::each_set_states_exactly_these_cells`,
+  `box_filesystem.rs::the_tmp_link_resolves_and_a_path_through_it_keeps_its_grants`, and
+  `boundary.rs::a_workspace_at_the_tmp_link_is_covered_by_the_runtime_minimum`.
 - **`(path-ancestors "/")` is an SBPL parse error**, and `sandbox-exec` reports
   `argument expected but none provided`. `ancestor_rule` renders nothing for `/`, which has no
   ancestor to name, so a grant on `/` renders its own rule and no ancestor rule.
@@ -986,6 +997,50 @@ an explicit descriptor (`RequestPath::new` in `crates/box/src/run/linux_enforcem
 `a_workload_returns_to_its_saved_folder_with_fchdir`
 saves a folder, enters a subfolder, and returns with `fchdir` under the real trampoline.
 
+### Creating a name without replacing one
+
+On GitHub's Ubuntu 24.04 ARM64 runner, Box `9f5e71ea` refused `renameat2` with `EPERM`. uv 0.13.7
+failed its first command with `error: Could not acquire lock`, caused by
+`Could not persist temporary file .cache/uvx/.tmp…: Operation not permitted (os error 1)`. uv
+creates its lock through the `tempfile` crate. On Linux, tempfile 3.27's `persist_noclobber` calls
+`renameat2(…, RENAME_NOREPLACE)` and falls back to a hard link only on `ENOSYS` or `EINVAL`
+(`src/file/imp/unix.rs`), so it returned the `EPERM`.
+
+The permit admits `renameat2` only when its flags are `0` or `RENAME_NOREPLACE`. With `0` it is the
+permitted `renameat`. `RENAME_NOREPLACE` only makes the call fail with `EEXIST` when the new name
+exists. `RENAME_EXCHANGE`, which swaps two names, and `RENAME_WHITEOUT`, which creates a device
+node, still match no rule and get `EPERM`. A permitted `renameat2` meets the same mounts that keep
+each ancestor of a denied path fixed, so moving one fails with `EBUSY`, as `renameat` does
+(`renameat2_variants_remain_refused_for_denied_ancestors`). This covers the default backend only.
+The native filesystem broker mediates `renameat2` itself and answers any call with flags with
+`EACCES` (`broker.rs`), so under native filesystem policy tempfile still cannot persist a file.
+`a_name_is_created_without_replacing_one_with_renameat2_under_the_filters` checks each flag under
+the filters, and runs tempfile's `persist_noclobber`.
+
+### The host's top-level links into /usr
+
+On Amazon Linux 2023 and Ubuntu, `/bin` is a link to `usr/bin`. The view bound only the files its
+grants named, so with `/usr/bin/sh` granted, `/bin` was absent and `#!/bin/sh` scripts failed to exec
+with `ENOENT` (#453). pnpm's `node_modules/.bin/tsc` failed this way, and so did uvx's cached tool
+commands, which uv writes as `#!/bin/sh` scripts because the environment can move: on GitHub's
+Ubuntu 24.04 runner, `uvx mypy@1.15.0` printed `error: Failed to spawn: mypy`.
+
+`materialize` now writes each host link from `/bin`, `/sbin`, `/lib`, `/lib32`, `/lib64` or
+`/libx32` into the view root, after every mount and before the root is sealed read-only. A link is
+copied only when the host's entry is a link whose text is a relative path into `usr/`. `plan`
+mounts every path written through such a link at its `/usr` name (`view_spelling`): an interpreter
+spelling `/bin/bash` is bound at `/usr/bin/bash`, and the loader at `/lib64/ld-linux-x86-64.so.2`
+at `/usr/lib64/ld-linux-x86-64.so.2`. So no mount sits under a linked name, and the link is kept.
+The first version left a name with a mount under it a plain folder, which dropped `/bin` for any
+tool whose wrapper starts `#!/bin/bash`, and `/lib` and `/lib64` for any process with an exec file.
+A refusal goes through the same mapping, so a refusal of `/bin/bash` replaces a grant of
+`/usr/bin/bash`, and the link reaches only the empty overmount. A link resolves only to paths the
+view binds, so it adds no reach. Bind sources stay host paths, which name the same files.
+`the_view_copies_the_hosts_usr_links_and_mounts_each_name_under_usr` pins the plan, and
+`a_bin_sh_script_runs_through_the_hosts_bin_link` runs a `#!/bin/sh` script under the real
+trampoline with only `/usr/bin/sh` granted, and checks that `/bin/cat` stays absent and that a
+refused `/usr/bin/cat` is empty through `/bin/cat`.
+
 ### W^X
 
 W^X closes three routes. Every writable mount, including `/tmp`, uses `MS_NOEXEC`. The permit filter
@@ -1330,7 +1385,6 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     bit still lands outside it. Unmeasured — read from `syscall.rs` and `view.rs`, and no Linux
     target was exercised. Seccomp **can** scope this, unlike the macOS flag argument, because the
     mode is a scalar.
-
 
 ### Native policy and filesystem-information notifications
 

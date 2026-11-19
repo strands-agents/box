@@ -26,22 +26,14 @@ async fn spawn_registered(
     #[cfg(target_os = "linux")] relay_control: Option<&std::os::unix::net::UnixStream>,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     registration: Option<crate::run::native_enforcement::Registration>,
 ) -> Result<(ProcessGroup, Trampoline), BoxError> {
     #[cfg_attr(
         not(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         )),
         allow(unused_mut)
     )]
@@ -49,11 +41,7 @@ async fn spawn_registered(
         trampoline::Launch {
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             hold_for_registration: registration.is_some()
                 && (cfg!(target_os = "macos") || boundary.native_filesystem_policy()),
@@ -79,20 +67,12 @@ async fn spawn_registered(
     configure_streams(&mut command);
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     let gate = trampoline.take_launch_gate();
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     if (registration.is_some()
         && (cfg!(target_os = "macos") || boundary.native_filesystem_policy()))
@@ -116,11 +96,7 @@ async fn spawn_registered(
     #[cfg_attr(
         not(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         )),
         allow(unused_mut)
     )]
@@ -149,11 +125,7 @@ async fn spawn_registered(
             return Err(SuperviseError::Control { reason }.into());
         }
     }
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     if let (Some(gate), Some(registration)) = (gate, registration) {
         let result = tokio::task::spawn_blocking(move || gate.release_native(registration)).await;
         let error = match result {
@@ -622,11 +594,7 @@ impl Contained {
             Some(&relay_child_side),
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             hosted.native_registration(),
         )
@@ -830,11 +798,7 @@ impl LeafBox {
         stderr: Stdio,
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         ))]
         registration: Option<crate::run::native_enforcement::Registration>,
     ) -> Result<LaunchedLeaf, BoxError> {
@@ -856,11 +820,7 @@ impl LeafBox {
             Some(&relay_child_side),
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             registration,
         )
@@ -913,11 +873,7 @@ impl LeafBox {
         layout: &BoxRoot,
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         ))]
         registration: Option<crate::run::native_enforcement::Registration>,
     ) -> Result<CapturedLeaf, BoxError> {
@@ -936,11 +892,7 @@ impl LeafBox {
             Stdio::piped(),
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             registration,
         )
@@ -977,11 +929,7 @@ impl LeafBox {
         layout: &BoxRoot,
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         ))]
         registration: Option<crate::run::native_enforcement::Registration>,
     ) -> Result<StreamingLeaf, BoxError> {
@@ -1003,11 +951,7 @@ impl LeafBox {
             Stdio::piped(),
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             registration,
         )

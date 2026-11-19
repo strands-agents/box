@@ -10,9 +10,6 @@ Audience: an operator who wants to write or change a policy. [Write a policy and
 decided](tutorials/first-policy.md) walks through a first one, and [the action
 vocabulary](policy/actions.md) lists every field a rule can read.
 
-> **Status.** The action vocabulary and the context fields can change before 1.0.0. Pin the Box
-> build you install (`./box-core/box --version`).
-
 ## When the box asks policy
 
 Four parts of the box ask policy, each about its own boundary:
@@ -951,6 +948,9 @@ record says it has not run but the history holds events:
 ```text
 strands-box: error: policy staging failed: the box record is committed, but the history /Users/dev/.box/<name>/private/dogwood.redb is absent. Wipe the box directory to start again.
 ```
+
+A first run that stops after Box stores the record and before it opens the history leaves the box
+in this state too.
 
 The text varies: the record `is committed` or `is not committed`, and the history `is absent`,
 `is empty`, or `holds <n> bytes`. The run also refuses when the engine cannot read the history

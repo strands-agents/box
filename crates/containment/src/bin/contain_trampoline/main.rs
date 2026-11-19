@@ -119,11 +119,7 @@ fn wait_for_launch(descriptor: i32) -> std::io::Result<()> {
     use std::io::{Read, Write};
     use std::os::fd::FromRawFd;
     use std::os::unix::net::UnixStream;
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     let descriptor = {
         // SAFETY: duplicate the live socket; the original serves later native registration.
         let duplicate = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 3) };
@@ -271,22 +267,14 @@ fn apply_containment(args: &Args, setup_status: &SetupStatus) -> Result<(), Exit
     // An unsupported platform is a setup error (2); anything else means apply ran and refused, which
     // is incomplete containment (3).
     // The Linux launcher preserves this writer until all setup processes finish.
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     let native_filesystem_handoff = args.launch_gate_fd.map(|descriptor| {
         // SAFETY: the trusted launcher passed this descriptor; it has no other owner here.
         unsafe {
             <std::os::unix::net::UnixStream as std::os::fd::FromRawFd>::from_raw_fd(descriptor)
         }
     });
-    #[cfg(not(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    )))]
+    #[cfg(not(all(target_os = "linux", feature = "native-filesystem-policy")))]
     let native_filesystem_handoff: Option<std::os::unix::net::UnixStream> = None;
     Containment::apply(
         &config,
