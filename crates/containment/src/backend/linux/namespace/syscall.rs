@@ -664,15 +664,15 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
         reason: "execveat with AT_EMPTY_PATH execs an inherited descriptor rather than \
                  a path, so the mount view never sees the bytes that run",
     },
-    // `pkey_mprotect` maps executable memory through a protection key. Box allocates none
-    // (`pkey_alloc` is unpermitted), so a JIT runtime uses the permitted `mmap` and `mprotect`
-    // instead; this stays denied so the key route cannot reach executable memory another way.
+    // `pkey_mprotect` is `mprotect` with a protection key. It stays refused together with
+    // `pkey_alloc`, so protection keys are admitted or refused as one decision; a JIT runtime with
+    // no key uses the permitted `mprotect` instead.
     MediatedSyscall {
         name: "pkey_mprotect",
         number: libc::SYS_pkey_mprotect,
         disposition: Disposition::ArgumentScoped,
-        reason: "pkey_mprotect adds PROT_EXEC through a protection key Box never allocates, \
-                 so a runtime uses the permitted mmap and mprotect instead",
+        reason: "pkey_mprotect pairs with pkey_alloc, which is unpermitted, so protection keys \
+                 stay refused as one unit and a runtime uses mprotect instead",
     },
     // The new mount API reaches the same effect as `mount(2)` without calling it.
     MediatedSyscall {

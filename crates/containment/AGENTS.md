@@ -1043,13 +1043,11 @@ refused `/usr/bin/cat` is empty through `/bin/cat`.
 
 ### W^X
 
-W^X closes the file routes to executing code, not the memory one. Every writable mount, including
-`/tmp`, uses `MS_NOEXEC`. The permit filter denies `memfd_create`, all `execveat`, and all
-`pkey_mprotect` calls. Writable-and-executable `mmap` and `mprotect` with `PROT_EXEC` are permitted
-on Linux, so a JIT runtime runs the code it compiles
-(`a_box_runs_generated_code_that_stays_contained`); a read-execute mapping stays permitted so the
-loader works (`a_read_execute_mapping_is_still_permitted`), and `writable_memory_can_become_executable`
-pins both halves at the filter.
+W^X closes the file routes to executing code. Every writable mount, including `/tmp`, uses
+`MS_NOEXEC`. The permit filter denies `memfd_create`, all `execveat`, and all `pkey_mprotect` calls.
+Memory is not covered: writable-and-executable `mmap` and `mprotect` with `PROT_EXEC` are permitted,
+so a JIT runtime runs the code it compiles (`writable_memory_can_become_executable` at the filter,
+`a_box_runs_generated_code_that_stays_contained` through the trampoline).
 
 **W^X protects the `fs:*` enforcement point, not the kernel boundary.** It does not stop the workload
 running code of its own choosing. An exec view is safe only when no reachable program is
@@ -1302,8 +1300,10 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
   write cell, because the census counts allows and cannot see one of these denies.
 - **V8 does not degrade under W^X; it aborts. Measured 2026-09-20** on Node 20.20.2, ARM64, kernel
   6.18: it asks for `mprotect(PROT_READ|PROT_WRITE|PROT_EXEC)` and has no protection-key path on this
-  architecture. JavaScriptCore absorbs the refusal and falls back to its interpreter in silence, so
-  throughput there is still unmeasured. `PR_SET_MDWE` is unavailable on 5.10.
+  architecture. JavaScriptCore absorbs the refusal and falls back to its interpreter in silence. This
+  is why Linux permits executable memory; see the
+  [decision](../../docs/design/decisions.md#a-jit-runtime-maps-executable-memory-on-linux).
+  `PR_SET_MDWE` is unavailable on 5.10.
 - `egress-gateway` asserts it writes no key material only in a `#[cfg(test)]` test.
 - **Two tests go vacuous if misconfigured:** the capability-drop test needs a user namespace, and
   `blocked_mode_leaves_no_route_at_all` must assert loopback is unreachable.

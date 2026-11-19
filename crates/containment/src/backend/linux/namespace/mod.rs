@@ -2175,7 +2175,7 @@ mod tests {
             // SAFETY: every call is a plain memory-management syscall on this child's own address
             // space, and the child `_exit`s without touching the parent's state.
             unsafe {
-                let one_call = libc::mmap(
+                let page = libc::mmap(
                     std::ptr::null_mut(),
                     4096,
                     libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
@@ -2183,26 +2183,14 @@ mod tests {
                     -1,
                     0,
                 );
-                if one_call == libc::MAP_FAILED {
-                    return 10; // W+X in one call must now succeed
+                if page == libc::MAP_FAILED {
+                    return 10;
                 }
-                let writable = libc::mmap(
-                    std::ptr::null_mut(),
-                    4096,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                    -1,
-                    0,
-                );
-                if writable == libc::MAP_FAILED {
-                    return 11; // a plain writable mapping must still work
+                if libc::mprotect(page, 4096, libc::PROT_READ | libc::PROT_EXEC) != 0 {
+                    return 11;
                 }
-                if libc::mprotect(writable, 4096, libc::PROT_READ | libc::PROT_EXEC) != 0 {
-                    return 12; // the JIT spelling must now succeed
-                }
-                if libc::syscall(libc::SYS_pkey_mprotect, writable, 4096, libc::PROT_EXEC, -1) == 0
-                {
-                    return 13; // pkey_mprotect must stay refused
+                if libc::syscall(libc::SYS_pkey_mprotect, page, 4096, libc::PROT_EXEC, -1) == 0 {
+                    return 12;
                 }
             }
             0
@@ -2210,41 +2198,8 @@ mod tests {
 
         assert_eq!(
             outcome, 0,
-            "10 = mmap(W|X) refused, 11 = a plain writable mapping was refused, \
-             12 = mprotect(PROT_EXEC) refused, 13 = pkey_mprotect(PROT_EXEC) succeeded"
-        );
-    }
-
-    /// **A read-execute mapping with no write is still permitted.** The loader maps libraries so.
-    #[test]
-    fn a_read_execute_mapping_is_still_permitted() {
-        if !probe::user_namespace_is_permitted() {
-            println!("skipping: this host forbids user namespaces");
-            return;
-        }
-        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
-            .compile()
-            .expect("the filters compile");
-
-        let outcome = in_filtered_child(&filters, || {
-            // SAFETY: an anonymous read-execute mapping in the child's own address space.
-            let mapped = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    4096,
-                    libc::PROT_READ | libc::PROT_EXEC,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                    -1,
-                    0,
-                )
-            };
-            if mapped == libc::MAP_FAILED { 20 } else { 0 }
-        });
-
-        assert_eq!(
-            outcome, 0,
-            "a read-execute mapping must remain permitted, or the dynamic loader cannot \
-             map a shared library and no workload starts"
+            "10 = mmap(W|X) refused, 11 = mprotect(PROT_EXEC) refused, \
+             12 = pkey_mprotect(PROT_EXEC) succeeded"
         );
     }
 

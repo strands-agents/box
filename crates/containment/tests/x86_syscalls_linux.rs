@@ -22,10 +22,7 @@ const VFORK_CHILD_ALLOWED: i32 = 37;
 const VFORK_CHILD_DENIED: i32 = 38;
 const VFORK_CHILD_UNEXPECTED: i32 = 39;
 const FORK_CHILD_ALLOWED: i32 = 40;
-/// Contained: `getpriority` denied by the permit filter, executable `mprotect` permitted.
-const FORK_CHILD_CONTAINED: i32 = 41;
-const FORK_CHILD_MAPPING_FAILED: i32 = 60;
-const FORK_CHILD_UNMAP_FAILED: i32 = 61;
+const FORK_CHILD_DENIED: i32 = 45;
 const SCOPES: [&str; 3] = ["writable", "readonly", "ungranted"];
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,66 +230,40 @@ fn reap_child(pid: libc::pid_t) -> ReapedChild {
 }
 
 // Only syscall wrappers and scalar operations run in the child of the multithreaded test harness.
-unsafe fn raw_fork_child(page_size: libc::c_long) -> ! {
-    // SAFETY: an anonymous private mapping needs no live input pointer or file descriptor.
-    let mapping = unsafe {
-        libc::syscall(
-            libc::SYS_mmap,
-            std::ptr::null::<libc::c_void>(),
-            page_size,
-            libc::PROT_READ,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-            -1,
-            0,
-        )
+unsafe fn raw_fork_child() -> ! {
+    // SAFETY: these calls address only this child.
+    let priority = unsafe { libc::syscall(libc::SYS_getpriority, libc::PRIO_PROCESS, 0) };
+    let priority_error = if priority == -1 {
+        // SAFETY: errno is thread-local and is read immediately after the failed call.
+        unsafe { *libc::__errno_location() }
+    } else {
+        0
     };
-    let mut code = FORK_CHILD_MAPPING_FAILED;
-    if mapping != -1 {
-        // SAFETY: these calls address only this child and its owned anonymous mapping.
-        let priority = unsafe { libc::syscall(libc::SYS_getpriority, libc::PRIO_PROCESS, 0) };
-        let priority_error = if priority == -1 {
-            // SAFETY: errno is thread-local and is read immediately after the failed call.
-            unsafe { *libc::__errno_location() }
-        } else {
-            0
-        };
-        let protection = unsafe {
-            libc::syscall(
-                libc::SYS_mprotect,
-                mapping,
-                page_size,
-                libc::PROT_READ | libc::PROT_EXEC,
-            )
-        };
-        let protection_error = if protection == -1 {
-            // SAFETY: errno is thread-local and is read immediately after the failed call.
-            unsafe { *libc::__errno_location() }
-        } else {
-            0
-        };
-        // SAFETY: mapping and page_size describe the anonymous mapping created above.
-        let unmapped = unsafe { libc::syscall(libc::SYS_munmap, mapping, page_size) };
-        let priority_outcome = if priority >= 0 {
-            0
-        } else if priority_error == libc::EPERM {
-            1
-        } else {
-            2
-        };
-        let protection_outcome = if protection == 0 {
-            0
-        } else if protection_error == libc::EPERM {
-            1
-        } else {
-            2
-        };
-        // Two-bit outcomes distinguish success, EPERM, and unexpected errors for each filter.
-        code = if unmapped == 0 {
-            FORK_CHILD_ALLOWED + priority_outcome + 4 * protection_outcome
-        } else {
-            FORK_CHILD_UNMAP_FAILED
-        };
-    }
+    // A nonzero pid argument is what the restriction filter refuses, and the permit filter admits.
+    // SAFETY: making this child its own process-group leader touches no other process.
+    let grouped = unsafe { libc::syscall(libc::SYS_setpgid, libc::syscall(libc::SYS_getpid), 0) };
+    let group_error = if grouped == -1 {
+        // SAFETY: errno is thread-local and is read immediately after the failed call.
+        unsafe { *libc::__errno_location() }
+    } else {
+        0
+    };
+    let priority_outcome = if priority >= 0 {
+        0
+    } else if priority_error == libc::EPERM {
+        1
+    } else {
+        2
+    };
+    let group_outcome = if grouped == 0 {
+        0
+    } else if group_error == libc::EPERM {
+        1
+    } else {
+        2
+    };
+    // Two-bit outcomes distinguish success, EPERM, and unexpected errors for each filter.
+    let code = FORK_CHILD_ALLOWED + priority_outcome + 4 * group_outcome;
     // SAFETY: exit terminates only this child without running copied userspace destructors.
     unsafe { libc::syscall(libc::SYS_exit, code) };
     loop {
@@ -305,15 +276,12 @@ fn raw_fork_probe() {
     if std::env::var_os("BOX_X86_SYSCALL_PROBE").is_none() {
         return;
     }
-    // SAFETY: sysconf has no pointer argument and only reads the page-size configuration.
-    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    assert!(page_size > 0);
     let mut report = Report::default();
     // SAFETY: the child takes a syscall-only path to SYS_exit; only the parent allocates or logs.
     let result = unsafe { libc::syscall(libc::SYS_fork) };
     if result == 0 {
-        // SAFETY: this is the child, with a valid positive page size and no shared-address-space fork.
-        unsafe { raw_fork_child(page_size) };
+        // SAFETY: this is the child of a fork that shares no address space.
+        unsafe { raw_fork_child() };
     }
     let fork_error = if result == -1 {
         std::io::Error::last_os_error().raw_os_error().unwrap()
@@ -593,11 +561,11 @@ fn raw_fork_preserves_child_restrictions() {
         assert_eq!(
             libc::WEXITSTATUS(child.status),
             if contained {
-                FORK_CHILD_CONTAINED
+                FORK_CHILD_DENIED
             } else {
                 FORK_CHILD_ALLOWED
             },
-            "getpriority checks the permit filter; executable mprotect, now permitted, checks the restriction filter: {child:?}"
+            "getpriority checks the permit filter; setpgid with a nonzero pid checks the restriction filter: {child:?}"
         );
         assert_eq!(child.second_wait, -1, "{child:?}");
         assert_eq!(child.second_wait_error, libc::ECHILD, "{child:?}");

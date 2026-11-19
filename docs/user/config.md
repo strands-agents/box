@@ -472,15 +472,14 @@ Older builds do not recognize the key, even when its value is `false`.
 
 ### Executable memory
 
-On Linux, a box permits writable and executable memory, so a JIT runtime such as Node, Java, or Bun
-runs the code it compiles, and Python `ctypes` works with a libffi that writes its callbacks into
-memory. There is no setting: it is on for every process. macOS has no such restriction either.
+On Linux, every process in a box can write code into memory and run it. A JIT runtime such as Node,
+Java, or Bun needs this, and so does Python `ctypes` when libffi writes a callback into memory. There
+is no setting. macOS has no such restriction.
 
-**A process can run code it writes into memory**, not only the programs its grants let it start. A
-runtime that calls native code, such as Python through `ctypes`, can run any bytes this way. The
-syscall filter, filesystem grants, and network policy still apply to that code: only the `mmap` and
-`mprotect` memory rules are lifted, while `memfd_create`, `pkey_mprotect`, descriptor `execveat`, and
-the `noexec` mounts stay refused, so the box still governs which program *files* run.
+**A process can run any bytes it writes into memory**, not only the programs its grants let it
+start. The system-call filter, filesystem grants, and network policy still apply to that code.
+`memfd_create`, `pkey_mprotect`, descriptor `execveat`, and the `noexec` mounts stay refused, so the
+box still governs which program *files* run.
 
 ### Script commands on Linux
 

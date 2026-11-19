@@ -215,9 +215,9 @@ and retains every selection. Older binaries refuse unsupported versions.
 To disable the experiment, change the global setting to `false`.
 Set `monty` to `true` before returning to a binary that supports only version 21.
 Remove all process overrides and `[limits]` settings, give each stdio MCP server its own
-program, set `file-attributes` to `false`, remove `file-watching` from every
-process, remove `[gateway] upgrade_http`, and give each telemetry target only `env://` or `secret://`
-bearer settings before returning to a binary that supports only version 21.
+program, set `file-attributes` to `false`, remove `file-watching` from every process, remove
+`[gateway] upgrade_http`, and give each telemetry target only `env://` or `secret://` bearer
+settings before returning to a binary that supports only version 21.
 If MCP argument wildcards are enabled, replace the stars with concrete arguments and disable
 `argument_wildcards` on each server too.
 Replace each absolute MCP executable path with a bare program name that the server's `PATH`

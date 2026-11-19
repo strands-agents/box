@@ -1713,20 +1713,22 @@ with agent denials on both platforms.
 #### A JIT runtime maps executable memory on Linux
 
 A JIT runtime such as Node, Java, or Bun writes the code it compiles into memory and then runs it.
-Linux once refused that memory, so V8 and the JVM aborted and Bun fell back to its interpreter, and
-Python `ctypes` could not build a libffi callback. A box now permits writable-and-executable `mmap`
-and `mprotect` with `PROT_EXEC` on every process. `memfd_create`, descriptor `execveat`,
+Linux refused that memory, so V8 and the JVM aborted, Bun fell back to its interpreter, and Python
+`ctypes` could not build a libffi callback. A box now permits writable-and-executable `mmap` and
+`mprotect` with `PROT_EXEC` in every process. `memfd_create`, descriptor `execveat`,
 `pkey_mprotect`, and the `noexec` mounts stay refused, so the box still governs which program
 *files* run.
 
 The cost is that a process can run code it writes into memory, not only code its mount view admits.
 A runtime that calls native code, such as Python through `ctypes` or Java through its foreign
 function API, can run any bytes this way. That code is still bound by the system-call filter, the
-filesystem grants, and the network policy, so this gives up a hardening measure, not an authority:
-the effect on kernel-exploit risk is not quantified. We chose the simpler design over a per-table
-opt-in because macOS has no counterpart rule either — Seatbelt does not govern anonymous memory, so
-a macOS box already lets every process write code and then execute it — and because the box's own
-exec view already assumes a granted interpreter or FFI runtime is universal over authored data.
+filesystem grants, and the network policy. This gives up a hardening measure, not an authority, and
+its effect on kernel-exploit risk is not quantified.
+
+We chose this over a per-table opt-in for two reasons. macOS has no counterpart rule: Seatbelt does
+not govern anonymous memory, so a macOS box already lets every process write code and run it. And
+the exec view already treats a granted interpreter or FFI runtime as able to run any authored data,
+so a key would add a setting without closing a route.
 `a_box_runs_generated_code_that_stays_contained` pins that generated code runs and stays inside the
 other restrictions.
 

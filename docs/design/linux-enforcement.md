@@ -205,7 +205,7 @@ So they reach only what the filesystem grants and the network restrictions alrea
 
 The `mprotect` and `pkey_mprotect` system calls change memory access permissions.
 Writable-and-executable `mmap` and `mprotect` with `PROT_EXEC` are permitted on Linux, so a JIT runtime runs the code it compiles.
-The permit set still omits `pkey_mprotect`, so the filter refuses it.
+The permit set omits `pkey_mprotect`, so the filter refuses it.
 See [the executable memory decision](decisions.md#a-jit-runtime-maps-executable-memory-on-linux).
 
 ## Terminal controls

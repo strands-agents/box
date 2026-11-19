@@ -25,7 +25,7 @@ fn refusal(failed: bool) -> Option<i32> {
 ///
 /// This is what a JIT runtime does: the bytes come from the process, not from a file the mount
 /// view approved. Returns what the generated function returned.
-unsafe fn run_generated_code() -> i32 {
+fn run_generated_code() -> i32 {
     // SAFETY: an anonymous private mapping touches no existing memory.
     let page = unsafe {
         libc::mmap(
@@ -75,10 +75,9 @@ fn executable_memory_probe() {
     if std::env::var_os("BOX_EXECUTABLE_MEMORY_PROBE").is_none() {
         return;
     }
-    // SAFETY: the generated function returns an int and makes no syscall; each check below is a
-    // single syscall on this process's own descriptors or an anonymous page.
+    let generated = run_generated_code();
+    // SAFETY: each check is a single syscall on this process's own descriptors or an anonymous page.
     let report = unsafe {
-        let generated = run_generated_code();
         let page = libc::mmap(
             std::ptr::null_mut(),
             LENGTH,

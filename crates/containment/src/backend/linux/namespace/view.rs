@@ -126,8 +126,8 @@ impl MountView {
             source: None,
             target: PathBuf::from("/proc"),
             kind: MountKind::Fresh { fstype: "proc" },
-            // Keep process inspection available, but do not allow `/proc/*/mem` to write through
-            // the executable-memory syscall restrictions.
+            // Keep process inspection available, but refuse writes through `/proc/*/mem`, which
+            // ignore page protections and can reach another process's memory.
             writable: false,
             executable: false,
             origin: MountOrigin::Scaffold,
