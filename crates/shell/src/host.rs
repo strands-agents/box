@@ -1,5 +1,5 @@
-//! The host folders the Shell serves, and the effects that act on the identity a path resolved to
-//! (docs/design/decisions.md#a-resolved-token-binds-the-object-it-names).
+//! The host folders the Shell serves, the effects that act on the identity a path resolved to
+//! (docs/design/decisions.md#a-resolved-token-binds-the-object-it-names), and the host's `uname`.
 
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use strands_shell::os::{
-    DirEntry, Fd, FdKind, FileStat, FileTimes, OpenFlags, Process, TimeChange,
+    DirEntry, Fd, FdKind, FileStat, FileTimes, OpenFlags, Process, SystemInfo, TimeChange,
 };
 
 use crate::kernel::Follow;
@@ -808,6 +808,33 @@ fn timespec(change: TimeChange) -> io::Result<libc::timespec> {
     Ok(specification)
 }
 
+/// The host's `uname(2)` fields, or the Shell's virtual system when the call fails. `uname(2)` has
+/// no operating-system field, so the kernel name stands in for it.
+pub(super) fn uname() -> SystemInfo {
+    let mut name = std::mem::MaybeUninit::<libc::utsname>::uninit();
+    // SAFETY: name is written before it is read.
+    if unsafe { libc::uname(name.as_mut_ptr()) } != 0 {
+        return SystemInfo::default();
+    }
+    // SAFETY: uname returned 0, so name is initialized.
+    let name = unsafe { name.assume_init() };
+    let field = |chars: &[libc::c_char]| {
+        // SAFETY: uname NUL-terminates each field within its array.
+        unsafe { std::ffi::CStr::from_ptr(chars.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let kernel_name = field(&name.sysname);
+    SystemInfo {
+        operating_system: kernel_name.clone(),
+        kernel_name,
+        node_name: field(&name.nodename),
+        kernel_release: field(&name.release),
+        kernel_version: field(&name.version),
+        machine: field(&name.machine),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,6 +854,22 @@ mod tests {
         assert_eq!(spec(TimeChange::To(before)), (-2, 500_000_000));
         let whole = UNIX_EPOCH - Duration::from_secs(1);
         assert_eq!(spec(TimeChange::To(whole)), (-1, 0));
+    }
+
+    #[test]
+    fn the_host_uname_is_what_the_uname_program_prints() {
+        let system = uname();
+        let printed = std::process::Command::new("uname")
+            .arg("-snrm")
+            .output()
+            .expect("run uname");
+        assert_eq!(
+            format!(
+                "{} {} {} {}\n",
+                system.kernel_name, system.node_name, system.kernel_release, system.machine
+            ),
+            String::from_utf8_lossy(&printed.stdout)
+        );
     }
 
     struct Fixture {
