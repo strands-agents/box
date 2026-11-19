@@ -1216,14 +1216,6 @@ Each of these stops the box before the workload starts:
   one of them: ``this write grant can change
   [secret-source.op] command /opt/homebrew/Caskroom/1password-cli/2.42.0/op or its path. Keep the
   program of each secret source outside every process's write grants``. Narrow the grant.
-- A write grant covers a file that a later element of `command` names, such as a script after an
-  interpreter: ``this write grant can change /Users/me/tools/vault.sh, a file that the `command`
-  of [secret-source.vault] names, or its path. Keep each file that a secret source command names
-  outside every process's write grants``. Narrow the grant, or move the file.
-- Box can't open a file that a later element of `command` names: ``invalid
-  `[secret-source.vault]` table: the file /Users/me/tools/key.pem, which its `command` names,
-  cannot be opened: Permission denied (os error 13)``. Box must be able to open each file that
-  `command` names by its absolute path, so that it can protect the file.
 - A `reads` or `deny` entry passes through symbolic links that don't end, or through a folder
   that Box can't search: ``invalid
   `[secret-source.op]` table: `deny` entry "~/.op/socket" cannot be inspected: the path passes
@@ -1257,14 +1249,7 @@ checks each one before it starts a program for the first time, in `box run` and 
 `command`. A write grant can't cover that path, the file that it resolves to, a symbolic link on
 the way, or a folder that holds one of them. The Shell and Monty can't change them.
 
-**A file that an argument names.** A later element of `command` that is the absolute path of a
-file gets the same protection, such as the script in
-`command = ["/bin/sh", "/Users/me/tools/vault.sh", "{ref}"]`. That protection is from change
-only: a workload with a read grant over the file can read it. So list a file that holds a key or
-a passphrase in `reads` too. Box doesn't know about a file that
-the program loads by itself, such as a library or a module. It also doesn't see a folder, or a
-path inside a longer argument such as `--config=/etc/vault.hcl`. Keep those outside every write
-grant yourself, or list the folder in `reads`.
+**The arguments.** The program file is the one file of `command` that Box protects. Box doesn't protect a file that a later element names, such as the script in `command = ["/bin/sh", "/Users/me/tools/vault.sh", "{ref}"]`. A workload that can write that script changes what runs outside the sandbox. So make a script the program: give it a `#!` line and the execute bit, and write `command = ["/Users/me/tools/vault.sh", "{ref}"]`. Box also doesn't know about a file that the program loads by itself, such as a library, a module, or a settings file. Keep each of those outside every write grant yourself, or list it in `reads`.
 
 **The `reads` and `deny` paths.** No grant can reach one of these paths. Box refuses a
 filesystem entry in any list except `deny` and `deny_write` that names the path, a path inside

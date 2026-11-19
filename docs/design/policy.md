@@ -77,8 +77,8 @@ authority](decisions.md#the-authored-policy-is-the-only-decision-authority).
 - The reachable paths check runs in the Shell and Monty after the engine. It refuses the box
   directory, the `box.toml` and policy this run loaded, and anything outside the operator's home and
   the workspace. It also refuses writes, deletion, replacement, and enclosing-path changes for
-  configured tool programs, the programs of declared secret sources and the files that their
-  arguments name, the `reads` and `deny` paths of those sources and each symbolic link on the way
+  configured tool programs, the programs of declared secret sources,
+  the `reads` and `deny` paths of those sources and each symbolic link on the way
   to one, and the [installed trusted
   binaries](binaries.md#trampoline---strands-box-contain-trampoline). Reads of these files remain
   subject to policy. Policy decides first, so a counting rule still sees the attempt, and the
@@ -348,8 +348,8 @@ as ``did you mean `path`?``.
 
 A policy that validates can still fail to run, because opening the history has its own refusals;
 [durable history](#durable-history) lists them. Before a workload starts, Box also refuses
-configured tool programs, and programs of declared secret sources and the files that their
-arguments name, that overlap with direct writable grants. On macOS and Linux, a command
+configured tool programs, and programs of declared secret sources, that overlap with direct
+writable grants. On macOS and Linux, a command
 with multiple hard links can remain writable by the operator. Box first requires a complete scan
 of every process's declared writable directories. The scan includes subdirectories excluded by
 `deny` and refuses startup if it finds another name for the command.

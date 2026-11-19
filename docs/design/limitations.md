@@ -75,9 +75,11 @@ your values of the `pass-secret-env` variables to that program alone.
   filesystem permit that covers one of those paths lets the workload read the vault's files
   through an interpreter, as it does for a credential store. See [no credential floor sits beneath the interpreters](decisions.md#no-credential-floor-sits-beneath-the-interpreters).
   Keep `fs:read` permits away from those paths.
-- Box protects the program file and each file that an argument names by its absolute path. It
-  doesn't know about a library, a module, or a settings file that the program finds by itself. A
-  workload that can write one of those changes what runs outside the sandbox.
+- Box protects the program file, which is element 0 of `command`, and no other file that the
+  program uses. It doesn't protect a file that an argument names, such as a script after an
+  interpreter, or a library, a module, or a settings file that the program finds by itself. A
+  workload that can write one of those changes what runs outside the sandbox. Make a script the
+  program, and list each other file in `reads`.
 - Each check covers one box, and the stored record holds no identity of the program. A workload
   in a second box that can write the program's folder can replace the program, and the next run
   of the first box starts that file. Keep each program outside every folder that any box can
@@ -95,7 +97,7 @@ your values of the `pass-secret-env` variables to that program alone.
 - Box doesn't look for your value of a `pass-secret-env` variable in a table of `box.toml`, in the arguments that you type after `run`, or in a file that a workload can read. But for `HOME` and `PATH`, a workload gets no variable from your shell, so it holds such a value only when you put it in one of those places. Box does refuse an `env://NAME` or `secret://NAME` reference to one of these variables, so no route or telemetry target sends the credential out.
 - `policy generate-schema` starts each stdio MCP server to list its tools, and that start has no
   sandbox, with or without a secret source. A server that it starts can read and change the `reads`
-  paths, the program of a source, and each file that its `command` names, and the next run starts
+  paths and the program of a source, and the next run starts
   what the server left there. Run `policy generate-schema` only with servers that you trust as
   yourself.
 - All of this is macOS only. A secret source doesn't load on Linux.

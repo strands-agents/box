@@ -32,7 +32,7 @@ pub(crate) struct SecretSources {
     /// The program path of each declared scheme, as `box.toml` spells it, with each control
     /// character escaped.
     programs: BTreeMap<String, String>,
-    /// The checked program of each declared scheme, and each file that its arguments name.
+    /// The checked program of each declared scheme.
     commands: ConfiguredCommands,
     /// Each telemetry target whose secret a source reads.
     telemetry: Vec<SecretUse>,
@@ -204,7 +204,7 @@ impl SecretSources {
 
     /// Refuse each process table in `tables` that lets a workload go around a source, so that
     /// no source program starts in that configuration: a grant that reaches a path that a
-    /// source protects, and a write grant that can change a file that a source runs.
+    /// source protects, and a write grant that can change the program of a source.
     fn refuse_exposure(
         &self,
         tables: &ProcessTables,

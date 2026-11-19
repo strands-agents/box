@@ -396,15 +396,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
       tool command holds the path as written and the canonical file only; do not widen that
       without approval, because it adds a refusal to a configuration that loads today.
       `each_link_on_the_way_to_a_secret_source_program_is_protected` pins both.
-    - A later element of `command` that is the absolute path of an existing regular file is
-      held as the program is (`ConfiguredCommands::source_files`, `ConfiguredCommand::named_file`),
-      such as a script after an interpreter. It need not be executable. Box must be able to
-      open it: the refusal says ``the file <path>, which its `command` names``, not
-      `configured command`.
-      `a_file_that_a_secret_source_argument_names_is_protected` pins it. Residual: a file that
-      the program loads by itself, a folder, and a path inside a longer argument are not held.
+    - Box holds no file that a later element of `command` names, such as a script after an interpreter, and no file that the program loads by itself. A hold of each argument that is the absolute path of a regular file was built and removed after review: neither shipped plugin names a file, and the hold cannot see a path inside `--config=/x`, a folder, or a file that an interpreter loads. An operator who needs a script makes it the program, which this bullet list protects. Do not add the hold again without approval.
     - `SecretSources::check` then judges each process table (`refuse_exposure`): its lists
-      against the source programs, the argument files, and the `reads` and `deny` paths.
+      against the source programs and the `reads` and `deny` paths.
       Last it writes one line
       for each source. A refusal returns no value, so no program starts and no line names a
       source. `run` and `policy generate-schema` both get their sources from this one order.

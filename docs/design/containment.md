@@ -234,8 +234,7 @@ floors](decisions.md#the-deny-only-floors-run-beneath-every-backend). The floors
   disclosed](decisions.md#direct-filesystem-reach-is-declared-and-disclosed).
 - Box refuses direct writable grants that can overwrite a configured command or replace its path,
   including its symbolic-link route and enclosing directories. The check covers the agent, every
-  tool, and every local MCP server. The program of a declared secret source gets the same check,
-  and so does each file that an argument of that program names.
+  tool, and every local MCP server. The program of a declared secret source gets the same check.
 - Grants cannot reach a path that a declared secret source lists in `reads` or `deny`: the path,
   a path inside it, or a directory that holds it. A write grant also cannot reach the directory
   that holds a symbolic link on the way to one. Each sandbox also denies those paths. A
@@ -737,8 +736,8 @@ one policy engine decides for the whole box. See [the interpreters run in the bo
 process](decisions.md#the-interpreters-run-in-the-trusted-process).
 
 Each one asks policy before it touches a file, then applies the reachable paths check. This check also refuses changes to
-configured tool programs, the programs of declared secret sources and the files that their
-arguments name, the `reads` and `deny` paths of those sources and each symbolic link on the way
+configured tool programs, the programs of declared secret sources,
+the `reads` and `deny` paths of those sources and each symbolic link on the way
 to one, and the installed trusted
 binaries, including changes to their enclosing paths. Before changing a directory, it also scans
 for hard-link names of commands admitted through the startup scan. Reads remain subject to policy.

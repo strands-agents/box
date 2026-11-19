@@ -877,44 +877,6 @@ fn a_grant_over_a_path_of_a_source_is_refused_and_starts_no_program() {
 }
 
 #[test]
-fn a_write_grant_over_an_argument_file_of_a_source_is_refused_and_starts_no_program() {
-    let program = StandIn::new(PRINTER);
-    let entries = crate::record::config::secret_source::tests::entries(
-        &program.table("op", Path::new(SHELL)),
-    );
-    let sources = SecretSources::for_tests(&entries).expect("the program is checked");
-    let folder = toml::Value::String(program.path().display().to_string()).to_string();
-
-    let refusal = sources
-        .refuse_exposure(
-            &agent_beside(
-                &format!("[filesystem]\nread = [{folder}]\nwrite = [{folder}]\n"),
-                &entries,
-            ),
-            &[],
-        )
-        .expect_err("the agent can replace the script that the source runs")
-        .to_string();
-    assert_eq!(
-        refusal,
-        format!(
-            "`[agent]` filesystem entry {:?} is refused: this write grant can change {}, a file \
-             that the `command` of [secret-source.op] names, or its path. Keep each file that a \
-             secret source command names outside every process's write grants",
-            program.path().display().to_string(),
-            program.path().join("program.sh").display()
-        )
-    );
-    sources
-        .refuse_exposure(
-            &agent_beside(&format!("[filesystem]\nread = [{folder}]\n"), &entries),
-            &[],
-        )
-        .expect("a read grant cannot change the script");
-    assert_eq!(program.runs(), 0, "the check starts no program");
-}
-
-#[test]
 fn a_check_for_references_checks_no_table_that_no_reference_reads() {
     let program = StandIn::new(PRINTER);
     // The program of this table does not exist, and the feature is off.

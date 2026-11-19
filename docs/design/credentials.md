@@ -72,9 +72,9 @@ Between two runs, a workload must not replace the program. So Box treats the pro
 a configured tool command. It refuses a write grant that covers the path in `command`, the file
 that the path resolves to, a symbolic link on the way, or a folder that holds one of them. The
 interpreters refuse a change to them. Box makes that check before the program starts for the
-first time, so a box that it refuses never runs the program. A later element of `command` that
-is the absolute path of a file gets the same check, such as a script after an interpreter. The
-check doesn't cover a file that the program loads by itself.
+first time, so a box that it refuses never runs the program. The check covers that one file and
+its path. It doesn't cover a file that the program loads or that an argument names, so a script
+must be the program itself.
 
 A workload must not reach the vault around Box either. The table lists the vault's own paths in
 `reads` and `deny`, and the variables that hold the vault's credential in `pass-secret-env`. In
