@@ -156,9 +156,17 @@ impl ProtectedPath {
         let (resolved, links) = crate::record::layout::resolved_through_links(&written)
             .map_err(|error| refuse(format!("cannot be inspected: {error}")))?;
         if present_only {
-            // A mount covers only a path that is there.
+            // A mount covers only a folder or a regular file that is there.
             match std::fs::metadata(&resolved) {
-                Ok(_) => {}
+                Ok(metadata) if metadata.is_dir() || metadata.is_file() => {}
+                Ok(_) => {
+                    return Err(refuse(format!(
+                        "names {}, which is not a folder or a regular file. On Linux, Box \
+                         protects only a folder or a regular file: name the folder that holds \
+                         it, or remove the entry",
+                        resolved.display()
+                    )));
+                }
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -167,8 +175,8 @@ impl ProtectedPath {
                 {
                     return Err(refuse(format!(
                         "names {}, which does not exist. On Linux, Box protects only a path \
-                         that exists when the box starts: create it, name an existing folder \
-                         above it, or remove the entry",
+                         that exists when the box starts: name an existing folder above it, \
+                         create it, or remove the entry",
                         resolved.display()
                     )));
                 }
@@ -608,8 +616,8 @@ pub(crate) mod tests {
         assert_eq!(protected_paths(&BTreeMap::new()), []);
     }
 
-    /// **An entry whose path is absent is refused by name where only a present path is
-    /// protected**, and a present path keeps its spellings.
+    /// **An entry whose path is absent or is a socket is refused by name where only a present
+    /// folder or file is protected**, and a present folder or file keeps its spellings.
     #[test]
     fn an_entry_whose_path_is_absent_is_refused_where_only_a_present_path_is_protected() {
         let directory = tempfile::tempdir().expect("a home");
@@ -641,7 +649,7 @@ pub(crate) mod tests {
                 format!(
                     "invalid `[secret-source.op]` table: `deny` entry {entry:?} names {}, which \
                      does not exist. On Linux, Box protects only a path that exists when the \
-                     box starts: create it, name an existing folder above it, or remove the entry",
+                     box starts: name an existing folder above it, create it, or remove the entry",
                     named.display()
                 )
             );
@@ -656,6 +664,27 @@ pub(crate) mod tests {
                 path.spellings_on(&home, false).expect("the path is there"),
                 "{entry}"
             );
+        }
+        // A socket, and a link to it: a mount covers a folder or a regular file alone.
+        let _socket =
+            std::os::unix::net::UnixListener::bind(home.join("agent.sock")).expect("a socket");
+        std::os::unix::fs::symlink(home.join("agent.sock"), home.join("linked.sock"))
+            .expect("a link to the socket");
+        for entry in ["~/agent.sock", "~/linked.sock"] {
+            let path = protected(entry);
+            assert_eq!(
+                path.spellings_on(&home, true)
+                    .expect_err("the path is a socket")
+                    .to_string(),
+                format!(
+                    "invalid `[secret-source.op]` table: `deny` entry {entry:?} names {}, which \
+                     is not a folder or a regular file. On Linux, Box protects only a folder or \
+                     a regular file: name the folder that holds it, or remove the entry",
+                    home.join("agent.sock").display()
+                )
+            );
+            path.spellings_on(&home, false)
+                .expect("the other rule protects a socket by its name");
         }
     }
 

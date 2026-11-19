@@ -1755,7 +1755,7 @@ mod tests {
         format!(
             "invalid `[secret-source.op]` table: `{list}` entry {entry:?} names {}, which does \
              not exist. On Linux, Box protects only a path that exists when the box starts: \
-             create it, name an existing folder above it, or remove the entry",
+             name an existing folder above it, create it, or remove the entry",
             named.display()
         )
     }

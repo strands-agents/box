@@ -841,7 +841,7 @@ fn an_absent_path_of_a_source_is_refused_with_no_process_table() {
                 Some(format!(
                     "invalid `[secret-source.op]` table: `reads` entry {:?} names {}, which \
                      does not exist. On Linux, Box protects only a path that exists when the \
-                     box starts: create it, name an existing folder above it, or remove the entry",
+                     box starts: name an existing folder above it, create it, or remove the entry",
                     store.display().to_string(),
                     store.display()
                 )),

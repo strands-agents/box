@@ -1155,7 +1155,7 @@ fn generate_schema_refuses_an_entry_whose_path_is_absent() {
         format!(
             "strands-box: error: invalid `[secret-source.vault]` table: `reads` entry \
              \"~/store\" names {}, which does not exist. On Linux, Box protects only a path that \
-             exists when the box starts: create it, name an existing folder above it, or remove \
+             exists when the box starts: name an existing folder above it, create it, or remove \
              the entry\n",
             home_path.join("store").display()
         )

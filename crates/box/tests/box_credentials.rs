@@ -1472,11 +1472,7 @@ fn an_entry_whose_path_is_absent_stops_the_box_before_a_program_starts() {
     // key comes first, so that it is a key of the `[secret-source.op]` table.
     for (name, entry, made) in [
         ("absent-folder", "~/.op", ".op"),
-        (
-            "absent-below",
-            "~/.cache/vault/socket",
-            ".cache/vault/socket",
-        ),
+        ("absent-below", "~/.cache/vault/store", ".cache/vault/store"),
     ] {
         let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
         let home = std::cell::OnceCell::new();
@@ -1505,8 +1501,8 @@ fn an_entry_whose_path_is_absent_stops_the_box_before_a_program_starts() {
         );
         let expected = format!(
             "invalid `[secret-source.op]` table: `deny` entry {entry:?} names {}, which does not \
-             exist. On Linux, Box protects only a path that exists when the box starts: create \
-             it, name an existing folder above it, or remove the entry",
+             exist. On Linux, Box protects only a path that exists when the box starts: name an \
+             existing folder above it, create it, or remove the entry",
             home.get().expect("the request ran").join(made).display()
         );
         assert!(stderr.contains(&expected), "{name}: {stderr}");
@@ -1519,6 +1515,56 @@ fn an_entry_whose_path_is_absent_stops_the_box_before_a_program_starts() {
         assert_ran(&next);
         assert_eq!(program.runs(), ["read op://Personal/GitHub/token"]);
     }
+}
+
+/// **On Linux, a `reads` or `deny` entry that names a socket stops the box before a program
+/// starts and before Box stores a record**, and the refusal says to name the folder.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_entry_that_names_a_socket_stops_the_box_before_a_program_starts() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+    let route = declared_route("api.example.test", "op://Personal/GitHub/token");
+    // The socket is outside each folder that the table names. The `deny` key comes first, so
+    // that it is a key of the `[secret-source.op]` table.
+    let request = with_vault(
+        "socket-entry",
+        &permit_egress_to("api.example.test", 443),
+        &declared_source(
+            true,
+            &program.path(),
+            &format!("deny = [\"~/.op/agent.sock\"]\n{route}"),
+        ),
+    );
+    let folder = request
+        .operator_home()
+        .canonicalize()
+        .expect("the operator home resolves")
+        .join(".op");
+    std::fs::create_dir(&folder).expect("the folder of the socket");
+    let socket = folder.join("agent.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("a socket of the vault");
+    let (box_, output) = request.attempt();
+    assert_refused(
+        &box_,
+        &output,
+        &[&format!(
+            "invalid `[secret-source.op]` table: `deny` entry \"~/.op/agent.sock\" names \
+             {}, which is not a folder or a regular file. On Linux, Box protects only a folder \
+             or a regular file: name the folder that holds it, or remove the entry",
+            socket.display()
+        )],
+    );
+    assert_eq!(program.runs(), Vec::<String>::new());
+    assert_eq!(
+        std::fs::read_dir(box_.root())
+            .expect("the box directory lists")
+            .count(),
+        0,
+        "the refused run stores nothing"
+    );
 }
 
 /// One table over the refusals an operator is most likely to trip, through the shipped binary.
