@@ -808,8 +808,7 @@ fn timespec(change: TimeChange) -> io::Result<libc::timespec> {
     Ok(specification)
 }
 
-/// The host's `uname(2)` fields, or the Shell's virtual system when the call fails. `uname(2)` has
-/// no operating-system field, so the kernel name stands in for it.
+/// The host's `uname(2)` fields, or the Shell's virtual system when the call fails.
 pub(super) fn uname() -> SystemInfo {
     let mut name = std::mem::MaybeUninit::<libc::utsname>::uninit();
     // SAFETY: name is written before it is read.
@@ -826,7 +825,13 @@ pub(super) fn uname() -> SystemInfo {
     };
     let kernel_name = field(&name.sysname);
     SystemInfo {
-        operating_system: kernel_name.clone(),
+        // `uname(2)` has no operating-system field. GNU's `uname -o` prints `GNU/Linux`, and
+        // macOS's prints the kernel name.
+        operating_system: if cfg!(target_os = "linux") {
+            "GNU/Linux".into()
+        } else {
+            kernel_name.clone()
+        },
         kernel_name,
         node_name: field(&name.nodename),
         kernel_release: field(&name.release),
@@ -860,13 +865,17 @@ mod tests {
     fn the_host_uname_is_what_the_uname_program_prints() {
         let system = uname();
         let printed = std::process::Command::new("uname")
-            .arg("-snrm")
+            .arg("-snrmo")
             .output()
             .expect("run uname");
         assert_eq!(
             format!(
-                "{} {} {} {}\n",
-                system.kernel_name, system.node_name, system.kernel_release, system.machine
+                "{} {} {} {} {}\n",
+                system.kernel_name,
+                system.node_name,
+                system.kernel_release,
+                system.machine,
+                system.operating_system
             ),
             String::from_utf8_lossy(&printed.stdout)
         );
