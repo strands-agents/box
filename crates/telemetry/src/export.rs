@@ -356,17 +356,18 @@ impl TargetExporter {
         match &self.wire {
             Wire::File(handle) => {
                 let line = one_line(request)?;
-                // Waiting for the file stays cancellable; once held, the write runs to its end. The
-                // busy state goes into the task with the lock and drops after it.
-                let file = Arc::clone(handle).lock_owned().await;
+                // Waiting for the file stays cancellable; once held, the write runs to its end, and
+                // the turn moves into the task whole, so the busy state lasts as long as the write.
+                let turn = FileTurn::take(handle, exporting).await;
                 tokio::task::spawn_blocking(move || {
-                    let _exporting = exporting;
-                    let mut file = file;
-                    append(&mut file, &line)
+                    // Bound whole: a closure that named only `turn.file` would leave the busy state
+                    // behind in this frame.
+                    let mut turn = turn;
+                    append(&mut turn.file, &line)
                 })
-                    .await
-                    .map_err(|source| OTelSdkError::InternalFailure(source.to_string()))?
-                    .map_err(|source| OTelSdkError::InternalFailure(source.to_string()))
+                .await
+                .map_err(|source| OTelSdkError::InternalFailure(source.to_string()))?
+                .map_err(|source| OTelSdkError::InternalFailure(source.to_string()))
             }
             Wire::Otlp {
                 base,
@@ -587,6 +588,25 @@ async fn attachment_for(
             "the target's vault governs no credential for its own destination".to_string(),
         )),
         attached => Ok(attached),
+    }
+}
+
+/// The file lock, held together with the busy state of the batch that writes under it.
+///
+/// One value, so code that moves the lock moves the busy state with it.
+struct FileTurn {
+    /// Dropped first, so the file is free before the busy state clears.
+    file: tokio::sync::OwnedMutexGuard<std::fs::File>,
+    _exporting: Option<Arc<Exporting>>,
+}
+
+impl FileTurn {
+    /// Wait for the file, keeping `exporting` alive until the turn ends.
+    async fn take(handle: &Arc<Mutex<std::fs::File>>, exporting: Option<Arc<Exporting>>) -> Self {
+        FileTurn {
+            file: Arc::clone(handle).lock_owned().await,
+            _exporting: exporting,
+        }
     }
 }
 
@@ -819,6 +839,25 @@ mod tests {
         );
     }
 
+    /// **A file turn holds the busy state for exactly as long as it holds the file**, so a relay
+    /// never passes the yield while the box's write still has the file.
+    #[tokio::test]
+    async fn a_file_turn_holds_the_busy_state_as_long_as_the_file() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let file = std::fs::File::create(directory.path().join("records.jsonl")).expect("create");
+        let handle = Arc::new(Mutex::new(file));
+        let backlog = Arc::new(Backlog::default());
+        let exporting = Arc::new(backlog.exporting(*FULL_BATCH));
+
+        let turn = FileTurn::take(&handle, Some(exporting)).await;
+        assert!(backlog.busy(), "the turn keeps the batch busy");
+        assert!(handle.try_lock().is_err(), "the turn holds the file");
+
+        drop(turn);
+        assert!(!backlog.busy(), "the busy state ends with the turn");
+        assert!(handle.try_lock().is_ok(), "the file is free");
+    }
+
     /// A full batch is the size the SDK derives from its variables, so the yield keeps pace with it.
     #[test]
     fn a_full_batch_is_the_size_the_sdk_configures() {
@@ -1023,6 +1062,52 @@ mod tests {
             b"{}\n{}\n",
             "a fragment stayed in the file"
         );
+    }
+
+    /// **A cut export keeps the lane busy until its file write ends**, so a relay cannot pass the
+    /// yield and queue on the file the box's write still holds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cut_export_keeps_the_lane_busy_until_its_write_ends() {
+        use std::io::Read as _;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (target, mut pipe) = stalled_pipe(directory.path());
+        let exporter = Arc::new(TargetExporter::open(&target, Arc::default()).expect("open"));
+        let exporting = Arc::new(exporter.backlog().exporting(*FULL_BATCH));
+        let empty = ExportLogsServiceRequest {
+            resource_logs: Vec::new(),
+        };
+
+        // The box's full batch holds the file inside a write the full pipe blocks; then it is cut,
+        // as the SDK cuts an export at its deadline.
+        let export = {
+            let exporter = Arc::clone(&exporter);
+            tokio::spawn(async move { exporter.attempt("/v1/logs", &empty, Some(exporting)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        export.abort();
+        let _ = export.await;
+        assert!(
+            exporter.yields_to_the_box(),
+            "the write still holds the file, so a relay must still yield"
+        );
+
+        // Empty the pipe, so the held write ends.
+        let mut buffer = [0_u8; 65536];
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while exporter.yields_to_the_box() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the busy state outlived the write"
+            );
+            match pipe.read(&mut buffer) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("empty the pipe: {error}"),
+            }
+        }
     }
 
     /// A relay cancelled while it waits for the file leaves no write behind.

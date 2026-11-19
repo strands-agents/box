@@ -364,13 +364,18 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   size private; `a_full_batch_is_the_size_the_sdk_configures` pins the rule. Nothing pins that `busy`
   clears when the SDK cuts an export at its deadline: that rests on the SDK dropping the export
   future, which drops the guard.
-  **The guard lives with the file lock, not with the export future.** `export_logs` takes the
-  `Exporting` guard and hands an `Arc` of it to each write, and the `Wire::File` arm of `attempt`
-  binds it before the lock so it drops after the lock. Today the future, the lock and the write end
-  together, so no test can tell the two apart. **A change that moves the file write off the future
-  (a `spawn_blocking` that owns the lock guard) must move the guard into that task with the lock**;
-  otherwise a cut export clears `busy` while the write still holds the file, and relays queue on the
-  lock the yield exists to keep free. Found by review on 2026-11-19, reading this PR against #473.
+  **The guard lives with the file write, not with the export future.** `export_logs` takes the
+  `Exporting` guard and hands an `Arc` of it to each write. The `Wire::File` arm of `attempt` takes a
+  `FileTurn`, one value that holds the owned lock guard and the busy guard, and moves it whole into
+  the `spawn_blocking` task that appends the line; its `file` field drops first, so the file is free
+  before `busy` clears. The write outlives a cut export, because the append is uncancellable, so a
+  guard held by the export future would clear `busy` while the write still held the file, and
+  relays would queue on the lock the yield exists to keep free. **The closure binds `turn` whole**:
+  a closure that named only `turn.file` captures that field alone, under edition 2021's disjoint
+  captures, and leaves the busy guard in the async frame. `a_cut_export_keeps_the_lane_busy_until_its_write_ends`
+  (a full batch's write blocked on a full FIFO, then cut) and
+  `a_file_turn_holds_the_busy_state_as_long_as_the_file` are the pins. Found by review on
+  2026-11-19, reading this PR against #473, which made the append uncancellable.
   **`a_flood_of_relayed_payloads_loses_no_decision` is the pin**, and it was the property's first one:
   200 concurrent posts land while 200 decisions are submitted, and every decision must reach the file.
   Its scope is the relay path, because the decision count stays inside the queue's own capacity — so it
