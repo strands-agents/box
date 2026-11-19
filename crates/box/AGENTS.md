@@ -242,7 +242,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   containment, and it sat inside the project where the starter policy permits `fs:write` — so a
   workload wrote an entry, the next `run` materialized an alias, and `shell:spawn` decided a
   program the *workload* picked. `box.toml` was already defended.
-  `policy::SELF_DEFENDED_FILES` is two entries for the same reason.
+  `policy.dw` is the second authority file, and both are protected by identity in
+  `run::contain::boundary::protect_authorities`.
 - **`ConfigureRequest` is the interface; `ConfigFile` is the wire record.** `ConfigureRequest` is the
   validated four-input request that composition consumes, and `Record` is what `configure` stores.
   `ConfigFile`/`EgressEntry` are the private `Deserialize` shapes and hold strings. Keep the serde
@@ -1260,8 +1261,8 @@ Do not treat any of these as settled by the code existing.
   encloses `box_dir` is refused, which was the same defect reached through a home rather than a grant.
 
   What still holds, and what a reader must not over-read from it: a box cannot reach its **own**
-  private tree, `~/.strands-box`, or the machine state; and both `SELF_DEFENDED_FILES` stay protected
-  by identity rather than by path, so the *authored* config and policy of a running box are refused
+  private tree, `~/.strands-box`, or the machine state; and both authority files, `box.toml` and `policy.dw`, stay
+  protected by identity rather than by path, so the *authored* config and policy of a running box are refused
   even when the file is reachable.
 - **The telemetry destination guard narrowed with it.** `record/config/telemetry.rs` refuses a
   destination inside **this** `box_dir` outside `private/`; it used to refuse one inside any box's

@@ -222,10 +222,12 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   when it is not. This is the existence-oracle class on host binds. Give one reason for every
   refusal of a path the caller may not reach.
 - `SELF_DEFENDED_FILES` is `["box.toml", "policy.dw"]`. It is a public export that nothing in the
-  workspace reads, so an entry defends nothing. The box defends its record and policy by the
-  authority-directory subtraction
-  (`a_project_entry_subtracts_the_directory_holding_this_boxs_authority`), not by this list.
-  `box/src/record/layout.rs` names the same two files as `RECORD_FILE` and `POLICY_FILE`.
+  workspace reads, so an entry defends nothing. The box pins each loaded authority source by
+  identity in `run::contain::boundary::protect_authorities`. A tree grant that strictly encloses the
+  directory holding that source also has the directory subtracted
+  (`a_project_entry_subtracts_the_directory_holding_this_boxs_authority`). The private copies,
+  `RECORD_FILE` and `POLICY_FILE` in `box/src/record/layout.rs`, are refused by
+  `require_private_state_absent`.
 - Raise three legs for a `FilesystemPair`: the source as the pair operation, the source as
   `fs:read_content`, and the destination. Do not reduce it to two. A rename whose destination
   exists raises a fourth, `fs:delete` on the destination, because the rename removes what it held.

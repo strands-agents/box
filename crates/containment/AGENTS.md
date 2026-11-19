@@ -557,7 +557,7 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     that tree by guessing names where before it enumerated only the top level. `access(F_OK)` on a
     present descendant succeeds; contents, metadata values and `readdir` stay refused.
     **`<workspace>/.strands-box/box.toml` and its policy are in that set** — the two
-    `policy::SELF_DEFENDED_FILES` — so their presence is disclosed and their bytes are not. Guards:
+    authority files, `box.toml` and `policy.dw` — so their presence is disclosed and their bytes are not. Guards:
     `a_dir_grant_inside_the_operator_home_reaches_its_own_entries` and
     `an_entry_of_a_granted_directory_answers_and_an_ungranted_sibling_does_not`. Removing the position
     clause fails both; an unconditional `subpath` fails six, including three pre-existing kernel pins.
