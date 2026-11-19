@@ -1116,13 +1116,11 @@ fn the_shim_image_name_is_not_on_the_workloads_path() {
 /// around the only governed one the box has. Its one route is the gateway, which
 /// judges a Shell `curl` under the same `net:*` policy as workload traffic. `PERMISSIVE_POLICY`
 /// grants no `net:*`, so the gateway refuses the CONNECT before any network is touched: the
-/// routed request fails at send with exit **6** and no origin body.
+/// routed request fails with the gateway's `policy denied` reason, exit 1, and no origin body.
 ///
-/// The exit code pins the gateway as the cause and rules out the vacuous alternatives. Exit 6 is
-/// the transport-error code, reached only after `curl` ran and the routed request left for the
-/// proxy. A missing builtin exits 127, a denied exec 126, and the two `PermissionDenied` floors —
-/// the Shell's own SSRF floor and a disabled network — exit 1 with `access denied` or `network
-/// access disabled`. `-sS` keeps the error visible; `-s` alone hides it. A live positive control
+/// The text pins the gateway as the cause and rules out the vacuous alternatives. A missing
+/// builtin exits 127, a denied exec 126, and the two Shell floors — its own SSRF floor and a
+/// disabled network — exit 1 with `access denied` or `network access disabled`. `-sS` keeps the error visible; `-s` alone hides it. A live positive control
 /// would need a public host, because the SSRF floor blocks the loopback a local upstream binds,
 /// and this suite otherwise reaches no external network.
 #[test]
@@ -1139,17 +1137,14 @@ fn the_shims_shell_has_no_network_path() {
     // exits non-zero, the failure is the gateway's own CONNECT refusal
     // (NOT the shell kernel's `disable_network` fallback or the SSRF
     // floor), and nothing that looks like a response body comes back.
-    // Linux (namespace launcher) exits 6 through the gateway; macOS
-    // (Seatbelt) exits with a different code through the same gateway;
-    // both satisfy the bound. Naming the exact Linux exit as the
-    // positive check made the assertion Linux-only, while the security
-    // property held on both platforms.
+    // Both platforms refuse through the same gateway; the exit code is
+    // not the positive check, because it differed by platform while the
+    // security property held on both.
     assert!(
         seen.contains("status=") && !seen.contains("status=0"),
         "the routed curl must fail at the egress boundary — refused by the box's gateway, \
          not by the shell kernel's `disable_network` fallback, and not by a missing curl. \
-         Linux exits with the transport-error 6; macOS (Seatbelt) exits with a different \
-         code, and both satisfy this bound. A `status=0` would mean egress escaped, a \
+         A `status=0` would mean egress escaped, a \
          missing `status=` would mean the shim did not run curl at all: {output:?}"
     );
     assert!(
@@ -1158,6 +1153,10 @@ fn the_shims_shell_has_no_network_path() {
             && !seen.contains("command not found"),
         "the failure must be the gateway's CONNECT refusal, not a disabled network, the SSRF \
          floor, or a missing curl: {output:?}"
+    );
+    assert!(
+        seen.contains("curl: policy denied this operation on 'example.com:443'"),
+        "the gateway's refusal reason must reach the workload: {output:?}"
     );
     assert!(
         !seen.contains("<html") && !seen.contains("<!doctype") && !seen.contains("Example Domain"),
