@@ -810,7 +810,8 @@ mod tests {
             })
             .await;
         written.store(true, std::sync::atomic::Ordering::Release);
-        next.expect("the next record is written");
+        // `fsync` on a pipe is `EINVAL` on Linux, so the pipe's bytes are the evidence, not the result.
+        let _ = next;
 
         let written = reader.join().expect("the pipe is read");
         assert_eq!(written.last(), Some(&b'\n'), "the pipe ends inside a line");
