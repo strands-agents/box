@@ -69,8 +69,8 @@ impl StandIn {
     }
 }
 
-/// The sources of the `[secret-source.<scheme>]` tables in `text`, on a protected operating
-/// system with the feature on, with each program file checked and no table judged.
+/// The sources of the `[secret-source.<scheme>]` tables in `text`, with the feature on, with each
+/// program file checked and no table judged.
 pub(crate) fn sources(text: &str) -> Result<SecretSources, BoxError> {
     SecretSources::for_tests(&crate::record::config::secret_source::tests::entries(text))
 }
@@ -81,15 +81,15 @@ impl SecretSources {
         &self.backend
     }
 
-    /// The sources of `entries` on a protected operating system, with the feature on, with each
-    /// program file checked and no table judged.
+    /// The sources of `entries`, with the feature on, with each program file checked and no table
+    /// judged.
     pub(crate) fn for_tests(
         entries: &BTreeMap<String, SecretSourceEntry>,
     ) -> Result<Self, BoxError> {
         Self::open(entries, DeclaredSources::for_tests(entries))
     }
 
-    /// [`check`](Self::check) of `record` on a protected operating system, with the feature on.
+    /// [`check`](Self::check) of `record`, with the feature on.
     pub(crate) fn check_for_tests(
         record: &Record,
         disclosure: impl std::io::Write,
@@ -814,6 +814,48 @@ fn a_write_grant_over_a_source_program_is_refused_and_starts_no_program() {
     let (sources, lines) = checked("", &agent_writes(&link));
     sources.expect("no source, no judgement");
     assert_eq!(lines, "");
+    assert_eq!(program.runs(), 0, "the check starts no program");
+}
+
+/// **The check refuses an entry whose path is absent in a configuration with no process table**,
+/// where only a present path is protected, and it names no source and starts no program.
+#[test]
+fn an_absent_path_of_a_source_is_refused_with_no_process_table() {
+    let program = StandIn::new(PRINTER);
+    let store = program.path().join("store");
+    let table = format!(
+        "{}reads = [{}]\n",
+        program.table("op", Path::new(SHELL)),
+        toml::Value::String(store.display().to_string())
+    );
+    let line = format!(
+        "strands-box: [secret-source.op]: reads each op:// secret with {SHELL}, which runs \
+         outside every sandbox\n"
+    );
+
+    let (sources, lines) = checked(&table, &no_tables());
+    if cfg!(target_os = "linux") {
+        assert_eq!(
+            (sources.err(), lines),
+            (
+                Some(format!(
+                    "invalid `[secret-source.op]` table: `reads` entry {:?} names {}, which \
+                     does not exist. On Linux, Box protects only a path that exists when the \
+                     box starts: create it, name an existing folder above it, or remove the entry",
+                    store.display().to_string(),
+                    store.display()
+                )),
+                String::new()
+            )
+        );
+    } else {
+        sources.expect("a path that is absent is protected by its name");
+        assert_eq!(lines, line);
+    }
+    std::fs::create_dir(&store).expect("the folder is made");
+    let (sources, lines) = checked(&table, &no_tables());
+    sources.expect("the path is there");
+    assert_eq!(lines, line);
     assert_eq!(program.runs(), 0, "the check starts no program");
 }
 

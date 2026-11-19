@@ -210,8 +210,8 @@ pub(crate) fn direct_grants(
     }
     require_no_overlap(&grants, context)?;
 
-    // Each path that a secret source protects is refused to the process, whether or not it is
-    // there, so no cell that Box adds beneath the lists reaches it.
+    // Each path that a secret source protects is refused to the process, so no cell that Box
+    // adds beneath the lists reaches it. macOS refuses a path that is not there too.
     for path in protected.iter().flat_map(|(_, spellings, _)| spellings) {
         if refusals.iter().any(|refusal| &refusal.path == path) {
             continue;
@@ -1749,6 +1749,17 @@ mod tests {
         )
     }
 
+    /// The refusal on Linux of the `list` entry `entry` of the source `op`, which names the
+    /// absent path `named`.
+    fn absent_refusal(list: &str, entry: &str, named: &Path) -> String {
+        format!(
+            "invalid `[secret-source.op]` table: `{list}` entry {entry:?} names {}, which does \
+             not exist. On Linux, Box protects only a path that exists when the box starts: \
+             create it, name an existing folder above it, or remove the entry",
+            named.display()
+        )
+    }
+
     /// **No grant reaches a path that a secret source protects**: the path itself, a path inside
     /// it, or a folder that holds it, in each list that authorizes.
     #[test]
@@ -1888,12 +1899,18 @@ mod tests {
         );
     }
 
-    /// **Each process is refused each path of a secret source**, also a process with no list and a
-    /// path that is absent, and no source means no refusal.
+    /// **Each process is refused each path of a secret source**, also a process with no list,
+    /// and no source means no refusal.
     #[test]
     fn each_process_is_refused_each_path_of_a_secret_source() {
         let fixture = Fixture::new();
         let home = &fixture.home;
+        // Linux refuses an entry whose path is not there, so there each path is a folder.
+        if cfg!(target_os = "linux") {
+            for folder in [".op", "scratch/later/socket"] {
+                std::fs::create_dir_all(home.join(folder)).expect("a path of the vault");
+            }
+        }
         let paths = [
             protected("op", "reads", "~/vendor/sdk"),
             protected("op", "reads", "~/.op"),
@@ -1926,8 +1943,8 @@ mod tests {
         );
     }
 
-    /// **A path of a secret source that is absent is still protected**: a grant that names it, or a
-    /// folder above it, is refused by its spelling.
+    /// **macOS protects an absent path of a secret source by its spelling, and Linux refuses its
+    /// entry.**
     #[test]
     fn a_grant_that_reaches_an_absent_path_of_a_secret_source_is_refused() {
         let fixture = Fixture::new();
@@ -1940,6 +1957,31 @@ mod tests {
             source_paths: &paths,
             ..fixture.context()
         };
+        if cfg!(target_os = "linux") {
+            let refusal = absent_refusal("reads", "~/.op", &home.join(".op"));
+            assert_eq!(fixture.refusal(&context, "read = ['~/notes']"), refusal);
+            assert_eq!(
+                direct_grants(&Filesystem::default(), &context)
+                    .expect_err("the path is not there")
+                    .to_string(),
+                refusal
+            );
+            // With the first path there, the refusal names the next one, and then each list
+            // is judged.
+            std::fs::create_dir(home.join(".op")).expect("the folder of the vault");
+            assert_eq!(
+                fixture.refusal(&context, "read = ['~/notes']"),
+                absent_refusal(
+                    "deny",
+                    "~/scratch/later/socket",
+                    &home.join("scratch/later/socket")
+                )
+            );
+            std::fs::create_dir_all(home.join("scratch/later/socket"))
+                .expect("the path of the socket");
+            fixture.reach(&context, "read = ['~/notes']");
+            return;
+        }
         assert_eq!(
             fixture.refusal(&context, "read = ['~/.op']"),
             source_refusal("~/.op", &home.join(".op"), "op", "reads", "~/.op"),
@@ -2037,6 +2079,14 @@ mod tests {
                 source_paths: &paths,
                 ..fixture.context()
             };
+            // Linux refuses an entry whose link names a target that is not there.
+            if cfg!(target_os = "linux") {
+                assert_eq!(
+                    fixture.refusal(&context, "read = ['~/notes']"),
+                    absent_refusal("deny", entry, &home.join(target))
+                );
+                continue;
+            }
             assert_eq!(
                 fixture.refusal(&context, "read = ['~/group']"),
                 source_refusal("~/group", &home.join(target), "op", "deny", entry)
@@ -2069,6 +2119,13 @@ mod tests {
                 source_paths: &paths,
                 ..fixture.context()
             };
+            if cfg!(target_os = "linux") && !home.join(target).exists() {
+                assert_eq!(
+                    fixture.refusal(&context, "read = ['~/notes']"),
+                    absent_refusal("reads", entry, &home.join(target))
+                );
+                continue;
+            }
             assert_eq!(
                 fixture.refusal(&context, "read = ['~/dotfiles']\nwrite = ['~/dotfiles']"),
                 format!(
@@ -2103,7 +2160,7 @@ mod tests {
         );
 
         // Two paths that are absent have no file to compare, so each one is compared as it
-        // resolves: a link in the entry, and a link in the grant.
+        // resolves: a link in the entry, and a link in the grant. Linux refuses the entry.
         for (entry, authored) in [
             ("~/linked/later", "~/vendor/later"),
             ("~/vendor/later", "~/linked/later"),
@@ -2113,6 +2170,13 @@ mod tests {
                 source_paths: &paths,
                 ..fixture.context()
             };
+            if cfg!(target_os = "linux") {
+                assert_eq!(
+                    fixture.refusal(&context, &format!("read = [{authored:?}]")),
+                    absent_refusal("deny", entry, &home.join("vendor/later"))
+                );
+                continue;
+            }
             assert_eq!(
                 fixture.refusal(&context, &format!("read = [{authored:?}]")),
                 source_refusal(authored, &home.join("vendor/later"), "op", "deny", entry)

@@ -858,7 +858,6 @@ fn generate_schema_composes_lowered_remote_mcp_tools() {
 
 /// **`policy generate-schema` reads a remote MCP server's secret through its declared source**:
 /// the program runs once, each discovery request carries the secret, and no artifact holds it.
-#[cfg(target_os = "macos")]
 #[test]
 fn generate_schema_reads_a_remote_mcp_secret_through_its_declared_source() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -946,7 +945,6 @@ fn generate_schema_reads_a_remote_mcp_secret_through_its_declared_source() {
 
 /// **`policy generate-schema` checks no program when no server names a declared scheme**: a
 /// declaration whose program is absent does not stop it, and it prints no line.
-#[cfg(target_os = "macos")]
 #[test]
 fn generate_schema_checks_no_program_when_no_server_names_a_declared_scheme() {
     let home = tempfile::tempdir().expect("an operator home");
@@ -981,7 +979,6 @@ fn generate_schema_checks_no_program_when_no_server_names_a_declared_scheme() {
 
 /// **`policy generate-schema` starts no source program that a write grant covers**: the refusal
 /// names the grant and the program, and the program does not run.
-#[cfg(target_os = "macos")]
 #[test]
 fn generate_schema_refuses_a_write_grant_over_a_source_program() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -1043,7 +1040,6 @@ fn generate_schema_refuses_a_write_grant_over_a_source_program() {
 
 /// **`policy generate-schema` starts no source program in a configuration that lets a workload
 /// go around the source**: a grant that reaches a path of the source.
-#[cfg(target_os = "macos")]
 #[test]
 fn generate_schema_refuses_a_table_that_exposes_a_secret_source() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -1103,9 +1099,87 @@ fn generate_schema_refuses_a_table_that_exposes_a_secret_source() {
     assert!(!runs.exists(), "the program must not start");
 }
 
+/// **On Linux, `policy generate-schema` starts no source program while a path that the source
+/// protects is absent**, in a configuration with no process table, and the same command reads
+/// the secret when the path is there.
+#[cfg(target_os = "linux")]
+#[test]
+fn generate_schema_refuses_an_entry_whose_path_is_absent() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = tempfile::tempdir().expect("an operator home");
+    let home_path = home.path().canonicalize().expect("the home resolves");
+    let directory = home_path.join("schemas");
+    let program = home_path.join("vault-stand-in");
+    let runs = home_path.join("runs");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\necho run >> '{}'\nprintf 'secret\\n'\n",
+            runs.display()
+        ),
+    )
+    .expect("write the stand-in program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("make the stand-in program executable");
+    let tools = json!([{"name": "inspect", "inputSchema": {"type": "object"}}]);
+    let (destination, _requests) = remote_mcp_server(tools);
+    std::fs::write(
+        home_path.join("box.toml"),
+        format!(
+            "name = \"schema\"\nbox_dir = \"/nonexistent/schema-generation\"\n\
+             [experimental-features]\nsecret-sources = true\n\
+             [secret-source.vault]\nprotocol = \"box.secret-source.v1\"\n\
+             command = [{:?}, \"read\", \"{{ref}}\"]\nreads = [\"~/store\"]\n\
+             [mcp.remote]\ntype = \"http\"\ndestinations = [\"{destination}\"]\n\
+             secret.ref = \"vault://team/remote\"\nsecret.env = \"REMOTE_TOKEN\"\n",
+            program.display().to_string()
+        ),
+    )
+    .expect("write box.toml");
+    let generate = || {
+        Command::new(box_binary())
+            .args(["policy", "generate-schema", "--config", "box.toml"])
+            .arg("--output-dir")
+            .arg(&directory)
+            .env("HOME", &home_path)
+            .current_dir(&home_path)
+            .output()
+            .expect("run the schema command")
+    };
+
+    let output = generate();
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "strands-box: error: invalid `[secret-source.vault]` table: `reads` entry \
+             \"~/store\" names {}, which does not exist. On Linux, Box protects only a path that \
+             exists when the box starts: create it, name an existing folder above it, or remove \
+             the entry\n",
+            home_path.join("store").display()
+        )
+    );
+    assert!(!runs.exists(), "the program must not start");
+    assert!(!directory.join("actions.cedarschema").exists());
+
+    // The same configuration reads the secret when the path is there.
+    std::fs::create_dir(home_path.join("store")).expect("create the folder of the vault");
+    let output = generate();
+    assert!(
+        output.status.success(),
+        "schema generation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&runs).expect("the program ran"),
+        "run\n"
+    );
+    assert!(directory.join("actions.cedarschema").exists());
+}
+
 /// **`policy generate-schema` refuses a placement that discovery cannot use before it starts
 /// the program** of the secret source that holds that secret.
-#[cfg(target_os = "macos")]
 #[test]
 fn generate_schema_refuses_a_placement_before_it_starts_the_program() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -1163,7 +1237,6 @@ fn generate_schema_refuses_a_placement_before_it_starts_the_program() {
 
 /// **A secret source that fails stops `policy generate-schema` before a stdio server starts**,
 /// and the refusal names the server.
-#[cfg(target_os = "macos")]
 #[test]
 fn generate_schema_stops_when_a_declared_source_returns_no_secret() {
     use std::os::unix::fs::PermissionsExt as _;

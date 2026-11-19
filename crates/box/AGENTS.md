@@ -321,10 +321,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   It names the host program that reads the secret of a reference in that scheme, and it permits no
   request. `record::config::secret_source` owns the table. Keep each part:
   - `DeclaredSources::check` is the one check, on load and on record read. Its order is the
-    operating system (macOS only, until protection for Linux exists), the
     `[experimental-features] secret-sources` switch, the scheme, the `protocol` key, the
     `credentials::SecretSourceCommand` constructor, and the shape of `reads` and `deny`. Do not
-    restate a rule that the constructor owns.
+    restate a rule that the constructor owns. It reads no file, on each operating system: a stored record must stay readable for `ls`, `stop`, and `rm` when a path goes away.
   - An entry's own rules need no declarations: `SecretScheme::Declared` is each scheme that
     `SecretSourceCommand::check_scheme` accepts. `validate_pairs` holds the rules that need them:
     a scheme that no table declares, a reference to a `pass-secret-env` variable, one
@@ -382,7 +381,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
       accessor, and do not make `open`, `refuse_exposure`, `disclose`, or `fetch` visible outside
       the module. A wrong order is then a compile error, which no test can show, so
       `only_the_check_builds_the_sources_and_only_they_read` pins the list of doors.
-    - `SecretSources::check` first loads each program through `ConfiguredCommand::load`, the
+    - `SecretSources::check` first resolves each `reads` and `deny` entry (`ProtectedPath::spellings`), which on Linux refuses an entry whose path is absent. It does so for each configuration that declares a source, also one with no process table, whose lists nothing judges. `an_absent_path_of_a_source_is_refused_with_no_process_table` and `generate_schema_refuses_an_entry_whose_path_is_absent` pin it.
+    - `SecretSources::check` next loads each program through `ConfiguredCommand::load`, the
       check of a configured tool command, and gives the opened file to
       `credentials::Backend::declared`. A configuration with no declaration gets
       `Backend::local()`.
@@ -510,8 +510,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
       path under `/private/var` for an entry under `/var`.
     - `direct_grants` also gives each process a `Refusal` on each spelling of each protected
       path, with no pinned identity. The sandbox then denies the path under the cells that Box
-      adds itself, under a tool's discovery of the home, and when the path appears after the box
-      starts. An absent path is not an error. Do not pin an identity there: a vault program can
+      adds itself, under a tool's discovery of the home, and on macOS when the path appears after the box
+      starts. On macOS an absent path is not an error. Do not pin an identity there: a vault program can
       make its socket again during a run, and a pinned one would refuse the next spawn.
     - `DeclaredSources::check` refuses an entry with a `..` component, a second `/` after `~`,
       a control character, or a character that a filesystem list refuses (`*`, `?`, `[`, `]`,
@@ -524,8 +524,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     - `ProtectedPath::spellings` is the one place that expands and resolves an entry.
       `filesystem::under_home` owns the `~` rule for it and for
       `expand_home`.
-    - On Linux, an absent protected path has no lowering, and `require_interpreter_route`
-      cannot resolve it. Decide both before a declaration loads there.
+    - **On Linux, `ProtectedPath::spellings` refuses an entry whose path is absent** after each link, and names the table and the entry. A mount covers only a path that exists, and `require_interpreter_route` resolves each refusal when a script starts. Both callers get the rule: `SecretSources::check`, before `initialize_first_use`, and `direct_grants`, at each judgement of a list. So a refused first run stores nothing, and the same box directory starts after the operator makes the path. `an_entry_whose_path_is_absent_stops_the_box_before_a_program_starts` pins that through the binary. macOS keeps an absent path and protects it by its name. Keep the rule out of `DeclaredSources::check`, which reads no file.
+    - Residuals on Linux, each measured in a real sandbox. A path that goes away during a run stops the start of a tool or a stdio MCP server whose program is a script (`interpreter /bin/bash cannot resolve denied path`), and a tool whose program is a binary still starts. A path under a folder that Box adds to a sandbox itself, such as `/usr/share/zoneinfo`, that a host process removes and makes again is readable in a sandbox that already runs. The agent reads a protected file through `/etc/localtime` when that cell is a link to the file, as it does for a `deny` entry of its own list: remove this sentence and the one in `docs/user/config.md` and `docs/design/limitations.md` with the fix of that defect. `a_tool_reads_an_empty_file_in_place_of_a_protected_file` pins the cover of a path inside a folder that Box adds to a sandbox itself. An entry for a path that a machine does not have stops each box there, so a tool that writes `box.toml` for many machines must name only paths that exist there.
   - **Box does not look for the operator's value of a `pass-secret-env` variable in a process table.** `credentials` passes those variables to the source program alone, and a workload gets no variable of the operator but `HOME` and `PATH`, which no exact `pass-secret-env` entry can name. So a workload holds such a value only when the operator, or a tool that writes `box.toml`, puts the value in a table. A compare of each `env` value and `command` element with those values was built and removed after review: it caught that one mistake, it missed a value in another encoding, and it kept a copy of each credential in memory for the check. Do not add it again without approval. `box_credentials.rs::a_workload_holds_a_placeholder_under_the_name_of_a_vault_credential` pins that the program gets the value and the workload does not.
   - The `pass-secret-env` refusal covers `env://NAME` and `secret://NAME` only. A bare `aws://`
     route signs with the ambient AWS identity, also when a `pass-secret-env` entry names an AWS

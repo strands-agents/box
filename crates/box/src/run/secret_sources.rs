@@ -3,7 +3,7 @@
 //!
 //! | Step | Owner |
 //! |---|---|
-//! | Check each program file, refuse a table that lets a workload go around a source, and name each source on stderr | [`SecretSources::check`] |
+//! | Refuse a path that this operating system cannot protect, check each program file, refuse a table that lets a workload go around a source, and name each source on stderr | [`SecretSources::check`] |
 //! | Read the secret of each telemetry target, and state each outcome | [`SecretSources::fetch_telemetry`] |
 //! | Read each other secret, and state each outcome | [`TelemetrySecrets::fetch_routes`] |
 //! | Drop each held secret after the vaults open | [`RouteSecrets`], which the vaults consume |
@@ -15,8 +15,11 @@ use credentials::{Backend, Locator};
 
 use crate::error::{BoxError, ConfigError};
 use crate::record::config::egress::EgressEntry;
-use crate::record::config::secret_source::{DeclaredSources, SecretSourceEntry, routed_scheme};
+use crate::record::config::secret_source::{
+    DeclaredSources, SecretSourceEntry, protected_paths, routed_scheme,
+};
 use crate::record::config::{AuthoritySource, ProcessTables, Record};
+use crate::record::layout::{canonical, operator_home_directory};
 use crate::run::commands::ConfiguredCommands;
 use crate::run::contain::boundary::judge_lists;
 use crate::run::telemetry::{ControlOperation, ControlRecord};
@@ -87,9 +90,10 @@ impl Fetched {
 }
 
 impl SecretSources {
-    /// Check the program file of each `[secret-source.<scheme>]` table of `record`, refuse each
-    /// process table that lets a workload go around a source, and write one line for each source
-    /// to `disclosure`.
+    /// Refuse a `reads` or `deny` path that this operating system cannot protect, check the
+    /// program file of each `[secret-source.<scheme>]` table of `record`, refuse each process
+    /// table that lets a workload go around a source, and write one line for each source to
+    /// `disclosure`.
     pub(crate) fn check(
         record: &Record,
         protected_sources: &[AuthoritySource],
@@ -131,8 +135,8 @@ impl SecretSources {
         Self::checked(entries, declared, tables, &[], disclosure).map(SchemaSecrets)
     }
 
-    /// The one order of the check, which each constructor follows: the program files, the
-    /// process tables, then the lines.
+    /// The one order of the check, which each constructor follows: the protected paths, the
+    /// program files, the process tables, then the lines.
     fn checked(
         entries: &BTreeMap<String, SecretSourceEntry>,
         declared: DeclaredSources,
@@ -140,6 +144,13 @@ impl SecretSources {
         protected_sources: &[AuthoritySource],
         disclosure: impl std::io::Write,
     ) -> Result<Self, BoxError> {
+        // Also for a configuration with no process table, whose lists nothing judges.
+        if !entries.is_empty() {
+            let home = canonical(&operator_home_directory()?);
+            for path in protected_paths(entries) {
+                path.spellings(&home)?;
+            }
+        }
         let sources = Self::open(entries, declared)?;
         sources.refuse_exposure(tables, protected_sources)?;
         sources
