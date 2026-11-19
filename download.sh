@@ -7,8 +7,7 @@
 #
 # It does not install anything: nothing is copied to a system directory, your
 # PATH is not changed, and no shell startup file is edited. To run the box,
-# call the downloaded binary by path. Linux x86-64 requires
-# EXPERIMENTAL_X86_SUPPORT=TRUE when running box run.
+# call the downloaded binary by path.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
@@ -171,12 +170,7 @@ log "Downloaded box ${VERSION} (${platform}) into ${DOWNLOAD_DIR}."
 log "Nothing was installed: your PATH and system directories are untouched."
 log ""
 log "Write a box.toml and a policy, then run the box by path:"
-if [ "$package" = linux-x86_64 ]; then
-    log "Linux x86-64 support is experimental. Enable it for this command:"
-    log "  EXPERIMENTAL_X86_SUPPORT=TRUE ${DOWNLOAD_DIR}/box run --config ./box.toml"
-else
-    log "  ${DOWNLOAD_DIR}/box run --config ./box.toml"
-fi
+log "  ${DOWNLOAD_DIR}/box run --config ./box.toml"
 
 if [ "$host_os" = Darwin ]; then
     "${DOWNLOAD_DIR}/box" --version 2>/dev/null || true

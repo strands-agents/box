@@ -174,7 +174,7 @@ exec "$1" "$2"
                 self.assertNotIn("unknown", result.stderr)
                 self.assertNotIn("EXPERIMENTAL_X86_SUPPORT", result.stderr)
 
-    def test_linux_x86_64_aliases_download_without_enabling_runtime(self):
+    def test_linux_x86_64_aliases_download_without_a_runtime_opt_in(self):
         self.env.pop("EXPERIMENTAL_X86_SUPPORT", None)
         for version in ("v1.2.3", "v9.9.9"):
             program = ("#!/bin/sh\n"
@@ -205,8 +205,10 @@ exec "$1" "$2"
                         self.assertEqual(self.urls(), expected)
                         self.assertIn(f"fixture {version} box x86_64", result.stdout)
                         self.assertIn("(Linux x86-64)", result.stderr)
+                        self.assertNotIn("EXPERIMENTAL_X86_SUPPORT", result.stderr)
+                        self.assertNotIn("experimental", result.stderr.lower())
                         self.assertIn(
-                            f"EXPERIMENTAL_X86_SUPPORT=TRUE {self.destination}/box run --config ./box.toml",
+                            f"{self.destination}/box run --config ./box.toml",
                             result.stderr,
                         )
 

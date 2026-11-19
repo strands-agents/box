@@ -33,7 +33,6 @@ Signed macOS release artifacts include the experiment's code; unsigned build art
 ### Linux ARM64 requirements
 
 Linux x86-64 builds refuse this feature during configuration validation, before creating Box state or starting a workload.
-The `EXPERIMENTAL_X86_SUPPORT` environment variable enables the x86 baseline only; it does not enable native filesystem policy.
 
 The host must support seccomp user notifications, descriptor injection, BPF Linux Security Module hooks, and BPF type information.
 BPF lets Box attach the checks that prevent delete and rename from affecting a replacement file.
@@ -208,7 +207,9 @@ A [telemetry target](config.md#telemetrylabel) that uses `accepts`, `headers`, `
 `secret.placement`, a vendor kind, or an `aws://` or `credsd://` secret requires record version 36.
 Setting [`monty`](config.md#monty) to `false` requires record version 37.
 A box whose agent, tool, or local MCP server declares a [`deny_write`](config.md#agentfilesystem-and-toolnamefilesystem) list requires record version 38.
-Setting `executable-memory` for any process requires record version 39.
+A [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table, or a `secret.env` key on a route or a
+remote MCP server, requires record version 39.
+Setting `executable-memory` for any process requires record version 40.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 

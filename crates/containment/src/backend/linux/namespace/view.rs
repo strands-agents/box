@@ -78,6 +78,9 @@ pub(crate) struct MountEntry {
 #[derive(Debug)]
 pub(crate) struct MountView {
     entries: Vec<MountEntry>,
+    /// Each link at the top of the view, as `(name, link text)`: the host's own `/bin -> usr/bin`
+    /// and its kin, which reach only what the entries bind.
+    root_links: Vec<(PathBuf, PathBuf)>,
     protected_parents: BTreeSet<PathBuf>,
     grant_identities: BTreeMap<PathBuf, ObjectIdentity>,
     grant_pins: Vec<ObjectPin>,
@@ -88,6 +91,11 @@ pub(crate) struct MountView {
 impl MountView {
     /// Plan the view from a request, without touching any namespace.
     pub(crate) fn plan(config: &ContainmentConfig) -> Result<Self, ContainmentError> {
+        // A script names its interpreter by the host's spelling, such as `#!/bin/sh`. The view
+        // copies the host's top-level links into `/usr` and mounts every path written through one
+        // at its `/usr` name, so `/bin/sh` resolves wherever `/usr/bin/sh` is bound.
+        let host_links = host_usr_links();
+        let in_view = |path: &Path| view_spelling(path, &host_links);
         let mut grant_identities = BTreeMap::new();
         for granted in config.authorizations() {
             if let Some(identity) = granted.identity
@@ -187,7 +195,7 @@ impl MountView {
             // A pathname socket grant needs the socket *file* present, or `connect(2)` fails with
             // `ENOENT` before any authorization is consulted. Brought in writable.
             if granted.operation == Operation::Connect {
-                for target in granted.reachable_paths() {
+                for target in granted.reachable_paths().iter().map(|path| in_view(path)) {
                     if dedup.insert(target.clone()) {
                         entries.push(MountEntry {
                             source: Some(resolved.clone()),
@@ -217,14 +225,14 @@ impl MountView {
             // `Metadata` at `Dir` scope lands here too: an empty filesystem is stricter than the
             // entry's own metadata, so it holds the requirement rather than widening it.
             if granted.scope == Scope::Dir {
-                for target in granted.reachable_paths() {
+                for target in granted.reachable_paths().iter().map(|path| in_view(path)) {
                     // An authorized descendant supplies the contents beneath this directory.
                     let has_granted_descendant =
                         config.authorizations().into_iter().any(|candidate| {
-                            candidate
-                                .reachable_paths()
-                                .iter()
-                                .any(|path| path != &target && path.starts_with(&target))
+                            candidate.reachable_paths().iter().any(|path| {
+                                let path = in_view(path);
+                                path != target && path.starts_with(&target)
+                            })
                         });
                     if has_granted_descendant {
                         continue;
@@ -258,7 +266,7 @@ impl MountView {
 
             // A grant is bound under BOTH its spellings, to the same source. A path granted read
             // and write arrives as two grants, so the second ORs the first entry's flags.
-            for target in granted.reachable_paths() {
+            for target in granted.reachable_paths().iter().map(|path| in_view(path)) {
                 if dedup.insert(target.clone()) {
                     entries.push(MountEntry {
                         source: Some(resolved.clone()),
@@ -297,7 +305,8 @@ impl MountView {
         let mut dependency_sources = BTreeMap::new();
         let mut missing = MissingReads::default();
         for executable in exec_files {
-            for dependency in collect_elf_dependencies(&executable, config, &mut missing)? {
+            for mut dependency in collect_elf_dependencies(&executable, config, &mut missing)? {
+                dependency.path = in_view(&dependency.path);
                 if covering
                     .iter()
                     .any(|tree| dependency.path.starts_with(tree))
@@ -378,7 +387,7 @@ impl MountView {
         let mut protections = Vec::new();
         let mut protected_parents = BTreeSet::new();
         for protected in config.write_protections() {
-            let mut targets = BTreeSet::from([protected.path().to_path_buf()]);
+            let mut targets = BTreeSet::from([in_view(protected.path())]);
             for entry in &entries {
                 if !entry.writable || entry.kind != MountKind::Bind {
                     continue;
@@ -512,7 +521,7 @@ impl MountView {
             } else {
                 MountKind::Fresh { fstype: "tmpfs" }
             };
-            for target in refused.reachable_paths() {
+            for target in refused.reachable_paths().iter().map(|path| in_view(path)) {
                 let entry = MountEntry {
                     source: None,
                     target: target.clone(),
@@ -585,8 +594,10 @@ impl MountView {
                 })
         });
 
+        let root_links = root_links(&entries, &host_links);
         Ok(Self {
             entries,
+            root_links,
             protected_parents,
             grant_identities,
             grant_pins: config
@@ -603,6 +614,12 @@ impl MountView {
     #[cfg(test)]
     pub(crate) fn entries(&self) -> &[MountEntry] {
         &self.entries
+    }
+
+    /// The planned links at the top of the view, as `(name, link text)`.
+    #[cfg(test)]
+    pub(crate) fn planned_root_links(&self) -> &[(PathBuf, PathBuf)] {
+        &self.root_links
     }
 
     /// Execute the plan and `pivot_root` into it.
@@ -648,6 +665,18 @@ impl MountView {
         let old_root = root.join(OLD_ROOT_NAME);
         std::fs::create_dir_all(&old_root)
             .map_err(|e| refusal(format!("creating the pivot target: {e}")))?;
+
+        // The host's merged-/usr links, written after every mount so no mount target is reached
+        // through one. `symlink` refuses an existing entry rather than replacing it.
+        for (name, link) in &self.root_links {
+            std::os::unix::fs::symlink(link, root.join(name)).map_err(|e| {
+                refusal(format!(
+                    "creating the view's '/{}' -> '{}' link: {e}",
+                    name.display(),
+                    link.display()
+                ))
+            })?;
+        }
 
         // Remount the root read-only now that every bind is in place.
         mount_syscall(
@@ -1400,6 +1429,64 @@ const OLD_ROOT_NAME: &str = ".old-root";
 /// The empty file every refused file is a bind of, in the view's own root.
 const EMPTY_FILE_NAME: &str = ".strands-box-empty";
 
+/// The top-level names a merged-/usr host makes links into `/usr`, as Debian, Ubuntu, Fedora and
+/// Amazon Linux do: `/bin -> usr/bin`, `/lib64 -> usr/lib64`.
+const MERGED_USR_NAMES: &[&str] = &["bin", "sbin", "lib", "lib32", "lib64", "libx32"];
+
+/// The host's top-level links into `/usr`, as `(name, link text)`, such as `("bin", "usr/bin")`.
+///
+/// A link counts only when the host's entry is a link whose text is a relative path into `usr/`
+/// made of plain names. Any other spelling, such as an absolute `/usr/bin` or a path with `..`,
+/// leaves that name as it was: absent from the view unless a grant names it.
+fn host_usr_links() -> Vec<(PathBuf, PathBuf)> {
+    MERGED_USR_NAMES
+        .iter()
+        .filter_map(|name| {
+            let link = std::fs::read_link(Path::new("/").join(name)).ok()?;
+            let into_usr = link.starts_with("usr")
+                && link
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_)));
+            into_usr.then(|| (PathBuf::from(name), link))
+        })
+        .collect()
+}
+
+/// Where the view mounts `path`: under the `/usr` folder a host link names when `path` starts
+/// with that link's name, so `/bin/bash` is mounted at `/usr/bin/bash`, else `path` itself.
+///
+/// On a host whose `/bin` links to `usr/bin`, both spellings are one object, and the view's own
+/// `/bin -> usr/bin` link resolves `/bin/bash` to the same mount. No mount sits under a linked
+/// name, so the link is never hidden by a folder that holds only one granted name, and a refusal
+/// written through the link overmounts the same object a grant binds.
+fn view_spelling(path: &Path, links: &[(PathBuf, PathBuf)]) -> PathBuf {
+    for (name, link) in links {
+        if let Ok(rest) = path.strip_prefix(Path::new("/").join(name)) {
+            let base = Path::new("/").join(link);
+            return if rest.as_os_str().is_empty() {
+                base
+            } else {
+                base.join(rest)
+            };
+        }
+    }
+    path.to_path_buf()
+}
+
+/// The host links the view copies: each one no planned mount sits at or under. [`view_spelling`]
+/// places every grant under its `/usr` name, so this keeps each link unless a scaffold mount
+/// were ever planned there.
+fn root_links(entries: &[MountEntry], links: &[(PathBuf, PathBuf)]) -> Vec<(PathBuf, PathBuf)> {
+    links
+        .iter()
+        .filter(|(name, _)| {
+            let top = Path::new("/").join(name);
+            !entries.iter().any(|entry| entry.target.starts_with(&top))
+        })
+        .cloned()
+        .collect()
+}
+
 /// `mount(2)`, with `Option`s for the arguments the kernel accepts as NULL.
 fn mount_syscall(
     source: Option<&Path>,
@@ -2107,6 +2194,12 @@ mod tests {
             .to_vec()
     }
 
+    /// Where the view mounts the host path `path`: under `/usr` when `path` is written through a
+    /// host link such as `/bin -> usr/bin`.
+    fn in_view(path: &Path) -> PathBuf {
+        view_spelling(path, &host_usr_links())
+    }
+
     #[test]
     fn broad_exec_keeps_scaffolds_refusals_and_protected_files_non_executable() {
         let root = tempfile::tempdir().expect("fixture");
@@ -2215,11 +2308,14 @@ mod tests {
         );
 
         // Every *grant*-origin member must be a path the caller actually named for execute.
-        let granted_for_execute: Vec<PathBuf> = config
+        let mut granted_for_execute: Vec<PathBuf> = config
             .grants_in(Operation::Exec, Scope::File)
             .into_iter()
             .flat_map(|granted| granted.reachable_paths())
+            .map(|path| in_view(&path))
             .collect();
+        granted_for_execute.sort();
+        granted_for_execute.dedup();
         for (origin, target) in &executable {
             if *origin == MountOrigin::Grant {
                 assert!(
@@ -3577,6 +3673,134 @@ mod tests {
         );
     }
 
+    /// **The view copies the host's links into `/usr`, and mounts every name under one at its
+    /// `/usr` name.** A link reaches only what the view binds, so it grants nothing. A grant, a
+    /// loader bind, or a refusal written through `/bin` or `/lib` lands under `/usr`, so no mount
+    /// sits under a linked name and every link is kept.
+    #[test]
+    fn the_view_copies_the_hosts_usr_links_and_mounts_each_name_under_usr() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let file = directory.path().join("granted");
+        std::fs::write(&file, b"contents").expect("write a granted file");
+        let config = ContainmentConfig::new()
+            .allow(&file, Operation::Read, Scope::File)
+            .expect("grant a file outside /bin");
+        let view = MountView::plan(&config).expect("plan must succeed");
+        for name in MERGED_USR_NAMES {
+            let top = Path::new("/").join(name);
+            let host = std::fs::read_link(&top).ok();
+            let copied = view
+                .planned_root_links()
+                .iter()
+                .find(|(planned, _)| planned == Path::new(name))
+                .map(|(_, link)| link.clone());
+            let mounted = view
+                .entries()
+                .iter()
+                .any(|entry| entry.target.starts_with(&top));
+            match host {
+                Some(link) if link.starts_with("usr") && !mounted => {
+                    assert_eq!(copied, Some(link), "/{name} is the host's link into /usr")
+                }
+                _ => assert_eq!(copied, None, "/{name} is no merged-/usr link of the host"),
+            }
+        }
+
+        let bin = Path::new("/bin");
+        let merged = std::fs::read_link(bin).is_ok_and(|link| link == Path::new("usr/bin"));
+        let (bash, sh) = (Path::new("/bin/bash"), Path::new("/usr/bin/sh"));
+        if !(merged && bash.exists() && sh.exists()) {
+            return;
+        }
+        let host_links = host_usr_links();
+        let under_a_link = |view: &MountView| -> Vec<PathBuf> {
+            view.entries()
+                .iter()
+                .map(|entry| entry.target.clone())
+                .filter(|target| {
+                    host_links
+                        .iter()
+                        .any(|(name, _)| target.starts_with(Path::new("/").join(name)))
+                })
+                .collect()
+        };
+        let copies_every_link = |view: &MountView| {
+            assert_eq!(
+                view.planned_root_links(),
+                host_links.as_slice(),
+                "every host link into /usr is copied"
+            )
+        };
+
+        // A command wrapper that starts `#!/bin/bash` grants `/bin/bash` by that name. The grant is
+        // mounted at `/usr/bin/bash`, so `/bin` stays a link and `/bin/sh` resolves too.
+        let config = ContainmentConfig::new()
+            .allow(bash, Operation::Read, Scope::File)
+            .expect("grant /bin/bash")
+            .allow(sh, Operation::Read, Scope::File)
+            .expect("grant /usr/bin/sh");
+        let view = MountView::plan(&config).expect("plan must succeed");
+        assert_eq!(
+            under_a_link(&view),
+            Vec::<PathBuf>::new(),
+            "no mount under a link"
+        );
+        assert!(
+            view.entries()
+                .iter()
+                .any(|entry| entry.target == Path::new("/usr/bin/bash")),
+            "/bin/bash is mounted at its /usr name: {:?}",
+            view.entries()
+        );
+        copies_every_link(&view);
+
+        // An exec file brings its loader and libc, which the host names under `/lib` or `/lib64`.
+        // They are mounted at their `/usr` names, so those links stay too.
+        let config = ContainmentConfig::new()
+            .allow(sh, Operation::Exec, Scope::File)
+            .expect("exec /usr/bin/sh");
+        let view = MountView::plan(&config).expect("plan must succeed");
+        assert!(
+            view.entries()
+                .iter()
+                .any(|entry| entry.origin == MountOrigin::Library),
+            "the loader closure is planned: {:?}",
+            view.entries()
+        );
+        assert_eq!(
+            under_a_link(&view),
+            Vec::<PathBuf>::new(),
+            "no mount under a link"
+        );
+        copies_every_link(&view);
+
+        // A refusal written through the link lands on the same target as the grant, and a refusal
+        // replaces whatever named its target first, so `/bin/bash` reaches only the empty overmount.
+        let config = ContainmentConfig::new()
+            .allow(Path::new("/usr/bin/bash"), Operation::Read, Scope::File)
+            .expect("grant /usr/bin/bash")
+            .refuse(bash, Scope::File)
+            .expect("refuse /bin/bash");
+        let view = MountView::plan(&config).expect("plan must succeed");
+        let at_bash: Vec<_> = view
+            .entries()
+            .iter()
+            .filter(|entry| entry.target == Path::new("/usr/bin/bash"))
+            .collect();
+        assert!(
+            at_bash.len() == 1
+                && at_bash[0].origin == MountOrigin::Refusal
+                && at_bash[0].source.is_none(),
+            "only the refusal sits at /usr/bin/bash: {at_bash:?}"
+        );
+        assert_eq!(
+            under_a_link(&view),
+            Vec::<PathBuf>::new(),
+            "no mount under a link"
+        );
+        copies_every_link(&view);
+    }
+
     /// A grant through a symlink is reachable under BOTH names.
     #[test]
     fn a_grant_through_a_symlink_is_reachable_under_both_names() {
@@ -4088,6 +4312,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let view = MountView {
             entries: Vec::new(),
+            root_links: Vec::new(),
             protected_parents: BTreeSet::new(),
             grant_identities: BTreeMap::new(),
             grant_pins: Vec::new(),
@@ -4117,6 +4342,7 @@ mod tests {
         std::fs::write(&source, b"protected").unwrap();
         let view = MountView {
             entries: Vec::new(),
+            root_links: Vec::new(),
             protected_parents: BTreeSet::new(),
             grant_identities: BTreeMap::new(),
             grant_pins: Vec::new(),
@@ -4158,6 +4384,7 @@ mod tests {
         };
         let view = MountView {
             entries: vec![parent],
+            root_links: Vec::new(),
             protected_parents: BTreeSet::new(),
             grant_identities: BTreeMap::new(),
             grant_pins: Vec::new(),
@@ -4219,6 +4446,7 @@ mod tests {
             let identity = ObjectIdentity::from_metadata(&source.metadata().unwrap());
             let view = MountView {
                 entries: Vec::new(),
+                root_links: Vec::new(),
                 protected_parents: BTreeSet::new(),
                 grant_identities: BTreeMap::from([(source.clone(), identity)]),
                 grant_pins: Vec::new(),
@@ -4464,6 +4692,7 @@ mod tests {
             std::fs::write(old.join("unexpected"), b"marker").unwrap();
             let view = MountView {
                 entries: Vec::new(),
+                root_links: Vec::new(),
                 protected_parents: BTreeSet::new(),
                 grant_identities: BTreeMap::new(),
                 grant_pins: Vec::new(),
@@ -4544,6 +4773,7 @@ mod tests {
             };
             let view = MountView {
                 entries: Vec::new(),
+                root_links: Vec::new(),
                 protected_parents: BTreeSet::new(),
                 grant_identities,
                 grant_pins: Vec::new(),
@@ -4660,6 +4890,7 @@ mod tests {
         };
         let view = MountView {
             entries: Vec::new(),
+            root_links: Vec::new(),
             protected_parents: BTreeSet::new(),
             grant_identities,
             grant_pins: Vec::new(),
@@ -4993,7 +5224,9 @@ mod tests {
         );
 
         assert!(
-            entries.iter().any(|entry| entry.target == system_libc),
+            entries
+                .iter()
+                .any(|entry| entry.target == in_view(&system_libc)),
             "libm must use the system libc"
         );
         assert!(
@@ -5122,7 +5355,7 @@ mod tests {
         for library in [&libm, &libc] {
             let entry = entries
                 .iter()
-                .find(|entry| entry.target == *library)
+                .find(|entry| entry.target == in_view(library))
                 .unwrap_or_else(|| panic!("{} must be planned", library.display()));
             assert_eq!(entry.origin, MountOrigin::Library);
             assert!(entry.executable && !entry.writable, "{entry:?}");
@@ -5162,8 +5395,8 @@ mod tests {
 
         let bound = entries
             .iter()
-            .find(|entry| entry.target == loader)
-            .expect("the loader directory is bound under its own spelling");
+            .find(|entry| entry.target == in_view(loader))
+            .expect("the loader directory is bound under its view spelling");
         assert!(bound.executable && !bound.writable, "{bound:?}");
         assert_eq!(bound.origin, MountOrigin::Grant);
         let plain = entries

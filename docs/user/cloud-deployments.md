@@ -8,7 +8,7 @@ Each profile lists what the cloud environment must provide and what to check aft
 The service profiles below describe ARM64 deployments. Select an ARM64 runtime, container, or MicroVM
 and check that `uname -m` reports `aarch64`.
 [Install Box](./getting-started.md#step-1-download-box), keeping the main executable and both helpers from the same build together.
-Check the [Linux requirements](./linux-requirements.md) for required libraries, permissions to create the sandbox, and experimental x86-64 builds.
+Check the [Linux requirements](./linux-requirements.md) for required libraries, permissions to create the sandbox, and architecture selection.
 
 Use the [configuration reference](./config.md) to configure Box.
 

@@ -11,8 +11,8 @@ Linux release executables are built on Amazon Linux 2023.
 Other distributions must provide the libraries and permissions below. Check them on the distribution you intend to use.
 Box does not specify a minimum kernel version. Check the required operations and your actual workload.
 
-ARM64 (64-bit Arm) is supported. Linux x86-64 is experimental.
-To start a sandbox on x86-64, [set Box's `EXPERIMENTAL_X86_SUPPORT` environment variable to `TRUE`](./getting-started.md#linux).
+Use an ARM64 (64-bit Arm) or x86-64 build that matches your system.
+Neither architecture requires an environment opt-in.
 A release may omit an architecture. Check its archive and checksum before downloading, or
 [build from source](./getting-started.md#build-from-source).
 The [tested configurations](#tested-configurations) below record specific checks, not a promise about every distribution or container runtime.
@@ -29,7 +29,7 @@ Before starting the workload, Box must create its namespaces, remove setup privi
 
 | Requirement | Required value or operation | How to check | What failure means |
 | --- | --- | --- | --- |
-| Architecture | A matching ARM64 or experimental x86-64 build for Box and the workload. | Run `uname -m`; expect `aarch64` or `x86_64`, matching the archive. | A mismatched executable cannot start natively. |
+| Architecture | A matching ARM64 or x86-64 build for Box and the workload. | Run `uname -m`; expect `aarch64` or `x86_64`, matching the archive. | A mismatched executable cannot start natively. |
 | GNU C library (glibc) and loader | For release binaries, glibc 2.34 or newer and the matching loader. | Follow [Check the installed binaries](#check-the-installed-binaries). | The main executable or a helper cannot load. |
 | GCC runtime library | `libgcc_s.so.1` for the executable's architecture. | Check that `ldd` resolves every library for all three executables. | An executable with a missing library cannot load. |
 | Namespaces | User, mount, process, interprocess communication, and hostname namespaces; a network namespace for default networking. | [Start the intended workload](#check-sandbox-startup) using the Linux user account that will run Box. | Box cannot create the sandbox and does not start the workload. |
@@ -82,7 +82,6 @@ This checks that the main executable loads. It does not create a sandbox or test
 Run Box with the configuration and Linux user account you intend to use.
 Use `box run --config` with your configuration file, as shown in the
 [Linux installation instructions](./getting-started.md#linux) and [configuration reference](./config.md).
-On x86-64, set `EXPERIMENTAL_X86_SUPPORT=TRUE` first.
 
 After the configured program starts inside Box, use that program to check its access. Use disposable files for these checks.
 
@@ -103,7 +102,6 @@ It runs the host OS's Bash to count input lines and write a report.
 First [download Box](./getting-started.md#step-1-download-box) and complete the binary checks above.
 Run the block below from the directory that contains `box-core`, using your normal account without `sudo`.
 You need Bash on `PATH` and the standard Linux utilities `cat`, `cmp`, `cp`, `id`, `mkdir`, and `mktemp`.
-On x86-64, keep `EXPERIMENTAL_X86_SUPPORT=TRUE` exported as described in the [Linux installation instructions](./getting-started.md#linux).
 
 Each run creates a fresh directory under `/tmp` and prints its location.
 The fixed directory template keeps paths safe to insert into TOML, regardless of your account name or installation path.

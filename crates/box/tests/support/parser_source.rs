@@ -36,6 +36,7 @@ pub fn config_source() -> String {
         "src/record/config/egress.rs",
         "src/record/config/env.rs",
         "src/record/config/mcp.rs",
+        "src/record/config/secret_source.rs",
         "src/record/config/telemetry.rs",
     ]
     .iter()

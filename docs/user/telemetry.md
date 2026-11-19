@@ -132,9 +132,11 @@ that the workload's log records and metrics reach every target.
 ### The credential
 
 `secret.ref` names where the box reads the key: `env://NAME` or `secret://NAME` for a variable in the
-environment of `strands-box run`, or `aws://PROFILE` or `credsd://ENVIRONMENT` for a SigV4 signature.
-The box holds the key in a vault of its own for each target, and attaches it on each request. A
-literal key is refused, and so is a `file://` or `op://` reference.
+environment of `strands-box run`, `aws://PROFILE` or `credsd://ENVIRONMENT` for a SigV4 signature, or
+a reference in a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table
+declares. The box holds the key in a vault of its own for each target, and attaches it on each
+request. A literal key is refused, and so is a `file://` reference. An `op://` reference is refused
+unless a table declares `op`.
 
 A credential needs an `https://` destination, unless the destination is loopback.
 
@@ -253,11 +255,20 @@ A control-plane record states one change to the authority this box holds. The sc
 
 | Key | Value |
 |---|---|
-| `strands.box.control.operation` | `policy_installed`, `policy_refused`, `schema_installed`, `discovery_complete`, `box_started`, or `box_stopped` |
+| `strands.box.control.operation` | `policy_installed`, `policy_refused`, `schema_installed`, `discovery_complete`, `box_started`, `box_stopped`, or `secret_fetched` |
 | `strands.box.control.outcome` | `ok`, or `refused` |
 | `strands.box.control.subject` | what the operation was about |
 | `strands.box.control.reason` | why a refusal happened |
 | `strands.box.control.detail` | further text the operation carries |
+
+A `secret_fetched` record states one read of a secret through a
+[declared secret source](config.md#secret-sourcescheme), when the box starts. The subject is the
+entry that names the secret, such as `[egress.github] secret.ref`. The detail names the source, its
+program, and the reference with its name removed: ``source `op`, program /opt/homebrew/bin/op,
+reference op://[REDACTED]``. The outcome is `refused` when the program returned no secret. The
+reason then says only that, because the program's own words go to stderr alone. Box reads the
+secret of a telemetry target before it opens its records, so a read that fails there is on stderr
+and in no record.
 
 ## Reading a records file
 
@@ -333,9 +344,10 @@ message does: Box prefixes every line it prints with `strands-box:`.
 | `` `<key>` does not apply to a `<kind>` target `` | A key belongs to another kind. |
 | ``a `cloudwatch_logs` target needs `log_group` and `log_stream` `` | A CloudWatch Logs target names no group or stream. |
 | ``needs `region`, an AWS region such as `us-west-2` `` | A CloudWatch target names no region, or an invalid one. |
-| `` `secret.ref` names no scheme this box reads `` | The reference is a literal value, or a scheme other than `env://`, `secret://`, `aws://`, or `credsd://`. |
+| `` `secret.ref` names no scheme this box reads `` | The reference is a literal value, or its scheme is not `env://`, `secret://`, `aws://`, `credsd://`, or a [declared scheme](config.md#secret-sourcescheme). A declared scheme with nothing after `://` is refused in the same way. |
 | `its destination is neither https nor loopback` | A credential would cross the network in the clear. |
 | `` the `aws://` credential cannot sign `` | The profile is missing, or holds no static keys. The run stops before the workload starts. |
+| `` `[telemetry.<name>] secret.ref` names a secret that the secret source `<scheme>` (<program>) did not return `` | The program of a declared secret source returned no secret for this target. The line before it on stderr holds the reason. No record holds this failure, because Box reads the secret before it opens its records. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |
 
 Each message names the table it came from.
 
