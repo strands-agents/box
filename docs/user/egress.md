@@ -260,6 +260,12 @@ The gateway adds a secret to a plain request only when every route that matches 
 literal address such as `127.0.0.1:4259`, and every other host still get
 `credential not permitted on a plaintext request`.
 
+Plain HTTP doesn't check who answers, so the secret goes to whatever process listens on that port
+of your machine. `box run` therefore refuses a secret on `host.box.internal` that names no port, or
+that names a port an `[[agent.ingress]]` entry uses as `listen` or `workload_port`, because that
+port leads back to the agent. Run the service before the agent starts, so that no other process
+takes its port.
+
 - Use `http://`. With `https://`, the gateway checks the service's certificate for
   `host.box.internal` against public roots, and a local service seldom has one, so the request
   fails.
@@ -371,6 +377,7 @@ not upgrade `rust-lang.org`.
 | Two routes hold a placeholder in one variable with a different `phantom_prefix` | Set the same `phantom_prefix` on both. One variable holds one placeholder. |
 | A `[gateway] upgrade_http` entry names a scheme, a port, a path, a `*` wildcard, or an IP address, or holds another character | Write the host name alone, such as `static.rust-lang.org`. |
 | A `write` or `write_file` entry reaches a path that `SSL_CERT_FILE` or `SSL_CERT_DIR` names | Remove the write, subtract the path with a `deny` entry, or run `box run` without that variable. See [networks that re-sign TLS](#networks-that-re-sign-tls). |
+| A secret on `host.box.internal` names no port, or a port that an `[[agent.ingress]]` entry uses | Name the port of the service, such as `host.box.internal:4259`, and keep it apart from every ingress port. |
 
 A request the gateway refuses while the box runs gets an HTTP 403 with the header
 `x-strands-box-egress: refused`. The body says why:

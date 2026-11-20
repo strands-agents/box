@@ -2187,6 +2187,18 @@ fn host_box_internal_reaches_only_the_permitted_loopback_port_with_its_secret() 
     );
 }
 
+/// A secret on `host.box.internal` with no port is refused before the box starts, because the
+/// plain request would carry the real secret to whatever process holds the port.
+#[test]
+fn a_host_box_internal_secret_with_no_port_is_refused_at_configure() {
+    let (box_, output) = attempt_configure(
+        "host-loopback-no-port",
+        &permit_egress_to("host.box.internal", 80),
+        &target("host.box.internal"),
+    );
+    assert_refused(&box_, &output, &["host.box.internal", "with no port"]);
+}
+
 #[test]
 fn policy_explanations_reach_the_contained_http_and_remote_mcp_workload() {
     if !fixture::namespace_launcher_is_usable() {

@@ -349,8 +349,11 @@ The gateway adds a secret only over TLS. It refuses a plain HTTP request to a bo
 before it adds any credential. The one exception is `host.box.internal`: when every route that
 matches the request names that host exactly, with no wildcard, and no backend re-routes it, the
 gateway adds the secret to a plain request, because the request never leaves the surrounding OS. A
-literal loopback address, a wildcard route, and every other host still need TLS. See [credentials
-require TLS](decisions.md#a-secret-rides-only-tls).
+literal loopback address, a wildcard route, and every other host still need TLS. Plain HTTP doesn't
+authenticate the server, so the secret goes to whatever process holds the port. The load therefore
+refuses such a route when it names no port, or names an `[[agent.ingress]]` `listen` or
+`workload_port`, because an ingress port leads back to the agent. See [credentials require
+TLS](decisions.md#a-secret-rides-only-tls).
 
 `secret.placement` selects a header, HTTP basic auth, or a query parameter for the secret. See
 [placement keys](../user/egress.md#placement), [the operator selects the credential

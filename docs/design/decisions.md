@@ -2278,7 +2278,10 @@ surrounding OS, and a local LLM gateway that asks for a key seldom speaks TLS.
 **Rejected.** Exempting every loopback destination: a literal `127.0.0.1` or a name that a resolver
 maps to loopback is not a name Box defines, and a wildcard route could reach the exception.
 
-**Cost.** Anything on the surrounding OS that can read loopback traffic can read that secret.
+**Cost.** Plain HTTP does not authenticate the server, so the secret goes to whatever process holds
+the port, and anything that reads loopback traffic can read it. A local process of any user can take
+a free port while the service is down. Box refuses such a route with no port, or on a port that an
+`[[agent.ingress]]` entry uses, because that port leads back to the agent.
 
 <a id="the-plain-path-binds-its-own-destination-and-reports-its-transport"></a>
 ### The plain path binds its own destination and reports its transport truthfully
