@@ -1,6 +1,7 @@
 //! The Linux namespace launcher backend.
 
 pub(crate) mod authority;
+mod container;
 mod filesystem_queries;
 #[cfg(feature = "native-filesystem-policy")]
 mod native_filesystem;
@@ -60,7 +61,7 @@ impl ContainmentBackend for NamespaceBackend {
         // A wrong-mechanism override is a caller error, not a hint: it names a
         // backend whose semantics this one does not implement.
         match config.backend_override() {
-            BackendOverride::None => {}
+            BackendOverride::None | BackendOverride::LinuxContainer => {}
             other => {
                 return Err(ContainmentError::UnsupportedCapability {
                     capability: format!("backend override {other:?}"),
@@ -161,6 +162,11 @@ impl ContainmentBackend for NamespaceBackend {
         config.require_live_path_identities()?;
         require_no_configured_devices(config)?;
 
+        let container_pid = matches!(config.backend_override(), BackendOverride::LinuxContainer);
+        if container_pid {
+            container::require_private_init()?;
+        }
+
         // Build the plan and compile both filters before anything irreversible.
         let view = view::MountView::plan(config)?;
         let policy = syscall::SyscallPolicy::for_config(config.network());
@@ -240,8 +246,25 @@ impl ContainmentBackend for NamespaceBackend {
             keep.extend(listeners.iter().map(|listener| listener.as_raw_fd()));
         }
         keep.extend(connector.as_ref().map(|connector| connector.handoff));
-        let filesystem_handoff =
-            establish_pid_namespace_and_reaper(&view, &keep, confirm_fd, connector)?;
+        let filesystem_handoff = if container_pid {
+            let lifetime = config
+                .container_lifetime_fd()
+                .ok_or_else(|| apply_failure("missing container lifetime channel".into()))?;
+            let proc = filesystem_queries::open_proc().map_err(|source| {
+                apply_failure(format!("pinning the container process view: {source}"))
+            })?;
+            let (queries, workload) = std::os::unix::net::UnixStream::pair().map_err(|source| {
+                apply_failure(format!("creating filesystem query handoff: {source}"))
+            })?;
+            let control = ContainerControl {
+                lifetime,
+                proc,
+                queries,
+            };
+            run_reaper(&view, &keep, confirm_fd, connector, workload, Some(control))?
+        } else {
+            establish_pid_namespace_and_reaper(&view, &keep, confirm_fd, connector)?
+        };
 
         // Only the workload process reaches here, in the pivoted view.
         authority::drop_all_capabilities()?;
@@ -578,6 +601,24 @@ fn establish_pid_namespace_and_reaper(
         unsafe { libc::_exit(127) };
     }
     drop(reaper_control);
+    run_reaper(view, keep, confirm_fd, connector, query_workload, None)
+}
+
+struct ContainerControl {
+    lifetime: libc::c_int,
+    proc: std::os::fd::OwnedFd,
+    queries: std::os::unix::net::UnixStream,
+}
+
+fn run_reaper(
+    view: &view::MountView,
+    keep: &[libc::c_int],
+    confirm_fd: Option<libc::c_int>,
+    connector: Option<reaper::Connector>,
+    query_workload: std::os::unix::net::UnixStream,
+    container: Option<ContainerControl>,
+) -> Result<std::os::unix::net::UnixStream, ContainmentError> {
+    use std::os::fd::AsRawFd as _;
     if let Err(error) = view.materialize() {
         // Printed because the reaper cannot return a `Result`: without this, a
         // failure here is only exit 127 and the cause is invisible.
@@ -592,6 +633,13 @@ fn establish_pid_namespace_and_reaper(
     // not inherit them a second time through PID 1.
     let mut keep = keep.to_vec();
     keep.push(query_workload.as_raw_fd());
+    if let Some(control) = &container {
+        keep.extend([
+            control.lifetime,
+            control.proc.as_raw_fd(),
+            control.queries.as_raw_fd(),
+        ]);
+    }
     close_reaper_descriptors(&keep, confirm_fd);
     protect_reaper_memory(confirm_fd);
 
@@ -614,11 +662,22 @@ fn establish_pid_namespace_and_reaper(
 
         // Supervise, then exit. Exiting is what makes the kernel terminate every
         // survivor in the namespace.
-        let code = reaper::supervise(workload, connector);
+        let code = if let Some(control) = container {
+            filesystem_queries::start_container_worker(control.proc, control.queries);
+            reaper::supervise_container(workload, control.lifetime, connector)
+        } else {
+            reaper::supervise(workload, connector)
+        };
         // SAFETY: terminating namespace PID 1.
         unsafe { libc::_exit(code) };
     }
 
+    // The workload must not retain the installation or notification-server endpoints.
+    if let Some(control) = container {
+        // SAFETY: the duplicated lifetime descriptor is owned by the container reaper only.
+        unsafe { libc::close(control.lifetime) };
+        drop(control);
+    }
     // The workload process — the only one that returns `Ok`.
     Ok(query_workload)
 }

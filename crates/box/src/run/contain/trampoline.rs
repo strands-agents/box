@@ -188,6 +188,7 @@ pub(crate) type ImageName<'a> = &'a dyn Fn(&str) -> Result<ImageCache, BoxError>
 
 /// Everything the trampoline needs to launch one workload.
 pub(crate) struct Launch<'a> {
+    pub(crate) container_socket: Option<&'a Path>,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
         all(target_os = "linux", feature = "native-filesystem-policy")
@@ -228,6 +229,26 @@ pub(crate) fn command(
     let prepared = identity_bound_command(helper, opened, launch.image_name)?;
     let mut command = prepared.command;
     crate::run::descriptor_limit::restore_in_child(&mut command);
+    if let Some(socket) = launch.container_socket {
+        command.arg("--connect-container").arg(socket);
+        #[cfg(target_os = "linux")]
+        {
+            let parent = std::process::id() as libc::pid_t;
+            // SAFETY: the child only changes its death signal and checks its parent PID.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0
+                        || libc::getppid() != parent
+                    {
+                        return Err(std::io::Error::other(
+                            "container supervisor exited before launch",
+                        ));
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
     let setup_status = SetupStatusPipe::attach(&mut command)?;
     attach_descriptor(&mut command, launch.config_file, "--config-fd")?;
     #[cfg(target_os = "linux")]
@@ -951,6 +972,7 @@ mod tests {
         image_name: ImageName<'a>,
     ) -> Launch<'a> {
         Launch {
+            container_socket: None,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
                 all(target_os = "linux", feature = "native-filesystem-policy")

@@ -802,6 +802,9 @@ const DENY_WRITE_RECORD_VERSION: u32 = 38;
 /// key, so an older build refuses the box by its version.
 const SECRET_SOURCE_RECORD_VERSION: u32 = 39;
 
+/// The record stamp for the private container PID namespace backend.
+const CONTAINER_RECORD_VERSION: u32 = 41;
+
 /// Monty is on unless the operator turns it off.
 fn monty_default() -> bool {
     true
@@ -819,6 +822,8 @@ const TOOL_CALLS_RECORD_VERSION: u32 = 40;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub(crate) struct ExperimentalFeatures {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) container_agent: bool,
     #[serde(default)]
     pub(crate) native_filesystem_policy: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -830,11 +835,29 @@ pub(crate) struct ExperimentalFeatures {
 }
 
 impl ExperimentalFeatures {
+    fn validate_agent(&self, agent: &ProcessSpec) -> Result<(), ConfigError> {
+        agent.validate("[agent]")?;
+        agent.validate_native_policy("[agent]", self.native_filesystem_policy)?;
+        if self.container_agent
+            && agent
+                .native_filesystem_policy
+                .unwrap_or(self.native_filesystem_policy)
+        {
+            return Err(ConfigError::Process {
+                table: "[agent]".into(),
+                reason: "container-agent requires native-filesystem-policy to be off for the agent"
+                    .into(),
+            });
+        }
+        agent.validate_ingress_selection("[agent]", self.ingress)
+    }
+
     fn is_disabled(&self) -> bool {
         !self.native_filesystem_policy
             && !self.tool_grammars
             && !self.ingress
             && !self.secret_sources
+            && !self.container_agent
     }
 
     fn record_version(&self) -> u32 {
@@ -881,7 +904,9 @@ fn record_version<'a>(
     secret_source_keys: bool,
 ) -> u32 {
     let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
-    if telemetry::names_tool_calls(targets) {
+    if features.container_agent {
+        CONTAINER_RECORD_VERSION
+    } else if telemetry::names_tool_calls(targets) {
         TOOL_CALLS_RECORD_VERSION
     } else if secret_source_keys {
         SECRET_SOURCE_RECORD_VERSION
@@ -1208,6 +1233,7 @@ impl Record {
             DENY_WRITE_RECORD_VERSION,
             SECRET_SOURCE_RECORD_VERSION,
             TOOL_CALLS_RECORD_VERSION,
+            CONTAINER_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1260,12 +1286,7 @@ impl Record {
     /// Every process table, judged on its own shape.
     fn validate_processes(&self) -> Result<(), ConfigError> {
         if let Some(agent) = &self.agent {
-            agent.validate("[agent]")?;
-            agent.validate_native_policy(
-                "[agent]",
-                self.experimental_features.native_filesystem_policy,
-            )?;
-            agent.validate_ingress_selection("[agent]", self.experimental_features.ingress)?;
+            self.experimental_features.validate_agent(agent)?;
         }
         for (label, tool) in &self.tool {
             tool.validate(&format!("[tool.{label}]"))?;
@@ -1675,15 +1696,18 @@ impl ConfigFile {
     /// Reject a config no run could honor, before anything is stored.
     fn validate(&self) -> Result<(), ConfigError> {
         self.experimental_features.validate()?;
+        if self.experimental_features.container_agent
+            && (!cfg!(all(target_os = "linux", target_arch = "aarch64"))
+                || self.agent.is_none()
+                || !self.tool.is_empty()
+                || !self.mcp.is_empty())
+        {
+            return Err(ConfigError::ContainerAgentConfiguration);
+        }
         BoxName::parse(&self.name)?;
         self.gateway.validate()?;
         if let Some(agent) = &self.agent {
-            agent.validate("[agent]")?;
-            agent.validate_native_policy(
-                "[agent]",
-                self.experimental_features.native_filesystem_policy,
-            )?;
-            agent.validate_ingress_selection("[agent]", self.experimental_features.ingress)?;
+            self.experimental_features.validate_agent(agent)?;
         }
         for (label, tool) in &self.tool {
             validate_tool_label(label)?;
@@ -2243,6 +2267,7 @@ native-filesystem-policy = false
             for file_attributes in [false, true] {
                 for native_filesystem_policy in [false, true] {
                     let features = ExperimentalFeatures {
+                        container_agent: false,
                         native_filesystem_policy,
                         tool_grammars: true,
                         ingress: false,
@@ -3409,7 +3434,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, TOOL_CALLS_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, CONTAINER_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -3441,6 +3466,54 @@ env = {}
             message.contains(&format!("1 to {MAXIMUM_BOX_IDENTITY_PREFIX} letters")),
             "the refusal names the limit that applies: {message}"
         );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[test]
+    fn container_agent_records_refuse_the_old_experimental_stamp() {
+        for watching in [false, true] {
+            let mut record = pinned_record(&format!(
+                "[experimental-features]\ncontainer-agent = true\n\
+                 [agent]\ncommand = [\"worker\"]\nfile-watching = {watching}\n"
+            ));
+            assert_eq!(record.version, 41);
+            assert_eq!(parsed_record(&record.to_toml().unwrap()).unwrap(), record);
+            for old_stamp in [35, 36, 37, 38, 39, 40] {
+                record.version = old_stamp;
+                assert!(matches!(
+                    parsed_record(&record.to_toml().unwrap()),
+                    Err(ConfigError::RecordVersion { found, expected: 41 }) if found == old_stamp
+                ));
+            }
+        }
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "native-filesystem-policy"
+    ))]
+    #[test]
+    fn container_agent_refuses_effective_native_policy_on_configure_and_reload() {
+        let body = "[experimental-features]\ncontainer-agent = true\nnative-filesystem-policy = true\n[agent]\ncommand = [\"worker\"]\n";
+        let mut record = pinned_record(&format!("{body}native-filesystem-policy = false\n"));
+        assert_eq!(parsed_record(&record.to_toml().unwrap()).unwrap(), record);
+        for setting in [None, Some(true)] {
+            let explicit = if setting.is_some() {
+                "native-filesystem-policy = true\n"
+            } else {
+                ""
+            };
+            let config = format!("name = 'worker'\nbox_dir = '/var/lib/box'\n{body}{explicit}");
+            assert!(matches!(
+                ConfigFile::parse(&config, Path::new("box.toml")),
+                Err(ConfigError::Process { reason, .. }) if reason.contains("container-agent")
+            ));
+            record.agent.as_mut().unwrap().native_filesystem_policy = setting;
+            assert!(
+                matches!(parsed_record(&record.to_toml().unwrap()), Err(ConfigError::Process { reason, .. }) if reason.contains("container-agent"))
+            );
+        }
     }
 
     #[test]

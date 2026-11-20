@@ -347,7 +347,7 @@ Programs can select database behavior for network filesystems without reading su
 Programs that need actual free-space counts cannot obtain them through this query.
 Relative paths return `EOPNOTSUPP`, and `fstatfs` remains denied.
 
-A seccomp notification sends each query to the existing launcher outside the workload's PID namespace.
+A seccomp notification sends each query to the trusted launcher. In the default backend it runs outside the workload's PID namespace. In [container agent mode](../user/linux-requirements.md#run-an-agent-in-a-container-pid-namespace), a thread of PID 1 handles the query.
 The launcher copies the pathname and pins the requesting process's root through a private procfs descriptor.
 It resolves the copied path with `openat2` and `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS`, then queries the pinned result.
 Ungranted files remain absent, and read-only binds remain read-only.
@@ -360,7 +360,7 @@ It never asks the kernel to continue the original `statfs` call.
 
 The [editable diagram](images/statfs-query-flow.drawio) contains the same query flow.
 
-The launcher retains only `CAP_SYS_PTRACE` within this sandbox's private user namespace.
+In the default backend, the launcher retains only `CAP_SYS_PTRACE` within this sandbox's private user namespace.
 Its bounding, inheritable, and ambient capability sets are empty, and it sets `no_new_privs` and becomes non-dumpable.
 The kernel's capability checks prevent this authority from accessing process memory in surrounding-OS user namespaces.
 The namespace reaper and workload retain their existing capability removal.
@@ -371,7 +371,7 @@ Hosts that prohibit process-memory access can also refuse these queries.
 
 The workload installs the notification filter and transfers its listener before its final syscall restrictions and execution.
 A failed handoff prevents execution.
-After a fatal service error, the launcher exits; the reaper's existing parent-death signal terminates the namespace.
+On a fatal service error in the default backend, the launcher exits and the reaper's parent-death signal terminates the namespace. In container agent mode, PID 1 drops all capabilities before starting the query thread. A fatal service error exits PID 1 and terminates its namespace.
 Request validation rejects canceled notifications, but does not make a numeric process identifier an atomic lifetime reference.
 The kernel's user-namespace checks independently restrict memory access, and both trusted launcher processes are excluded as query targets.
 Filesystem lookup and statistics can block in the kernel, which can delay launcher exit handling.
@@ -771,3 +771,17 @@ accepts it.
 
 For the request path, read [Policy](policy.md). For the three binaries and where each one runs, read
 [Binaries](binaries.md).
+
+## Linux container agent boundary
+
+The optional [container agent mode](../user/linux-requirements.md#run-an-agent-in-a-container-pid-namespace) uses the runtime-provided
+private PID namespace and its masked procfs. The launcher checks its initial PID,
+UID, capabilities, process count, and thread count before creating the other
+namespaces. The trusted Box supervisor stays outside that namespace. A private
+Unix socket admits one same-UID peer, at most eight descriptors, and a launch
+frame of at most 64 KiB. The socket is removed before the workload starts.
+
+The PID 1 reaper holds the lifetime connection. When the supervisor disconnects,
+PID 1 exits and the kernel terminates the namespace. After dropping capabilities,
+PID 1 serves filesystem notifications in a separate thread. The workload has the
+same syscall filters as in the default namespace backend.

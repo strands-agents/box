@@ -39,6 +39,7 @@ async fn spawn_registered(
     )]
     let (mut command, mut trampoline) = trampoline::command(
         trampoline::Launch {
+            container_socket: boundary.container_socket(),
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
                 all(target_os = "linux", feature = "native-filesystem-policy")
