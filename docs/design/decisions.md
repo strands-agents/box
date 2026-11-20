@@ -2416,9 +2416,9 @@ inferring it would mean encoding each AWS product's host shape in Box. Host deri
 (`derive_service_region`) stays only for an ordinary AWS destination, whose host is standard.
 Signing per request keeps expiring credentials fresh, and the inbound signing artifacts are
 stripped first, as for a destination signature. The signer covers only the headers that leave:
-`content-length` is left unsigned because the forwarding layer owns it (it refreshes the value and
-omits the header entirely on a bodyless request), so signing the workload's value would attest a
-header the request may not send, which a strict verifier rejects. Signing before the rewrite was rejected: the `Host`
+`content-length` is left unsigned because the forwarding layer owns it. That layer refreshes the
+value and omits the header entirely on a bodyless request. Signing the workload's value would attest
+a header the request may not send, which a strict verifier rejects. Signing before the rewrite was rejected: the `Host`
 is a signed header, so signing while the request still names the original destination and then
 rewriting it desynchronizes the signature from the bytes sent. Signing in the box was rejected: only
 the gateway holds the per-request bytes. The env:// box-owned backend token keeps its pre-rewrite

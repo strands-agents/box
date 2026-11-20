@@ -174,9 +174,9 @@ several destinations. The box presents the backend host on the wire, so distinct
 backend would reach it as the same bytes with the agent's host lost. Write one entry per host.
 
 A host that re-routes to a backend may be named by no other entry, on any port. The box matches a
-re-route by host alone, so any other entry that covers the host (a direct entry on another port, a
-second backend, or a `*`/`*.suffix` wildcard that spans it) would load and then be refused on every
-request. The loader refuses the pair instead.
+re-route by host alone, so any other entry that covers the host would load and then be refused on
+every request. That includes a direct entry on another port, a second backend, or a `*`/`*.suffix`
+wildcard that spans it. The loader refuses the pair instead.
 
 This version re-routes to one backend. More than one backend and routing rules are not yet
 available.
@@ -202,8 +202,8 @@ default credential provider chain, in order: the `AWS_*` environment variables, 
 (including `credential_process`), web identity, the ECS or EKS container endpoint, then EC2 instance
 metadata: the host's **ambient** identity. `aws://PROFILE` resolves **only** the named profile: its
 static keys, `credential_process`, assume-role, or web identity. It never reads the ambient `AWS_*`
-keys or instance metadata, and a missing profile is refused rather than signing as the ambient
-identity, like the AWS CLI's `--profile`. Naming a profile pins *which* identity signs; it does not
+keys or instance metadata. Like the AWS CLI's `--profile`, a missing profile is refused rather than
+signing as the ambient identity. Naming a profile pins *which* identity signs; it does not
 avoid `credential_process` (see the writable-`~/.aws` note below).
 
 This build does **not** resolve **AWS SSO** or `aws login` profiles (the SDK's `sso` provider is
@@ -221,7 +221,7 @@ identity signs, and grant the workload no write access to ~/.aws
 ```
 
 Naming a profile with `aws://PROFILE` pins *which* identity signs and does not warn. The shipped box
-has no setting that refuses a bare `aws://` outright (it always signs with a warning), so a
+has no setting that refuses a bare `aws://` outright. It always signs with a warning. So a
 deployment that must pin the identity writes `aws://PROFILE` rather than a bare `aws://`.
 
 > **Writable `~/.aws` is a remote-code-execution path.** Both `aws://` forms read the profile files,
@@ -288,7 +288,7 @@ not upgrade `rust-lang.org`.
 | An entry has a backend, and its destination is not one exact host | A re-route is matched per connection, on host and port, and the box presents the backend host on the wire. Give a backend entry exactly one destination with an exact host (no path, no wildcard). Write one entry per host. |
 | A host with a backend is also named by another entry (any port) | A re-route is matched by host alone, so a host that re-routes may name no other entry. Move the other destination to its own host, or drop it. |
 | An entry has a backend and a signed (`aws://`/`credsd://`) `secret`, or one in a declared scheme | A re-routed destination secret is phantom-only, so it must be `env://`. |
-| An entry has a backend and sets `secret.inject` | A re-routed destination secret is phantom-only (provisioned to the workload and stripped, never injected), so `inject` has no effect. Remove `secret.inject`. |
+| An entry has a backend and sets `secret.inject` | A re-routed destination secret is phantom-only: it is provisioned to the workload and stripped, never injected. So `inject` has no effect. Remove `secret.inject`. |
 | A `backends.auth` uses `credsd://`, or sits on an `http` backend | Use an `env://` token or an `aws://` profile on an `https` backend. |
 | A `backends.auth` uses `aws://` without a valid `aws.service`/`aws.region` (or sets them on a non-`aws://` auth) | An `aws://` backend auth signs over the backend host, so state `backends.auth.aws.service` and `backends.auth.aws.region`, each non-empty and only lowercase letters, digits, or `-`. They are valid only on an `aws://` auth. |
 | `secret.ref` has a scheme other than `env` or `aws`, and no `[secret-source.<scheme>]` table declares it | Use one of the two schemes, or declare the [secret source](config.md#secret-sourcescheme). |
