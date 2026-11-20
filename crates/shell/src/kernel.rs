@@ -153,10 +153,11 @@ impl ShellKernel {
         self.interceptor.intercept(attempt).await.map(Permit::new)
     }
 
-    /// Resolve `path` per `follow`, keeping the identity an effect must still find.
-    async fn resolve(&self, proc: &Process, path: &str, follow: Follow) -> Resolved {
+    /// Resolve `path` per `follow`, keeping the identity an effect must still find. An empty
+    /// path names no file.
+    async fn resolve(&self, proc: &Process, path: &str, follow: Follow) -> io::Result<Resolved> {
         let generation = self.backend.generation.lock().await;
-        let abs = strands_shell::vfs::absolute(&proc.cwd, path);
+        let abs = strands_shell::vfs::absolute(&proc.cwd, path)?;
         let vfs = self.backend.memory.vfs.lock().await;
         let mounts = &self.backend.mounts;
         let resolved = match follow {
@@ -175,12 +176,12 @@ impl ShellKernel {
             .canonical_spelling(&resolved, follow)
             .unwrap_or(resolved);
         let host = mounts.identity(&resolved, follow);
-        Resolved {
+        Ok(Resolved {
             path: resolved,
             follow,
             generation: *generation,
             host,
-        }
+        })
     }
 
     /// Hold the namespace still while an effect acts, or refuse a path whose object moved.
@@ -204,7 +205,7 @@ impl ShellKernel {
         follow: Follow,
         operation: FsOperation,
     ) -> io::Result<(Resolved, Permit)> {
-        let resolved = self.resolve(proc, path, follow).await;
+        let resolved = self.resolve(proc, path, follow).await?;
         let permit = self
             .admit(&EffectAttempt::Filesystem {
                 path: &resolved.path,
@@ -629,8 +630,8 @@ impl Kernel for ShellKernel {
             .await
             .into_iter()
             .filter(|candidate| {
-                let abs = strands_shell::vfs::absolute(&proc.cwd, candidate);
-                !mounts.serves(&abs) || mounts.is_mount_point(&abs)
+                strands_shell::vfs::absolute(&proc.cwd, candidate)
+                    .is_ok_and(|abs| !mounts.serves(&abs) || mounts.is_mount_point(&abs))
             })
             .collect();
         permit.report_probe(!candidates.is_empty()).await;
@@ -762,8 +763,8 @@ impl Kernel for ShellKernel {
     /// Both names are admitted together. The source is the link itself, and the destination's
     /// final component is the name replaced, so whether one is bound there is read unfollowed.
     async fn rename(&self, proc: &Process, from: &str, to: &str) -> io::Result<()> {
-        let source = self.resolve(proc, from, Follow::No).await;
-        let target = self.resolve(proc, to, Follow::No).await;
+        let source = self.resolve(proc, from, Follow::No).await?;
+        let target = self.resolve(proc, to, Follow::No).await?;
         let destination = {
             let mounts = &self.backend.mounts;
             if mounts.serves(&target.path) {
@@ -797,7 +798,7 @@ impl Kernel for ShellKernel {
 
     /// Only `link` is a resolved identity; `target` is the text the link stores.
     async fn symlink(&self, proc: &Process, target: &str, link: &str) -> io::Result<()> {
-        let at = self.resolve(proc, link, Follow::No).await;
+        let at = self.resolve(proc, link, Follow::No).await?;
         let permit = self
             .admit(&EffectAttempt::FilesystemPair {
                 from: target,

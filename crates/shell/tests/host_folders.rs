@@ -91,6 +91,19 @@ host_case!(
     }
 );
 
+host_case!(
+    rm_rf_of_an_empty_path_removes_nothing,
+    "e=; rm -rf \"$e\"; unset u; rm -rf \"$u\"",
+    |folder, ran| {
+        assert_eq!(ran.out.status, 0, "{}", ran.out.stderr);
+        assert!(folder.exists("dir/inner.txt"), "the cwd is kept");
+        assert!(
+            folder.outside.join("host.txt").exists(),
+            "nothing outside is reached"
+        );
+    }
+);
+
 #[test]
 fn a_file_bind_whose_source_is_a_symlink_is_not_a_link() {
     let folder = support::Folder::standard();
