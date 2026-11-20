@@ -708,7 +708,7 @@ destination that reaches the box as an IPv6 encoding of an IPv4 address carries 
 `ip4` as well. So one `ip4 like "169.254.*"` covers the dotted quad and every encoding in the table
 below, and you need no clause per encoding.
 
-**`ip6` matches the wire form** — the address the gateway actually dials. A destination that arrives
+**`ip6` matches the wire form**: the address the gateway dials. A destination that arrives
 wrapped carries both fields, so `ip6 like "64:ff9b::*"` refuses every address routed through the
 well-known NAT64 translator, whatever IPv4 address each one carries. Use `ip6` when the route is
 what you care about and `ip4` when the endpoint is.
@@ -777,7 +777,7 @@ refuse to load:
 
 What this does not catch is a wildcard pattern whose pieces are all plausible but whose prefix no
 address takes, such as `ip6 like "::ffff:a9fe:*"`. A mapped address is written with a dotted quad, so
-that pattern misses the mapped addresses it looks aimed at — but `::ffff:a9fe:a9fe:0` is a real
+that pattern misses the mapped addresses it looks aimed at. But `::ffff:a9fe:a9fe:0` is a real
 address it does match, so the load cannot prove it inert. Check an `ip6` pattern against the table
 above.
 
