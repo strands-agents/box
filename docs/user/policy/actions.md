@@ -128,9 +128,15 @@ with `expected ipaddr but saw String`.
 | `path` | String | The URL path in canonical form, without the query. |
 | `body_bytes` | Long | The request body length. |
 | `intercepted` | Bool | `true` when the gateway decrypted a TLS exchange, `false` for plain HTTP. |
+| `upgrade` | String | `"websocket"` on a WebSocket handshake, and `""` on every other request. |
 
 A rule on `path` has caveats for repeated slashes and `%2F`.
 [Forbid one URL path on a host](../policy.md#forbid-one-url-path-on-a-host) lists them.
+
+A WebSocket handshake is one `http:request`, and its permit admits the whole WebSocket. The gateway
+asks policy nothing after the `101`. A permit that doesn't read `upgrade` admits a WebSocket to its
+host, so add `context.input.upgrade == ""` to a permit that is for HTTP only. A guard or a budget can
+refuse the next handshake, but it cannot close a WebSocket that is open.
 
 Cloud metadata and link-local protection is two `forbid` rules on `net:connect`;
 [what Box always enforces](../security.md#what-box-always-enforces) lists them.

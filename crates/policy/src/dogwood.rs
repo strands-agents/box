@@ -2357,6 +2357,7 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
             path,
             body_bytes,
             intercepted,
+            upgrade,
         } => vec![
             (attr::HOST, Value::String((*host).to_string())),
             (attr::PORT, Value::Int(i64::from(*port))),
@@ -2364,6 +2365,7 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
             (attr::PATH, Value::String((*path).to_string())),
             (attr::BODY_BYTES, Value::Int(clamp(*body_bytes))),
             (attr::INTERCEPTED, Value::Bool(*intercepted)),
+            (attr::UPGRADE, Value::String((*upgrade).to_string())),
         ],
         Request::McpCall {
             server,
@@ -2487,6 +2489,7 @@ fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
             path,
             delivery,
             intercepted,
+            upgrade,
             ..
         } => vec![
             (attr::HOST, Value::String((*host).to_string())),
@@ -2500,6 +2503,7 @@ fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
                 Value::Int(clamp(delivery.accepted_bytes())),
             ),
             (attr::INTERCEPTED, Value::Bool(*intercepted)),
+            (attr::UPGRADE, Value::String((*upgrade).to_string())),
         ],
         Outcome::ShellRun {
             command,
@@ -3915,6 +3919,7 @@ when temporal {
             delivery: crate::Delivery::Completed { bytes },
             status: Some(200),
             intercepted: true,
+            upgrade: "",
         }
     }
 
@@ -3926,6 +3931,7 @@ when temporal {
             path: "/v1",
             body_bytes: 10,
             intercepted: true,
+            upgrade: "",
         }
     }
 
@@ -4000,6 +4006,7 @@ when temporal {
                         delivery: crate::Delivery::Completed { bytes: 10 },
                         status: Some(200),
                         intercepted: true,
+                        upgrade: "",
                     }
                 )
                 .is_err(),
@@ -4101,6 +4108,7 @@ when temporal {
             delivery: crate::Delivery::Completed { bytes: 150 },
             status: Some(200),
             intercepted: true,
+            upgrade: "",
         };
         let request_id = permitted_http_request(&engine);
         engine

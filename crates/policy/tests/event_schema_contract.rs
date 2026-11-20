@@ -147,6 +147,7 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
                 path: "/upload",
                 body_bytes: 5,
                 intercepted: true,
+                upgrade: "",
             },
             Outcome::Http {
                 host: "api.example.com",
@@ -156,6 +157,7 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
                 delivery,
                 status: None,
                 intercepted: true,
+                upgrade: "",
             },
             &mut identifiers,
         );
@@ -261,6 +263,7 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
             path: "/upload",
             body_bytes: 5,
             intercepted: true,
+            upgrade: "",
         },
     );
     assert!(

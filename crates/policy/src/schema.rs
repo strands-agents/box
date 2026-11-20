@@ -297,6 +297,7 @@ pub(crate) mod attr {
     pub(crate) const BODY_BYTES: &str = "body_bytes";
     /// `context.input.intercepted` — whether HTTP was seen through TLS interception.
     pub(crate) const INTERCEPTED: &str = "intercepted";
+    pub(crate) const UPGRADE: &str = "upgrade";
     /// `context.input.server` — the MCP server a tool call names (`mcp:call`).
     pub(crate) const SERVER: &str = "server";
     /// `context.input.tool` — the tool a `tools/call` names (`mcp:call`).
@@ -574,6 +575,7 @@ fn context_for(
             path,
             body_bytes,
             intercepted,
+            upgrade,
         } => vec![
             (
                 attr::HOST.to_string(),
@@ -598,6 +600,10 @@ fn context_for(
             (
                 attr::INTERCEPTED.to_string(),
                 RestrictedExpression::new_bool(*intercepted),
+            ),
+            (
+                attr::UPGRADE.to_string(),
+                RestrictedExpression::new_string((*upgrade).to_string()),
             ),
         ],
         Request::McpCall {
@@ -820,6 +826,7 @@ mod tests {
                 path: "/",
                 body_bytes: 12,
                 intercepted: true,
+                upgrade: "",
             },
             // Two arguments, so both optional positions are exercised.
             Request::ShellExec {

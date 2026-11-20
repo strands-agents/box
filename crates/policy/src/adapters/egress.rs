@@ -218,6 +218,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                 body_bytes,
                 intercepted,
                 mcp,
+                upgrade,
             } => {
                 // HTTP and MCP decisions are separate requests, even in one gateway exchange.
                 authorize(
@@ -231,6 +232,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                         path,
                         body_bytes: *body_bytes,
                         intercepted: *intercepted,
+                        upgrade,
                     },
                 )
                 .map_err(|reason| format!("http:request gate: {reason}"))
@@ -371,6 +373,7 @@ enum AttemptIdentity {
         intercepted: bool,
         /// Present when this request carried an `mcp:call`; drives the response-leg recording.
         mcp: Option<McpCallIdentity>,
+        upgrade: String,
     },
     /// An attempt kind this adapter does not map, and the release of a reply. Each is admitted
     /// only if the authorization arm above allowed it, and it records nothing.
@@ -397,6 +400,7 @@ impl AttemptIdentity {
                 path,
                 intercepted,
                 mcp,
+                upgrade,
                 ..
             } => Self::Http {
                 host: (*host).to_string(),
@@ -404,6 +408,7 @@ impl AttemptIdentity {
                 method: (*method).to_string(),
                 path: (*path).to_string(),
                 intercepted: *intercepted,
+                upgrade: (*upgrade).to_string(),
                 // Record a response leg only for an actual tool/resource/prompt CALL — never for
                 // `List`/enumeration (tools/list, resources/list, prompts/list). Discovery drives
                 // those `List` frames through the gateway at startup; counting them would inflate a
@@ -749,6 +754,7 @@ impl LocalPolicyEffectPermit {
                     path,
                     intercepted,
                     mcp,
+                    upgrade,
                 },
                 Some(delivery),
             ) => {
@@ -764,6 +770,7 @@ impl LocalPolicyEffectPermit {
                         delivery,
                         status: reply_status_of(outcome),
                         intercepted: *intercepted,
+                        upgrade,
                     },
                 );
                 // Record the `mcp:call::response` leg for a remote (http) MCP call, so temporal caps
@@ -1079,6 +1086,7 @@ mod tests {
             path: "/mcp",
             body_bytes: 32,
             intercepted: false,
+            upgrade: "",
             mcp: Some(McpFrame::List { server, method }),
         }
     }
@@ -1096,6 +1104,7 @@ mod tests {
             path: "/mcp",
             body_bytes: 64,
             intercepted: false,
+            upgrade: "",
             mcp: Some(McpFrame::ToolCall {
                 server,
                 tool,
@@ -2357,6 +2366,7 @@ mod tests {
                 path: "/v1/messages",
                 body_bytes: 42,
                 intercepted: true,
+                upgrade: "",
                 mcp: None,
             })
             .expect("request is allowed")
@@ -2386,6 +2396,7 @@ mod tests {
             path: "/",
             body_bytes: 0,
             intercepted: true,
+            upgrade: "",
             mcp: None,
         };
         let response = EgressEffectAttempt::ResponseRelease {
@@ -2476,6 +2487,7 @@ mod tests {
             path: "/",
             body_bytes: 0,
             intercepted: true,
+            upgrade: "",
             mcp: None,
         };
         for _ in 0..3 {
@@ -2544,6 +2556,7 @@ mod tests {
             path: "/",
             body_bytes: 0,
             intercepted: true,
+            upgrade: "",
             mcp: None,
         };
         for (source, admitted_after) in [(count_all, false), (count_errors, true)] {
@@ -2670,6 +2683,7 @@ mod tests {
             path: "/v1/messages",
             body_bytes,
             intercepted: true,
+            upgrade: "",
             mcp: None,
         };
 
@@ -2701,6 +2715,7 @@ mod tests {
             path: "/v1/messages",
             body_bytes: 0,
             intercepted,
+            upgrade: "",
             mcp: None,
         };
 
@@ -2740,6 +2755,7 @@ mod tests {
             path: "/v1/messages",
             body_bytes: 0,
             intercepted,
+            upgrade: "",
             mcp: None,
         };
         let exchange = |fixture: &InterceptorFixture, intercepted| {

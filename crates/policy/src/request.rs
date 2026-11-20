@@ -228,6 +228,8 @@ pub enum Request<'a> {
         body_bytes: usize,
         /// Whether the request was seen through TLS interception (vs. tunneled).
         intercepted: bool,
+        /// `websocket` on a WebSocket handshake, and empty on every other request.
+        upgrade: &'a str,
     },
     /// One MCP request, with per-tool actions for `tools/call` and `mcp:call` for other methods.
     McpCall {

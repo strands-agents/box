@@ -174,7 +174,8 @@ type NetworkRequestInput = {
   path: String,
   body_bytes: Long,
   // Whether the gateway terminated TLS and parsed the exchange.
-  intercepted: Bool
+  intercepted: Bool,
+  upgrade: String
 };
 
 // The reply, on the `output` of an `http:request` response event. `status` is the

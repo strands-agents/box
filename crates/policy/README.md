@@ -214,7 +214,7 @@ load refuses an `operation` guard under no action.
 |---|---|---|
 | `Fs` | one `Box::Action` selected by `operation` | `path: &ApprovedPath`, `operation: FsOperation` |
 | `Connect` | `Box::Action::"net:connect"` | `host: &str`, `ip: Option<IpAddr>`, `port: u16` |
-| `Http` | `Box::Action::"http:request"` | `host: &str`, `port: u16`, `method: &str`, `path: &str`, `body_bytes: usize`, `intercepted: bool` |
+| `Http` | `Box::Action::"http:request"` | `host: &str`, `port: u16`, `method: &str`, `path: &str`, `body_bytes: usize`, `intercepted: bool`, `upgrade: &str` |
 | `ShellExec` | `Box::Action::"shell:exec"` | `command`, `program`, `args`, `cwd` |
 | `ShellSpawn` | `Box::Action::"shell:spawn"` | the same, plus `program_path` |
 | `McpCall` | `Box::Action::"mcp:call"`, or `<normalized-server>::Action::"<tool>"` when `tool` and `arguments` are present | `server`, `method`, `tool`, `prompt`, `uri`, `arguments` |
@@ -413,6 +413,7 @@ fn submit(policy: &PolicyEngine, request_id: &RequestId) -> Result<(), PolicyErr
             delivery: Delivery::Completed { bytes: 512 },
             status: Some(200),
             intercepted: true,
+            upgrade: "",
         },
     )
 }
@@ -427,7 +428,7 @@ Other facts in those events remain available until normal history pruning remove
 | Variant | Records |
 |---|---|
 | `Connect` | `host`, `port`, `address`, `connected` |
-| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status`, `intercepted` |
+| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status`, `intercepted`, `upgrade` |
 | `ShellRun` | `command`, `program`, `args`, `cwd`, `status` |
 | `ShellSpawn` | the same, plus `program_path` |
 | `Fs` | `path`, `operation`, `result` |

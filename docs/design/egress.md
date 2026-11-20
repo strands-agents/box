@@ -162,6 +162,21 @@ A request the gateway refuses gets a 403 with the header `x-strands-box-egress: 
 that says why. A `net:connect` refusal of a `CONNECT` arrives before the `200`, so the client never
 starts TLS. A policy refusal of a request to an HTTP MCP server gets a JSON-RPC error body.
 
+### WebSocket
+
+A WebSocket handshake inside a `CONNECT` is one `http:request`, with `upgrade` set to
+`"websocket"`. The gateway refuses a handshake that isn't a valid RFC 6455 `GET` with 400, a plain
+HTTP handshake with 403 before any decision, and a handshake to an HTTP MCP server with 403. It
+removes `Sec-WebSocket-Extensions`, adds the credential to the handshake as to any request, and
+refuses a `101` with a wrong `Sec-WebSocket-Accept` or with an extension with 502.
+
+After the `101`, the gateway copies bytes both ways and asks policy nothing more. On a host with a
+credential, it reads each frame from the server whole, up to the 16 MiB cap, redacts the credential,
+and sends the frame on with its new length. A redacted Ping or Pong goes on with no payload, and a
+redacted Close keeps only its code. A server frame over the cap or one that breaks RFC 6455 ends
+both connections with one refusal record. When one side closes, the gateway closes its write to the
+other side. After 300 seconds with no byte on either leg, it ends both connections.
+
 ### Cloud instance metadata
 
 For gateway traffic, policy provides the only check on metadata endpoints. The gateway has no
