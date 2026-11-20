@@ -4173,7 +4173,7 @@ mod tests {
     /// through an `[[agent.ingress]]` entry; a route without a secret, or with a backend, is not
     /// checked.
     #[test]
-    fn a_host_loopback_secret_names_a_port_that_no_ingress_uses() {
+    fn reserved_name_secret_port_not_ingress() {
         let ingress = vec![crate::record::config::ingress::Ingress {
             listen: "0.0.0.0:8080".to_string(),
             workload_port: 8081,

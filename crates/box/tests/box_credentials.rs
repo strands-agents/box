@@ -2141,7 +2141,7 @@ IFS= read -r status <&3; printf 'status=%s\n' "${{status%$'\r'}}""#
 /// `host.box.internal` reaches the operator's loopback only on the port a policy permits, and a
 /// route that names it exactly adds its secret over plain HTTP.
 #[test]
-fn host_box_internal_reaches_only_the_permitted_loopback_port_with_its_secret() {
+fn reserved_name_reaches_permitted_port_with_secret() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
@@ -2190,7 +2190,7 @@ fn host_box_internal_reaches_only_the_permitted_loopback_port_with_its_secret() 
 /// A secret on `host.box.internal` with no port is refused before the box starts, because the
 /// plain request would carry the real secret to whatever process holds the port.
 #[test]
-fn a_host_box_internal_secret_with_no_port_is_refused_at_configure() {
+fn reserved_name_secret_needs_a_port() {
     let (box_, output) = attempt_configure(
         "host-loopback-no-port",
         &permit_egress_to("host.box.internal", 80),

@@ -427,9 +427,8 @@ binding sends the request with a placeholder in place of the secret, which the p
 
 ### Reach a service on your machine
 
-The agent reaches a local LLM gateway that listens on `127.0.0.1:4259` on your machine, and no other
-port there. The agent names it `http://host.box.internal:4259`;
-[a service on your machine](egress.md#a-service-on-your-machine) covers the agent's side.
+The agent reaches `http://host.box.internal:4259`, a service on your machine's loopback, and no other
+port there ([a service on your machine](egress.md#a-service-on-your-machine)):
 
 ```text
 @id("local_llm_connect")
@@ -441,9 +440,8 @@ permit (principal, action == Box::Action::"http:request", resource)
 when { context.input.host == "host.box.internal" && context.input.port == 4259 };
 ```
 
-The gateway decides `net:connect` twice: on the name, and then on the address it dials, with
-`ip4 = "127.0.0.1"`. So a policy that forbids loopback addresses also refuses the name. To keep
-that forbid, exclude the name from it:
+The gateway decides `net:connect` on the name, then on the address it dials, `ip4 = "127.0.0.1"`.
+So a forbid on loopback addresses also refuses the name. To keep it, exclude the name:
 
 ```text
 @id("no_loopback")
@@ -454,13 +452,7 @@ when {
 };
 ```
 
-| Request | Decision | Rule |
-|---|---|---|
-| `http://host.box.internal:4259/v1/models` | Permitted | `local_llm_connect`, `local_llm_request` |
-| `http://host.box.internal:5432/` | Refused | No permit |
-| `http://127.0.0.1:4259/v1/models` | Refused | No permit: the host is `127.0.0.1`, not the name |
-
-A wildcard permit, such as `context.input.host like "*.internal"`, includes `host.box.internal`.
+A permit on the name doesn't admit `127.0.0.1:4259`, and a wildcard host permit includes the name.
 
 ## History persistence and process crashes
 

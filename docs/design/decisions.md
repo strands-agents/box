@@ -2236,30 +2236,25 @@ that the box carries cleartext to a permitted host, so anything on that path can
 <a id="host-box-internal-names-the-surrounding-oss-loopback"></a>
 ### `host.box.internal` names the surrounding OS's loopback, and policy grants it per port
 
-Inside a box, `localhost` stays the box's own loopback. The reserved name `host.box.internal` means
-the surrounding OS's loopback: the gateway decides the name, maps it to `127.0.0.1` with no DNS
-lookup, and decides that address before it dials. The name is not in `NO_PROXY`, and no starter
-policy permits it. The name follows the `host.docker.internal` convention, and the `box` label
-avoids a real machine named `host.internal`.
+Inside a box, `localhost` stays the box's own loopback. The reserved name `host.box.internal` is the
+surrounding OS's loopback: the gateway decides the name, maps it to `127.0.0.1` with no DNS lookup,
+and decides that address before it dials. No starter policy permits it. The `box` label avoids a
+real machine named `host.internal`.
 
-**Rejected.** An operator override of `NO_PROXY`: it sends all of the agent's loopback traffic to
-the host, which breaks a server the agent starts in the box, and it cannot name one port.
+**Rejected.** Letting an operator clear `NO_PROXY`: it sends all loopback traffic to the host,
+which breaks the agent's own servers, and it cannot name one port.
 
-**Cost.** IPv4 only, so a service that listens only on `::1` is out of reach. A `forbid` on a
-loopback `ip4` also refuses the name, and a wildcard host permit includes it. Under a containerized
-Box, the name reaches the container's loopback.
+**Cost.** IPv4 only. A loopback `ip4` forbid also refuses the name, and a wildcard host permit
+includes it.
 
 <a id="the-gateway-never-dials-its-own-listener"></a>
 ### The gateway never dials its own listener
 
-The gateway refuses a dial to its own listening address, in any local spelling, before policy
-decides the address. Such a dial connects the gateway to itself, so the request meets the gateway in
-place of a service and holds a second connection slot. `host.box.internal` or a literal `127.0.0.1`
-reaches that address. The refusal is a deny-only floor beneath policy, and it decides no other
+The gateway refuses a dial to its own listening address before policy decides the address, because
+the gateway would connect to itself. The refusal is a deny-only floor and decides no other
 destination.
 
-**Rejected.** Leaving the self-dial to policy: a wildcard port permit on the name would open it, and
-the gateway's port changes on each run, so a rule cannot name it.
+**Rejected.** Leaving it to policy: the gateway's port changes on each run, so no rule can name it.
 
 **Cost.** The gateway holds one fixed refusal of its own. The telemetry collector's port stays
 reachable through the name when a policy permits it.
@@ -2267,21 +2262,17 @@ reachable through the name when a policy permits it.
 <a id="a-secret-rides-only-tls"></a>
 ### Credentials require TLS, except to `host.box.internal`
 
-A bare-host credential pattern matches port 80 as well as 443, and a target carries no scheme, so a
-cleartext request to a credential-bound host would otherwise receive the real secret. The plain-HTTP
-path therefore refuses with `403` when any credential control matches the destination, before the
-gateway applies request controls. The destination determines this refusal, and request content
-cannot opt out of it. The one exception, which the maintainer approved, is `host.box.internal`
-when every matching route names it exactly and no backend re-routes it. That cleartext stays on the
-surrounding OS, and a local LLM gateway that asks for a key seldom speaks TLS.
+A bare-host credential pattern matches port 80 as well as 443, so a cleartext request to a bound
+host would otherwise receive the real secret. The plain-HTTP path therefore refuses with `403` when
+any credential matches the destination, and request content cannot opt out. The one exception,
+which the maintainer approved, is `host.box.internal` when every matching route names it exactly,
+with a port, and no backend re-routes it, because a local LLM gateway seldom speaks TLS.
 
-**Rejected.** Exempting every loopback destination: a literal `127.0.0.1` or a name that a resolver
-maps to loopback is not a name Box defines, and a wildcard route could reach the exception.
+**Rejected.** Exempting every loopback destination, which a literal address or a wildcard route
+could reach.
 
 **Cost.** Plain HTTP does not authenticate the server, so the secret goes to whatever process holds
-the port, and anything that reads loopback traffic can read it. A local process of any user can take
-a free port while the service is down. Box refuses such a route with no port, or on a port that an
-`[[agent.ingress]]` entry uses, because that port leads back to the agent.
+the port. Box refuses an `[[agent.ingress]]` port, which leads back to the agent.
 
 <a id="the-plain-path-binds-its-own-destination-and-reports-its-transport"></a>
 ### The plain path binds its own destination and reports its transport truthfully

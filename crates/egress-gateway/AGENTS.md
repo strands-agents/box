@@ -47,19 +47,12 @@ The gateway holds no destination deny list. A metadata or link-local address is 
 `forbid` on `context.input.ip4` or `context.input.ip6`, decided on the pinned address
 ([metadata protection is policy](../../docs/design/decisions.md#the-ssrf-and-metadata-floor-is-compiled-beneath-policy)).
 
-- **The one fixed refusal is the gateway's own listener.** `SharedState::is_own_listener` refuses
-  a dial to the bound TCP address, in any local spelling, before the address decision, because
-  the gateway would connect to itself. It is a deny-only floor, approved by the maintainer
-  ([the gateway never dials its own listener](../../docs/design/decisions.md#the-gateway-never-dials-its-own-listener)).
-  Do not grow it into a list of other addresses.
-- **The plaintext-credential floor has one exception, and it stays exact.**
-  `SharedState::is_mapped_host_loopback` and `CapabilitySet::every_match_names_host` admit a
-  credential on plain HTTP only for `HOST_LOOPBACK_NAME`, mapped by a `dns_overrides` entry to a
-  loopback address, with no backend, and with every matching pattern naming the host exactly
-  ([credentials require TLS](../../docs/design/decisions.md#a-secret-rides-only-tls)). A wildcard
-  route, a literal loopback address, and a re-route each still refuse. The name is spelled once
-  here and once in `strands-box` (`record::config::egress::HOST_LOOPBACK_NAME`), which sets the
-  mapping and refuses a secret with no port or on an ingress port; keep the two spellings equal.
+- **`host.box.internal` adds two exact, approved rules.** `is_own_listener` refuses a dial to the
+  gateway's own address before policy (deny-only; do not grow it into a list), and the plaintext
+  floor admits a credential only for `HOST_LOOPBACK_NAME` mapped to loopback, with no backend and
+  every matching route naming it exactly. Keep this spelling equal to `strands-box`'s
+  ([own listener](../../docs/design/decisions.md#the-gateway-never-dials-its-own-listener),
+  [credentials require TLS](../../docs/design/decisions.md#a-secret-rides-only-tls)).
 - **`CapabilitySet` holds the credential mutators, not a second authority.** A capability returns
   its mutations or a fault, and it has **no allow**. The fold applies the mutations only in the
   *absence* of a fault.

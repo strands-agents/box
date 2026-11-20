@@ -744,7 +744,7 @@ mod tests {
     /// A dial to the gateway's own listener, bound to one address or to every address, is refused
     /// before policy sees the address, and no socket opens.
     #[test]
-    fn a_dial_to_the_gateways_own_listener_is_refused_before_policy() {
+    fn own_listener_refused() {
         let own = Recorder::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
         own.assert_live();
         let before = own.accepted();

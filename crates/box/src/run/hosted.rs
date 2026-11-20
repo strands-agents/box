@@ -1377,7 +1377,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_reserved_loopback_name_maps_to_ipv4_loopback_alone() {
+    fn reserved_name_maps_to_ipv4_loopback() {
         assert_eq!(
             host_loopback_overrides(),
             vec![(

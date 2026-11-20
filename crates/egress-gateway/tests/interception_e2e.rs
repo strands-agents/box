@@ -1878,13 +1878,14 @@ fn a_credential_on_an_upgraded_plain_request_is_refused() {
 /// The reserved name, as the box maps it.
 const HOST_LOOPBACK: &str = "host.box.internal";
 
-/// A gateway under `policy` with `controls`, mapping each of `mapped` to `127.0.0.1`.
-fn loopback_gateway(
+/// A plain `GET` through a gateway that maps each of `mapped` to `127.0.0.1`; port 0 is its own.
+fn loopback_get(
     controls: CapabilitySet,
-    policy: Arc<FixedPolicy>,
+    policy: Arc<dyn EffectInterceptor>,
     mapped: &[&str],
     backends: Vec<(DestinationPattern, BackendDial)>,
-) -> egress_gateway::MitmHandle {
+    (host, port, phantom): (&str, u16, &str),
+) -> String {
     let config = MitmConfig {
         dns_overrides: mapped
             .iter()
@@ -1894,228 +1895,203 @@ fn loopback_gateway(
         ..MitmConfig::default()
     };
     let emitter = Box::new(RECORDS.with(Clone::clone));
-    MitmInterceptor::start_with(config, controls, policy, emitter, None).unwrap()
-}
-
-/// A plain `GET` to `host:port` that carries `phantom`.
-fn plain_with_phantom(host: &str, port: u16, phantom: &str) -> String {
-    format!(
-        "GET http://{host}:{port}/v1/models HTTP/1.1\r\nHost: {host}:{port}\r\n\
-         Authorization: Bearer {phantom}\r\nConnection: close\r\n\r\n"
+    let handle = MitmInterceptor::start_with(config, controls, policy, emitter, None).unwrap();
+    // Port 0 names the gateway's own port.
+    let own = proxy_port(&handle);
+    let port = if port == 0 { own } else { port };
+    plain_exchange(
+        own,
+        &format!(
+            "GET http://{host}:{port}/v1 HTTP/1.1\r\nHost: {host}:{port}\r\n\
+             Authorization: Bearer {phantom}\r\nConnection: close\r\n\r\n"
+        ),
     )
 }
 
-/// A route that names the mapped loopback name exactly puts its secret on a plain request, and the
-/// phantom does not ride upstream.
-#[test]
-fn a_secret_rides_plain_http_to_the_mapped_host_loopback_name() {
-    let origin = PlainOrigin::start();
-    let port = origin.port;
-    let (store, phantom) = opaque_store(HOST_LOOPBACK, port, "sk_live_LOOPBACKSECRET");
-    let controls = CapabilitySet::new(vec![CredentialCapability::new(
-        pat(HOST_LOOPBACK, port),
-        store,
-    )]);
-    let handle = loopback_gateway(
-        controls,
-        FixedPolicy::allowing(&[HOST_LOOPBACK]),
-        &[HOST_LOOPBACK],
-        Vec::new(),
-    );
+/// One plaintext case: name, routes, host, mapped hosts, backends, and whether the secret rides.
+type PlainCase<'a> = (
+    &'a str,
+    Vec<&'a str>,
+    &'a str,
+    &'a [&'a str],
+    Vec<(DestinationPattern, BackendDial)>,
+    bool,
+);
 
-    let reply = plain_exchange(
-        proxy_port(&handle),
-        &plain_with_phantom(HOST_LOOPBACK, port, &phantom),
-    );
-    assert!(reply.starts_with("HTTP/1.1 200"), "{reply:?}");
-    let requests = origin.requests();
-    assert_eq!(requests.len(), 1, "{requests:?}");
-    assert!(
-        requests[0].contains("Bearer sk_live_LOOPBACKSECRET"),
-        "the local service receives the real secret: {requests:?}"
-    );
-    assert!(!requests[0].contains(&phantom), "{requests:?}");
+/// A plain-HTTP backend on `127.0.0.1:port`.
+fn plain_backend(port: u16) -> BackendDial {
+    BackendDial {
+        host: "127.0.0.1".to_string(),
+        port,
+        tls: false,
+        path_prefix: String::new(),
+    }
 }
 
-/// One case of the plaintext exception's narrow scope.
-struct PlainCase {
-    name: &'static str,
-    route: String,
-    host: &'static str,
-    mapped: Vec<&'static str>,
-    backends: Vec<(DestinationPattern, BackendDial)>,
-}
-
-/// The plaintext exception names one host, exactly: another host, a literal loopback address, a
-/// wildcard route, and a re-routed reserved name each still refuse a credential on plain HTTP.
+/// Without a permit nothing is dialed, and the gateway's own port is refused even with one.
 #[test]
-fn a_plaintext_secret_to_any_other_destination_is_still_refused() {
+fn no_permit_refuses() {
     let origin = PlainOrigin::start();
-    let port = origin.port;
-    let backend = PlainOrigin::start();
-    let cases = [
-        PlainCase {
-            name: "another mapped host",
-            route: format!("llm.local:{port}"),
-            host: "llm.local",
-            mapped: vec!["llm.local"],
-            backends: Vec::new(),
-        },
-        PlainCase {
-            name: "a literal loopback address",
-            route: format!("127.0.0.1:{port}"),
-            host: "127.0.0.1",
-            mapped: Vec::new(),
-            backends: Vec::new(),
-        },
-        PlainCase {
-            name: "a wildcard route over the name",
-            route: format!("*.box.internal:{port}"),
-            host: HOST_LOOPBACK,
-            mapped: vec![HOST_LOOPBACK],
-            backends: Vec::new(),
-        },
-        PlainCase {
-            name: "the name re-routed to a backend",
-            route: format!("{HOST_LOOPBACK}:{port}"),
-            host: HOST_LOOPBACK,
-            mapped: vec![HOST_LOOPBACK],
-            backends: vec![(
-                pat(HOST_LOOPBACK, port),
-                BackendDial {
-                    host: "127.0.0.1".to_string(),
-                    port: backend.port,
-                    tls: false,
-                    path_prefix: String::new(),
-                },
-            )],
-        },
+    let cases: [(Arc<FixedPolicy>, u16, &str); 2] = [
+        (
+            FixedPolicy::denying_all(),
+            origin.port,
+            "denied by test policy",
+        ),
+        (
+            FixedPolicy::allowing(&[HOST_LOOPBACK]),
+            0,
+            "the gateway's own listener",
+        ),
     ];
-    for case in cases {
-        let pattern = DestinationPattern::parse(&case.route).unwrap();
-        let (store, phantom) = opaque_store_for(pattern.clone(), "sk_live_PLAINSECRET");
-        let controls = CapabilitySet::new(vec![CredentialCapability::new(pattern, store)]);
-        let handle = loopback_gateway(
-            controls,
-            FixedPolicy::allowing(&[case.host]),
-            &case.mapped,
-            case.backends,
-        );
-        let reply = plain_exchange(
-            proxy_port(&handle),
-            &plain_with_phantom(case.host, port, &phantom),
+    for (policy, port, reason) in cases {
+        let reply = loopback_get(
+            CapabilitySet::default(),
+            policy,
+            &[HOST_LOOPBACK],
+            Vec::new(),
+            (HOST_LOOPBACK, port, "unused"),
         );
         assert!(
-            reply.starts_with("HTTP/1.1 403")
-                && reply.contains("credential not permitted on a plaintext request"),
-            "{}: {reply:?}",
-            case.name
+            reply.starts_with("HTTP/1.1 403") && reply.contains(reason),
+            "{reply:?}"
         );
     }
-    let seen = [origin.requests(), backend.requests()].concat();
-    assert!(
-        seen.is_empty(),
-        "no request reached a plaintext origin: {seen:?}"
-    );
+    assert!(origin.requests().is_empty());
 }
 
-/// A backend on the reserved name dials the backend, not the mapped loopback port.
+/// The name is decided, then dialed at `127.0.0.1`; a backend on the name wins over the map.
 #[test]
-fn a_backend_on_host_box_internal_dials_the_backend() {
+fn name_dials_loopback_unless_rerouted() {
     let mapped = PlainOrigin::start();
     let backend = PlainOrigin::start();
-    let handle = loopback_gateway(
-        CapabilitySet::default(),
-        FixedPolicy::allowing(&[HOST_LOOPBACK]),
-        &[HOST_LOOPBACK],
-        vec![(
-            pat(HOST_LOOPBACK, mapped.port),
-            BackendDial {
-                host: "127.0.0.1".to_string(),
-                port: backend.port,
-                tls: false,
-                path_prefix: String::new(),
-            },
-        )],
-    );
-    let reply = plain_exchange(
-        proxy_port(&handle),
-        &plain_with_phantom(HOST_LOOPBACK, mapped.port, "unused"),
-    );
-    assert!(reply.starts_with("HTTP/1.1 200"), "{reply:?}");
-    assert_eq!(
-        backend.requests().len(),
-        1,
-        "the re-route dials the backend"
-    );
-    assert!(
-        mapped.requests().is_empty(),
-        "the mapping yields to the re-route"
-    );
-}
-
-/// The gateway never dials its own listener, through the reserved name or a literal address, even
-/// when policy permits the destination.
-#[test]
-fn the_gateway_refuses_to_dial_its_own_listener() {
-    let handle = loopback_gateway(
-        CapabilitySet::default(),
-        FixedPolicy::allowing(&[HOST_LOOPBACK, "127.0.0.1"]),
-        &[HOST_LOOPBACK],
-        Vec::new(),
-    );
-    let own = proxy_port(&handle);
-    for host in [HOST_LOOPBACK, "127.0.0.1"] {
-        let mut client = WorkloadClient::connect_raw(own);
-        let head = client.raw_connect(host, own);
-        assert!(head.starts_with("HTTP/1.1 403"), "CONNECT {host}: {head:?}");
-        let reply = plain_exchange(own, &plain_with_phantom(host, own, "unused"));
-        assert!(reply.starts_with("HTTP/1.1 403"), "GET {host}: {reply:?}");
+    for (backends, reached, skipped) in [
+        (Vec::new(), &mapped, &backend),
+        (
+            vec![(pat(HOST_LOOPBACK, mapped.port), plain_backend(backend.port))],
+            &backend,
+            &mapped,
+        ),
+    ] {
+        let before = (reached.requests().len(), skipped.requests().len());
+        let policy = RecordingPolicy::new(false);
+        let reply = loopback_get(
+            CapabilitySet::default(),
+            policy.clone(),
+            &[HOST_LOOPBACK],
+            backends,
+            (HOST_LOOPBACK, mapped.port, "unused"),
+        );
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply:?}");
+        assert_eq!(reached.requests().len(), before.0 + 1);
+        assert_eq!(skipped.requests().len(), before.1);
+        assert_eq!(
+            policy.seen()[0],
+            Seen::Resolve(HOST_LOOPBACK.to_string(), mapped.port)
+        );
     }
-    let records = records();
-    let loops = records
-        .iter()
-        .filter(|record| record.reason.contains("the gateway's own listener"))
-        .count();
-    assert_eq!(
-        loops, 4,
-        "each attempt is refused by the loop guard: {records:?}"
-    );
-    assert_eq!(
-        records.len(),
-        4,
-        "no request reached the gateway a second time: {records:?}"
-    );
 }
 
-/// The exception needs every matching route to name the reserved host exactly: an exact route
-/// beside a wildcard route over the same destination still refuses the plain request.
+/// A plain request carries a secret only to the mapped reserved name, when every matching route
+/// names it exactly and no backend re-routes it.
 #[test]
-fn a_plaintext_secret_is_refused_when_a_wildcard_route_also_matches() {
+fn plain_secret_only_to_reserved_name() {
     let origin = PlainOrigin::start();
+    let backend = PlainOrigin::start();
     let port = origin.port;
-    let exact = pat(HOST_LOOPBACK, port);
-    let wildcard = DestinationPattern::parse(&format!("*.box.internal:{port}")).unwrap();
-    let (exact_store, phantom) = opaque_store_for(exact.clone(), "sk_live_EXACTSECRET");
-    let (wildcard_store, _) = opaque_store_for(wildcard.clone(), "sk_live_WILDSECRET");
-    let controls = CapabilitySet::new(vec![
-        CredentialCapability::new(exact, exact_store),
-        CredentialCapability::new(wildcard, wildcard_store),
-    ]);
-    let handle = loopback_gateway(
-        controls,
-        FixedPolicy::allowing(&[HOST_LOOPBACK]),
-        &[HOST_LOOPBACK],
-        Vec::new(),
+    let exact = format!("{HOST_LOOPBACK}:{port}");
+    let wildcard = format!("*.box.internal:{port}");
+    let reroute = || vec![(pat(HOST_LOOPBACK, port), plain_backend(backend.port))];
+    let cases: [PlainCase; 6] = [
+        (
+            "the reserved name",
+            vec![&exact],
+            HOST_LOOPBACK,
+            &[HOST_LOOPBACK],
+            Vec::new(),
+            true,
+        ),
+        (
+            "another mapped host",
+            vec!["llm.local"],
+            "llm.local",
+            &["llm.local"],
+            Vec::new(),
+            false,
+        ),
+        (
+            "a literal loopback address",
+            vec!["127.0.0.1"],
+            "127.0.0.1",
+            &[],
+            Vec::new(),
+            false,
+        ),
+        (
+            "a wildcard route",
+            vec![&wildcard],
+            HOST_LOOPBACK,
+            &[HOST_LOOPBACK],
+            Vec::new(),
+            false,
+        ),
+        (
+            "an exact and a wildcard route",
+            vec![&exact, &wildcard],
+            HOST_LOOPBACK,
+            &[HOST_LOOPBACK],
+            Vec::new(),
+            false,
+        ),
+        (
+            "a re-routed name",
+            vec![&exact],
+            HOST_LOOPBACK,
+            &[HOST_LOOPBACK],
+            reroute(),
+            false,
+        ),
+    ];
+    for (name, routes, host, mapped, backends, carries) in cases {
+        let mut phantom = String::new();
+        let mut capabilities = Vec::new();
+        for route in routes {
+            let route = if route.contains(':') {
+                route.to_string()
+            } else {
+                format!("{route}:{port}")
+            };
+            let pattern = DestinationPattern::parse(&route).unwrap();
+            let (store, minted) = opaque_store_for(pattern.clone(), "sk_live_LOOPBACK");
+            phantom = if phantom.is_empty() { minted } else { phantom };
+            capabilities.push(CredentialCapability::new(pattern, store));
+        }
+        let reply = loopback_get(
+            CapabilitySet::new(capabilities),
+            FixedPolicy::allowing(&[host]),
+            mapped,
+            backends,
+            (host, port, &phantom),
+        );
+        if carries {
+            assert!(reply.starts_with("HTTP/1.1 200"), "{name}: {reply:?}");
+            let requests = origin.requests();
+            assert!(
+                requests[0].contains("Bearer sk_live_LOOPBACK"),
+                "{requests:?}"
+            );
+            assert!(!requests[0].contains(&phantom), "{requests:?}");
+        } else {
+            assert!(
+                reply.contains("credential not permitted on a plaintext request"),
+                "{name}: {reply:?}"
+            );
+        }
+    }
+    assert_eq!(
+        origin.requests().len(),
+        1,
+        "only the reserved name reached a service"
     );
-    let reply = plain_exchange(
-        proxy_port(&handle),
-        &plain_with_phantom(HOST_LOOPBACK, port, &phantom),
-    );
-    assert!(
-        reply.starts_with("HTTP/1.1 403")
-            && reply.contains("credential not permitted on a plaintext request"),
-        "{reply:?}"
-    );
-    assert!(origin.requests().is_empty(), "{:?}", origin.requests());
+    assert!(backend.requests().is_empty());
 }
