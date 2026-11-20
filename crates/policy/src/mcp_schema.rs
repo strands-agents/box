@@ -274,9 +274,12 @@ fn generate_from_tools(server: &str, tools_list: &str) -> Result<String, McpSche
                 reason,
             }
         })?;
-        use_box_entities(&mut definition_value, &server_namespace);
-        declare_reply_output(&mut definition_value, &tools_with_output);
-        restore_argument_names(&mut definition_value, &argument_names);
+        finish_namespace(
+            &mut definition_value,
+            &server_namespace,
+            &tools_with_output,
+            &argument_names,
+        );
         *definition = serde_json::from_value(definition_value).map_err(|_| {
             McpSchemaError::GeneratedShape {
                 server: server.to_string(),
@@ -687,14 +690,17 @@ const SCHEMA_KEYWORDS: [&str; 6] = [
     "prefixItems",
 ];
 
+/// The record fields that the generator and [`declare_reply_output`] add, which no argument
+/// identifier may take.
+const GENERATED_FIELDS: [&str; 4] = ["input", "output", "reply", "structured"];
+
 /// `tools_list` with each input argument name that is not a Cedar identifier renamed to one, and
 /// the exact name of each renamed identifier. `tools_list` is unchanged when it does not parse.
 fn identify_arguments(tools_list: &str) -> (String, BTreeMap<String, String>) {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(tools_list) else {
         return (tools_list.to_string(), BTreeMap::new());
     };
-    let mut names = ArgumentNames::default();
-    collect_property_names(&value, &mut names.taken);
+    let mut names = ArgumentNames::for_response(&value);
     names.rename_tools(&mut value);
     if names.exact.is_empty() {
         return (tools_list.to_string(), BTreeMap::new());
@@ -739,6 +745,16 @@ struct ArgumentNames {
 }
 
 impl ArgumentNames {
+    /// The renames for one tools/list response, with every name it declares already taken.
+    fn for_response(response: &serde_json::Value) -> Self {
+        let mut names = Self::default();
+        names
+            .taken
+            .extend(GENERATED_FIELDS.iter().map(|field| field.to_string()));
+        collect_property_names(response, &mut names.taken);
+        names
+    }
+
     /// Rename the arguments of each tool in a tools/list response, in the three shapes the
     /// generator reads: a `result` with `tools` and shared `$defs`, an array of tools, or one tool.
     fn rename_tools(&mut self, response: &mut serde_json::Value) {
@@ -864,6 +880,19 @@ impl ArgumentNames {
         self.exact.insert(identifier.clone(), name.to_string());
         identifier
     }
+}
+
+/// Give a generated namespace its exact argument names, Box's entities, and Box's reply output.
+fn finish_namespace(
+    value: &mut serde_json::Value,
+    namespace: &str,
+    tools_with_output: &BTreeSet<String>,
+    argument_names: &BTreeMap<String, String>,
+) {
+    // Restore first: Box's own fields do not exist yet, so the restore cannot rename one.
+    restore_argument_names(value, argument_names);
+    use_box_entities(value, namespace);
+    declare_reply_output(value, tools_with_output);
 }
 
 /// Give each record attribute that [`identify_arguments`] renamed its exact argument name again.
@@ -1637,6 +1666,120 @@ mod tests {
             generated.contains("type send_Input_x__cedar = {"),
             "an identifier that already parses keeps the type name it had before\n{generated}"
         );
+    }
+
+    #[test]
+    fn restoring_argument_names_never_renames_a_field_box_adds() {
+        // An identifier map that names Box's own fields, as it would if Box added a field whose
+        // name an argument identifier can take (for example `reply_text` beside `reply-text`).
+        let exact = BTreeMap::from([
+            ("zone_id".to_string(), "zone-id".to_string()),
+            ("reply".to_string(), "re-ply".to_string()),
+            ("structured".to_string(), "struc-tured".to_string()),
+        ]);
+        let mut namespace = serde_json::json!({
+            "commonTypes": {
+                "lookupInput": {
+                    "type": "Record",
+                    "attributes": {"zone_id": {"type": "String", "required": false}}
+                },
+                "lookupOutput": {
+                    "type": "Record",
+                    "attributes": {"q": {"type": "String", "required": false}}
+                }
+            },
+            "entityTypes": {},
+            "actions": {"lookup": {"appliesTo": {
+                "principalTypes": ["Agent"],
+                "resourceTypes": ["Resource"],
+                "context": {"type": "Record", "attributes": {
+                    "input": {"type": "EntityOrCommon", "name": "lookupInput"},
+                    "output": {"type": "EntityOrCommon", "name": "lookupOutput"}
+                }}
+            }}}
+        });
+
+        finish_namespace(
+            &mut namespace,
+            "cf",
+            &BTreeSet::from(["lookup".to_string()]),
+            &exact,
+        );
+
+        let output = namespace
+            .pointer("/actions/lookup/appliesTo/context/attributes/output/attributes")
+            .and_then(serde_json::Value::as_object)
+            .expect("Box declares the reply output");
+        assert_eq!(
+            output.keys().collect::<Vec<_>>(),
+            ["reply", "structured"],
+            "{namespace:#}"
+        );
+        assert!(
+            namespace
+                .pointer("/commonTypes/lookupInput/attributes/zone-id")
+                .is_some(),
+            "the argument keeps its exact name\n{namespace:#}"
+        );
+    }
+
+    #[test]
+    fn no_argument_identifier_can_take_a_name_box_or_the_generator_adds() {
+        let names = ArgumentNames::for_response(&serde_json::json!({"result": {"tools": []}}));
+        for field in ["input", "output", "reply", "structured"] {
+            assert!(names.taken.contains(field), "{field} is reserved");
+        }
+    }
+
+    #[test]
+    fn an_argument_spelled_like_a_generated_field_keeps_every_field() {
+        let tools = serde_json::json!({"result": {"tools": [{
+            "name": "lookup",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "in-put": {"type": "string"},
+                    "out-put": {"type": "string"},
+                    "re-ply": {"type": "string"},
+                    "struc-tured": {"type": "string"},
+                    "type-Choice0": {"type": "string"},
+                    "proj-0": {"type": "string"},
+                    "either": {"type": ["string", "integer"]}
+                }
+            },
+            "outputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}
+        }]}});
+        let generated =
+            generate_mcp_schema("cf", &tools.to_string()).expect("the schema generates");
+        let (schema, warnings) =
+            Schema::from_cedarschema_str(&format!("{SCHEMA_SRC}\n{generated}"))
+                .expect("the schema composes");
+        assert_eq!(warnings.count(), 0);
+        assert_eq!(
+            attributes(&generated, "cf", "lookupInput"),
+            [
+                "either",
+                "in-put",
+                "out-put",
+                "proj-0",
+                "re-ply",
+                "struc-tured",
+                "type-Choice0"
+            ]
+        );
+        let lookup = r#"cf::Action::"lookup""#;
+        for condition in [
+            r#"context.input has "in-put" && context.input["in-put"] == "x""#,
+            r#"context.input has either && context.input.either has typeChoice0
+                && context.input.either.typeChoice0 == "x""#,
+            r#"context has output && context.output.reply == "result"
+                && context.output has structured && context.output.structured has q"#,
+        ] {
+            assert!(
+                validates(&schema, lookup, condition),
+                "{condition}\n{generated}"
+            );
+        }
     }
 
     #[test]
