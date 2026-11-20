@@ -31,6 +31,12 @@ pub(crate) fn open_policy_with_mcp_schemas(
     policy
 }
 
+/// Open a policy whose tool schemas will be supplied through discovery.
+pub(crate) fn open_staged_policy(sources: Vec<Policy>, history: &std::path::Path) -> PolicyEngine {
+    PolicyEngine::open_staged(&policy::Operator::unanchored(), sources, history)
+        .expect("test policy opens")
+}
+
 // One lock over `HOME` for every test in this module tree.
 
 use std::path::Path;

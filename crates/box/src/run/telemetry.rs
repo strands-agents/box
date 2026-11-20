@@ -527,6 +527,7 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
         &self,
         effect: &EgressEffectAttempt<'_>,
     ) -> io::Result<Box<dyn EgressEffectPermit>> {
+        let _admission = crate::run::hosted::policy_admission();
         let Some(identity) = EgressIdentity::of(effect) else {
             return self.inner.intercept(effect);
         };
@@ -2110,3 +2111,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod reload_tests;
