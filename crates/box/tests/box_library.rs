@@ -6,10 +6,17 @@ mod bounded_output;
 #[cfg(unix)]
 #[path = "support/fixture.rs"]
 mod fixture;
+#[cfg(unix)]
+#[path = "support/runtime_mcp.rs"]
+mod runtime_mcp;
 
 #[cfg(unix)]
 fn main() {
-    if reload_tests::dispatch() || decision_tests::dispatch() {
+    if reload_tests::dispatch() || decision_tests::dispatch() || terminal_tests::dispatch() {
+        return;
+    }
+    if std::env::args().any(|argument| argument == "--terminal-logs-only") {
+        terminal_tests::suite();
         return;
     }
     #[cfg(target_os = "macos")]
@@ -205,6 +212,123 @@ fn main() {
     a_supplied_box_id_names_the_box_and_its_telemetry();
     reload_tests::suite();
     decision_tests::suite();
+    terminal_tests::suite();
+}
+
+#[cfg(unix)]
+mod terminal_tests {
+    use std::fs::File;
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    const CONFIG: &str = "BOX_TEST_TERMINAL_LOG_CONFIG";
+    const WORKLOAD_HOME: &str = "BOX_TEST_TERMINAL_LOG_HOME";
+    const MESSAGE: &[u8] = b"policy: warn: repeated diagnostic\n";
+
+    pub(super) fn dispatch() -> bool {
+        let Some(config) = std::env::var_os(CONFIG) else {
+            return false;
+        };
+        let home = PathBuf::from(std::env::var_os(WORKLOAD_HOME).unwrap());
+        let (mut master, mut terminal) = (-1, -1);
+        // SAFETY: openpty writes the two descriptors and uses default terminal settings.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut terminal,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0,
+        );
+        // SAFETY: each descriptor returned by openpty is owned once.
+        let (mut master, terminal) =
+            unsafe { (File::from_raw_fd(master), File::from_raw_fd(terminal)) };
+        for file in [&master, &terminal] {
+            // SAFETY: the descriptor remains open through this call.
+            assert_eq!(
+                unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) },
+                0,
+            );
+        }
+        let mut writer = None;
+        let code = strands_box::run(
+            config.into(),
+            Vec::new(),
+            strands_box::RunOptions {
+                terminal: Some(terminal),
+                on_ready: Some(Box::new(|| {
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut master, &mut std::io::sink());
+                    });
+                    writer = Some(std::thread::spawn(move || {
+                        let deadline = Instant::now() + Duration::from_secs(30);
+                        while !home.join("workload.started").exists() {
+                            assert!(Instant::now() < deadline, "workload did not start");
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        let mut stderr = std::io::stderr().lock();
+                        stderr.write_all(&MESSAGE.repeat(2000)).unwrap();
+                        stderr
+                            .write_all(b"strands-box: error: final unique error\n")
+                            .unwrap();
+                        std::fs::write(home.join("release"), "").unwrap();
+                    }));
+                    Ok(())
+                })),
+                ..Default::default()
+            },
+        );
+        writer.unwrap().join().unwrap();
+        assert_eq!(code, std::process::ExitCode::SUCCESS);
+        true
+    }
+
+    pub(super) fn suite() {
+        if !crate::fixture::namespace_launcher_is_usable() {
+            return;
+        }
+        let box_ = crate::runtime_mcp::RuntimeMcpBox::new("caller-terminal-log");
+        box_.write_workspace(
+            "",
+            &[],
+            "printf 'WORKLOAD_OUTPUT\\n'; : > \"$HOME/workload.started\"\n\
+             while [ ! -e \"$HOME/release\" ]; do :; done\n",
+        );
+        let launch = box_.command_for_run();
+        let executable = box_.server_executable("library-probe");
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let built = std::path::Path::new(env!("CARGO_BIN_EXE_strands-box"))
+            .parent()
+            .unwrap();
+        for helper in ["strands-box-sock-alias", "strands-box-contain-trampoline"] {
+            std::fs::copy(built.join(helper), executable.with_file_name(helper)).unwrap();
+        }
+        let mut command = std::process::Command::new(executable);
+        command
+            .env(CONFIG, launch.get_args().last().unwrap())
+            .env(WORKLOAD_HOME, box_.box_home())
+            .env("HOME", box_.operator_home())
+            .env("PATH", box_.trusted_path());
+        let output = crate::bounded_output::bounded_output(command);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert_eq!(
+            stderr.matches("policy: warn: repeated diagnostic").count(),
+            2000
+        );
+        assert!(
+            stderr.contains("strands-box: error: final unique error"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("runtime diagnostics were discarded"));
+        assert!(!stderr.contains("WORKLOAD_OUTPUT"));
+    }
 }
 
 /// **A caller-supplied box ID names a new box, its record, and its telemetry, and a configured box
