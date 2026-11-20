@@ -23,6 +23,7 @@ pub struct MitmHandle {
     connections: Arc<Connections>,
     accept_thread: Option<JoinHandle<()>>,
     shutdown_connection: OnceLock<OwnedFd>,
+    host_roots: Option<super::tls::HostRoots>,
 }
 
 impl MitmHandle {
@@ -32,6 +33,7 @@ impl MitmHandle {
         ca_path: Option<PathBuf>,
         connections: Arc<Connections>,
         accept_thread: JoinHandle<()>,
+        host_roots: Option<super::tls::HostRoots>,
     ) -> Self {
         Self {
             transport,
@@ -39,7 +41,13 @@ impl MitmHandle {
             connections,
             accept_thread: Some(accept_thread),
             shutdown_connection: OnceLock::new(),
+            host_roots,
         }
+    }
+
+    /// What the gateway took from the host's trust store, when it read it.
+    pub fn upstream_host_roots(&self) -> Option<&super::tls::HostRoots> {
+        self.host_roots.as_ref()
     }
 
     /// The localhost port the proxy is listening on, if it bound a `TcpListener`.
@@ -157,6 +165,7 @@ mod tests {
             None,
             connections,
             accept_thread,
+            None,
         );
         (handle, path)
     }
@@ -177,7 +186,13 @@ mod tests {
                 }
             })
         };
-        MitmHandle::new(BoundTransport::Tcp(port), None, connections, accept_thread)
+        MitmHandle::new(
+            BoundTransport::Tcp(port),
+            None,
+            connections,
+            accept_thread,
+            None,
+        )
     }
 
     /// `port()`/`unix_socket_path()` each report the transport actually bound.

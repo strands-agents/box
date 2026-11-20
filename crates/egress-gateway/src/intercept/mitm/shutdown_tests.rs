@@ -65,13 +65,20 @@ impl Gateway {
             ..MitmConfig::default()
         };
         let ca = ca::EphemeralCa::generate(None, None).unwrap();
-        let client_config =
-            Arc::new(tls::upstream_client_config(&[ca.ca_cert_pem().to_string()]).unwrap());
+        let client_config = Arc::new(
+            tls::upstream_client_config(&[ca.ca_cert_pem().to_string()], false)
+                .unwrap()
+                .0,
+        );
         let state = Arc::new(SharedState {
             controls: CapabilitySet::default(),
             config,
             ca,
-            upstream_config: Arc::new(tls::upstream_client_config(upstream_ca_pems).unwrap()),
+            upstream_config: Arc::new(
+                tls::upstream_client_config(upstream_ca_pems, false)
+                    .unwrap()
+                    .0,
+            ),
             emitter: Box::new(StubEmitter::new()),
             effect_interceptor: policy,
             reply_copies: Arc::new(body::CopyBudget::for_limit(1024)),
@@ -114,6 +121,7 @@ impl Gateway {
                 None,
                 connections.clone(),
                 worker,
+                None,
             )),
             connections,
             accepted,

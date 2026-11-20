@@ -2270,6 +2270,25 @@ manifest itself reaches the workload through the gateway's TLS leg.
 `a_listed_plain_request_reaches_a_tls_upstream_judged_on_443` and
 `a_credential_on_an_upgraded_plain_request_is_refused` pin it.
 
+<a id="the-gateway-trusts-the-hosts-roots-and-no-grant-writes-them"></a>
+### The gateway trusts the host's roots for upstream servers, and no grant may write them
+
+The gateway checks each upstream certificate against its built-in roots and the roots the host
+trusts: the macOS keychain, the Linux system bundle, or the files that `SSL_CERT_FILE` and
+`SSL_CERT_DIR` name for `box run`. It reads them once, at start. A network that re-signs TLS puts its
+root in the host's store, so the box reaches what the host reaches with no setting. A writable grant
+that reaches a path those variables name stops the box, because a root written there would vouch for
+every upstream on a later run. The Shell and Python refuse to change those paths too, whatever policy
+permits.
+
+**Rejected.** A `box.toml` key that names a root file: it adds a frozen key and makes the operator
+export a root the host already trusts. The operating system's own verifier: on macOS it drops the
+built-in roots, and its revocation checks reach the network outside policy.
+
+**Cost.** Each root the host trusts can vouch for any host that policy permits, and a re-signing proxy
+reads every credential the gateway adds. A `box.toml` grant over a hard link elsewhere to a root file
+is not judged. On macOS, a set `SSL_CERT_FILE` replaces the keychain.
+
 <a id="a-remote-mcp-tool-call-passes-a-second-gate"></a>
 ### A remote MCP tool call passes a second gate after the transport gate
 

@@ -237,6 +237,36 @@ deployment that must pin the identity writes `aws://PROFILE` rather than a bare 
 The gateway adds a credential only over HTTPS. A plain `http://` request to a destination a route
 names is refused.
 
+## Networks that re-sign TLS
+
+Some company networks re-sign HTTPS traffic with their own root certificate. The gateway checks
+each server's certificate against its built-in public roots and the roots your machine trusts, so a
+root that your machine already trusts works in the box with no setting.
+
+- On macOS, the gateway reads the trusted roots in the keychain, including one your administrator
+  installed.
+- On Linux, it reads the system bundle, such as `/etc/pki/tls/certs/ca-bundle.crt` or
+  `/etc/ssl/certs/ca-certificates.crt`.
+- When `box run` has `SSL_CERT_FILE` or `SSL_CERT_DIR` set, the gateway reads only the file and
+  directories they name, on both platforms. On macOS that replaces the keychain.
+
+The gateway reads the roots once, when the box starts, and stderr says how many it added:
+
+```text
+strands-box: the egress gateway also trusts 136 root certificates from this host's trust store for upstream servers (0 ignored)
+```
+
+A trusted root can vouch for any server, and the network that re-signs the traffic reads every
+request in plain text, including each credential the gateway adds. Policy still decides every
+destination.
+
+The box doesn't start when a `write` or `write_file` entry, in any table, reaches a file or
+directory that `SSL_CERT_FILE` or `SSL_CERT_DIR` names. A root written there would be trusted by the
+next run. Read access is fine. A common case is `SSL_CERT_FILE` set to Python's `certifi` bundle
+inside a project's `.venv`, with the project writable: unset the variable for `box run`, or add a
+`deny` entry for the bundle. The Shell and Python also refuse to change these paths, whatever your
+policy permits.
+
 ## Upgrade plain HTTP to HTTPS
 
 Some tools check certificates with the macOS platform verifier, which can't trust the box's CA.
@@ -309,6 +339,7 @@ not upgrade `rust-lang.org`.
 | `phantom_prefix` is empty, longer than 64 characters, or holds another character | Use 1 to 64 letters, digits, `-`, `_`, `.`, or `~`. |
 | Two routes hold a placeholder in one variable with a different `phantom_prefix` | Set the same `phantom_prefix` on both. One variable holds one placeholder. |
 | A `[gateway] upgrade_http` entry names a scheme, a port, a path, a `*` wildcard, or an IP address, or holds another character | Write the host name alone, such as `static.rust-lang.org`. |
+| A `write` or `write_file` entry reaches a path that `SSL_CERT_FILE` or `SSL_CERT_DIR` names | Remove the write, subtract the path with a `deny` entry, or run `box run` without that variable. See [networks that re-sign TLS](#networks-that-re-sign-tls). |
 
 A request the gateway refuses while the box runs gets an HTTP 403 with the header
 `x-strands-box-egress: refused`. The body says why:
@@ -322,6 +353,9 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 | `response blocked by egress control` | The server sent a compressed response to a credentialed request. |
 
 A 502 with no `x-strands-box-egress` header means the gateway couldn't resolve or reach the server.
+A connection that policy permitted but that closes with no reply, such as curl exit 52 or 56, means
+the server's certificate chains to no root the gateway trusts. See
+[networks that re-sign TLS](#networks-that-re-sign-tls).
 
 Responses arrive progressively, including on credentialed routes. Credential redaction retains a
 short tail until more bytes arrive or the response completes cleanly. Requests and HTTP MCP

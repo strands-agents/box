@@ -155,8 +155,21 @@ own query. Credential edits can add or remove query parameters. Removing the las
 an originally nonempty query still removes the delimiter.
 
 After `http:request` permits the request, the gateway opens TLS to the server. It verifies the
-server's certificate against a compiled-in set of public root certificates, then forwards the
-request. Each connection carries one request.
+server's certificate against a compiled-in set of public root certificates and the roots the host
+trusts, then forwards the request. Each connection carries one request.
+
+The host's roots are read once, when the gateway starts, by `rustls-native-certs`. On macOS that is
+the keychain's trusted roots, including an administrator's TLS-inspection root. On Linux it is the
+system bundle that `openssl-probe` finds. When `box run` has `SSL_CERT_FILE` or `SSL_CERT_DIR` set,
+only the paths they name are read, on either platform. A certificate that does not parse as a root
+is skipped. Startup prints how many roots were added. The roots are not the per-run CA the workload
+trusts, and they grant no reach: policy still decides every destination. A writable grant in any
+table that reaches a path `SSL_CERT_FILE` or `SSL_CERT_DIR` names, or an entry of a named directory
+or a link's target, stops the box at startup
+([why](./decisions.md#the-gateway-trusts-the-hosts-roots-and-no-grant-writes-them)). The Shell and
+Python refuse, whatever policy permits, a change to those paths, to a hard link to one of their
+files, and to a directory that holds them. A `box.toml` grant over a hard link elsewhere to a root
+file is not judged.
 
 A request the gateway refuses gets a 403 with the header `x-strands-box-egress: refused`, and a body
 that says why. A `net:connect` refusal of a `CONNECT` arrives before the `200`, so the client never

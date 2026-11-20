@@ -15,7 +15,7 @@ operators inspecting egress decisions.
 
 ## Public Interface
 
-The crate root is the complete public API — 36 names, 31 unconditional and 5
+The crate root is the complete public API — 37 names, 31 unconditional and 6
 behind the `tls-intercept` feature:
 
 | Area | Items |
@@ -28,7 +28,7 @@ behind the `tls-intercept` feature:
 | Remote MCP | `McpTarget`, `McpTargetIdentity`, `canonicalize_mcp_frame`, `mcp_denial_response`, `refuse_duplicate_mcp_keys` |
 | Audit seam | `Emitter`, `StubEmitter` |
 | Errors | `PROXY_ORIGIN_HEADER`, `PROXY_ORIGIN_VALUE`, `ProxyError`, `Result` |
-| Default adapter | `BackendDial`, `MitmConfig`, `MitmHandle`, `MitmInterceptor`, `ResponseLimits` |
+| Default adapter | `BackendDial`, `HostRoots`, `MitmConfig`, `MitmHandle`, `MitmInterceptor`, `ResponseLimits` |
 
 `AuditDecision` is the one renamed export: the item is `audit::Decision`.
 
@@ -219,7 +219,7 @@ fn start() -> egress_gateway::Result<MitmHandle> {
 
 `EffectAttempt` is `#[non_exhaustive]`, so an implementation needs a wildcard arm.
 
-`MitmConfig` has twelve fields:
+`MitmConfig` has thirteen fields:
 
 | Field | Type | Default |
 |---|---|---|
@@ -229,6 +229,7 @@ fn start() -> egress_gateway::Result<MitmHandle> {
 | `response_limits` | `ResponseLimits` | `max_body_bytes: 16 MiB` |
 | `expected_token` | `Option<String>` | `None` |
 | `upstream_ca_pems` | `Vec<String>` | empty |
+| `upstream_host_roots` | `bool` | `false` |
 | `dns_overrides` | `Vec<(String, IpAddr)>` | empty |
 | `upstream_read_deadline` | `Duration` | 300 s |
 | `max_connections` | `usize` | `256` |
@@ -240,7 +241,9 @@ fn start() -> egress_gateway::Result<MitmHandle> {
 at `bind_addr`; `Some(path)` binds only a `UnixListener`, at mode `0600`, and
 never a TCP port. Every admitted connection is terminated and inspected, so TLS
 interception is not selective. The adapter is thread-per-connection, and
-`max_connections` bounds the thread count. `upstream_read_deadline` sets one absolute deadline for
+`max_connections` bounds the thread count. `upstream_host_roots` adds the host's trusted roots,
+read once at start by `rustls-native-certs`, to the built-in roots and `upstream_ca_pems`; a
+certificate that does not parse as a root is skipped. `upstream_read_deadline` sets one absolute deadline for
 upstream TLS, request transmission, and complete response receipt.
 Arriving chunks do not reset it. If delivery has started, expiry closes the incomplete response.
 Once upstream receipt finishes, this deadline does not bound the final workload write.
@@ -271,7 +274,9 @@ matches the host on 443 still re-routes it. The workload's leg stays plain, so `
 `false` and a credential-matched request is refused.
 
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
-`env_vars()`, and `shutdown()`.
+`env_vars()`, `upstream_host_roots()`, and `shutdown()`. `upstream_host_roots()` returns a
+`#[non_exhaustive]` `HostRoots`, with the roots added from the host, the certificates skipped, and
+the errors the store reported, when the gateway read the host's trust.
 `env_vars()` returns the four `HTTP_PROXY`/`HTTPS_PROXY` spellings on the TCP
 transport and no proxy variable on AF_UNIX. It adds `SSL_CERT_FILE` on both
 transports when a CA directory is configured. `Drop` shuts the adapter down and
