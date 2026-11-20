@@ -136,7 +136,8 @@ A rule on `path` has caveats for repeated slashes and `%2F`.
 
 A WebSocket handshake is one `http:request`, and its permit admits the whole WebSocket. The gateway
 asks policy nothing after the `101`. A permit that doesn't read `upgrade` admits a WebSocket to its
-host, so add `context.input.upgrade == ""` to a permit that is for HTTP only.
+host, so add `context.input.upgrade == ""` to a permit that is for HTTP only. A guard or a budget can
+refuse the next handshake, but it cannot close a WebSocket that is open.
 
 Cloud metadata and link-local protection is two `forbid` rules on `net:connect`;
 [what Box always enforces](../security.md#what-box-always-enforces) lists them.
