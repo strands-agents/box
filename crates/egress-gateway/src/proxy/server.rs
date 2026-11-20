@@ -135,14 +135,21 @@ async fn first_request(
         completion,
     )
     .await;
-    Ok(answered(&connect, forwarded))
+    Ok(answered(&connect, backend.as_ref(), forwarded))
 }
 
-/// The forwarded response, or a failure that says why, with the reason also on stderr.
-fn answered(connect: &ConnectRequest, forwarded: Result<WorkloadResponse>) -> WorkloadResponse {
+/// The forwarded response, or a failure that says why, with the reason and any backend on stderr.
+fn answered(
+    connect: &ConnectRequest,
+    backend: Option<&BackendDial>,
+    forwarded: Result<WorkloadResponse>,
+) -> WorkloadResponse {
     forwarded.unwrap_or_else(|error| {
+        let via = backend
+            .map(|dial| format!(" (backend {}:{})", dial.host, dial.port))
+            .unwrap_or_default();
         eprintln!(
-            "strands-box: warning: egress request to {}:{} failed: {error}",
+            "strands-box: warning: egress request to {}:{}{via} failed: {error}",
             connect.host, connect.port
         );
         WorkloadResponse::failure(error.http_status(), error.to_string().as_bytes())
@@ -185,7 +192,9 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
     let completion = &completion;
     serve(client, completion, |request, head| async move {
         let max_body = state.config.response_limits.max_body_bytes;
-        let parsed = http1::read_request(&head, request.into_body(), max_body).await?;
+        let Ok(parsed) = http1::read_request(&head, request.into_body(), max_body).await else {
+            return Ok(WorkloadResponse::bare(400));
+        };
         let forwarded = l7::forward_tls(
             parsed,
             upstream,
@@ -196,7 +205,7 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
             completion,
         )
         .await;
-        Ok(answered(&connect, forwarded))
+        Ok(answered(&connect, backend.as_ref(), forwarded))
     })
     .await
 }

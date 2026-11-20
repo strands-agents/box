@@ -2000,10 +2000,12 @@ The gateway issues the origin's leaf certificate when it intercepts a request. A
 tunnel would reach the Shell as an ordinary HTTP status. `curl` exits 0 for any status unless the
 caller passes `-f`. The gateway therefore adds a header to each response it writes: `refused` on a
 refusal, and `failed` on a request it didn't refuse but couldn't complete. Box's kernel wrapper
-converts either response to a permission-denied error. `curl` then prints one reason line and exits
-1. The marker identifies who wrote the response. It does not authorize the request.
-`a_marked_refusal_fails_curl` pins it for `http://`, `a_marked_refusal_inside_a_tunnel_fails_curl`
-for `https://`, and `a_marked_failure_fails_curl_on_both_schemes` for a failure.
+converts a refusal to a permission-denied error, so `curl` prints one reason line and exits 1. It
+converts a failure to a transport error, so `curl` prints `curl: (6)` and the reason, and exits 6. A
+script can tell the two apart by exit status. The marker identifies who wrote the response. It does
+not authorize the request. `a_marked_refusal_fails_curl` pins it for `http://`,
+`a_marked_refusal_inside_a_tunnel_fails_curl` for `https://`, and
+`a_marked_failure_fails_curl_as_a_transport_error_on_both_schemes` for a failure.
 
 **The conversion is the kernel wrapper's alone, and Monty does not have it.** A Monty `fetch` builds
 its own client and never reads the marker, so a denied request reaches the script as an ordinary

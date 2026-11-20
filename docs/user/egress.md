@@ -363,7 +363,8 @@ A request the gateway doesn't refuse, but can't complete, gets an HTTP 502 with 
 | `effect interceptor unavailable` | The box's policy check failed. |
 
 Except for `effect interceptor unavailable`, policy permitted the request, so it may have reached
-the server. The box also prints the reason on stderr:
+the server. The box also prints the reason on stderr, naming the backend when the destination
+re-routes to one:
 `strands-box: warning: egress request to <host>:<port> failed: <reason>`.
 
 A 502 with no `x-strands-box-egress` header answers a `CONNECT`, or a plain `http://` request, that

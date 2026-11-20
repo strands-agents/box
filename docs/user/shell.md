@@ -356,7 +356,9 @@ action permit when a tool grammar binds the file, and `program` is still the nam
 
 `curl` sends each request through the egress gateway, which decides `net:connect` and
 `http:request` ([how Box controls outbound traffic](../design/egress.md)). A request the gateway
-refuses, or can't complete, makes `curl` exit non-zero.
+refuses makes `curl` exit `1` and print the reason, even with `-s`. A request the gateway permits
+but can't complete makes `curl` exit `6` and print `curl: (6)` and the reason, unless `-s` hides
+errors.
 
 A response body is at most [`limits.shell.max_output`](config.md#limits) bytes, 1 MiB by default.
 Past it, `curl` exits with status `6`, writes none of the body, and prints

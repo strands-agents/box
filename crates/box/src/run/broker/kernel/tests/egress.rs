@@ -391,26 +391,30 @@ fn a_marked_refusal_inside_a_tunnel_fails_curl() {
 }
 
 #[test]
-fn a_marked_failure_fails_curl_on_both_schemes() {
+fn a_marked_failure_fails_curl_as_a_transport_error_on_both_schemes() {
     for scheme in Scheme::BOTH {
-        let (routing, _requests) = scheme.scripted(std::iter::repeat(response(
-            "502 Bad Gateway",
-            &[("x-strands-box-egress", "failed")],
-            "io error: upstream deadline passed",
-        )));
+        for (body, reason) in [
+            (
+                "io error: upstream deadline passed",
+                "io error: upstream deadline passed",
+            ),
+            ("", "the egress gateway could not complete this request"),
+        ] {
+            let (routing, _requests) = scheme.scripted(std::iter::repeat(response(
+                "502 Bad Gateway",
+                &[("x-strands-box-egress", "failed")],
+                body,
+            )));
 
-        let (status, stdout, stderr) = run(
-            Some(routing),
-            &format!("curl -sS {}", scheme.url("a.example/")),
-        );
+            let (status, stdout, stderr) = run(
+                Some(routing),
+                &format!("curl -sS {}", scheme.url("a.example/")),
+            );
 
-        assert_eq!(status, 1, "{scheme:?}: {stdout} {stderr}");
-        assert_eq!(
-            stderr.trim(),
-            "curl: io error: upstream deadline passed",
-            "{scheme:?}"
-        );
-        assert!(stdout.is_empty(), "{scheme:?}: {stdout}");
+            assert_eq!(status, 6, "{scheme:?}: {stdout} {stderr}");
+            assert_eq!(stderr.trim(), format!("curl: (6) {reason}"), "{scheme:?}");
+            assert!(stdout.is_empty(), "{scheme:?}: {stdout}");
+        }
     }
 }
 

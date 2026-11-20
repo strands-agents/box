@@ -50,7 +50,7 @@ pub const PROXY_ORIGIN_VALUE: &str = "refused";
 
 /// The [`PROXY_ORIGIN_HEADER`] value on a request the gateway did not refuse, but could not
 /// complete.
-pub const PROXY_FAILURE_VALUE: &str = "failed";
+pub(crate) const PROXY_FAILURE_VALUE: &str = "failed";
 
 impl ProxyError {
     /// The HTTP status code this error maps to when the proxy must answer the workload: `403` for
