@@ -114,6 +114,12 @@ Conventions: `docs/conventions.md`.
   `ProxyOnly` kernel pin, the real anti-hijack defence.
 - Report the pre-mutation `workload_path` in every `emit_decision` and `deny`. Never read
   `req.target.path`; a `UrlPath` credential makes it the secret.
+- Keep `escapes_backend_prefix` an allowlist-shaped refusal under a backend `path_prefix`. Policy
+  judges the canonical path, but a backend can fold a spelling the gateway keeps into `..` after the
+  join: a path parameter (`..;`), trailing dots or spaces (`...`, `..%20`), a second decode
+  (`%252e%252e`, `%252F`), an overlong UTF-8 slash (`%C0%AF`), or an escaped delimiter (`%3B`). A
+  wider decode does not close this class, because each fold is the backend's. Benign escapes such as
+  `%3A` in a Bedrock model ID still pass.
 - Keep `estimate_head_capacity` a correctness bound; `headers + 64` under-counted a plain
   `POST /v1/messages` by 6 bytes in 500 of 500 runs.
 - Allocate `head.len() + body.len()` up front in the coalesce path; reuse relocated in 300 of 300

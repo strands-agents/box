@@ -659,16 +659,14 @@ fn a_backend_reroute_still_refuses_a_host_pivot() {
     );
 }
 
-/// A re-routed path carrying an encoded separator (`%2F`) under a backend prefix is refused before
-/// it reaches the backend, because the backend could decode it and escape the prefix.
-#[test]
-fn a_backend_reroute_refuses_an_encoded_separator_in_the_path() {
+/// A gateway that re-routes `original` to the recording `upstream` under `path_prefix`.
+fn start_reroute(
+    upstream: &TlsUpstream,
+    original: &str,
+    path_prefix: &str,
+) -> egress_gateway::MitmHandle {
     let backend_host = "gw.example.test";
-    let upstream = TlsUpstream::start(backend_host);
     let port = upstream.port();
-    let original = "api.github.test";
-    let before = upstream.request_count();
-
     let config = MitmConfig {
         upstream_ca_pems: vec![upstream.ca_pem()],
         dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
@@ -678,33 +676,77 @@ fn a_backend_reroute_refuses_an_encoded_separator_in_the_path() {
                 host: backend_host.to_string(),
                 port,
                 tls: true,
-                path_prefix: "/github".to_string(),
+                path_prefix: path_prefix.to_string(),
             },
         )],
         ..MitmConfig::default()
     };
     let emitter = Box::new(RECORDS.with(Clone::clone));
-    let handle = MitmInterceptor::start_with(
+    MitmInterceptor::start_with(
         config,
         CapabilitySet::default(),
         FixedPolicy::allowing(&[original]),
         emitter,
         None,
     )
-    .unwrap();
+    .unwrap()
+}
 
-    let mut client = WorkloadClient::connect(proxy_port(&handle), original, port);
-    client.send_request("GET", "/..%2Fslack/secret", &[], b"");
+/// A re-routed path that a backend could fold out of its prefix is refused before it reaches the
+/// backend.
+#[test]
+fn a_backend_reroute_refuses_a_path_that_could_escape_the_prefix() {
+    let original = "api.github.test";
+    for path in [
+        "/..%2Fslack/secret",
+        "/..%5Cslack/secret",
+        "/..;/slack/secret",
+        "/.../slack/secret",
+        "/..%20/slack/secret",
+        "/%252e%252e/slack/secret",
+        "/..%252Fslack/secret",
+        "/..%255Cslack/secret",
+        "/..%C0%AFslack/secret",
+        "/..%00/slack/secret",
+        "/..%7F/slack/secret",
+        "/..%3B/slack/secret",
+        "/..%3F/slack/secret",
+        "/..%23/slack/secret",
+    ] {
+        let upstream = TlsUpstream::start("gw.example.test");
+        let handle = start_reroute(&upstream, original, "/github");
+        let before = upstream.request_count();
+
+        let mut client = WorkloadClient::connect(proxy_port(&handle), original, upstream.port());
+        client.send_request("GET", path, &[], b"");
+        let status = client.read_status();
+
+        assert_eq!(status, 403, "{path:?} under a prefix is refused");
+        assert_eq!(
+            upstream.request_count(),
+            before,
+            "{path:?} never reached the backend"
+        );
+    }
+}
+
+/// A re-route with no path prefix forwards a double-encoded separator, because no join exists.
+#[test]
+fn a_backend_reroute_without_a_prefix_forwards_a_double_encoded_separator() {
+    let original = "api.github.test";
+    let upstream = TlsUpstream::start("gw.example.test");
+    let handle = start_reroute(&upstream, original, "");
+    let before = upstream.request_count();
+
+    let mut client = WorkloadClient::connect(proxy_port(&handle), original, upstream.port());
+    client.send_request("GET", "/a%252Fb", &[], b"");
     let status = client.read_status();
 
-    assert_eq!(
-        status, 403,
-        "an encoded separator under a prefix is refused"
-    );
-    assert_eq!(
-        upstream.request_count(),
-        before,
-        "the refused request never reached the backend"
+    assert_eq!(status, 200, "a prefix-less backend forwards the path");
+    assert_eq!(upstream.request_count(), before + 1);
+    assert!(
+        upstream.last_request().raw.starts_with("GET /a%252Fb "),
+        "the backend receives the path unchanged"
     );
 }
 
