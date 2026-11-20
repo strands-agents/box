@@ -43,7 +43,8 @@ Rules:
 
 ## Before you start
 
-Box supports macOS on Apple silicon and Linux ARM64 (64-bit Arm). Linux x86-64 builds require no environment opt-in.
+Box supports macOS on Apple silicon, Linux ARM64 (64-bit Arm), and Linux x86-64.
+Linux x86-64 builds require no environment opt-in.
 Check the [macOS requirements](./macos-requirements.md) for the release package, workload dependencies, and startup checks.
 Linux release executables are built on Amazon Linux 2023. Check the [Linux requirements](./linux-requirements.md) for required libraries, permissions to create the sandbox, and tested configurations.
 [Step 1](#step-1-download-box) installs Box on either platform.
