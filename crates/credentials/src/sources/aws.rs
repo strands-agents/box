@@ -16,8 +16,8 @@ const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 /// The fixed terminator string for the credential scope and signing-key derivation.
 const REQUEST_TYPE: &str = "aws4_request";
 
-/// The request headers that the signer does not sign, which are the headers that botocore does
-/// not sign.
+/// The headers that the signer does not sign, which are the same as in
+/// `SigV4Auth.headers_to_sign` of `botocore/auth.py` in botocore 1.43.127.
 const UNSIGNED_HEADERS: &[&str] = &[
     "baggage",
     "connection",
