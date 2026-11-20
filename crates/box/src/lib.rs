@@ -28,6 +28,26 @@ pub use run::decisions::{
     PolicyDecision, PolicyDecisionReceiver, PolicyDecisionSender, policy_decisions,
 };
 
+/// The linked Box Core package version as `MAJOR.MINOR.PATCH`, without prerelease labels, build
+/// metadata, or a source commit identifier.
+pub const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION_MAJOR"),
+    ".",
+    env!("CARGO_PKG_VERSION_MINOR"),
+    ".",
+    env!("CARGO_PKG_VERSION_PATCH"),
+);
+
+/// The linked Box Core checkout's 40-character lowercase Git commit, or `None` when unavailable.
+pub const GIT_COMMIT: Option<&str> = {
+    let commit = env!("STRANDS_BOX_GIT_COMMIT");
+    if commit.is_empty() {
+        None
+    } else {
+        Some(commit)
+    }
+};
+
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Optional terminal attachment and host initialization for one run.

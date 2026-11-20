@@ -1,10 +1,21 @@
-//! Embeds an `Info.plist` as the `__TEXT,__info_plist` section of each shipped
-//! macOS binary, so CD Signer reads `CFBundleIdentifier` and `CFBundleName`.
+//! Records the Core checkout identity and embeds signing metadata in macOS binaries.
+
+mod build_metadata;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("set by cargo"));
+    let metadata = build_metadata::git_metadata(&dir);
+    println!("cargo:rerun-if-changed=build_metadata.rs");
+    for path in metadata.watched_paths {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    println!(
+        "cargo:rustc-env=STRANDS_BOX_GIT_COMMIT={}",
+        metadata.commit.as_deref().unwrap_or_default()
+    );
     println!("cargo::rustc-check-cfg=cfg(box_native_test_faults)");
     println!("cargo::rustc-check-cfg=cfg(box_native_kernel_tests)");
     println!("cargo:rerun-if-env-changed=SDKROOT");
@@ -26,7 +37,6 @@ fn main() {
         return;
     }
 
-    let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("set by cargo"));
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("set by cargo"));
     embed(&dir, &out, "strands-box", "Info.plist");
     embed(
