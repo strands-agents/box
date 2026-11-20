@@ -33,10 +33,9 @@ on:
         required: true
         type: string
       publish_linux_x86:
-        # Set true only after x86-64 qualification.
         description: 'Also publish the Linux x86-64 archive'
         required: true
-        default: false
+        default: true
         type: boolean
       sha:
         # Releases require main history. Dry runs also accept the dispatched

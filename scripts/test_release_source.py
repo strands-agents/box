@@ -78,7 +78,7 @@ class ReleaseSourceTests(unittest.TestCase):
         ).strip()
 
     def scan_source(self, dry_run, source="", dispatch=None, version="0.1.1",
-                    publish_linux_x86="false"):
+                    publish_linux_x86="true"):
         output = self.root / "output"
         output.write_text("")
         environment = {
@@ -158,9 +158,9 @@ class ReleaseSourceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("linux_preview=false\n", output)
 
-    def test_linux_arm64_has_no_switch_and_x86_is_off_by_default(self):
+    def test_linux_arm64_has_no_switch_and_x86_is_on_by_default(self):
         self.assertNotIn("      publish_linux:", WORKFLOW.read_text().splitlines())
-        self.assertEqual(workflow_input_default("publish_linux_x86"), "false")
+        self.assertEqual(workflow_input_default("publish_linux_x86"), "true")
         for version, preview in [("0.1.1", "false"), ("0.1.1-linux-preview.1", "true")]:
             with self.subTest(version=version):
                 result, output = self.scan_source(
@@ -169,12 +169,12 @@ class ReleaseSourceTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("publish_linux=", output)
-                self.assertIn("publish_linux_x86=false\n", output)
+                self.assertIn("publish_linux_x86=true\n", output)
                 self.assertIn(f"linux_preview={preview}\n", output)
 
-    def test_x86_publication_is_opt_in_on_each_channel(self):
+    def test_x86_publication_accepts_both_selections_on_each_channel(self):
         for version in ["0.1.1", "0.1.1-linux-preview.1"]:
-            for x86 in [workflow_input_default("publish_linux_x86"), "true"]:
+            for x86 in ["false", "true"]:
                 with self.subTest(version=version, x86=x86):
                     (self.root / "summary").write_text("")
                     result, output = self.scan_source("true", version=version, publish_linux_x86=x86)
@@ -367,9 +367,9 @@ class ReleaseBundleTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn("missing", result.stdout)
 
-    def test_stable_and_preview_publish_arm64_with_x86_off_by_default(self):
+    def test_stable_and_preview_publish_arm64_and_x86_by_default(self):
         x86_default = workflow_input_default("publish_linux_x86")
-        self.assertEqual(x86_default, "false")
+        self.assertEqual(x86_default, "true")
         for tag, preview in [("v0.1.1", "false"), ("v0.1.1-linux-preview.1", "true")]:
             with self.subTest(tag=tag), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -387,7 +387,7 @@ class ReleaseBundleTests(unittest.TestCase):
                 self.assertEqual(
                     {path.name for path in (root / "release").iterdir()},
                     {f"box-{tag}-aarch64-apple-darwin.tar.gz", f"box-{tag}-linux-arm64.tar.gz",
-                     "SHA256SUMS.txt"},
+                     f"box-{tag}-linux-x86_64.tar.gz", "SHA256SUMS.txt"},
                 )
 
     def test_stable_and_preview_bundle_only_their_expected_platforms(self):
