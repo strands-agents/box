@@ -46,11 +46,17 @@ from the repository root on a Linux host with Python 3 and `readelf` installed:
 python3 scripts/check-linux-package.py stage/box-core --target x86_64-unknown-linux-gnu
 ```
 
-Omit `--target` to check ARM64. These checks do not run workloads or qualify an installed x86-64 release.
+Omit `--target` to check ARM64. This command checks binary metadata only.
 
 Before the x86-64 package check, the workflow removes the retired `EXPERIMENTAL_LINUX_SUPPORT` and `EXPERIMENTAL_X86_SUPPORT` variables from the environment.
 It requires the staged executable to reject a missing configuration, which catches a selected source that still requires an opt-in.
 This startup check does not run a workload.
+
+Each Linux build then runs `scripts/smoke-linux-package.py` against its packaged archive on a runner
+with the matching CPU architecture. The checks run as a non-root user in the Amazon Linux 2023
+container. They start a contained workload and verify file-access and process restrictions without
+an experimental opt-in. A failed check stops the build and prevents publication. These checks do not
+replace target qualification or verification of the published download.
 
 ## Publish
 

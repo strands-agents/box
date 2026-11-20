@@ -507,11 +507,24 @@ class ReleasePackageTests(unittest.TestCase):
                         'fi\n'
                         'printf "%s\\n" "$PACKAGE_VERSION"\n')
         self.executable(self.root / "readelf", '#!/bin/sh\nprintf "%s\\n" "$PACKAGE_HEADER"\n')
+        self.smoke_arguments = self.root / "smoke-arguments.json"
+        self.sudo_arguments = self.root / "sudo-arguments.json"
+        self.executable(scripts / "smoke-linux-package.py", "import json, os, sys\n"
+                        "from pathlib import Path\n"
+                        "Path(os.environ['SMOKE_ARGS']).write_text(json.dumps(sys.argv[1:]))\n"
+                        "sys.exit(int(os.environ.get('SMOKE_EXIT', '0')))\n")
+        self.executable(self.root / "sudo", "#!/usr/bin/env python3\n"
+                        "import json, os, sys\n"
+                        "from pathlib import Path\n"
+                        "Path(os.environ['SUDO_ARGS']).write_text(json.dumps(sys.argv[1:]))\n"
+                        "sys.exit(int(os.environ.get('SUDO_EXIT', '0')))\n")
         self.docker_arguments = self.root / "docker-arguments.json"
         self.executable(self.root / "docker", "#!/usr/bin/env python3\n"
                         "import json, os, sys\n"
                         "from pathlib import Path\n"
-                        "Path(os.environ['DOCKER_ARGS']).write_text(json.dumps(sys.argv[1:]))\n"
+                        "path = Path(os.environ['DOCKER_ARGS'])\n"
+                        "calls = json.loads(path.read_text()) if path.exists() else []\n"
+                        "path.write_text(json.dumps([*calls, sys.argv[1:]]))\n"
                         "command = sys.argv[sys.argv.index('box-linux-release') + 1:]\n"
                         "os.execvp(command[0], command)\n")
 
@@ -525,6 +538,8 @@ class ReleasePackageTests(unittest.TestCase):
             cwd=self.root,
             env={**os.environ, "PATH": f"{self.root}:{os.environ['PATH']}",
                  "DOCKER_ARGS": str(self.docker_arguments), "RUNNER_TEMP": str(self.root),
+                 "SUDO_ARGS": str(self.sudo_arguments), "SMOKE_ARGS": str(self.smoke_arguments),
+                 "NEW_TAG": "v0.2.4",
                  "EXPERIMENTAL_LINUX_SUPPORT": "TRUE", "EXPERIMENTAL_X86_SUPPORT": "TRUE",
                  **environment},
             text=True,
@@ -537,7 +552,7 @@ class ReleasePackageTests(unittest.TestCase):
     def test_x86_package_step_checks_all_three_executables_in_read_only_container(self):
         result = self.run_step("Check the x86-64 Linux package", PACKAGE_HEADER=self.header())
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(self.docker_arguments.read_text()), [
+        self.assertEqual(json.loads(self.docker_arguments.read_text())[0], [
             "run", "--rm", "--mount", f"type=bind,source={self.root},target=/src,readonly",
             "box-linux-release", "python3", "scripts/check-linux-package.py", "stage/box-core",
             "--target", "x86_64-unknown-linux-gnu",
@@ -547,6 +562,50 @@ class ReleasePackageTests(unittest.TestCase):
             "box", "strands-box-sock-alias", "strands-box-contain-trampoline",
         ])
         self.assertEqual({item["architecture"] for item in report}, {"x86_64"})
+
+    def test_x86_package_step_runs_its_archive_without_root_or_host_write_access(self):
+        workflow = WORKFLOW.read_text()
+        step = workflow.split("      - name: Check the x86-64 Linux package\n", 1)[1].split(
+            "      - name:", 1
+        )[0]
+        self.assertIn("        env:\n          NEW_TAG: ${{ needs.scan.outputs.new_tag }}\n", step)
+        self.assertRegex(workflow, r"(?m)^          - triple: x86_64-unknown-linux-gnu\n"
+                         r"(?:            [^\n]+\n)*            runner: ubuntu-24\.04$")
+        self.assertNotRegex(step, r"(?m)^        continue-on-error: (?!false(?:\s|$))")
+        result = self.run_step("Check the x86-64 Linux package", PACKAGE_HEADER=self.header())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = json.loads(self.docker_arguments.read_text())
+        self.assertEqual(len(calls), 2, "package validation must be followed by a workload run")
+        self.assertEqual(calls[1], [
+            "run", "--rm", "--cap-drop", "ALL", "--user", "1000:1000",
+            "--security-opt", "seccomp=unconfined",
+            "--security-opt", "apparmor=box-package-smoke",
+            "--security-opt", "systempaths=unconfined",
+            "--env", "HOME=/home/box-test",
+            "--mount", f"type=bind,source={self.root},target=/src,readonly",
+            "box-linux-release", "python3", "scripts/smoke-linux-package.py",
+            "dist/box-v0.2.4-x86_64-unknown-linux-gnu.tar.gz",
+        ])
+        self.assertEqual(json.loads(self.smoke_arguments.read_text()), [
+            "dist/box-v0.2.4-x86_64-unknown-linux-gnu.tar.gz",
+        ])
+        self.assertEqual(json.loads(self.sudo_arguments.read_text()), [
+            "apparmor_parser", "-r", str(self.root / "box-package-smoke.apparmor"),
+        ])
+        profile = (self.root / "box-package-smoke.apparmor").read_text()
+        self.assertRegex(profile, r"(?m)^profile box-package-smoke flags=\(unconfined\) \{$")
+        self.assertRegex(profile, r"(?m)^\s*userns,$")
+
+    def test_x86_package_step_propagates_a_packaged_workload_failure(self):
+        result = self.run_step("Check the x86-64 Linux package", PACKAGE_HEADER=self.header(),
+                               SMOKE_EXIT="23")
+        self.assertEqual(result.returncode, 23, result.stdout + result.stderr)
+
+    def test_x86_package_step_does_not_run_a_workload_without_its_namespace_profile(self):
+        result = self.run_step("Check the x86-64 Linux package", PACKAGE_HEADER=self.header(),
+                               SUDO_EXIT="24")
+        self.assertEqual(result.returncode, 24, result.stdout + result.stderr)
+        self.assertFalse(self.smoke_arguments.exists())
 
     def test_x86_package_step_rejects_a_gated_or_wrongly_successful_startup(self):
         for startup in ("gated", "accepts-missing-config"):
