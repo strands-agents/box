@@ -1507,6 +1507,27 @@ pub(crate) struct BoxName(String);
 /// The longest box name, which also bounds a caller-supplied box identity.
 pub(crate) const MAXIMUM_BOX_NAME: usize = 32;
 
+/// Why `host` is not a name the egress gateway can bind, or `None` when it is one.
+pub(crate) fn unbindable_host_name(host: &str) -> Option<&'static str> {
+    let canonical = egress_gateway::normalize_host(host);
+    if canonical.is_empty() {
+        return Some("it is empty");
+    }
+    if !canonical.is_ascii() {
+        return Some(
+            "it holds a character other than a letter, a digit, '.', '-', or '_'; write a \
+             non-ASCII name in its punycode (xn--) form",
+        );
+    }
+    if !egress_gateway::is_bindable_host(&canonical) {
+        return Some("it holds a character other than a letter, a digit, '.', '-', or '_'");
+    }
+    if canonical.split('.').any(str::is_empty) {
+        return Some("it has an empty label");
+    }
+    None
+}
+
 /// Whether one character may appear in a box name, an MCP server name, or an alias filename.
 pub(crate) fn nameable(character: char) -> bool {
     matches!(character, 'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '-')
@@ -1956,6 +1977,58 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].url, "https://api.example.com/mcp");
     }
+    /// The refusal `read_remote_mcp_servers` gives for a `box.toml` with `body`.
+    fn remote_mcp_refusal(body: &str) -> String {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("box.toml");
+        std::fs::write(
+            &path,
+            format!("name = \"test\"\nbox_dir = \"/var/lib/box\"\n{body}"),
+        )
+        .unwrap();
+        match read_remote_mcp_servers(&path) {
+            Ok(_) => panic!("{body:?} loads"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_remote_mcp_server_the_gateway_cannot_recognize_is_refused() {
+        for (destination, reason) in [
+            ("mcp.example.com.", "trailing dot"),
+            ("bücher.example", "punycode (xn--)"),
+            ("*.example.com", "may not be a wildcard"),
+        ] {
+            let error = remote_mcp_refusal(&format!(
+                "[mcp.tools]\ntype = \"http\"\ndestinations = [{destination:?}]\n"
+            ));
+            assert!(error.contains(reason), "{destination:?}: {error}");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("box.toml");
+        std::fs::write(
+            &path,
+            "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+             [mcp.tools]\ntype = \"http\"\ndestinations = [\"xn--bcher-kva.example\"]\n",
+        )
+        .unwrap();
+        let servers = read_remote_mcp_servers(&path).unwrap();
+        assert_eq!(servers[0].url, "https://xn--bcher-kva.example/mcp");
+    }
+
+    #[test]
+    fn a_re_route_onto_a_remote_mcp_server_host_is_refused() {
+        let error = remote_mcp_refusal(
+            "[egress.api]\ndestinations = [\"api.github.com\"]\n\
+             [[egress.api.backends]]\nurl = \"https://gw.example.com\"\n\
+             [mcp.tools]\ntype = \"http\"\ndestinations = [\"gw.example.com\"]\n",
+        );
+        assert!(
+            error.contains("which `tools` declares as a remote MCP server"),
+            "{error}"
+        );
+    }
+
     // **The egress tests still live here.** They belong in `egress.rs` beside what they test;
     // moving them needs the `load` fixture below, which every other test also uses.
 
