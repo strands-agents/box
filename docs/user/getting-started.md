@@ -367,7 +367,7 @@ Example output:
 
 ```text
 deny    net:connect   telemetry.strandsagents.com
-deny    shell:spawn   /usr/bin/uname -s
+permit  shell:exec    uname -s
 permit  shell:exec    pwd
 permit  net:connect   bedrock-runtime.us-west-2.amazonaws.com
 permit  http:request  bedrock-runtime.us-west-2.amazonaws.com
@@ -384,11 +384,11 @@ deny    fs:write      ~/box-tutorial/my-project/README.md
 Notice that each model call results in a `net:connect` and an `http:request`, and each command
 results in a `shell:exec`, plus an `fs:` decision for every file it touches.
 
-The box's shell has `cat`, `printf`, `ls`, and about thirty other commands built in. Running any
-other program is a `shell:spawn`, and this policy allows none, so the box refused the `uname` that
-the CLI runs when it starts. The box also refused the CLI's own version ping, because the policy
-names no host but Bedrock. Nothing you typed asked for either one, which is the point: the log holds
-what the agent did on its own as well as what you asked for.
+The box's shell has `cat`, `printf`, `ls`, `uname`, and about thirty other commands built in, so
+the `uname` that the CLI runs when it starts is a `shell:exec`. Running any other program is a
+`shell:spawn`, and this policy allows none. The box refused the CLI's own version ping, because the
+policy names no host but Bedrock. Nothing you typed asked for the `uname` or the ping, which is the
+point: the log holds what the agent did on its own as well as what you asked for.
 
 ## Step 8. Allow the write
 

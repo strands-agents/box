@@ -9,7 +9,7 @@ use std::time::SystemTime;
 use strands_shell::Shell;
 use strands_shell::os::{
     CommandFallback, CommandRequest, DirEntry, Fd, FileStat, FileTimes, HttpRequest, HttpResponse,
-    Kernel, OpenFlags, Process,
+    Kernel, OpenFlags, Process, SystemInfo,
 };
 use strands_shell::vfs_kernel::VfsKernel;
 
@@ -156,7 +156,7 @@ impl ShellKernel {
     /// Resolve `path` per `follow`, keeping the identity an effect must still find.
     async fn resolve(&self, proc: &Process, path: &str, follow: Follow) -> Resolved {
         let generation = self.backend.generation.lock().await;
-        let abs = resolve::absolute(&proc.cwd, path);
+        let abs = strands_shell::vfs::absolute(&proc.cwd, path);
         let vfs = self.backend.memory.vfs.lock().await;
         let mounts = &self.backend.mounts;
         let resolved = match follow {
@@ -629,7 +629,7 @@ impl Kernel for ShellKernel {
             .await
             .into_iter()
             .filter(|candidate| {
-                let abs = resolve::absolute(&proc.cwd, candidate);
+                let abs = strands_shell::vfs::absolute(&proc.cwd, candidate);
                 !mounts.serves(&abs) || mounts.is_mount_point(&abs)
             })
             .collect();
@@ -914,6 +914,11 @@ impl Kernel for ShellKernel {
 
     fn now(&self) -> SystemTime {
         SystemTime::now()
+    }
+
+    /// The host's system, because the programs the agent runs are the host's.
+    fn uname(&self) -> SystemInfo {
+        host::uname()
     }
 
     fn check_url(&self, url: &str) -> io::Result<()> {

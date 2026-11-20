@@ -4432,9 +4432,10 @@ dependencies = [
 [[package]]
 name = "strands-shell"
 version = "0.0.0"
-source = "git+https://github.com/strands-agents/shell?rev=39daa83d7f155d5b164f794f783e35598f49064e#39daa83d7f155d5b164f794f783e35598f49064e"
+source = "git+https://github.com/strands-agents/shell?rev=674212e8d582ce1a61ac640093b989e2ccd666ff#674212e8d582ce1a61ac640093b989e2ccd666ff"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "inventory",
  "jaq-core",
@@ -4457,7 +4458,7 @@ dependencies = [
 [[package]]
 name = "strands-shell-macros"
 version = "0.1.0"
-source = "git+https://github.com/strands-agents/shell?rev=39daa83d7f155d5b164f794f783e35598f49064e#39daa83d7f155d5b164f794f783e35598f49064e"
+source = "git+https://github.com/strands-agents/shell?rev=674212e8d582ce1a61ac640093b989e2ccd666ff#674212e8d582ce1a61ac640093b989e2ccd666ff"
 dependencies = [
  "proc-macro2",
  "quote",
