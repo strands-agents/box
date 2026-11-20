@@ -154,7 +154,7 @@ impl ShellKernel {
     }
 
     /// Resolve `path` per `follow`, keeping the identity an effect must still find. An empty
-    /// path names no file.
+    /// path names no file, as in POSIX.
     async fn resolve(&self, proc: &Process, path: &str, follow: Follow) -> io::Result<Resolved> {
         let generation = self.backend.generation.lock().await;
         let abs = strands_shell::vfs::absolute(&proc.cwd, path)?;
