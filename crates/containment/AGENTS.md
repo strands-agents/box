@@ -1020,6 +1020,22 @@ The native filesystem broker mediates `renameat2` itself and answers any call wi
 `a_name_is_created_without_replacing_one_with_renameat2_under_the_filters` checks each flag under
 the filters, and runs tempfile's `persist_noclobber`.
 
+### Listing a file's extended attribute names
+
+On GitHub's Ubuntu 24.04 ARM64 runner, Box `78e752b0` refused `listxattr` with `EPERM`. A hatchling
+editable build under `uv sync` failed with `PermissionError: [Errno 1] Operation not permitted` from
+`os.listxattr` in `shutil._copyxattr`. hatchling moves the built wheel from the tool's temporary
+folder into the project with `shutil.move`, which falls back to `shutil.copy2` because the two are
+different mounts (`EXDEV`). `copy2` lists the source's attribute names, and Python treats only
+`ENOTSUP`, `ENODATA` and `EINVAL` as "none", so it raised the `EPERM`.
+
+The permit admits `listxattr`, `llistxattr` and `flistxattr`, which return the names of a file's
+extended attributes and no value. `getxattr`, `setxattr` and `removexattr` stay refused, so a copy of a
+file that carries an attribute still fails, and nothing reads or sets `security.capability`. The names
+are of files the box already sees through its own mounts.
+`a_file_lists_its_attribute_names_but_reads_no_value_under_the_filters` runs the three calls and a
+`getxattr` under the filters.
+
 ### The host's top-level links into /usr
 
 On Amazon Linux 2023 and Ubuntu, `/bin` is a link to `usr/bin`. The view bound only the files its
