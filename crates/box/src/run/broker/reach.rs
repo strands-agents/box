@@ -61,6 +61,12 @@ pub(super) struct Reach {
     /// The host trust the egress gateway reads, which no interpreter may change.
     upstream_trust: Vec<PathBuf>,
 
+    /// The on-disk identities of the host trust paths that existed when the set was declared.
+    upstream_trust_identities: Vec<(u64, u64)>,
+
+    /// The on-disk identities of each host trust path and its existing ancestors.
+    upstream_trust_enclosing: Vec<(u64, u64)>,
+
     /// The operator home both interpreters may name under policy.
     shared: Option<String>,
 
@@ -205,6 +211,8 @@ impl Reach {
             commands: std::sync::Arc::default(),
             installation: None,
             upstream_trust: Vec::new(),
+            upstream_trust_identities: Vec::new(),
+            upstream_trust_enclosing: Vec::new(),
             shared: shared
                 .map(|home| utf8(&home, "the operator home"))
                 .transpose()?,
@@ -229,15 +237,37 @@ impl Reach {
     }
 
     pub(super) fn with_upstream_trust(mut self, upstream_trust: &[PathBuf]) -> Self {
+        // The identities are taken once, as the deny floor's are. Judging each trust path with
+        // `lies_within` stats it and each ancestor per mutation: with `SSL_CERT_DIR=/etc/ssl/certs`
+        // (366 trust paths) that measured about 6.5 ms per mutation, against 20 µs without them.
+        let mut identities = Vec::new();
+        let mut enclosing = Vec::new();
+        for trust in upstream_trust {
+            identities.extend(disk_identity(trust));
+            enclosing.extend(trust.ancestors().filter_map(disk_identity));
+        }
+        for set in [&mut identities, &mut enclosing] {
+            set.sort_unstable();
+            set.dedup();
+        }
         self.upstream_trust = upstream_trust.to_vec();
+        self.upstream_trust_identities = identities;
+        self.upstream_trust_enclosing = enclosing;
         self
     }
 
-    /// Whether changing `path` would change, replace, or move the host trust the gateway reads.
+    /// Whether changing `path` would change, replace, or move the host trust the gateway reads:
+    /// `path` is a trust path or lies within one, or encloses one, by spelling or on-disk identity.
     fn changes_upstream_trust(&self, path: &Path) -> bool {
+        if self.upstream_trust.is_empty() {
+            return false;
+        }
+        let enclosing = &self.upstream_trust_enclosing;
         self.upstream_trust
             .iter()
-            .any(|trust| lies_within(trust, path) || lies_within(path, trust))
+            .any(|trust| path.starts_with(trust) || trust.starts_with(path))
+            || has_ancestor_among(path, &self.upstream_trust_identities)
+            || disk_identity(path).is_some_and(|id| enclosing.binary_search(&id).is_ok())
     }
 
     /// The directory a relative path means, and what the interpreters report as `PWD`.
