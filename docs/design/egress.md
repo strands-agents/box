@@ -189,6 +189,25 @@ needs two `forbid` rules on `net:connect`: one for the metadata hostnames `metad
 and `metadata.azure.internal`, and one for the metadata addresses `169.254.*`, `fd00:ec2::254`,
 Azure WireServer `168.63.129.16`, Alibaba Cloud `100.100.100.200`, and the IPv6 link-local range.
 
+### A service on the operator's machine
+
+Inside a box, `localhost` is the box's own loopback, and `NO_PROXY` keeps it local. The reserved
+name `host.box.internal` is the surrounding OS's loopback; it isn't in `NO_PROXY`, so it reaches the
+gateway. The gateway decides `net:connect` on the name, maps it to `127.0.0.1` with no DNS lookup,
+decides the address (`ip4 = "127.0.0.1"`), and dials it from its own process. So a loopback `ip4`
+forbid also refuses the name, and a backend on the name still wins over the map. Shell `curl` and
+Monty `fetch()` don't refuse the name, so policy decides their requests too. See
+[`host.box.internal` names the surrounding OS's
+loopback](decisions.md#host-box-internal-names-the-surrounding-oss-loopback).
+
+Only `http://` works in practice: on `https://` the gateway checks the local service's
+certificate for `host.box.internal` against its trusted roots, which a local service seldom passes.
+Under a containerized Box, the name is the container's loopback.
+
+The gateway also refuses, before policy, a dial to its own listening address in any local spelling,
+because it would connect to itself. See [the gateway never dials its own
+listener](decisions.md#the-gateway-never-dials-its-own-listener).
+
 ## How responses reach the workload
 
 The gateway streams response bodies as they arrive, using bounded buffers. This includes
@@ -310,7 +329,9 @@ A placeholder sent anywhere else authenticates nothing. The gateway forwards it 
 destination with no route. The random value reveals no real credential to the receiving server.
 
 The gateway adds a secret only over TLS. It refuses a plain HTTP request to a bound destination
-before it adds any credential. See [credentials require TLS](decisions.md#a-secret-rides-only-tls).
+before it adds any credential, except to `host.box.internal` when every matching route names it
+exactly, with a port that no `[[agent.ingress]]` entry uses, and no backend. See [credentials
+require TLS](decisions.md#a-secret-rides-only-tls).
 
 `secret.placement` selects a header, HTTP basic auth, or a query parameter for the secret. See
 [placement keys](../user/egress.md#placement), [the operator selects the credential

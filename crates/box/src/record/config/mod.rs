@@ -53,7 +53,7 @@ use crate::error::{BoxError, ConfigError};
 use self::egress::routes_for;
 use self::egress::{
     BackendTarget, EgressEntry, EgressRoute, Protocol, host_of, routes_for_and_remote,
-    validate_egress, validate_egress_and_remote,
+    validate_egress, validate_egress_and_remote, validate_host_loopback_secrets,
 };
 #[cfg(test)]
 use self::env::{LOADER_HOOK_PREFIXES, LOADER_HOOKS};
@@ -575,6 +575,11 @@ impl RunContract {
         let remote_mcp = remote_mcp_entries(http_mcp);
         let declared = self.file.declared_sources()?;
         validate_egress_and_remote(&egress, &remote_mcp, &declared)?;
+        validate_host_loopback_secrets(
+            &egress,
+            &remote_mcp,
+            agent_ingress(self.file.agent.as_ref()),
+        )?;
         let _ = routes_for_and_remote(&egress, &remote_mcp, &declared)?;
         let mut sources = vec![self.source];
         if let Some(source) = policy_source {
@@ -1716,6 +1721,11 @@ impl ConfigFile {
                 ),
             });
         }
+        validate_host_loopback_secrets(
+            &self.egress,
+            &BTreeMap::new(),
+            agent_ingress(self.agent.as_ref()),
+        )?;
         validate_egress(&self.egress, &self.declared_sources()?)
     }
 
@@ -1731,6 +1741,11 @@ impl ConfigFile {
                     .map(|(label, tool)| (format!("[tool.{label}]"), tool)),
             )
     }
+}
+
+/// The `[[agent.ingress]]` entries of `agent`, or none.
+fn agent_ingress(agent: Option<&ProcessSpec>) -> &[ingress::Ingress] {
+    agent.map_or(&[], |agent| agent.ingress.as_slice())
 }
 
 /// Refuse a `[tool.<name>]` label that is not one plain component.

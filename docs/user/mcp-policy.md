@@ -137,6 +137,17 @@ A per-tool rule names a tool as `<server>::Action::"<tool>"`, and reads that too
 `context.input.<argument>`. The namespace is the server name with each character other than a
 letter, a digit, or `_` changed to `_`, so `my-server` becomes `my_server`.
 
+An argument keeps its exact name, even when it isn't a plain name such as `zone-id`, `x-api-key`,
+or `if`. Quote that name, with `has` and with brackets:
+
+```cedar
+forbid (principal, action == dns::Action::"list_records", resource)
+when { context.input has "zone-id" && context.input["zone-id"] == "private-zone" };
+```
+
+A `when temporal` or `unless temporal` clause can't name an argument like this: it reads only
+arguments with plain names.
+
 `policy generate-schema` starts each declared server, reads its `tools/list`, and writes the
 per-tool actions and their argument types:
 

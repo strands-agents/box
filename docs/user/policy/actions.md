@@ -132,6 +132,9 @@ with `expected ipaddr but saw String`.
 A rule on `path` has caveats for repeated slashes and `%2F`.
 [Forbid one URL path on a host](../policy.md#forbid-one-url-path-on-a-host) lists them.
 
+`host.box.internal` is your machine's loopback, decided as `ip4 = "127.0.0.1"`; see
+[reach a service on your machine](../policy.md#reach-a-service-on-your-machine).
+
 Cloud metadata and link-local protection is two `forbid` rules on `net:connect`;
 [what Box always enforces](../security.md#what-box-always-enforces) lists them.
 
@@ -218,7 +221,10 @@ when { context.input.server == "demo" && context.input has tool && context.input
 ```
 
 **A generated per-tool action**, `<server>::Action::"<tool>"`, carries the tool's arguments as
-`context.input.<argument>`, with the types the server's `tools/list` declares. Run the
+`context.input.<argument>`, with the types the server's `tools/list` declares. An argument whose
+name isn't a plain name, such as `zone-id`, keeps it, and a rule reads it as
+`context.input["zone-id"]`. A `temporal` clause can't name such an argument; it reads only
+arguments with plain names. Run the
 `policy generate-schema` verb to see the exact names:
 
 ```sh

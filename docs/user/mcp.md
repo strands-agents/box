@@ -392,7 +392,7 @@ auth.aws.region  = "us-east-1"
 
 A remote MCP backend is the egress backend applied to a remote MCP server: the same `url` and `auth`
 keys, the same validation, and the same re-route on the wire. See [Backends in the egress
-guide](./egress.md#backends) for the full rules — the backend `url` shape, the backend `auth`, the
+guide](./egress.md#backends) for the full rules: the backend `url` shape, the backend `auth`, the
 backend address check, and how a phantom-only `env://` `secret` rides beside a backend. The one
 difference is scope: a backend here re-routes a remote MCP server, and a `backends` key is refused on
 a `type = "stdio"` server, which is a local child with no remote endpoint.

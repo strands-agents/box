@@ -47,6 +47,12 @@ The gateway holds no destination deny list. A metadata or link-local address is 
 `forbid` on `context.input.ip4` or `context.input.ip6`, decided on the pinned address
 ([metadata protection is policy](../../docs/design/decisions.md#the-ssrf-and-metadata-floor-is-compiled-beneath-policy)).
 
+- **`host.box.internal` adds two exact, approved rules.** `is_own_listener` refuses a dial to the
+  gateway's own address before policy (deny-only; do not grow it into a list), and the plaintext
+  floor admits a credential only for `HOST_LOOPBACK_NAME` mapped to loopback, with no backend and
+  every matching route naming it exactly. Keep this spelling equal to `strands-box`'s
+  ([own listener](../../docs/design/decisions.md#the-gateway-never-dials-its-own-listener),
+  [credentials require TLS](../../docs/design/decisions.md#a-secret-rides-only-tls)).
 - **`CapabilitySet` holds the credential mutators, not a second authority.** A capability returns
   its mutations or a fault, and it has **no allow**. The fold applies the mutations only in the
   *absence* of a fault.

@@ -235,6 +235,7 @@ local specs, requirement numbers, and draft `KD-N` identifiers out of code citat
 Committed docs must not link to local drafts or explorations.
 For Mermaid, quote every edge label as `A -.->|"source kind"| B` and compile every block with `mmdc`.
 
-Use ASD-STE100 Simplified Technical English for prose, including comments, commits, and reviews.
+Use plain English for prose, including comments, commits, and reviews: short declarative
+sentences in the present tense and the active voice.
 Pages in `docs/user/` and `docs/design/` instead follow
 [the plain-English voice guide](.agents/references/voice-guide.md).

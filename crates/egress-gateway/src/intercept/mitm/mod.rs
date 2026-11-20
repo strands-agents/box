@@ -151,6 +151,10 @@ impl Default for MitmConfig {
     }
 }
 
+/// The reserved name of the surrounding OS's loopback, the one host a plaintext credential may reach
+/// (docs/design/decisions.md#a-secret-rides-only-tls).
+pub(crate) const HOST_LOOPBACK_NAME: &str = "host.box.internal";
+
 /// The shared, read-only state every connection handler borrows (behind an `Arc`).
 pub(crate) struct SharedState {
     /// Part B — the controls this adapter drives.
@@ -167,6 +171,8 @@ pub(crate) struct SharedState {
     effect_interceptor: Arc<dyn EffectInterceptor>,
     /// The bytes every reply observer's copy may hold at once.
     pub(crate) reply_copies: Arc<body::CopyBudget>,
+    /// The TCP address this gateway listens on, which it never dials; `None` for AF_UNIX.
+    pub(crate) listening: Option<SocketAddr>,
 }
 
 impl SharedState {
@@ -178,6 +184,33 @@ impl SharedState {
             .iter()
             .find(|(h, _)| h.eq_ignore_ascii_case(host))
             .map(|(_, ip)| *ip)
+    }
+
+    /// Whether a dial to `address`, in any spelling of a local address, reaches this gateway's own
+    /// listener.
+    fn is_own_listener(&self, address: SocketAddr) -> bool {
+        // An IPv4-mapped address dials its IPv4 address, and a dial to the unspecified address
+        // reaches a local listener, so both compare as the local address they reach.
+        let local = |ip: std::net::IpAddr| ip.is_loopback() || ip.is_unspecified();
+        self.listening.is_some_and(|listening| {
+            let (dialed, bound) = (address.ip().to_canonical(), listening.ip().to_canonical());
+            listening.port() == address.port()
+                && (dialed == bound
+                    || (bound.is_unspecified() && local(dialed))
+                    || (dialed.is_unspecified() && local(bound)))
+        })
+    }
+
+    /// Whether `host` is the reserved loopback name, mapped to a loopback address and not
+    /// re-routed to a backend.
+    pub(crate) fn is_mapped_host_loopback(
+        &self,
+        host: &str,
+        backend: Option<&BackendDial>,
+    ) -> bool {
+        host == HOST_LOOPBACK_NAME
+            && backend.is_none()
+            && self.dns_override(host).is_some_and(|ip| ip.is_loopback())
     }
 
     /// The backend `host:port` dials to, if the original destination `host:port` re-routes. Matched by
@@ -217,6 +250,14 @@ impl SharedState {
             .find(|(configured, _)| connect::same_host(configured, host))
             .map(|(_, name)| name.as_str())
     }
+}
+
+/// The one listener the adapter bound, before its accept loop starts.
+enum Bound {
+    /// A TCP listener and the address it bound.
+    Tcp(std::net::TcpListener, SocketAddr),
+    /// An AF_UNIX listener and its path.
+    Unix(std::os::unix::net::UnixListener, PathBuf),
 }
 
 /// The emitter [`MitmInterceptor::start`] installs: it drops each record, so nothing grows unread.
@@ -265,41 +306,18 @@ impl MitmInterceptor {
             tls::upstream_client_config(&config.upstream_ca_pems, config.upstream_host_roots)?;
         let upstream_config = Arc::new(upstream_config);
 
-        let state = Arc::new(SharedState {
-            controls,
-            config: config.clone(),
-            ca,
-            upstream_config,
-            emitter,
-            effect_interceptor,
-            reply_copies: Arc::new(body::CopyBudget::for_limit(
-                config.response_limits.max_body_bytes,
-            )),
-        });
-
-        let connections = Arc::new(listener::Connections::new(config.max_connections));
-
-        // Bind exactly one transport. `unix_socket_path: Some(path)` binds ONLY an AF_UNIX
-        // socket — no `TcpListener` is created in that mode — since a workload contained by the
-        // seccomp pin cannot reach a TCP port at all. `None` (the default) keeps today's behavior:
-        // bind `127.0.0.1:0`. Each arm records the transport it bound so the handle never guesses.
-        let (transport, accept_thread) = match &config.unix_socket_path {
+        // Bind exactly one transport, before the state, so the state holds the address it must
+        // never dial. `unix_socket_path: Some(path)` binds ONLY an AF_UNIX socket — no
+        // `TcpListener` is created in that mode — since a workload contained by the seccomp pin
+        // cannot reach a TCP port at all. `None` (the default) binds `127.0.0.1:0`.
+        let bound = match &config.unix_socket_path {
             None => {
-                // Default: bind 127.0.0.1:0.
                 let listener = std::net::TcpListener::bind(config.bind_addr)
                     .map_err(|e| ProxyError::Bind(format!("binding {}: {e}", config.bind_addr)))?;
-                let port = listener
+                let address = listener
                     .local_addr()
-                    .map_err(|e| ProxyError::Bind(format!("reading bound addr: {e}")))?
-                    .port();
-                let accept_thread = {
-                    let state = state.clone();
-                    let connections = connections.clone();
-                    std::thread::spawn(move || {
-                        listener::accept_loop(listener.incoming(), state, connections, false)
-                    })
-                };
-                (BoundTransport::Tcp(port), accept_thread)
+                    .map_err(|e| ProxyError::Bind(format!("reading bound addr: {e}")))?;
+                Bound::Tcp(listener, address)
             }
             Some(path) => {
                 // AF_UNIX-only pin: bind ONLY the UnixListener, never a TcpListener.
@@ -321,6 +339,41 @@ impl MitmInterceptor {
                         ))
                     },
                 )?;
+                Bound::Unix(listener, path.clone())
+            }
+        };
+
+        let state = Arc::new(SharedState {
+            controls,
+            config: config.clone(),
+            ca,
+            upstream_config,
+            emitter,
+            effect_interceptor,
+            reply_copies: Arc::new(body::CopyBudget::for_limit(
+                config.response_limits.max_body_bytes,
+            )),
+            listening: match &bound {
+                Bound::Tcp(_, address) => Some(*address),
+                Bound::Unix(..) => None,
+            },
+        });
+
+        let connections = Arc::new(listener::Connections::new(config.max_connections));
+
+        // Each arm records the transport it bound so the handle never guesses.
+        let (transport, accept_thread) = match bound {
+            Bound::Tcp(listener, address) => {
+                let accept_thread = {
+                    let state = state.clone();
+                    let connections = connections.clone();
+                    std::thread::spawn(move || {
+                        listener::accept_loop(listener.incoming(), state, connections, false)
+                    })
+                };
+                (BoundTransport::Tcp(address.port()), accept_thread)
+            }
+            Bound::Unix(listener, path) => {
                 let accept_thread = {
                     let state = state.clone();
                     let connections = connections.clone();
@@ -328,7 +381,7 @@ impl MitmInterceptor {
                         listener::accept_loop(listener.incoming(), state, connections, true)
                     })
                 };
-                (BoundTransport::Unix(path.clone()), accept_thread)
+                (BoundTransport::Unix(path), accept_thread)
             }
         };
 

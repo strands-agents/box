@@ -24,6 +24,14 @@ use crate::intercept::mitm::BackendDial;
 /// egress.
 type Outcome = std::result::Result<Vec<Mutation>, String>;
 
+/// The host half of `pattern` as written, without its port or path, so a wildcard keeps its `*`.
+#[cfg(feature = "tls-intercept")]
+fn written_host(pattern: &credentials::DestinationPattern) -> String {
+    let written = pattern.as_written();
+    let end = written.find([':', '/']).unwrap_or(written.len());
+    written[..end].to_string()
+}
+
 /// The body checks retained after response-header edits have passed the capability fold.
 #[cfg(feature = "tls-intercept")]
 #[derive(Debug, Default)]
@@ -52,6 +60,20 @@ impl CapabilitySet {
         self.credentials
             .iter()
             .any(|credential| credential.pattern().matches(destination))
+    }
+
+    /// Whether some credential matches `destination` and each match names `host` exactly.
+    #[cfg(feature = "tls-intercept")]
+    pub(crate) fn every_match_names_host(
+        &self,
+        destination: &credentials::Destination<'_>,
+        host: &str,
+    ) -> bool {
+        let matching = self.matching(destination);
+        !matching.is_empty()
+            && matching
+                .iter()
+                .all(|credential| written_host(credential.pattern()) == host)
     }
 
     /// The credentials whose pattern matches `destination`. Only these act, so an off-route

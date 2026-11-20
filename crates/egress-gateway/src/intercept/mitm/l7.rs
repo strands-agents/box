@@ -170,7 +170,15 @@ async fn run_l7_legs(
     };
 
     // A secret rides only TLS: refuse on the same canonical target the credential match below sees.
-    if !intercepted && state.controls.matches_any(&target.as_destination()) {
+    // The one exception is the reserved loopback name, when it is mapped to loopback, not
+    // re-routed, and every matching route names it exactly: that plaintext leg never leaves the
+    // surrounding OS (docs/design/decisions.md#a-secret-rides-only-tls).
+    let destination = target.as_destination();
+    let stays_on_host_loopback = state.is_mapped_host_loopback(&connect.host, backend)
+        && state
+            .controls
+            .every_match_names_host(&destination, super::HOST_LOOPBACK_NAME);
+    if !intercepted && state.controls.matches_any(&destination) && !stays_on_host_loopback {
         return Ok(refuse(
             "credential would attach on a plaintext request; refused — a secret must ride TLS",
             WorkloadResponse::refusal(403, b"credential not permitted on a plaintext request"),
