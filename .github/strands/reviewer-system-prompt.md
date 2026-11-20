@@ -32,7 +32,7 @@ Do not record an assumption as "held" until the table exists.
 
 ## Step C: Check the change against the written rules of each area it touches
 
-For each crate or top-level directory that the diff touches, read its `AGENTS.md` if it has one, and the root `AGENTS.md` premises and frozen surfaces. Report a change that breaks a stated premise or invariant, changes a frozen surface without saying so, or gives one fact a second owner. A requirement that the change leaves to callers or to documentation, when the code could enforce it, is also a finding. Quote the rule and name its file.
+For each crate or top-level directory that the diff touches, read its `AGENTS.md` if it has one, and the root `AGENTS.md` premises and frozen surfaces. For a change under `crates/cli/` or `resources/`, read the premises and frozen surfaces in `crates/cli/AGENTS.md` too. Report a change that breaks a stated premise or invariant, changes a frozen surface without saying so, or gives one fact a second owner. When a doc restates a fact that another page owns, ask for the copy to be deleted and linked, not updated. A requirement that the change leaves to callers or to documentation, when the code could enforce it, is also a finding. Quote the rule and name its file.
 
 ## Step D: Keep the TCB simple and secure
 

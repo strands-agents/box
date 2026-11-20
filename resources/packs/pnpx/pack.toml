@@ -1,0 +1,48 @@
+# The pnpx tool and MCP launcher requirements.
+# MCP compatibility on macOS arm64:
+# Pass: pnpm 10.34.9 / Node 22.22.2 and 22.23.4; native pnpm 12.16.1 / Node 24.22.1.
+# Local npm prefix: pnpm 10.34.9 / Node 20.19.0 and 22.22.2, as a tool and MCP launcher.
+# Oldest supported major checked: pnpm 10 on the Node 22 LTS line.
+# Test scope and fixtures: docs/dev/engine-tests.md, Launcher tests.
+[pack]
+name = "@box/pnpx"
+version = 1
+kind = "tool"
+extend = ["@box/node"]
+include = ["@box/node"]
+
+[inputs.pnpx.path]
+description = "The pnpx program."
+type = "program"
+program = "pnpx"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.pnpx.path }}"]
+# A downloaded package can need node, also when pnpx is a native program. A package's .bin shim
+# runs dirname, sed, and uname.
+helpers = ["node", "dirname", "sed", "uname"]
+hosts = ["registry.npmjs.org"]
+
+# The older npm-style names, and the PNPM_CONFIG_* names that a native pnpm reads.
+[env]
+npm_config_store_dir = "${{ cache }}/store"
+npm_config_cache_dir = "${{ cache }}/cache"
+# A native pnpm reads its workspace configuration from here.
+PNPM_CONFIG_WORKSPACE_DIR = "."
+PNPM_CONFIG_STORE_DIR = "${{ cache }}/store"
+PNPM_CONFIG_CACHE_DIR = "${{ cache }}/cache"
+PNPM_CONFIG_STATE_DIR = "${{ cache }}/state"
+# A native pnpm puts its store locks here.
+XDG_RUNTIME_DIR = "${{ cache }}"
+# pnpm 10 resolves TMPDIR before it creates its cache. Leave it unset so Box supplies an
+# existing tool scratch directory or MCP cache.
+
+[filesystem]
+read = ["${{ root.parent }}"]
+# node resolves `localhost` from the hosts file, so a test runner or dev server that looks it up
+# starts. This tool runs node as a helper, so node gets this tool's grants.
+read_file = [
+    { path = "/private/etc/hosts", when = "macos" },
+    { path = "/etc/hosts", when = "linux" },
+]

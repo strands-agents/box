@@ -1,0 +1,30 @@
+# node, as the operator's PATH finds it: dnf, Homebrew, nvm, or a tarball.
+[pack]
+name = "@box/node"
+version = 1
+kind = "tool"
+
+[inputs.node.path]
+description = "The node program."
+type = "program"
+program = "node"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.node.path }}"]
+installation = ["node", "homebrew"]
+
+[env]
+npm_config_cache = "${{ workspace }}/.npm"
+npm_config_update_notifier = "false"
+npm_config_audit = "false"
+npm_config_fund = "false"
+npm_config_script_shell = "/bin/bash"
+
+[filesystem]
+# node resolves `localhost` from the hosts file, so a test runner or dev server that looks it up
+# starts.
+read_file = [
+    { path = "/private/etc/hosts", when = "macos" },
+    { path = "/etc/hosts", when = "linux" },
+]

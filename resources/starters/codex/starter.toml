@@ -1,0 +1,62 @@
+# `box profile create codex` asks these questions. A run never reads this file.
+[starter]
+name = "@box/codex"
+label = "Codex"
+packs = ["@box/codex"]
+ask = ["bedrock.region", "bedrock.sign-in", "codex.import-mcp"]
+
+# What Codex on this host already uses, from its own configuration file.
+[[source]]
+id = "provider"
+label = "Provider"
+places = [{ file = "~/.codex/config.toml", directory-env = "CODEX_HOME", kind = "toml", key = ["model_provider"] }]
+
+# Codex documents no order between aws.region and AWS_REGION. The file comes first, because it
+# names the provider that the region belongs to.
+[[source]]
+id = "mantle-region"
+pack = "@box/bedrock-mantle"
+label = "Region"
+input = "bedrock.region"
+places = [
+  { file = "~/.codex/config.toml", directory-env = "CODEX_HOME", kind = "toml", key = ["model_providers", "amazon-bedrock", "aws", "region"] },
+  { env = "AWS_REGION" },
+]
+
+[[source]]
+id = "runtime-region"
+pack = "@box/bedrock"
+label = "Region"
+input = "bedrock.region"
+places = [
+  { file = "~/.codex/config.toml", directory-env = "CODEX_HOME", kind = "toml", key = ["model_providers", "amazon-bedrock-runtime", "aws", "region"] },
+  { env = "AWS_REGION" },
+]
+
+[[question]]
+id = "provider"
+prompt = "Which model provider should Codex use?"
+default = "bedrock"
+
+[[question.choice]]
+id = "bedrock"
+label = "Amazon Bedrock Mantle"
+packs = ["@box/bedrock-mantle"]
+options = { "codex.host" = "amazon-bedrock" }
+detect = { source = "provider", equals = "amazon-bedrock" }
+
+[[question.choice]]
+id = "bedrock-runtime"
+label = "Amazon Bedrock Runtime"
+packs = ["@box/bedrock"]
+options = { "codex.host" = "amazon-bedrock-runtime" }
+detect = { source = "provider", equals = "amazon-bedrock-runtime" }
+
+# Detected only when the host names openai: with no model_provider, Codex uses OpenAI, but the
+# host may sign in with ChatGPT, which the box does not bring in.
+[[question.choice]]
+id = "openai"
+label = "The OpenAI API"
+packs = ["@box/openai"]
+options = { "codex.host" = "openai" }
+detect = { source = "provider", equals = "openai" }

@@ -1,5 +1,19 @@
 name: CI
 
+# One CI for Box Core and the box CLI. detect-changes sorts a pull request's paths into change
+# classes, and each job runs for the classes that need it:
+#
+#   core    Box Core: everything under crates/ outside crates/cli/, and its test harnesses.
+#           Runs Core's unit tests and lint (rust-test-lint.yml), containment, and the CLI's
+#           engine suite (cli-test.yml, suite `engine`), because the CLI builds on Core.
+#   cli     The box CLI: crates/cli/, resources/, the test-corpus files its tests read, and its
+#           scripts. Runs cli-test.yml (all). A CLI-only change skips Core's unit tests and the
+#           containment suite.
+#   shared  The workspace files both parts build from. Runs everything.
+#   other   A path that no filter and no skip-list entry names. Runs everything.
+#
+# Every other event (push, workflow_dispatch) runs every job.
+
 on:
   pull_request:
     branches: [main, feature/native-filesystem-core, feature/linux-native-launch-prep, feature/linux-native-kernel, feature/linux-native-operations]
@@ -21,28 +35,53 @@ jobs:
       pull-requests: read
       contents: read
     outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      site_manifest: ${{ steps.filter.outputs.site_manifest }}
-      containment: ${{ steps.filter.outputs.containment }}
-      verdict: ${{ steps.filter.outputs.verdict }}
+      core: >-
+        ${{ github.event_name != 'pull_request' || steps.filter.outputs.core == 'true' ||
+        steps.every.outputs.core_crates == 'true' || steps.filter.outputs.shared == 'true' ||
+        steps.every.outputs.other == 'true' }}
+      cli: >-
+        ${{ github.event_name != 'pull_request' || steps.filter.outputs.cli == 'true' ||
+        steps.filter.outputs.shared == 'true' || steps.every.outputs.other == 'true' }}
+      site_manifest: ${{ github.event_name != 'pull_request' || steps.filter.outputs.site_manifest == 'true' }}
+      containment: >-
+        ${{ github.event_name != 'pull_request' || steps.filter.outputs.containment == 'true' ||
+        steps.every.outputs.core_crates == 'true' || steps.every.outputs.other == 'true' }}
+      verdict: ${{ github.event_name != 'pull_request' || steps.filter.outputs.verdict == 'true' }}
     steps:
       - uses: actions/checkout@v7
+        if: github.event_name == 'pull_request'
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
+        if: github.event_name == 'pull_request'
         with:
-          # `**/!(*.md)` excludes docs-only changes from the Rust matrix. Keep
-          # this an extglob because paths-filter OR-s its patterns.
+          # `**/!(*.md)` excludes docs-only changes. Keep these extglobs because paths-filter OR-s
+          # the patterns of a filter. Core's crates are in the `every` step below.
           filters: |
-            rust:
-              - '.cargo/**'
-              - 'crates/**/!(*.md)'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'rust-toolchain.toml'
+            core:
               - 'test-native-filesystem/**/!(*.md)'
               - '.github/workflows/rust-*'
               - 'scripts/check-linux-test-output.py'
               - 'scripts/test_linux_test_output.py'
+            cli:
+              - 'crates/cli/**/!(*.md)'
+              - 'resources/**'
+              - 'test-corpus/**'
+              # crates/cli/app/src/profile_tests.rs reads it.
+              - 'docs/cli/troubleshooting.md'
+              - '.github/workflows/cli-test.yml'
+              # The CLI's scripts and their tests. resources.rs reads macos-release-cli.py.
+              - 'scripts/check-prose.sh'
+              - 'scripts/drive_tui.py'
+              - 'scripts/macos-release-cli.py'
+              - 'scripts/try-build.sh'
+              - 'scripts/test_ci_workflow.py'
+              - 'scripts/test_try_build.py'
+            shared:
+              - '.cargo/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'justfile'
               - '.github/workflows/ci.yml'
             site_manifest:
               - 'docs/site-manifest.json'
@@ -51,7 +90,6 @@ jobs:
               - 'crates/box/tests/site_manifest.rs'
               - '.github/workflows/ci.yml'
             containment:
-              - 'crates/**/!(*.md)'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'test-integ/**/!(*.md)'
@@ -72,6 +110,59 @@ jobs:
               - 'test-workload/workload-native-filesystem/**'
               - '.github/workflows/verdict-hermetic.yml'
               - '.github/workflows/ci.yml'
+      # A path must match every pattern of these filters, so they have their own step
+      # (`predicate-quantifier` applies to each filter in a step).
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
+        id: every
+        if: github.event_name == 'pull_request'
+        with:
+          predicate-quantifier: every
+          filters: |
+            core_crates:
+              - 'crates/**/!(*.md)'
+              - '!crates/cli/**'
+            other:
+              - '**'
+              - '!**/*.md'
+              - '!.agents/**'
+              - '!.cargo/**'
+              - '!.claude/**'
+              - '!.github/**'
+              - '!.gitignore'
+              - '!crates/**'
+              - '!docs/**'
+              - '!examples/**'
+              - '!resources/**'
+              - '!scripts/**'
+              - '!team/**'
+              - '!test-common/**'
+              - '!test-corpus/**'
+              - '!test-integ/**'
+              - '!test-native-filesystem/**'
+              - '!test-workload/**'
+              - '!Cargo.lock'
+              - '!Cargo.toml'
+              - '!LICENSE'
+              - '!NOTICE'
+              - '!download.sh'
+              - '!justfile'
+              - '!rust-toolchain.toml'
+
+  # The CLI's pages, with the same list as `just prose`. Box Core's pages join after their prose
+  # cleanup.
+  prose:
+    name: Prose
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Prose
+        run: git ls-files -z 'docs/cli/*.md' 'docs/design/cli/*.md' 'resources/packs/*/README.md' 'resources/plugins/*/README.md' 'resources/policies/*/README.md' | xargs -0 scripts/check-prose.sh
 
   packaging:
     name: Packaging tests
@@ -100,27 +191,37 @@ jobs:
   rust:
     name: Rust
     needs: detect-changes
-    # On push and workflow_dispatch, detect-changes still runs but its filter
-    # outputs are unset — run rust unconditionally in those cases.
-    #
-    # The macOS runner also runs the deterministic containment suite, so a push
-    # holds one macOS runner. A change that only the containment filter selects
-    # runs the macOS unit-test leg alone, with no Linux leg and no lint. A draft
-    # pull request skips the containment suite, as it skips `containment`.
-    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.rust == 'true' || (github.event.pull_request.draft == false && needs.detect-changes.outputs.containment == 'true') }}
+    # Box Core's unit tests on three runners and the workspace lint, for a Core change. The macOS
+    # runner also runs the deterministic containment suite, so a push holds one macOS runner. A
+    # change that only the containment filter selects runs the macOS unit-test leg alone, with no
+    # Linux leg and no lint. A draft pull request skips the containment suite.
+    if: ${{ needs.detect-changes.outputs.core == 'true' || (github.event.pull_request.draft != true && needs.detect-changes.outputs.containment == 'true') }}
     uses: ./.github/workflows/rust-test-lint.yml
     permissions:
       contents: read
     with:
       ref: ${{ github.sha }}
-      os: ${{ (github.event_name != 'pull_request' || needs.detect-changes.outputs.rust == 'true') && '["ubuntu-24.04-arm", "ubuntu-24.04", "macos-latest"]' || '["macos-latest"]' }}
-      run_lint: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.rust == 'true' }}
-      containment_macos: ${{ github.event_name != 'pull_request' || (github.event.pull_request.draft == false && needs.detect-changes.outputs.containment == 'true') }}
+      os: ${{ needs.detect-changes.outputs.core == 'true' && '["ubuntu-24.04-arm", "ubuntu-24.04", "macos-latest"]' || '["macos-latest"]' }}
+      run_lint: ${{ needs.detect-changes.outputs.core == 'true' }}
+      containment_macos: ${{ github.event.pull_request.draft != true && needs.detect-changes.outputs.containment == 'true' }}
+
+  # The CLI's build, test, and lint on Linux, and the macOS checks (cli-test.yml). A Core-only
+  # change runs the engine suite, and a draft skips the macOS jobs.
+  cli:
+    name: CLI
+    needs: detect-changes
+    if: needs.detect-changes.outputs.cli == 'true' || needs.detect-changes.outputs.core == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/cli-test.yml
+    with:
+      suite: ${{ needs.detect-changes.outputs.cli == 'true' && 'all' || 'engine' }}
+      macos: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
 
   site-manifest:
     name: Site manifest
     needs: detect-changes
-    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.site_manifest == 'true' }}
+    if: ${{ needs.detect-changes.outputs.site_manifest == 'true' }}
     runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 15
     permissions:
@@ -163,10 +264,8 @@ jobs:
   containment:
     name: Containment
     needs: detect-changes
-    # Same unconditional-on-push rule as `rust`: detect-changes runs but its
-    # filter outputs are unset outside a pull_request. A draft pull request
-    # skips this suite; `ready_for_review` starts it.
-    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.draft == false && needs.detect-changes.outputs.containment == 'true') }}
+    # A draft pull request skips this suite; `ready_for_review` starts it.
+    if: ${{ github.event.pull_request.draft != true && needs.detect-changes.outputs.containment == 'true' }}
     uses: ./.github/workflows/containment-deterministic.yml
     permissions:
       contents: read
@@ -174,30 +273,31 @@ jobs:
   verdict:
     name: Verdict
     needs: detect-changes
-    # Same unconditional-on-push rule as the legs above. A draft pull request
-    # skips this suite; `ready_for_review` starts it.
-    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.draft == false && needs.detect-changes.outputs.verdict == 'true') }}
+    # A draft pull request skips this suite; `ready_for_review` starts it.
+    if: ${{ github.event.pull_request.draft != true && needs.detect-changes.outputs.verdict == 'true' }}
     uses: ./.github/workflows/verdict-hermetic.yml
     permissions:
       contents: read
     with:
       ref: ${{ github.sha }}
 
+  # The one check the main branch ruleset requires. A draft skips the macOS jobs and the
+  # containment suites, so it never passes.
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [detect-changes, packaging, rust, site-manifest, containment, verdict]
+    needs: [detect-changes, prose, packaging, rust, cli, site-manifest, containment, verdict]
     runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 5
     permissions: {}
     steps:
       - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # release/v1
         with:
-          allowed-skips: rust, site-manifest, containment, verdict
+          allowed-skips: rust, cli, site-manifest, containment, verdict
           jobs: ${{ toJSON(needs) }}
 
       - name: Refuse a draft as merge evidence
         if: ${{ github.event.pull_request.draft == true }}
         run: |
-          echo "::error::Draft run: containment and verdict did not run. Mark the pull request ready to run the full suite."
+          echo "::error::Draft run: the macOS checks and the containment suites did not run. Mark the pull request ready to run the full suite."
           exit 1

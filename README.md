@@ -76,6 +76,15 @@ individual Dogwood decisions. To apply a policy to file operations, use the
 interpreters and keep those files out of the agent's direct grants. See
 [filesystem access](docs/user/security.md) and [policy](docs/user/policy.md).
 
+## The `box` command-line tool
+
+`box` runs a coding agent, such as Claude Code, Codex, or Kiro, in a box set up from a profile.
+A profile names the agent, its tools, and what it may reach, and `box` turns it into the box's
+configuration and policies on each run. Its source is in [`crates/cli/`](crates/cli/), with the
+packs, policies, and starters it ships in [`resources/`](resources/). Its user guide starts at
+[docs/cli/README.md](docs/cli/README.md). To build it, run `just build-cli`; the programs are in
+`target/debug`.
+
 ## Use Box as a Rust library
 
 Link the `strands-box` package in `crates/box`, then call:
@@ -265,9 +274,10 @@ for the offline dependency guards.
 Common tasks run through [`just`](https://github.com/casey/just):
 
 ```sh
-just build         # the CLI, the alias image, and the containment trampoline
-just test          # workspace tests
-just check         # pre-push gate: fmt-check + clippy + test
+just build         # strands-box, the alias image, and the containment trampoline
+just build-cli     # the box CLI and the Box Core binaries it runs
+just test          # build-cli, then the workspace tests
+just check         # pre-push gate: fmt-check + clippy + prose + test
 just test-all      # workspace tests and box example checks
 ```
 

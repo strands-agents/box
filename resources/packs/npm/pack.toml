@@ -1,0 +1,25 @@
+# npm, run by the node of @box/node.
+[pack]
+name = "@box/npm"
+version = 1
+kind = "tool"
+extend = ["@box/node"]
+include = ["@box/node"]
+
+[inputs.npm.path]
+description = "The npm program."
+type = "program"
+program = "npm"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.npm.path }}"]
+installation = ["npm", "homebrew"]
+hosts = ["registry.npmjs.org"]
+
+[env]
+npm_config_cache = "${{ workspace }}/.npm"
+npm_config_update_notifier = "false"
+npm_config_audit = "false"
+npm_config_fund = "false"
+npm_config_script_shell = "/bin/bash"
