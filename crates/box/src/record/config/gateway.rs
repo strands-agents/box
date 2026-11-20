@@ -58,16 +58,10 @@ fn not_a_host_name(entry: &str) -> Option<&'static str> {
     if entry.contains('/') {
         return Some("it names a path");
     }
+    if let Some(reason) = super::unbindable_host_name(entry) {
+        return Some(reason);
+    }
     let host = egress_gateway::normalize_host(entry);
-    if host.is_empty() {
-        return Some("it is empty");
-    }
-    if !egress_gateway::is_bindable_host(&host) {
-        return Some("it holds a character other than a letter, a digit, '.', '-', or '_'");
-    }
-    if host.split('.').any(str::is_empty) {
-        return Some("it has an empty label");
-    }
     if host.parse::<IpAddr>().is_ok()
         || host
             .bytes()

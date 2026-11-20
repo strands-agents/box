@@ -328,7 +328,7 @@ to the server in both modes.
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `type` | string | required | `"http"`. |
-| `destinations` | string array | required | Destinations for MCP identification and optional credential routing. Entries accept a host, `host:port`, or a host with a path prefix. A `*.` wildcard entry supports credential routing only. MCP identification uses the explicit host; see [remote destination matching](#remote-destination-matching). |
+| `destinations` | string array | required | Destinations for MCP identification and optional credential routing. Entries accept a host, `host:port`, or a host with a path prefix. A `*.` wildcard entry is refused, because MCP identification uses the explicit host; see [remote destination matching](#remote-destination-matching). |
 | `secret.ref` | string | none | The credential the gateway attaches to each request to the server: `env://NAME`, `aws://PROFILE`, a bare `aws://` for the AWS default credential chain, or a reference in a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table declares. |
 | `secret.env` | string | `NAME` for `env://NAME` | Experimental: needs `secret-sources = true` in [`[experimental-features]`](config.md#experimental-features). The variable that holds the placeholder in the workload. Required for a reference in a declared scheme. |
 | `secret.header` | string | `Authorization` | The header the credential goes in. |
@@ -349,23 +349,19 @@ entry. Hostname comparison ignores letter case and trailing dots. IP literals ma
 parsed address. Box does not use DNS results to treat different hostnames, or a hostname and an
 IP address, as the same MCP server.
 
-Keep equivalent hostname spellings in the same `[mcp.<name>]` table. The configuration loader
-currently fails to reject different server entries for names such as `mcp.example.com` and
-`mcp.example.com.`. Runtime matching treats those spellings as one host. Requests to either spelling can therefore
-use one entry's server name and tool rules, leaving the other entry's rules unapplied. Use one
-server table for the host; its declared hostname already matches with and without trailing dots.
+Write each host as a connection names it: ASCII letters, digits, `.`, `-`, and `_`, with no empty
+label and no trailing dot. Write an internationalized name in its punycode form, such as
+`xn--bcher-kva.example`. A remote MCP server's destination may not be a `*.` wildcard, because MCP
+identification uses the exact host. The loader refuses each of these, because no request could
+enter MCP checks for it. The loader also refuses an egress backend whose `url` host is a remote MCP
+server's host, because the gateway dials a backend directly and would skip the server's
+`mcp:call` decisions.
 
 MCP matching ignores an entry's port and path. A request to the matching host enters MCP checks
 on any port and path that network and HTTP policy permit.
 
-A `*.` wildcard entry does not select the parent domain or any concrete subdomain for MCP checks.
-For example, `*.example.com` selects neither `example.com` nor `api.example.com`. If a server lists
-only wildcard destinations, requests to those hosts receive no `mcp:call` or per-tool checks for
-that server. Its configured credential can still attach when the credential pattern matches and
-network and HTTP policy permit the request. List each intended hostname or IP address explicitly.
-
-Credential routing uses the [destination patterns](egress.md#destinations), including their port,
-path, and wildcard rules. Attaching a credential does not establish an MCP server identity.
+Credential routing uses the [destination patterns](egress.md#destinations), including their port
+and path rules. Attaching a credential does not establish an MCP server identity.
 Requests to destinations without an MCP match remain subject to network and HTTP policy.
 Follow [the remote-server policy guidance](mcp-policy.md#scope-of-remote-server-rules) to restrict
 alternative routes to the same application.
@@ -422,6 +418,9 @@ stops the whole run, and the error names the server.
 | A `secret` error (a scheme that no table declares, a declared scheme with no `secret.env`, a `secret.env` while `secret-sources` is off, two entries with one placeholder variable and different secrets, or a reference to a `pass-secret-env` variable) | A remote MCP server's `secret` follows the egress secret rules. See [Errors in the egress guide](./egress.md#errors-and-exit-codes). |
 | `` `[mcp.<name>] secret.ref` names a secret that the secret source `<scheme>` (<program>) did not return `` | The program of a declared secret source returned no secret when the box started. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |
 | `` `[mcp.<name>]` filesystem entry "<entry>" is refused: this grant reaches <path>, which the secret source `<scheme>` keeps from each workload `` | A stdio server's `filesystem` entry reaches a `reads` or `deny` path of a declared secret source. Remove the entry. See [what Box protects](config.md#what-box-protects). |
+| `` destination host "<host>" is not the spelling the gateway matches a connection against `` | A `type = "http"` destination has an empty label, a trailing dot, or a character other than an ASCII letter, a digit, `.`, `-`, or `_`. Write an internationalized name in its punycode (`xn--`) form. See [remote destination matching](#remote-destination-matching). |
+| `a remote MCP server destination may not be a wildcard` | A `type = "http"` destination is a `*.` pattern. Name each host of the server. |
+| `` `<entry>` re-routes to backend host "<host>", which `<name>` declares as a remote MCP server `` | An egress or MCP backend `url` names this server's host. Point the backend at another host. |
 | A backend error (more than one backend, a bad backend `url`, a signed `secret` beside a backend, or a refused backend `auth`) | A remote MCP backend follows the egress backend rules. See [Errors in the egress guide](./egress.md#errors-and-exit-codes). |
 | `MCP server "<name>" failed during <step>` | The server failed while the box read its tool list. stderr names the step. |
 | `modern MCP requests require ...` | The client omitted required protocol metadata. Update the client to one that sends the fields on every request. |
