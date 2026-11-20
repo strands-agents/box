@@ -76,6 +76,7 @@ By default, both channels publish these files, with the selected tag in place of
 
 Setting `publish_linux_x86=false` omits `box-<tag>-linux-x86_64.tar.gz` and its checksum entry.
 The x86-64 package then remains a workflow artifact.
+The x86-64 build and package checks run for either setting. A failure blocks publication of every selected archive.
 
 The Linux release archives use `linux-arm64` and `linux-x86_64` in their names.
 Compilation and intermediate workflow artifacts retain the Rust targets `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu`, respectively.
