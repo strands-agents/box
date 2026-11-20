@@ -48,7 +48,7 @@ credential the box can't deliver is refused at
 load](./decisions.md#an-undeliverable-credential-is-refused-at-load).
 
 A `[secret-source.<scheme>]` table names a host program that reads a secret, such as the 1Password
-CLI. The table is experimental, and it loads on macOS only. Box checks the table and stores it in
+CLI. The table is experimental. Box checks the table and stores it in
 the record when the configuration loads. A route in that scheme then works as an `env://NAME` route
 does, with two differences: the program supplies the secret, and `secret.env` names the variable
 that holds the placeholder.
@@ -82,7 +82,7 @@ that same early step, Box refuses a grant of the agent, a tool, or a local MCP s
 one of those paths, a path inside it, or a folder that holds it, and a write grant over the
 folder that holds a symbolic link on the way to one. A credential store that a grant can
 otherwise name exactly, such as `~/.aws`, has no exception here. Each sandbox also denies
-those paths, so they stay closed when they appear after the box starts. Box gives the
+those paths. On macOS they stay closed when they appear after the box starts. On Linux a sandbox covers a path with an empty mount, and a mount needs a path that exists, so no sandbox denies an entry whose path is absent when the box starts, and Box names it on stderr. It refuses an entry whose path is not a folder or a regular file. Box gives the
 operator's value of a `pass-secret-env` variable to the program alone. It doesn't look for that
 value in a table's `env` or `command`. A workload gets no variable from the operator's shell
 but `HOME` and `PATH`, so it holds the value only when the operator writes it in a table.

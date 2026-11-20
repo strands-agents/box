@@ -184,10 +184,9 @@ fn validate_against_sources(
             if !sources.declares(&scheme) {
                 return refuse(format!(
                     "secret scheme {scheme:?} has no `[secret-source.{scheme}]` table: declare \
-                     the secret source that reads it, which Box loads on macOS only, or use \
-                     env://NAME for a credential the workload presents as a placeholder, \
-                     aws://profile for one signed in the boundary, or credsd://<environment> \
-                     for a credsd-vended credential"
+                     the secret source that reads it, or use env://NAME for a credential the \
+                     workload presents as a placeholder, aws://profile for one signed in the \
+                     boundary, or credsd://<environment> for a credsd-vended credential"
                 ));
             }
         }
@@ -2434,9 +2433,9 @@ mod tests {
                 format!(
                     "invalid credential entry for host \"api.test\": secret scheme {scheme:?} \
                      has no `[secret-source.{scheme}]` table: declare the secret source that \
-                     reads it, which Box loads on macOS only, or use env://NAME for a credential \
-                     the workload presents as a placeholder, aws://profile for one signed in the \
-                     boundary, or credsd://<environment> for a credsd-vended credential"
+                     reads it, or use env://NAME for a credential the workload presents as a \
+                     placeholder, aws://profile for one signed in the boundary, or \
+                     credsd://<environment> for a credsd-vended credential"
                 )
             );
         }
@@ -2972,10 +2971,10 @@ mod tests {
                 .expect_err("no table declares `op`")
                 .to_string(),
             "invalid credential entry for host \"api.github.com\": secret scheme \"op\" has no \
-             `[secret-source.op]` table: declare the secret source that reads it, which Box \
-             loads on macOS only, or use env://NAME for a credential the workload presents as \
-             a placeholder, aws://profile for one signed in the boundary, or \
-             credsd://<environment> for a credsd-vended credential"
+             `[secret-source.op]` table: declare the secret source that reads it, or use \
+             env://NAME for a credential the workload presents as a placeholder, aws://profile \
+             for one signed in the boundary, or credsd://<environment> for a credsd-vended \
+             credential"
         );
         assert_eq!(
             declared_refusal(&entry(

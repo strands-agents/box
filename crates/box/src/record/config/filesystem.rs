@@ -18,7 +18,7 @@ use containment::{ContainmentConfig, Operation, PreparedFilesystemPath, Scope};
 use crate::GrantRefusal;
 use crate::error::{BoxError, ConfigError};
 use crate::record::config::process::{Filesystem, Grant};
-use crate::record::config::secret_source::ProtectedPath;
+use crate::record::config::secret_source::{ProtectedPath, Spelled};
 use crate::record::layout::{lies_within, resolved_to_its_deepest_existing_ancestor};
 
 /// One host path a process's own syscalls reach, with no policy decision in the path.
@@ -210,9 +210,11 @@ pub(crate) fn direct_grants(
     }
     require_no_overlap(&grants, context)?;
 
-    // Each path that a secret source protects is refused to the process, whether or not it is
-    // there, so no cell that Box adds beneath the lists reaches it.
-    for path in protected.iter().flat_map(|(_, spellings, _)| spellings) {
+    // Each path that a secret source protects is refused to the process, so no cell that Box
+    // adds beneath the lists reaches it. macOS refuses a path that is not there too, and Linux
+    // skips it, because a mount needs a path that is there.
+    let covered = protected.iter().filter(|(_, spelled)| spelled.covered);
+    for path in covered.flat_map(|(_, spelled)| &spelled.spellings) {
         if refusals.iter().any(|refusal| &refusal.path == path) {
             continue;
         }
@@ -458,9 +460,8 @@ pub(crate) fn require_judged_identities(
     Ok(())
 }
 
-/// One path that a secret source protects, its spellings as written and as it resolves, and each
-/// symbolic link on the way.
-type SourcePath<'a> = (&'a ProtectedPath, Vec<PathBuf>, Vec<PathBuf>);
+/// One path that a secret source protects, with what it names.
+type SourcePath<'a> = (&'a ProtectedPath, Spelled);
 
 /// Each path that a secret source protects, with its spellings and the links on the way to it.
 fn source_path_spellings<'a>(
@@ -469,10 +470,7 @@ fn source_path_spellings<'a>(
     context
         .source_paths
         .iter()
-        .map(|protected| {
-            let (spellings, links) = protected.spellings(context.operator_home)?;
-            Ok((protected, spellings, links))
-        })
+        .map(|protected| Ok((protected, protected.spellings(context.operator_home)?)))
         .collect()
 }
 
@@ -490,7 +488,8 @@ fn require_outside_source_paths(
         return Ok(());
     };
     let granted = [resolved_to_its_deepest_existing_ancestor(&written), written];
-    for (source, spellings, links) in protected {
+    for (source, spelled) in protected {
+        let (spellings, links) = (&spelled.spellings, &spelled.links);
         let reached = spellings.iter().find(|path| {
             granted
                 .iter()
@@ -1888,12 +1887,18 @@ mod tests {
         );
     }
 
-    /// **Each process is refused each path of a secret source**, also a process with no list and a
-    /// path that is absent, and no source means no refusal.
+    /// **Each process is refused each path of a secret source**, also a process with no list,
+    /// and no source means no refusal.
     #[test]
     fn each_process_is_refused_each_path_of_a_secret_source() {
         let fixture = Fixture::new();
         let home = &fixture.home;
+        // On Linux no sandbox denies a path that is not there, so there each path is a folder.
+        if cfg!(target_os = "linux") {
+            for folder in [".op", "scratch/later/socket"] {
+                std::fs::create_dir_all(home.join(folder)).expect("a path of the vault");
+            }
+        }
         let paths = [
             protected("op", "reads", "~/vendor/sdk"),
             protected("op", "reads", "~/.op"),
@@ -1926,8 +1931,8 @@ mod tests {
         );
     }
 
-    /// **A path of a secret source that is absent is still protected**: a grant that names it, or a
-    /// folder above it, is refused by its spelling.
+    /// **No grant reaches an absent path of a secret source, by its spelling**, and on Linux no
+    /// sandbox gets a refusal for it, because a mount needs a path that is there.
     #[test]
     fn a_grant_that_reaches_an_absent_path_of_a_secret_source_is_refused() {
         let fixture = Fixture::new();
@@ -1955,7 +1960,26 @@ mod tests {
                 "~/scratch/later/socket"
             )
         );
-        fixture.reach(&context, "read = ['~/notes']");
+        let refused = |path: &str| Refusal {
+            path: home.join(path),
+            scope: Scope::Root,
+            judged: None,
+        };
+        let both = [refused(".op"), refused("scratch/later/socket")];
+        let reach = fixture.reach(&context, "read = ['~/notes']");
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                reach.refusals,
+                [],
+                "no sandbox denies a path that is absent"
+            );
+            // A path that is there is denied beside one that is not.
+            std::fs::create_dir(home.join(".op")).expect("the folder of the vault");
+            let reach = fixture.reach(&context, "read = ['~/notes']");
+            assert_eq!(reach.refusals, [refused(".op")]);
+        } else {
+            assert_eq!(reach.refusals, both);
+        }
     }
 
     /// **A credential store that a secret source reads has no exact-name exception**, and the
@@ -2041,10 +2065,13 @@ mod tests {
                 fixture.refusal(&context, "read = ['~/group']"),
                 source_refusal("~/group", &home.join(target), "op", "deny", entry)
             );
-            assert_eq!(
-                fixture.reach(&context, "read = ['~/notes']").refusals,
-                [refused(written), refused(target)]
-            );
+            // On Linux no sandbox denies an entry whose link names a target that is not there.
+            let refusals = fixture.reach(&context, "read = ['~/notes']").refusals;
+            if cfg!(target_os = "linux") {
+                assert_eq!(refusals, []);
+            } else {
+                assert_eq!(refusals, [refused(written), refused(target)]);
+            }
         }
 
         // A chain of two links: a write grant over the folder that holds the middle link could

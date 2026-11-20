@@ -693,7 +693,6 @@ mod tests {
 
     /// **Each vault of a record opens through the secrets that the run read, and takes them**:
     /// a route and a backend token share one run of the program, and no later read starts it.
-    #[cfg(target_os = "macos")]
     #[test]
     fn each_vault_opens_through_the_secrets_of_the_run_and_then_they_close() {
         use crate::record::config::secret_source::tests::entries;
