@@ -2381,12 +2381,12 @@ re-routed request AFTER it rewrites the `Host` to the backend and joins the path
 covers exactly the bytes the backend receives, under the service and region the `aws://` auth states
 ([where a re-route signs a backend auth](#where-a-re-route-signs-a-backend-auth-of-aws)). The backend
 host is a gateway or custom domain with no derivable scope, so the `aws://` auth states an explicit
-`aws.service` and `aws.region`, which the loader requires — Box never guesses a vendor's host shape.
+`aws.service` and `aws.region`, which the loader requires. Box never guesses a vendor's host shape.
 A `credsd://` backend `auth` stays refused (out of scope); an
 `auth` on a plaintext `http` backend is refused, because a credential must ride TLS; and a signed
 destination `secret` beside a backend is refused, because it mints no phantom to strip. Because the
 box never reads the destination secret's value, a re-routed entry launches with
-its variable unset — the case a backend exists for. When one `env://` variable is named by both a
+its variable unset, which is the case a backend exists for. When one `env://` variable is named by both a
 re-routed entry and a direct entry, the workload holds one placeholder: the direct route's
 Strict-checked phantom, which the re-routed host's unconditional strip removes just the same. The
 cost: a backend authenticates with an `env://` box-owned token or an `aws://` signature over the
@@ -2406,18 +2406,18 @@ crate's `box_owned_route_attaches_the_real_secret_with_no_phantom`,
 A backend `auth` of `aws://` signs the request the backend receives, so the signature must cover the
 backend host, the joined path, the sent headers (including the rewritten `Host`), and the body hash.
 The gateway signs it in `run_l7_legs` AFTER it rewrites the `Host` to the backend and builds the
-forwarded target, and BEFORE it serializes the request — the one point where the bytes that leave are
+forwarded target, and BEFORE it serializes the request. That is the one point where the bytes that leave are
 final. The box lowers the `aws://` auth to a signed route keyed on the backend host, held in the
 backend vault; the gateway applies it with an `Outbound` whose host is the backend, so the existing
 in-boundary SigV4 signer covers the backend host. The service and region are **stated explicitly** on
 the auth (`aws.service`, `aws.region`), carried on the route (`RouteSpec::aws_scope`) and used by the
-signer verbatim — a backend is a gateway or custom domain whose host carries no derivable scope, and
+signer verbatim. A backend is a gateway or custom domain whose host carries no derivable scope, and
 inferring it would mean encoding each AWS product's host shape in Box. Host derivation
 (`derive_service_region`) stays only for an ordinary AWS destination, whose host is standard.
 Signing per request keeps expiring credentials fresh, and the inbound signing artifacts are
 stripped first, as for a destination signature. The signer covers only the headers that leave:
-`content-length` is left unsigned because the forwarding layer owns it — it refreshes the value and
-omits the header entirely on a bodyless request — so signing the workload's value would attest a
+`content-length` is left unsigned because the forwarding layer owns it (it refreshes the value and
+omits the header entirely on a bodyless request), so signing the workload's value would attest a
 header the request may not send, which a strict verifier rejects. Signing before the rewrite was rejected: the `Host`
 is a signed header, so signing while the request still names the original destination and then
 rewriting it desynchronizes the signature from the bytes sent. Signing in the box was rejected: only

@@ -348,7 +348,7 @@ A second build enables deliberate storage, registration, deadline, and worker fa
 The script stops on a failed build or test and prints the directory containing retained fixtures.
 
 Privileged tests require the private `box_native_kernel_tests` build setting.
-Deliberate faults additionally require `box_native_test_faults`.
+Deliberate faults also require `box_native_test_faults`.
 The script sets these values; ordinary `cargo test --all-features` runs the unprivileged unit tests without enabling them.
 Ordinary unit-test success does not replace this kernel suite.
 Neither setting is required to build or use the feature.
