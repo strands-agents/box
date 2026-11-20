@@ -289,14 +289,24 @@ permit(principal, action == Box::Action::"fs:read", resource);
     );
 }
 
-/// A box whose one tool, `probe`, is a link to the host `bash`, with `extra` in its configuration.
-fn stdin_probe_box(name: &str, extra: &str) -> (Configured, tempfile::TempDir) {
+/// A box whose one tool, `probe`, is a link to the host `bash` that also reads `reads`, with `extra`
+/// in its configuration.
+fn stdin_probe_box(
+    name: &str,
+    reads: &[&std::path::Path],
+    extra: &str,
+) -> (Configured, tempfile::TempDir) {
     let links = fixture::short_temporary_home();
     let bash = std::path::Path::new("/bin/bash")
         .canonicalize()
         .expect("bash exists");
     std::os::unix::fs::symlink(&bash, links.path().join("probe")).expect("a link to bash");
     let directory = links.path().display();
+    let reads = std::iter::once(links.path())
+        .chain(reads.iter().copied())
+        .map(|path| format!("{:?}", path.display().to_string()))
+        .collect::<Vec<_>>()
+        .join(", ");
     let policy = format!(
         r#"
 permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
@@ -310,7 +320,7 @@ permit(principal, action == Box::Action::"fs:read", resource);
         &policy,
         &format!(
             "[tool.probe]\ncommand = [\"{directory}/probe\"]\n\
-             [tool.probe.filesystem]\nread = [\"{directory}\"]\n{extra}"
+             [tool.probe.filesystem]\nread = [{reads}]\n{extra}"
         ),
     )
     .agent_read(&[links.path()])
@@ -324,12 +334,19 @@ fn a_host_binary_whose_alias_has_no_stdin_gets_dev_null() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let (box_, links) = stdin_probe_box("prog-stdin-null", "");
     // `perl -p STDIN` tests the descriptor itself; a path under `/dev/fd` is not granted in a box.
+    // A Linux leaf sees only its grants, so the probe is granted the canonical `perl`.
+    let perl = std::path::Path::new("/usr/bin/perl")
+        .canonicalize()
+        .expect("perl exists");
+    let (box_, links) = stdin_probe_box("prog-stdin-null", &[&perl], "");
     let script = links.path().join("kind.sh");
     std::fs::write(
         &script,
-        "exec /usr/bin/perl -e 'print((-p STDIN) ? q(pipe) : q(other))'\n",
+        format!(
+            "exec {} -e 'print((-p STDIN) ? q(pipe) : q(other))'\n",
+            perl.display()
+        ),
     )
     .expect("write the stdin kind script");
     let probe = format!("{}/probe {}", links.path().display(), script.display());
@@ -357,7 +374,7 @@ fn a_host_binary_reads_the_stdin_piped_to_the_alias() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let (box_, links) = stdin_probe_box("prog-stdin-binary", "");
+    let (box_, links) = stdin_probe_box("prog-stdin-binary", &[], "");
     let directory = links.path().display();
 
     let output = box_.bash(&format!(
@@ -378,6 +395,7 @@ fn a_host_binary_that_writes_before_it_reads_gets_all_its_input() {
     }
     let (box_, links) = stdin_probe_box(
         "prog-stdin-write-first",
+        &[],
         "[limits.shell]\nmax_stdin = 262144\nmax_output = 0\ntimeout = 15\n",
     );
     let directory = links.path().display();
@@ -407,8 +425,11 @@ fn a_host_binary_that_reads_no_stdin_is_not_held_by_it() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let (box_, links) =
-        stdin_probe_box("prog-stdin-unread", "[limits.shell]\nmax_stdin = 262144\n");
+    let (box_, links) = stdin_probe_box(
+        "prog-stdin-unread",
+        &[],
+        "[limits.shell]\nmax_stdin = 262144\n",
+    );
     let directory = links.path().display();
 
     let started = Instant::now();
