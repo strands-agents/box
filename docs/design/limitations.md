@@ -63,6 +63,38 @@ access. Review each one before you run:
 | A program with no tool table | Run a program under one of the agent's `exec` entries. | It gets the agent's grants plus the wider reach of a tool's sandbox, and the startup report doesn't show the wider part. |
 | `contain_egress = false` on a local MCP server or a tool | Support a client that can't use the gateway. | Its traffic bypasses the gateway and its policy checks. Its filesystem restrictions still apply. A tool's arguments come from the agent, so the agent can direct that tool's network access. See [native egress](decisions.md#native-egress-is-an-operator-declared-leaf-escape). |
 
+## A secret source runs outside every sandbox
+
+A [`[secret-source.<scheme>]`](../user/config.md#secret-sourcescheme) table names a program that
+Box runs with your rights, outside every sandbox, to read a secret from a vault. Box keeps each
+workload away from that program, keeps each sandbox away from the `reads` and `deny` paths of
+the table, and gives your values of the `pass-secret-env` variables to that program alone.
+[What Box protects](../user/config.md#what-box-protects) lists each check. These limits remain:
+
+- Strands Shell and Monty don't refuse a read or a change of a `reads` or `deny` path, or a change of a symbolic link on the way to one. They run in Box's trusted process, outside every sandbox, and policy alone decides a read or a change there. A filesystem permit that covers one of those paths lets the workload read the vault's files through an interpreter, or change them, as it does for a credential store. A workload that changes a vault's settings can change what the program of the source runs outside the sandbox: an AWS `config` file can name a `credential_process`. See [no credential floor sits beneath the interpreters](decisions.md#no-credential-floor-sits-beneath-the-interpreters). No floor beneath policy covers these paths. So give each `fs:*` permit a path condition and write a `forbid` rule for the paths of the vault, as [what Box protects](../user/config.md#what-box-protects) shows. A `forbid` rule compares each letter exactly and doesn't match another case of a name, so the narrow permits are the protection and the rule is a second check.
+- Box protects the program file, which is element 0 of `command`, and no other file that the
+  program uses. It doesn't protect a file that an argument names, such as a script after an
+  interpreter, or a library, a module, or a settings file that the program finds by itself. A
+  workload that can write one of those changes what runs outside the sandbox. Make a script the
+  program, and list each other file in `reads`.
+- Each check covers one box, and the stored record holds no identity of the program. A workload
+  in a second box that can write the program's folder can replace the program, and the next run
+  of the first box starts that file. Keep each program outside every folder that any box can
+  write.
+- Box protects the paths that `reads` and `deny` name, and no others. It doesn't discover a
+  vault's other files or sockets.
+- Box finds a `reads` or `deny` path by its name and by the file at that name. It doesn't search
+  for hard links. A hard link in another folder to a file under a `reads` path is not protected,
+  and a grant on the folder that holds it loads.
+- Box doesn't look for your value of a `pass-secret-env` variable in a table of `box.toml`, in the arguments that you type after `run`, or in a file that a workload can read. But for `HOME` and `PATH`, a workload gets no variable from your shell, so it holds such a value only when you put it in one of those places. Box does refuse an `env://NAME` or `secret://NAME` reference to one of these variables, so no route or telemetry target sends the credential out.
+- `policy generate-schema` starts each stdio MCP server to list its tools, and that start has no
+  sandbox, with or without a secret source. A server that it starts can read and change the `reads`
+  paths and the program of a source, and the next run starts
+  what the server left there. Run `policy generate-schema` only with servers that you trust as
+  yourself.
+- On Linux, a sandbox denies a `reads` or `deny` path only when it exists at startup. Box skips an entry whose path is absent and prints one line that names it. No grant can reach that path, but no sandbox denies it until the next start, so a sandbox can see it inside a system folder that Box adds itself. One exception: Box makes the sandboxes after it reads the secrets. So each sandbox denies a path that appears during that read, such as a folder that the program of the source makes on its first run, though the line says that no sandbox denies it. A path that goes away during that read gets no line, and no sandbox denies it. A typing error in a path doesn't stop the box on Linux, so the line is the only sign. Box refuses an entry that names a socket or another path that is not a folder or a regular file, so name the folder that holds a socket. macOS protects an absent path and a socket by name.
+- On Linux, a `reads` or `deny` path must stay in place during a run. If one goes away, a tool or a stdio MCP server whose program is a script doesn't start until the path is back. Box adds a few system folders, such as `/usr/share/zoneinfo`, to a sandbox itself. If a path inside one of them goes away and comes back, a sandbox that already runs can read the new path. The agent can also read a protected file through `/etc/localtime` when that name is a link to the file.
+
 ## Protections Box doesn't provide
 
 Box does not provide the following protections:

@@ -18,8 +18,10 @@ enforcement point.
 
 ## Public Interface
 
-The façade exports **60 names with `--all-features`, and 54 by default.** The adapter features add
-the six names in the last row.
+A standalone build of this package exports **63 names with `--all-features`, and 54 by default.**
+The adapter features add seven names. The `experimental-idle-flush` feature adds two timer types.
+The Box package enables these features in its own composition; it does not change this
+package's default feature set.
 
 `PrincipalKind` left on 2026-08-18. The three enforcement-point principals collapsed into one
 `Agent`, so a kind enum named a distinction that no longer exists.
@@ -35,9 +37,9 @@ the six names in the last row.
 | `ApprovedPath`, `PathResolver`, `PathRefusal` | The resolved path a `Request::Fs` demands, the only public minter of one, and why a mint fails. |
 | `Decision`, `DenyReason`, `RuleId` | Authorization verdict and determining rule. |
 | `Outcome`, `Delivery`, `FsResult` | One completed effect, submitted as history. |
-| `PendingToolResponse`, `McpReply` | The per-tool `::response` an allowed `tools/call` owes, from `refine_tool_call` to `record_tool_response` (or `record_tool_reply`, which reads the reply frame and its `structuredContent`), and how the call ended. |
+| `PendingToolResponse`, `McpReply` | The per-tool `::response` an allowed `tools/call` owes, from `refine_tool_call` to `record_tool_response` (or `record_tool_reply`, which reads the reply frame and its `structuredContent`), and how the call ended. `McpReply::as_str` spells the end as `output.reply` does. |
 | `EffectivePolicy`, `ENGINE_ID` | Active engine and source identity. |
-| `PolicyError` | Startup and history-recording errors. |
+| `PolicyError` | Startup, history-recording, and history-flush errors. |
 | `PolicyCheck`, `Finding`, `RuleRef`, `Location` | What `check` finds in a policy: each finding's message, rules, source location, and help. |
 | `SchemaStage`, `PolicyDiagnostic`, `PolicyStagingError` | Runtime MCP schema staging results and errors. |
 | `generate_mcp_schema`, `validate_mcp_schema_composition`, `compose_action_schema`, `McpSchemaError` | MCP schema generation, validation, composition, and errors. |
@@ -45,7 +47,8 @@ the six names in the last row.
 | `DecisionObserver` | A synchronous sink for each policy verdict. |
 | `ToolGrammar`, `ToolGrammars`, `ToolGrammarError` | One checked tool grammar from its `box.toml` table, the set a box installs with no two that share a name or a program, the action schema with their actions, and why one is refused. |
 | `GrammarBindings`, `BindingRefusal` | The engine's tool grammars bound to each tool's opened program file and called name, which `PolicyEngine::bound_by` installs for the engine's life, and why declaring a tool or installing bindings from another engine is refused. |
-| `EgressPolicyInterceptor` (`egress-adapter`), `ShellPolicyInterceptor` (`shell-adapter`), `ScriptPolicyInterceptor`, `ScriptPermit`, `ScriptRefusal`, and `RenameDestination` (`script-adapter`) | One adapter per enforcement point, each behind its own feature. |
+| `EgressPolicyInterceptor` and `ReplyReader` (`egress-adapter`), `ShellPolicyInterceptor` (`shell-adapter`), `ScriptPolicyInterceptor`, `ScriptPermit`, `ScriptRefusal`, and `RenameDestination` (`script-adapter`) | One adapter per enforcement point, each behind its own feature. `ReplyReader` reads one remote `tools/call` reply body, plain JSON or Server-Sent Events, as it grows, and finds the JSON-RPC reply to its request. |
+| `HistoryFlusher`, `HistoryFlushSnapshot` (`experimental-idle-flush`) | Own one timer and observe its completed flush calls. |
 
 The lifecycle is:
 
@@ -503,6 +506,54 @@ directory through `box_dir`; see [the upgrade procedure](../../docs/user/policy.
 Earlier activity does not carry over: counts start at zero, and prior events no longer satisfy
 history-based prerequisites. The adapter does not erase or convert existing history.
 
+<a id="experimental-idle-history-flushing"></a>
+## Periodic history persistence
+
+The `experimental-idle-flush` feature in `crates/policy/Cargo.toml` adds an owned timer
+for periodic persistence. The pinned public `dogwood-local-engine = "=1.1.2"` package
+provides the required durability and flush interfaces. This feature is not enabled
+by default in the standalone policy package.
+
+`PolicyEngine::open` uses per-event persistence, even when the feature is compiled in.
+The caller must select periodic persistence explicitly. The Box package enables the
+feature by default and makes that selection; see its
+[history persistence settings](../box/README.md#experimental-history-timer).
+For another composition, select periodic persistence and start one timer on the same
+`Arc<PolicyEngine>`:
+
+```text
+PolicyEngine::set_periodic_history(&self, max_events: u32, max_interval: Duration) -> Result<(), PolicyError>
+PolicyEngine::start_history_flusher(self: &Arc<Self>, interval: Duration) -> Result<HistoryFlusher, PolicyError>
+PolicyEngine::flush_history(&self) -> Result<(), PolicyError>
+HistoryFlusher::snapshot(&self) -> HistoryFlushSnapshot
+HistoryFlusher::shutdown(self) -> Result<HistoryFlushSnapshot, PolicyError>
+HistoryFlusher::stop(self) -> Result<HistoryFlushSnapshot, PolicyError>
+```
+
+Here, `Arc` and `Duration` are the standard library's shared pointer and time-span types.
+The engine's thresholds are checked when events arrive. The separate timer flushes
+periodically, including while events arrive and while Box is idle. A successful call
+can do no work if no history is pending. The snapshot counts calls, not disk synchronizations.
+
+Each flush first retries completed outcomes that Box retained after a recording failure,
+then persists events that the engine has already accepted. An explicit `flush_history`
+call, including the final flush during `shutdown`, returns an error if an outcome remains
+refused. On timer ticks, an outcome delayed only by a backward clock change remains
+available for retry. That delay does not count as a timer failure. Other recording and
+storage failures remain errors.
+
+Keep the guard alive while producers can submit events. Stop and join those producers
+before calling `shutdown`; shutdown wakes and joins the timer, then flushes once.
+It returns any observed flush error, even if a later retry succeeds. Dropping the guard
+also joins it and normally flushes, but can only report errors to stderr. If producers
+cannot stop, `stop` joins the timer without an additional final flush. It still reports
+earlier timer failures; it does not establish that pending history reached disk.
+
+A one-second interval is a polling target. The worker waits another interval after each
+flush completes. Scheduling, lock waits, and storage latency can extend persistence delay. A process crash before a completed flush can lose pending
+history. Enabling the timer does not protect unflushed events from a process crash.
+
+
 ## Effective Policy
 
 `PolicyEngine::effective` returns:
@@ -522,7 +573,7 @@ history-based prerequisites. The adapter does not erase or convert existing hist
 | `Schema` | A policy value, attribute, or entity type violates the schema. A deleted resource entity lands here. |
 | `UnknownAction` | A policy names an action outside the schema. |
 | `UnsupportedClause` | A temporal predicate names an action group. |
-| `Evaluation` | The durable engine could not open or recover the database, install sources, or submit an event. |
+| `Evaluation` | The durable engine could not open or recover the database, install sources, submit an event, or flush history. |
 
 `open` returns `Parse`, `Schema`, `UnknownAction`, or `Evaluation`. `record` returns
 `Evaluation` if durable submission fails after the effect.

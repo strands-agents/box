@@ -31,19 +31,26 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 
 - The lifecycle is `PolicyEngine::open` → `decide` → `record` → `effective`.
   `PolicyEngine::validate` and `PolicyEngine::check` sit off it and return no authority.
-- The root `pub use` set is the whole API: `EgressPolicyInterceptor`, `RenameDestination`,
-  `ScriptPermit`, `ScriptPolicyInterceptor`, `ScriptRefusal`, `ShellPolicyInterceptor`,
-  `CatalogRefusal`, `CatalogStage`, `CompleteCatalog`, `DiscoveryFailure`, `ListPage`,
-  `MAXIMUM_LIST_BYTES`, `MAXIMUM_LIST_PAGES`, `McpServerKind`, `ServerDiscovery`, `ToolCatalogs`,
-  `Finding`, `Location`, `PolicyCheck`, `RuleRef`, `Decision`, `DenyReason`, `PolicyAttribution`,
-  `RuleId`, `event_schema_source`, `PolicyDiagnostic`, `PolicyError`, `PolicyStagingError`,
-  `McpSchemaError`, `compose_action_schema`, `generate_mcp_schema`,
+- The root `pub use` set is the whole API: `EgressPolicyInterceptor`, `ReplyReader`,
+  `RenameDestination`, `ScriptPermit`, `ScriptPolicyInterceptor`, `ScriptRefusal`,
+  `ShellPolicyInterceptor`, `CatalogRefusal`, `CatalogStage`, `CompleteCatalog`, `DiscoveryFailure`,
+  `ListPage`, `MAXIMUM_LIST_BYTES`, `MAXIMUM_LIST_PAGES`, `McpServerKind`, `ServerDiscovery`,
+  `ToolCatalogs`, `Finding`, `Location`, `PolicyCheck`, `RuleRef`, `Decision`, `DenyReason`,
+  `PolicyAttribution`, `RuleId`, `event_schema_source`, `PolicyDiagnostic`, `PolicyError`,
+  `PolicyStagingError`, `McpSchemaError`, `compose_action_schema`, `generate_mcp_schema`,
   `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `McpReply`,
   `Outcome`, `PendingToolResponse`, `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`,
   `EffectivePolicy`, `Policy`, `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`,
   `FsOperation`, `Principal`, `Request`, `RequestId`, `GovernedBox`, `Operator`, `PolicyWarning`,
-  `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 60
-  names with `--all-features` and 54 by default; recompute it when you touch the façade.
+  `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`,
+  `HistoryFlusher`, `HistoryFlushSnapshot`. That is 63 names with `--all-features` and 54 by
+  default; recompute it when you touch the façade. The two history-flush types require
+  `experimental-idle-flush`.
+  `ReplyReader` is exported for the box, which reads every remote `tools/call` reply for its
+  tool-call log record with the same incremental reader the per-tool response uses, and
+  `McpReply::as_str` spells the end on that record. The box reads a reply the policy does not
+  already read only when a telemetry target takes tool calls, because each copy counts against the
+  gateway's shared budget.
 - `check` and `validate` share one composition (`check_and_expand`), and the staged check repeats
   the steps of `open_staged_with_engine` with no engine. A finding keeps a span only when the span
   is an offset into the authored text: a Dogwood parse error and a Cedar validation error over
@@ -272,3 +279,12 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Parse the schema at `open`, never lazily: a lazy parse costs the first call ~1.5 ms and turns a
   load error into a first-request deny. `cached_uid` saves ~7 µs per verdict and still yields
   `PolicyError::Schema`.
+- Declare no common type for each grammar action. Dogwood 1.0.0 finds a common type by a scan over
+  all of them, once for each action, so one type per action makes `open` grow with the square of
+  the action count (1.6 s at 400 actions and 13.7 s at 1600, on a loaded host). `Grammar::schema`
+  writes each input record inline. Pinned by
+  `grammar/schema.rs::a_grammar_with_many_actions_declares_no_type_per_action_and_loads`.
+  `generate_mcp_schema` still declares one `<tool>Input` type for each tool, so a server with many
+  tools has the same cost. A history from before the change can replay the old schema text until
+  its next snapshot. Each decision also builds every action entity again, and only a Dogwood
+  release can fix that.

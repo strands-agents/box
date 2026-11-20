@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use box_shell::{EffectAttempt, EffectInterceptor, FsPairOperation, HostSpawner};
+use box_shell::{
+    EffectAttempt, EffectInterceptor, EffectPermit, FsOperation, FsPairOperation, HostSpawner,
+};
 use support::{Folder, Hook};
 
 const STALE: &str = "filesystem identity changed during effect admission";
@@ -149,29 +151,123 @@ fn mkdir_onto_a_host_symlink_does_not_show_whether_its_target_exists() {
     );
 }
 
-#[test]
-fn a_writable_bind_point_is_not_removed_or_replaced() {
-    let folder = Folder::standard();
+/// A checkpoint that refuses each removal, rename, and symlink, and admits the rest.
+struct RefuseRemoval;
+
+#[async_trait::async_trait]
+impl EffectInterceptor for RefuseRemoval {
+    async fn intercept(
+        &self,
+        effect: &EffectAttempt<'_>,
+    ) -> std::io::Result<Box<dyn EffectPermit>> {
+        let removal = matches!(
+            effect,
+            EffectAttempt::Filesystem {
+                operation: FsOperation::RemoveFile | FsOperation::RemoveDir,
+                ..
+            } | EffectAttempt::FilesystemPair {
+                operation: FsPairOperation::Rename { .. } | FsPairOperation::Symlink,
+                ..
+            }
+        );
+        if removal {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "refused by the checkpoint",
+            ));
+        }
+        support::PermitAll.intercept(effect).await
+    }
+}
+
+/// Serve `real.txt` at `/home/lash/cfg`, and each folder in `folders` at `/home/lash/<name>`.
+fn bound(folder: &Folder, folders: &[&str]) -> support::Builder {
     let file = folder.ws.join("real.txt").display().to_string();
-    let (removed, linked, after) = support::run(async {
-        let mut shell = support::builder()
-            .bind_direct(file, "/home/lash/cfg")
+    let mut builder = support::builder().bind_direct(file, "/home/lash/cfg");
+    for name in folders {
+        let source = folder.ws.join(name).display().to_string();
+        builder = builder.bind_direct(source, format!("/home/lash/{name}"));
+    }
+    builder
+}
+
+#[test]
+fn the_checkpoint_decides_whether_a_root_is_removed_moved_or_replaced() {
+    let folder = Folder::standard();
+    std::fs::create_dir(folder.ws.join("empty")).expect("an empty folder");
+    let outs = support::run(async {
+        let mut shell = bound(&folder, &["empty", "dir"])
+            .effect_interceptor(Arc::new(RefuseRemoval))
             .build()
             .expect("shell builds");
-        (
-            shell.run("rm /home/lash/cfg").await,
-            shell.run("ln -s elsewhere /home/lash/cfg").await,
-            shell.run("cat /home/lash/cfg").await,
-        )
+        let mut outs = Vec::new();
+        for script in [
+            "rm /home/lash/cfg",
+            "ln -s elsewhere /home/lash/cfg",
+            "rmdir /home/lash/empty",
+            "mv /home/lash/dir /home/lash/moved",
+        ] {
+            outs.push((script, shell.run(script).await));
+        }
+        outs
     });
-    for out in [&removed, &linked] {
+    for (script, out) in &outs {
+        assert_ne!(out.status, 0, "{script}: {}", out.stderr);
         assert!(
-            out.stderr.contains("bind mount point is busy"),
-            "{}",
+            out.stderr.contains("refused by the checkpoint"),
+            "{script}: {}",
             out.stderr
         );
     }
-    assert_eq!(after.stdout, "REAL_BYTES", "the bind is still in place");
+    assert_eq!(read(&folder.ws.join("real.txt")), "REAL_BYTES");
+    assert!(folder.ws.join("empty").is_dir(), "the empty folder stays");
+    assert_eq!(read(&folder.ws.join("dir/inner.txt")), "INNER");
+}
+
+#[test]
+fn a_permitted_rmdir_removes_the_host_folder_at_a_root() {
+    let folder = Folder::standard();
+    std::fs::create_dir(folder.ws.join("empty")).expect("an empty folder");
+    let out = support::run(async {
+        let mut shell = bound(&folder, &["empty"]).build().expect("shell builds");
+        shell.run("rmdir /home/lash/empty").await
+    });
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    assert!(!folder.exists("empty"), "the host folder is removed");
+}
+
+#[test]
+fn a_permitted_rm_removes_the_host_file_at_a_root() {
+    let folder = Folder::standard();
+    let out = support::run(async {
+        let mut shell = bound(&folder, &[]).build().expect("shell builds");
+        shell.run("rm /home/lash/cfg").await
+    });
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    assert!(!folder.exists("real.txt"), "the host file is removed");
+}
+
+#[test]
+fn a_permitted_link_at_a_root_is_refused_as_an_escape_from_the_bind() {
+    let folder = Folder::standard();
+    std::fs::create_dir(folder.ws.join("empty")).expect("an empty folder");
+    let (removed, linked) = support::run(async {
+        let mut shell = bound(&folder, &["empty"]).build().expect("shell builds");
+        (
+            shell.run("rmdir /home/lash/empty").await,
+            shell.run("ln -s inner /home/lash/empty").await,
+        )
+    });
+    assert_eq!(removed.status, 0, "{}", removed.stderr);
+    assert_ne!(linked.status, 0, "{}", linked.stderr);
+    assert!(
+        linked
+            .stderr
+            .contains("symlink target escapes the bind mount"),
+        "{}",
+        linked.stderr
+    );
+    assert!(!folder.exists("empty"), "no host link is made");
 }
 
 /// A spawner that records each program it receives.

@@ -486,7 +486,9 @@ impl Contained {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let signals = Signals::listen()?;
+        let mut signals = Signals::listen()?;
+        // Tests share the host's process-wide signal handlers.
+        signals.restore_default = false;
         let group = ProcessGroup::spawn(command).await?;
 
         Ok(Self {
@@ -722,12 +724,13 @@ impl Contained {
             let _ = self.group.stop().await;
         }
         let termination_result = self.group.release().await;
-        let native_result = self.hosted.stop_native();
         // A piped run never claimed the terminal, so there is nothing to give back.
         let terminal_result = match self.terminal.as_mut() {
             Some(terminal) => terminal.restore(),
             None => Ok(()),
         };
+        let _shutdown_signals = self.signals.arm_shutdown();
+        let shutdown_result = self.hosted.shutdown();
         let setup_result = self.trampoline.setup_failure();
         #[cfg(unix)]
         let diagnostics_result = match self.diagnostics.as_mut() {
@@ -744,16 +747,18 @@ impl Contained {
         // including the failures before a `HostedBox` exists. A run that ends in an error still
         // keeps its records, because this collector outlives the `?`-returns below.
 
-        let status = match completion {
-            Completion::Workload(result) => result?,
-            Completion::Hosted(failure) => return Err(failure),
-        };
-        termination_result?;
-        native_result?;
-        terminal_result?;
-        #[cfg(unix)]
-        diagnostics_result?;
-        contained_exit_code(status, setup_result)
+        let outcome = (|| {
+            let status = match completion {
+                Completion::Workload(result) => result?,
+                Completion::Hosted(failure) => return Err(failure),
+            };
+            termination_result?;
+            terminal_result?;
+            #[cfg(unix)]
+            diagnostics_result?;
+            contained_exit_code(status, setup_result)
+        })();
+        crate::run::hosted::with_shutdown(outcome, shutdown_result)
     }
 }
 
@@ -1159,6 +1164,35 @@ impl Signals {
         }
     }
 
+    /// Temporarily arm forced interruption for a run that owns its termination signals.
+    fn arm_shutdown(&self) -> ShutdownSignals {
+        let mut guard = ShutdownSignals::default();
+        #[cfg(unix)]
+        if self.restore_default {
+            let signals = [
+                Some(libc::SIGINT),
+                Some(libc::SIGTERM),
+                self.hangup.as_ref().map(|_| libc::SIGHUP),
+            ];
+            for signal in signals.into_iter().flatten() {
+                // SAFETY: zeroed storage is a valid action with no flags.
+                let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+                action.sa_sigaction = libc::SIG_DFL;
+                // SAFETY: action owns initialized storage for the signal mask.
+                unsafe { libc::sigemptyset(&mut action.sa_mask) };
+                let mut previous = std::mem::MaybeUninit::uninit();
+                // SAFETY: a valid signal and action atomically replace and save the old disposition.
+                if unsafe { libc::sigaction(signal, &action, previous.as_mut_ptr()) } == 0 {
+                    // SAFETY: a successful sigaction initialized the complete previous action.
+                    guard
+                        .previous
+                        .push((signal, unsafe { previous.assume_init() }));
+                }
+            }
+        }
+        guard
+    }
+
     /// Wait for the leader, forwarding `SIGINT` to its group and stopping the group on `SIGTERM`
     /// or `SIGHUP`.
     async fn wait_forwarding(&mut self, group: &mut ProcessGroup) -> Result<ExitStatus, BoxError> {
@@ -1201,6 +1235,23 @@ fn is_ignored(signal: libc::c_int) -> bool {
         let mut current: libc::sigaction = std::mem::zeroed();
         libc::sigaction(signal, std::ptr::null(), &mut current) == 0
             && current.sa_sigaction == libc::SIG_IGN
+    }
+}
+
+/// The termination signal actions to restore when hosted cleanup finishes or unwinds.
+#[derive(Default)]
+struct ShutdownSignals {
+    #[cfg(unix)]
+    previous: Vec<(libc::c_int, libc::sigaction)>,
+}
+
+impl Drop for ShutdownSignals {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        for (signal, action) in &self.previous {
+            // SAFETY: each complete action was saved for this signal before cleanup began.
+            unsafe { libc::sigaction(*signal, action, std::ptr::null_mut()) };
+        }
     }
 }
 
@@ -1514,6 +1565,112 @@ mod tests {
             signals.hangup.is_none(),
             "an ignored SIGHUP gets no listener"
         );
+    }
+
+    #[tokio::test]
+    async fn teardown_respects_signal_ownership_and_ignored_hangup() {
+        const CHILD: &str = "STRANDS_BOX_TEST_TEARDOWN_SIGNALS";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "run::contain::supervise::tests::teardown_respects_signal_ownership_and_ignored_hangup",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .expect("run the signal-disposition control in a subprocess");
+            assert!(output.status.success(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("teardown signal controls completed"),
+                "the subprocess must execute the control: {output:?}"
+            );
+            return;
+        }
+        let _signals = SIGNALS.lock().await;
+        let read_action = |signal| {
+            // SAFETY: initialized storage and a null action only read the signal disposition.
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::sigaction(signal, std::ptr::null(), &mut action) },
+                0
+            );
+            action
+        };
+        let assert_action = |actual: &libc::sigaction, expected: &libc::sigaction| {
+            assert_eq!(actual.sa_sigaction, expected.sa_sigaction);
+            assert_eq!(actual.sa_flags, expected.sa_flags);
+            for signal in [
+                libc::SIGINT,
+                libc::SIGTERM,
+                libc::SIGHUP,
+                libc::SIGUSR1,
+                libc::SIGUSR2,
+            ] {
+                // SAFETY: both masks came from successful sigaction calls.
+                assert_eq!(
+                    unsafe { libc::sigismember(&actual.sa_mask, signal) },
+                    unsafe { libc::sigismember(&expected.sa_mask, signal) }
+                );
+            }
+        };
+        for (restore_default, has_hangup) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let mut signals = Signals::listen().unwrap();
+            signals.restore_default = restore_default;
+            signals.hangup = has_hangup.then(|| {
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).unwrap()
+            });
+            let watched = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+            let previous = watched.map(read_action);
+            for signal in watched {
+                // SAFETY: initialized action storage is filled before installing it for a valid signal.
+                let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+                action.sa_sigaction = libc::SIG_IGN;
+                action.sa_flags = libc::SA_RESTART;
+                unsafe {
+                    assert_eq!(libc::sigemptyset(&mut action.sa_mask), 0);
+                    assert_eq!(libc::sigaddset(&mut action.sa_mask, libc::SIGUSR1), 0);
+                    assert_eq!(libc::sigaddset(&mut action.sa_mask, libc::SIGUSR2), 0);
+                    assert_eq!(libc::sigaction(signal, &action, std::ptr::null_mut()), 0);
+                }
+            }
+            let expected = watched.map(read_action);
+            let observed = {
+                let _shutdown_signals = signals.arm_shutdown();
+                watched.map(read_action)
+            };
+            let restored = watched.map(read_action);
+            let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _shutdown_signals = signals.arm_shutdown();
+                std::panic::resume_unwind(Box::new(()));
+            }));
+            let restored_after_unwind = watched.map(read_action);
+            for (signal, action) in watched.into_iter().zip(&previous) {
+                // SAFETY: restore the action saved for this signal in the isolated subprocess.
+                assert_eq!(
+                    unsafe { libc::sigaction(signal, action, std::ptr::null_mut()) },
+                    0
+                );
+            }
+            assert!(unwound.is_err());
+            for (index, signal) in watched.into_iter().enumerate() {
+                let armed = restore_default && (signal != libc::SIGHUP || has_hangup);
+                assert_eq!(
+                    observed[index].sa_sigaction,
+                    if armed { libc::SIG_DFL } else { libc::SIG_IGN },
+                    "signal={signal}, restore_default={restore_default}, has_hangup={has_hangup}"
+                );
+                if !armed {
+                    assert_action(&observed[index], &expected[index]);
+                }
+                assert_action(&restored[index], &expected[index]);
+                assert_action(&restored_after_unwind[index], &expected[index]);
+            }
+        }
+        println!("teardown signal controls completed");
     }
 
     #[tokio::test]

@@ -33,7 +33,6 @@ Signed macOS release artifacts include the experiment's code; unsigned build art
 ### Linux ARM64 requirements
 
 Linux x86-64 builds refuse this feature during configuration validation, before creating Box state or starting a workload.
-The `EXPERIMENTAL_X86_SUPPORT` environment variable enables the x86 baseline only; it does not enable native filesystem policy.
 
 The host must support seccomp user notifications, descriptor injection, BPF Linux Security Module hooks, and BPF type information.
 BPF lets Box attach the checks that prevent delete and rename from affecting a replacement file.
@@ -126,9 +125,13 @@ It uses a five-second deadline for descendant cleanup and callback draining.
 Startup checks subscriptions and removes path mutes that would suppress required events.
 It refuses startup if required events remain muted or any process mute exists.
 
-The signed tests cover detached-child cleanup and durable history across mode changes.
-They do not establish enforcement after the trusted Box process crashes or validate every shutdown failure.
-Production use still requires further review and tests for those failures.
+Native policy requires the trusted Box process to remain alive. On macOS, an uncatchable
+termination such as `SIGKILL` can leave a descendant running. That descendant can perform new
+file operations within its filesystem grants without Dogwood checks, even when policy denied
+those operations before Box stopped. Normal shutdown cleanup does not protect this case.
+
+The signed tests cover normal detached-child cleanup and durable history across mode changes.
+Standard-release support still requires the remaining failure review and tests.
 
 ### Linux ARM64
 
@@ -152,6 +155,31 @@ Ordinary symbolic links and parent components (`..`) resolve inside the captured
 Policy checks use the resolved object, and effects use its pinned descriptor or parent directory.
 `O_NOFOLLOW` preserves the final-link restriction. Kernel magic links remain restricted.
 Other unsupported open flags and file kinds receive a refusal.
+
+Hard links are different names for the same file contents. Box checks the requested name against
+filesystem grants and policy. Denying one name does not deny every link to that file. An allowed
+write through another name changes the shared contents, including contents visible through a denied
+name or a name outside the workload grants. Those other names do not become accessible.
+
+Native entry handling has these limits in addition to baseline containment:
+
+- `renameat2` is supported only with zero flags. Box refuses nonzero flags, including
+  `RENAME_NOREPLACE` (refuse an existing destination), even when ordinary containment permits them.
+  GNU `mv` can request `RENAME_NOREPLACE` even for a plain move to a new name. With native
+  filesystem policy enabled, Box refuses that request with a permission error even when
+  filesystem grants and policy would permit the move.
+- A rename cannot replace an existing directory, including an empty directory. Moving a directory
+  to a new name is supported.
+- File and directory creation accept only the ordinary permission bits (`0000` through `0777`).
+  Native checks refuse creation with the sticky bit. Baseline containment already refuses
+  the set-group-ID and set-user-ID bits, whether native checks are enabled or disabled.
+
+These operations are refused before a Dogwood decision or file effect.
+The workload receives an operating-system permission error; the source and destination entries remain unchanged.
+
+For native rename cases, the [comparison suite](../dev/linux-native-tests.md#compare-shell-and-native-policy-events)
+uses a test program that calls `renameat` directly; it does not execute GNU `mv`.
+Its permitted rename cases do not establish that GNU `mv` works with native filesystem policy.
 
 An existing descriptor can carry later reads, writes, or directory listings without another Dogwood check.
 Linux permission changes remain subject to filesystem grants, without a fresh Dogwood permission-change check.
@@ -201,12 +229,17 @@ A box whose egress re-routes a destination to a [backend](egress.md) requires re
 An explicit `limits.shell.max_input` or `limits.shell.max_output` requires record version 31,
 including values equal to the defaults.
 A non-empty [`[gateway] upgrade_http`](config.md#gateway) requires record version 32.
+An explicit `limits.shell.max_stdin` requires record version 33.
 A box ID that a library caller supplied, other than `box-` and 16 hexadecimal digits, requires record
 version 34.
 Enabling [`file-watching`](config.md#file-watching) for any process requires record version 35.
 A [telemetry target](config.md#telemetrylabel) that uses `accepts`, `headers`, `secret.prefix`,
 `secret.placement`, a vendor kind, or an `aws://` or `credsd://` secret requires record version 36.
 Setting [`monty`](config.md#monty) to `false` requires record version 37.
+A box whose agent, tool, or local MCP server declares a [`deny_write`](config.md#agentfilesystem-and-toolnamefilesystem) list requires record version 38.
+A [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table, or a `secret.env` key on a route or a
+remote MCP server, requires record version 39.
+A [telemetry target](telemetry.md#include) that names `mcp_tool_calls` requires record version 40.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 
@@ -268,7 +301,9 @@ Disabling a workload also excludes its native filesystem operations from policy 
 
 ### Does this change where policy history lives?
 
-No. The adapter uses the box's existing durable Dogwood history, which survives restarts.
+No. The adapter uses the box's existing Dogwood history file. Persisted history survives
+restarts, but a process crash can lose recent events; see
+[history persistence](policy.md#history-persistence-and-process-crashes).
 Disabling and re-enabling interception does not erase that history.
 This feature adds no option to keep history only in memory.
 
@@ -289,7 +324,8 @@ Read the recorded operation and outcome instead of treating every allow as a com
 
 The shutdown path terminates tracked descendants, including detached children, before interception stops.
 On macOS, descendant cleanup and callback draining share a five-second deadline.
-Tests cover normal detached-child cleanup, but not every shutdown failure or enforcement after the trusted process crashes.
+This describes normal shutdown. On macOS, an uncatchable termination such as `SIGKILL` can leave
+a descendant running without native policy checks; its filesystem grants still apply.
 
 ### Can I immediately return to an older binary?
 

@@ -160,35 +160,52 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   context, so even a widened scope test would have skipped every control record for want of a span ID.
   The scope test is now `Plane::of`, an exhaustive match on the two scope constants, and the constants
   are `pub(crate)` so the two files cannot drift on the spelling. The agent's own scopes fall through to
-  `None` and relay untouched. MCP routing diagnostics in `strands-box.mcp` are log records only and
-  stay outside `Plane::of`.
+  `None` and relay untouched. MCP routing diagnostics and MCP tool-call records, both in
+  `strands-box.mcp`, are log records only and stay outside `Plane::of`.
 - **Severity is what routes a record to a lane, so two signals may never share one.** `TargetLane::emit`
   reads `Signal::of_severity` and nothing else — not the scope, not the attributes. So adding a signal
-  means adding a severity no other signal holds; `control_plane` took `Info2`. Sharing one would file a
+  means adding a severity no other signal holds; `control_plane` took `Info2`, and `mcp_tool_calls`
+  took `Info4`. Sharing one would file a
   control-plane record as a permit, silently. `no_two_signals_share_a_severity` is the pin.
 - **Box record kinds share one destination, and a reader must select a scope.** Decisions carry
   `strands-box.policy`, control-plane records carry `strands-box.control`, and unmatched MCP routes
-  carry `strands-box.mcp`. Two box tests indexed
-  `scopeLogs[0]` and broke the moment control records started arriving first — a box records that it
-  started before it decides anything. A query over one file that does not name a scope will read the
-  wrong record shape, and the shipped `jq` recipes had to gain a `select(.scope.name == …)` for that
-  reason.
+  and MCP tool-call records both carry `strands-box.mcp`, told apart by event name. Two box tests
+  indexed `scopeLogs[0]` and broke the moment control records started arriving first — a box records
+  that it started before it decides anything. A query over one file that does not name a scope will
+  read the wrong record shape, and the shipped `jq` recipes had to gain a `select(.scope.name == …)`
+  for that reason.
 - **A record is only as good as the `drained` that carries it, and `drained` has ONE caller.**
-  `Collector::drop` is the other route out of the queue and it waits for nothing, so a record
-  queued on a path that reaches no `drained` is lost, not delayed. Measured: `policy_refused` and
+  `Collector::drop` is the other route out of the queue and it waits for nothing, so a record queued
+  on a path that reaches no `drained` is lost, not delayed. Measured: `policy_refused` and
   `box_started` both reached a **0-byte** file when the box refused its policy, because the refusal
   returned before any `HostedBox` existed and the drain lived inside one. The box now drains in
   `command::run::execute`, which is the one point every exit reaches.
   `a_run_that_fails_before_its_workload_still_records_its_stop` is the pin, and it fails when the
   teardown block is removed. **Do not move the drain back inside a type a failure path can skip.**
   This fixed the *drain*, and it decides nothing about routing: a target whose signal set omits
-  `control_plane` still receives no control-plane record, because `Collector::control` returns at the
-  acceptance union first. That is the operator's list working as
-  [a target names a set of signals](../../docs/design/decisions.md#a-target-names-a-set-of-signals) says it should.
-  An absent list takes **every** signal, and a list that is written must name `trace` to keep
-  the control plane, because `trace` expands to both `agent_trace` and `control_plane`. `logs` expands
-  to `agent_logs` and `mcp_unmatched`. The seven spellings here are this crate's own.
-  `box.toml` takes five words: `deny`, `permit`, `trace`, `logs`, and `metrics`. Box expands them.
+  `control_plane` still receives no control-plane record, because `Collector::control` returns at
+  the acceptance union first. That is the operator's list working as [a target names a set of
+  signals](../../docs/design/decisions.md#a-target-names-a-set-of-signals) says it should. An absent
+  list takes **every** signal, and a list that is written must name `trace` to keep the control
+  plane, because `trace` expands to both `agent_trace` and `control_plane`. `logs` expands to
+  `agent_logs` and `mcp_unmatched`. The eight spellings here are this crate's own. `box.toml` takes
+  six words: `deny`, `permit`, `trace`, `logs`, `metrics`, and `mcp_tool_calls`. Box expands them.
+- **A tool call carries its values in clear text, so it reaches only a target that names
+  `mcp_tool_calls`.** `Signal::default_signals` is every signal except `McpToolCalls`, and both
+  `Target::new` and `Target::opened_file` start from it, so neither a target with no `include` nor
+  the box's default file receives one. `only_a_target_naming_tool_calls_receives_them_in_clear_text`
+  (two unnamed targets beside a named one, one of them opened) and
+  `the_default_set_is_every_signal_but_tool_calls` are the pins; both fail when the filter in
+  `default_signals` is removed. Two designs came before this one and were withdrawn. A per-tool,
+  per-field `tool_fields` list redacted every other value in the exporter; operators rarely wrote
+  the MCP servers they run, so they could not choose the fields, and each list went stale. Its first
+  version kept every field name visible, and a token-shaped key such as `ghp_…` reached every target
+  as a name. **Do not reintroduce redaction by key shape**, for the reason the shell entry above
+  gives: no syntactic rule separates a secret from a plain name. Keys are copied as the tool wrote
+  them; a key holding `.` can spell another key's path, and the first one flattened keeps it. **A
+  target that accepts no logs cannot name `mcp_tool_calls`**, because the record is a log and never
+  a span: before this refusal, a Langfuse target naming it passed startup, was disclosed as
+  receiving tool calls, and received none. `tool_calls_need_a_target_that_accepts_logs` pins it.
 - **`agent_logs` and `agent_metrics` are UNCONDITIONAL, and no list narrows them away.**
   `Collector::start` unions `Signal::always_received()` into every target's lane, by the maintainers'
   direction on 2026-09-29, so `include = ["deny"]` holds the refusals **and** the agent's own log
@@ -300,8 +317,8 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   key. The permit is therefore taken **before** the decode, and
   `a_body_naming_too_many_resources_is_refused_on_every_route` pins the bound. Do not move the permit
   back below the decode, and do not raise the limit without re-measuring.
-- **`RELAY_CAPACITY` is 1, and 64 was wrong.** A file target's `Mutex<tokio::fs::File>` is held across
-  `write_all` and `sync_all`, and the same `Arc<TargetExporter>` serves the SDK lane and the relay
+- **`RELAY_CAPACITY` is 1, and 64 was wrong.** A file target's
+  `tokio::sync::Mutex<std::fs::File>` is held across `write_all` and `sync_all`, and the same `Arc<TargetExporter>` serves the SDK lane and the relay
   list. So 64 concurrent relays each doing a write and an `fsync` stalled the box's own export worker,
   and the SDK's queue overflow is not counted anywhere — which reopens exactly the audit-suppression
   hole that
@@ -385,9 +402,24 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   per signal even for a relayed one. A relayed signal never reaches `TargetLane::emit`, so the value
   is unobservable in production — which is exactly why it is easy to give two of them the same
   severity and pass every behavioural test. `no_two_signals_share_a_severity` is the guard.
-- **A file target's line must be one write.** `tokio::fs::File` caps a write syscall, so a very long
-  line becomes several appends. One writer is safe; two boxes sharing one destination can tear a
-  line. Prefer one target per box.
+- **A file target's write must outlive the future that started it.** The write was a
+  `tokio::fs::File::write_all` awaited inside the receiver's request, and tokio splits a file write
+  into 2 MiB chunks. A client reset or the request deadline dropped the future between chunks, so a
+  relayed line over 2 MiB was cut, and the box's next decision record was appended onto the fragment.
+  Measured: a 2,097,172-byte unparseable line, which is one 2 MiB chunk plus the next record.
+  The write now runs in `spawn_blocking`, which runs to its end when its caller is dropped.
+  **The lock is still async, and the guard moves into the blocking task.** A first version locked a
+  `std::sync::Mutex` inside the blocking task, so each relay cancelled while it waited left a
+  blocking thread behind with its line. The one relay permit did not bound those threads, and each
+  wrote its line later. Measured: 20 cancelled relays behind a stalled pipe wrote 21 lines, not 1.
+  `a_cancelled_relay_never_tears_the_file` and
+  `a_relay_cancelled_while_waiting_leaves_no_write_behind` are the pins.
+  **A failed append is cut back too.** `write_all` that stops on `ENOSPC`, `EDQUOT`, or `EFBIG`
+  left its fragment, and the next record joined it the same way. `append` now counts what it wrote
+  and `cut_back` restores the length from before the write, but only when the file grew by exactly
+  that count, so it never removes a line another writer appended. `a_failed_append_leaves_no_fragment`
+  is the pin; it lowers `RLIMIT_FSIZE` in a child process, because the limit is per process.
+  Two boxes sharing one destination can still tear a line. Prefer one target per box.
 - **A telemetry secret must resolve through `credentials`.** `box`'s `telemetry_config` once read the
   variable with `std::env::var`, which bypassed the `env://` denylist — so
   `secret.ref = "secret://AWS_SECRET_ACCESS_KEY"` shipped the operator's AWS key to a vendor.
@@ -404,10 +436,10 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
 
 ## Public surface
 
-Seventeen names: `Collector`, `Target`, `TargetKind`, `TargetSecret`, `TelemetryConfig`, `Result`,
+Eighteen names: `Collector`, `Target`, `TargetKind`, `TargetSecret`, `TelemetryConfig`, `Result`,
 `TelemetryError`, `DecisionRecord`, `DecisionCause`, `DeterminingPolicy`, `Subject`, `Correlation`,
-`ControlRecord`, `ControlOperation`, `Signal`, `McpUnmatched`, and `Payload`, reached through
-`telemetry::open`, then:
+`ControlRecord`, `ControlOperation`, `Signal`, `McpUnmatched`, `Payload`, and `McpToolCall`, reached
+through `telemetry::open`, then:
 
 **Three of those carry one decision's context, and each exists because a caller holds the value and
 this crate must not re-derive it.** `Correlation` is the request's W3C parent, the transport request
@@ -442,6 +474,12 @@ copies it unchanged.
 - `Collector::record` never blocks, never fails and never awaits. Strands Box calls it from a policy
   enforcement point before the effect or refusal. A record no target's signal set accepts is not
   built at all.
+- **`DecisionRecord`'s readers return the values its attributes state, by construction.**
+  `attributes` builds `strands.box.policy.action`, `category`, `resource`, `verdict`, `cause`,
+  `reason`, and `rule` from the readers of the same names (`verdict` from `permitted`), so Strands
+  Box's in-memory `PolicyDecision` and the record cannot disagree. `time` is the timestamp
+  `Collector::record` stamps on the record. Do not compute one of those attributes apart from its
+  reader.
 - `Collector::control` is the same contract for the other plane. Strands Box calls it where the
   authority itself changes — a policy install, a schema install, discovery completing, a box starting
   or stopping. **Each operation also reaches a span**, under `strands-box.control`, named

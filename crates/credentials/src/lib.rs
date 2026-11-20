@@ -20,7 +20,10 @@ pub use attach::{Attachment, Inbound, Outbound, Redactions};
 pub use backend::Backend;
 pub use config::VaultConfig;
 pub use error::{CredentialError, Result};
-pub use model::{Destination, DestinationPattern, InjectMode, Locator, PhantomCheck, RouteSpec};
+pub use model::{
+    Destination, DestinationPattern, InjectMode, Locator, PhantomCheck, RouteSpec,
+    SecretSourceCommand,
+};
 pub use opened::{Opened, Phantom, Skipped};
 pub use preflight::credsd_preflight;
 pub use redaction::ResponseRedactor;

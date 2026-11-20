@@ -4,7 +4,7 @@ name: Release Box
 # version and a commit; the workflow builds strands-box for each target below on
 # hosted runners, packages each binary set as a versioned tarball, and attaches
 # the macOS and Linux tarballs with SHA256SUMS.txt to a GitHub Release.
-# Every release publishes macOS and Linux ARM64. Linux x86-64 is opt-in.
+# Every release publishes macOS and Linux ARM64. The x86-64 archive is optional.
 # That naming and layout is what download.sh (curl | sh) and a Homebrew tap both
 # consume:
 #
@@ -34,7 +34,7 @@ on:
         type: string
       publish_linux_x86:
         # Set true only after x86-64 qualification.
-        description: 'Also publish Linux x86-64 (experimental)'
+        description: 'Also publish the Linux x86-64 archive'
         required: true
         default: false
         type: boolean
@@ -382,6 +382,18 @@ jobs:
       - name: Check the x86-64 Linux package
         if: matrix.target.triple == 'x86_64-unknown-linux-gnu'
         run: |
+          set -euo pipefail
+          # Reject a selected source that still requires either retired opt-in.
+          if output=$(env -u EXPERIMENTAL_LINUX_SUPPORT -u EXPERIMENTAL_X86_SUPPORT \
+            stage/box-core/box run --config "$RUNNER_TEMP/missing-x86-config.toml" 2>&1); then
+            echo "::error::Linux x86-64 startup accepted a missing configuration."
+            exit 1
+          fi
+          if ! grep -Fq "$RUNNER_TEMP/missing-x86-config.toml" <<< "$output"; then
+            echo "::error::Linux x86-64 startup did not reach configuration validation without an opt-in."
+            printf '%s\n' "$output"
+            exit 1
+          fi
           docker run --rm \
             --mount "type=bind,source=$PWD,target=/src,readonly" \
             box-linux-release \
@@ -427,6 +439,41 @@ jobs:
             box-linux-release \
             python3 scripts/smoke-linux-package.py \
               "dist/box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
+
+      - name: Record the macOS build features
+        if: matrix.target.triple == 'aarch64-apple-darwin'
+        env:
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+          SOURCE_SHA: ${{ needs.scan.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          cargo read-manifest --manifest-path crates/box/Cargo.toml > "$RUNNER_TEMP/box-manifest.json"
+          python3 - <<'PYTHON'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads((Path(os.environ["RUNNER_TEMP"]) / "box-manifest.json").read_text())
+          features = sorted(set(manifest.get("features", {}).get("default", []) + ["native-filesystem-policy"]))
+          asset = Path("dist") / f"box-{os.environ['NEW_TAG']}-aarch64-apple-darwin.tar.gz"
+          metadata = {
+              "source_sha": os.environ["SOURCE_SHA"],
+              "features": features,
+              "input_sha256": hashlib.sha256(asset.read_bytes()).hexdigest(),
+          }
+          path = asset.with_name(asset.name.removesuffix(".tar.gz") + ".build-metadata.json")
+          path.write_text(json.dumps(metadata, indent=2) + "\n")
+          PYTHON
+
+      - name: Upload the macOS build metadata
+        if: matrix.target.triple == 'aarch64-apple-darwin'
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-build-metadata
+          path: dist/*.build-metadata.json
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
@@ -486,6 +533,11 @@ jobs:
         with:
           name: box-${{ needs.scan.outputs.new_tag }}-aarch64-apple-darwin
           path: unsigned
+      - name: Download this run's macOS build metadata
+        uses: actions/download-artifact@v8
+        with:
+          name: macos-build-metadata
+          path: unsigned
       - name: Install signing tools
         run: |
           brew install gnu-tar
@@ -506,6 +558,7 @@ jobs:
         run: |
           "$RUNNER_TEMP/signing-venv/bin/python" scripts/macos-release.py sign \
             --input "unsigned/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
+            --build-metadata "unsigned/box-${NEW_TAG}-aarch64-apple-darwin.build-metadata.json" \
             --output "signed/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
             --work "$RUNNER_TEMP/signing" --version "$VERSION" --source-sha "$SOURCE_SHA" \
             --notary-secret "$NOTARY_CREDENTIAL_SECRET"
@@ -786,7 +839,7 @@ jobs:
           set -euo pipefail
           platforms="macOS 15 or later on Apple silicon and ARM64 Linux"
           if [ "$PUBLISH_LINUX_X86" = "true" ]; then
-            platforms="macOS 15 or later on Apple silicon, ARM64 Linux, and experimental x86-64 Linux"
+            platforms="macOS 15 or later on Apple silicon, ARM64 Linux, and x86-64 Linux"
           fi
           cat > body.md <<EOF
           ## Download
@@ -850,14 +903,14 @@ jobs:
           EOF
           if [ "$PUBLISH_LINUX_X86" = "true" ]; then
           cat >> body.md <<EOF
-          ### Linux x86-64 (experimental)
+          ### Linux x86-64
 
-          For Amazon Linux 2023 x86-64, use \`box-${NEW_TAG}-linux-x86_64.tar.gz\`. The downloader selects this archive and verifies its checksum. Download this exact release, then enable x86 support when starting a workload:
+          For Amazon Linux 2023 x86-64, use \`box-${NEW_TAG}-linux-x86_64.tar.gz\`. The downloader selects this archive and verifies its checksum. Download this exact release, then start a workload:
 
           \`\`\`sh
           curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh -o download-box.sh &&
             BOX_VERSION=${NEW_TAG} sh download-box.sh &&
-            EXPERIMENTAL_X86_SUPPORT=TRUE ./box-core/box run --config ./box.toml
+            ./box-core/box run --config ./box.toml
           \`\`\`
 
           EOF

@@ -2,8 +2,8 @@
 
 use std::io;
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 
 use crate::audit::RequestId;
 
@@ -14,89 +14,147 @@ use super::l7::{self, WorkloadResponse};
 use super::resolve::PinnedDestination;
 use crate::audit::Decision as AuditDecision;
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, EffectOutcome};
-use crate::transport::socket::Socket;
+use crate::transport::socket::{Socket, SocketShutdown};
 
-/// A counting semaphore bounding the number of in-flight connection threads, with no external
-/// dependency. `acquire` blocks the accept loop until a slot frees, so
-/// an untrusted workload cannot make the adapter spawn unbounded OS threads (backpressure, not an
-/// optimization). Each [`Permit`] releases its slot on drop.
-struct ConnectionLimiter {
-    available: Mutex<usize>,
+/// The bounded set of client sockets whose connection workers have not finished.
+pub(super) struct Connections {
+    max: usize,
+    state: Mutex<ConnectionState>,
     freed: Condvar,
 }
 
-impl ConnectionLimiter {
-    fn new(max: usize) -> Self {
+struct ConnectionState {
+    stopped: bool,
+    sockets: Vec<Arc<SocketShutdown>>,
+}
+
+impl Connections {
+    pub(super) fn new(max: usize) -> Self {
         Self {
-            // A zero cap would deadlock the accept loop; clamp to at least one slot.
-            available: Mutex::new(max.max(1)),
+            max: max.max(1),
+            state: Mutex::new(ConnectionState {
+                stopped: false,
+                sockets: Vec::new(),
+            }),
             freed: Condvar::new(),
         }
     }
 
-    /// Block until a slot is free, then take it. Returns a [`Permit`] that releases on drop.
-    fn acquire(self: &Arc<Self>) -> Permit {
-        let mut available = self.available.lock().unwrap_or_else(|e| e.into_inner());
-        while *available == 0 {
-            available = self
-                .freed
-                .wait(available)
-                .unwrap_or_else(|e| e.into_inner());
+    pub(super) fn is_stopped(&self) -> bool {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).stopped
+    }
+
+    pub(super) fn shutdown(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.stopped {
+            return false;
         }
-        *available -= 1;
-        Permit {
-            limiter: self.clone(),
+        state.stopped = true;
+        for socket in &state.sockets {
+            socket.shutdown();
         }
+        self.freed.notify_all();
+        true
+    }
+
+    fn acquire(self: &Arc<Self>, socket: SocketShutdown) -> Option<Permit> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        while !state.stopped && state.sockets.len() == self.max {
+            state = self.freed.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+        if state.stopped {
+            return None;
+        }
+        let socket = Arc::new(socket);
+        state.sockets.push(socket.clone());
+        Some(Permit {
+            connections: self.clone(),
+            socket,
+        })
     }
 }
 
-/// A held connection slot; returns it to the [`ConnectionLimiter`] on drop.
+/// A registered connection whose slot remains held through terminal outcome recording.
 struct Permit {
-    limiter: Arc<ConnectionLimiter>,
+    connections: Arc<Connections>,
+    socket: Arc<SocketShutdown>,
 }
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        let mut available = self
-            .limiter
-            .available
+        let mut state = self
+            .connections
+            .state
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        *available += 1;
-        self.limiter.freed.notify_one();
+        state
+            .sockets
+            .retain(|socket| !Arc::ptr_eq(socket, &self.socket));
+        self.connections.freed.notify_one();
     }
 }
 
-/// Run an accept loop over `incoming` until `stop` is set. Each connection is handled on its own
-/// thread, **bounded** by `config.max_connections`: the loop blocks on a free slot before accepting
-/// more, so an untrusted workload cannot exhaust the host with unbounded threads.
-///
-/// The TCP and AF_UNIX listeners share this loop. `connect_only` is set for AF_UNIX, whose workload
-/// is under the egress pin and has no plain-HTTP client.
+/// The connection threads owned and joined by the accept loop.
+struct WorkerThreads {
+    connections: Arc<Connections>,
+    threads: Vec<JoinHandle<()>>,
+}
+
+impl WorkerThreads {
+    fn reap_finished(&mut self) {
+        let mut index = 0;
+        while index < self.threads.len() {
+            if self.threads[index].is_finished() {
+                let _ = self.threads.swap_remove(index).join();
+            } else {
+                index += 1;
+            }
+        }
+    }
+}
+
+impl Drop for WorkerThreads {
+    fn drop(&mut self) {
+        self.connections.shutdown();
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Accept bounded connections, then interrupt clients and join their workers on shutdown.
 pub(super) fn accept_loop<S: Socket + Send + 'static>(
     incoming: impl Iterator<Item = io::Result<S>>,
     state: Arc<SharedState>,
-    stop: Arc<AtomicBool>,
+    connections: Arc<Connections>,
     connect_only: bool,
 ) {
-    let limiter = Arc::new(ConnectionLimiter::new(state.config.max_connections));
+    let mut workers = WorkerThreads {
+        connections: connections.clone(),
+        threads: Vec::new(),
+    };
     for incoming in incoming {
-        if stop.load(Ordering::SeqCst) {
+        if connections.is_stopped() {
             break;
         }
+        workers.reap_finished();
         let stream = match incoming {
             Ok(s) => s,
             Err(_) => continue,
         };
-        // Block here until a connection slot is free (backpressure), then hand the permit to the
-        // worker thread so the slot is released when the connection finishes.
-        let permit = limiter.acquire();
+        let Ok(shutdown) = stream.shutdown_handle() else {
+            continue;
+        };
+        let Some(permit) = connections.acquire(shutdown) else {
+            break;
+        };
         let state = state.clone();
-        std::thread::spawn(move || {
-            // The permit lives for the duration of the connection; dropping it frees the slot.
+        if let Ok(thread) = std::thread::Builder::new().spawn(move || {
             let _permit = permit;
             let _ = crate::proxy::server::serve_connection(stream, &state, connect_only);
-        });
+        }) {
+            workers.threads.push(thread);
+        }
     }
 }
 
@@ -309,43 +367,82 @@ fn emit_connect_decision(
 }
 
 #[cfg(test)]
+#[path = "shutdown_tests.rs"]
+mod shutdown_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
-    /// The limiter caps concurrent permits and blocks a further acquire until one is released.
+    fn idle_socket() -> SocketShutdown {
+        let (socket, _) = std::os::unix::net::UnixStream::pair().unwrap();
+        SocketShutdown::Unix(socket)
+    }
+
     #[test]
     fn limiter_caps_and_releases() {
-        let limiter = Arc::new(ConnectionLimiter::new(2));
-        let a = limiter.acquire();
-        let b = limiter.acquire();
-        assert_eq!(*limiter.available.lock().unwrap(), 0, "both slots taken");
+        let limiter = Arc::new(Connections::new(2));
+        let a = limiter.acquire(idle_socket()).unwrap();
+        let b = limiter.acquire(idle_socket()).unwrap();
+        assert_eq!(limiter.state.lock().unwrap().sockets.len(), 2);
 
-        // A third acquire on another thread must block until a slot frees.
         let limiter2 = limiter.clone();
         let handle = std::thread::spawn(move || {
-            let _c = limiter2.acquire(); // blocks until `a` (or `b`) drops
+            let _c = limiter2.acquire(idle_socket()).unwrap();
         });
-        // Give the spawned thread a moment to reach the blocked wait.
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(!handle.is_finished(), "third acquire must block while full");
 
-        drop(a); // free one slot → the blocked acquire proceeds
+        drop(a);
         handle.join().unwrap();
         drop(b);
-        assert_eq!(*limiter.available.lock().unwrap(), 2, "all slots returned");
+        assert!(limiter.state.lock().unwrap().sockets.is_empty());
     }
 
-    /// A zero cap is clamped to one slot so the accept loop can never deadlock on a misconfig.
     #[test]
     fn zero_cap_is_clamped_to_one() {
-        let limiter = Arc::new(ConnectionLimiter::new(0));
-        assert_eq!(*limiter.available.lock().unwrap(), 1);
-        let _permit = limiter.acquire(); // does not deadlock
+        let limiter = Arc::new(Connections::new(0));
+        assert_eq!(limiter.max, 1);
+        let _permit = limiter.acquire(idle_socket()).unwrap();
+    }
+
+    #[test]
+    fn shutdown_closes_a_socket_before_its_worker_starts() {
+        use std::io::Read;
+        use std::time::Duration;
+
+        let (mut worker_socket, mut client) = std::os::unix::net::UnixStream::pair().unwrap();
+        worker_socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let connections = Arc::new(Connections::new(1));
+        let permit = connections
+            .acquire(worker_socket.shutdown_handle().unwrap())
+            .unwrap();
+        assert!(connections.shutdown());
+        let mut byte = [0; 1];
+        assert_eq!(worker_socket.read(&mut byte).unwrap(), 0);
+        assert_eq!(client.read(&mut byte).unwrap(), 0);
+        drop(permit);
+        assert!(connections.state.lock().unwrap().sockets.is_empty());
+    }
+
+    #[test]
+    fn shutdown_refuses_later_registration() {
+        let connections = Arc::new(Connections::new(1));
+        assert!(connections.shutdown());
+        assert!(connections.acquire(idle_socket()).is_none());
+        assert!(connections.state.lock().unwrap().sockets.is_empty());
+        assert!(!connections.shutdown());
     }
 
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
     use std::sync::Mutex;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::capability::CapabilitySet;
     use crate::effect::{EffectAttempt, EffectInterceptor, EffectPermit};

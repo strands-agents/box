@@ -10,6 +10,7 @@ name = "policy"
 path = "src/lib.rs"
 
 [features]
+experimental-idle-flush = []
 # The egress-gateway adapter implements its policy-neutral `EffectInterceptor`
 # lifecycle. The crate itself is always compiled, because the load-time spelling
 # judge holds every host literal to the gateway's own `normalize_host` and

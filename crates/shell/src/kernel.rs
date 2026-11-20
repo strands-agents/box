@@ -693,11 +693,7 @@ impl Kernel for ShellKernel {
             .await?;
         let removed = async {
             let mut generation = self.guard(&resolved).await?;
-            let mounts = &self.backend.mounts;
-            if mounts.is_mount_point(&resolved.path) {
-                return Err(host::mount_point_busy());
-            }
-            let result = if mounts.serves(&resolved.path) {
+            let result = if self.backend.mounts.serves(&resolved.path) {
                 match self.host_for(&resolved, Follow::No) {
                     Some((host_path, _)) => host::unlink(&host_path, resolved.host.as_ref(), false),
                     None => Err(not_found()),
@@ -811,11 +807,7 @@ impl Kernel for ShellKernel {
             .await?;
         let linked = async {
             let mut generation = self.guard(&at).await?;
-            let mounts = &self.backend.mounts;
-            if mounts.is_mount_point(&at.path) {
-                return Err(host::mount_point_busy());
-            }
-            let result = if mounts.serves(&at.path) {
+            let result = if self.backend.mounts.serves(&at.path) {
                 match self.host_for(&at, Follow::No) {
                     Some((host_link, base)) => {
                         host::verify_symlink_target(target, &host_link, &base)

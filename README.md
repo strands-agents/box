@@ -46,10 +46,9 @@ Box's interpreters and gateways share an event history, so rules can use earlier
 actions and elapsed time to decide what is allowed next. For example, a file read
 through Shell or Python can cause the gateway to deny a later outbound HTTP request.
 
-**Preview:** Box supports local execution on Linux ARM64 and macOS with Apple silicon.
-Linux x86-64 is experimental and requires `EXPERIMENTAL_X86_SUPPORT=TRUE` in the
-environment of the box's trusted process. See the [Linux download instructions](docs/user/getting-started.md#linux)
-for release selection and the x86-64 startup opt-in.
+**Preview:** Box supports local execution on Linux ARM64, Linux x86-64, and macOS with Apple silicon.
+Linux x86-64 builds start without an environment opt-in. See the [Linux download instructions](docs/user/getting-started.md#linux)
+for release selection and the [Linux requirements](docs/user/linux-requirements.md) for tested configurations.
 We welcome feedback through [GitHub issues](https://github.com/strands-agents/box/issues).
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 
@@ -90,6 +89,8 @@ By default, it uses the process's terminal and returns its exit
 code. The second argument appends arguments to `[agent] command`.
 Use `RunOptions::terminal` to supply the workload's terminal and `RunOptions::on_ready`
 to start host threads after hardening and signal registration, before workload setup.
+Use `RunOptions::policy_decisions` to receive each policy decision in memory as the box makes it
+(see [the library section](crates/box/README.md#policy-decisions-for-a-library-caller)).
 Use `RunOptions::box_id` to give a new box your own ID, such as
 `my-app-3f9a1c0e7b2d4a6f`: a prefix of 1 to 15 letters, digits, `.`, `_`, or `-`, then `-` and 16
 lowercase hexadecimal digits. Box stores it, prints it, and labels telemetry with it. A box that
@@ -178,7 +179,7 @@ For each part, where it runs, what it decides, and how one request moves through
 
 ## Getting started
 
-Follow the [getting-started guide](docs/user/getting-started.md) to download Box for macOS, Linux ARM64, or experimental Linux x86-64.
+Follow the [getting-started guide](docs/user/getting-started.md) to download Box for macOS, Linux ARM64, or Linux x86-64.
 The Strands CLI walkthrough uses macOS.
 For that walkthrough, you need macOS 15 or later on Apple silicon and Node.js 22.21 or later from Homebrew.
 You also need access to Claude Opus 5 on Amazon Bedrock in `us-west-2`.
@@ -245,10 +246,9 @@ cargo build --release -p strands-box -p strands-box-containment
 Run the compiled binary as `./target/release/strands-box`. Keep its helper
 binaries in the same directory.
 
-The [release guide](docs/dev/releases.md) covers version selection and publication for macOS, Linux ARM64, and experimental Linux x86-64.
+The [release guide](docs/dev/releases.md) covers version selection and publication for macOS, Linux ARM64, and Linux x86-64.
 
 Linux workspace tests run on Ubuntu ARM64 and x86-64 with user, mount, and process namespaces enabled.
-The x86-64 jobs set `EXPERIMENTAL_X86_SUPPORT=TRUE` to test the experimental runtime.
 Unexpected prerequisite skips fail the job. The accepted alias-read limitation and missing
 credential-daemon fixture remain explicit in the report. Workspace and deterministic integration
 failures on either Linux architecture or macOS fail `CI Gate`.
@@ -276,6 +276,30 @@ just test-all      # workspace tests and box example checks
 the `test-support` feature. Linux CI also checks the three native filesystem forwarding tests
 in a separate step. See the [Linux native test guide](docs/dev/linux-native-tests.md#forwarding-buffer-tests)
 for that command and the other native test prerequisites.
+
+Continuous integration tests both history persistence modes on Linux x86-64, Linux ARM64,
+and macOS. Default builds test batched crash recovery and verify that the idle timer saves
+history before shutdown. The separate `--no-default-features` build also checks that recovery
+retains every returned permit after the process is killed. Both modes refuse new requests
+after the kill. These jobs run independently of the all-feature build.
+
+Run the default checks locally with:
+
+```sh
+cargo build --locked -p strands-box -p strands-box-containment --bins
+cargo test --locked -p strands-box --test box_killed_run -- --show-output
+cargo test --locked -p strands-box --lib run::hosted::tests::hosted_idle_timer_flushes_pending_history_without_shutdown -- --exact --show-output
+```
+
+Run the per-event crash-recovery check with batching disabled in both commands:
+
+```sh
+cargo build --locked -p strands-box -p strands-box-containment --bins --no-default-features
+cargo test --locked -p strands-box --no-default-features --test box_killed_run -- --show-output
+```
+
+On Linux, follow the namespace and launcher-image setup in the
+[`history-persistence` workflow job](.github/workflows/rust-test-lint.yml) before running the tests.
 
 In pull-request CI, changes to `docs/site-manifest.json`,
 `docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` run the focused

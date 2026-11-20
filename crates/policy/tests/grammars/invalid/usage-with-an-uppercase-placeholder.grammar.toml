@@ -1,0 +1,10 @@
+# expect: `<grammar>.shell.cat.usage` has "FILE", which has no lowercase letter, so it is not a command word; write an operand as `<file>`
+# A tool grammar whose usage copies an uppercase placeholder from help text.
+
+name    = "tool"
+program = "tool"
+format  = 1
+version = 1
+
+[shell.cat]
+usage = "tool cat FILE"

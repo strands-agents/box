@@ -60,13 +60,15 @@ A target names a **set**. No signal contains another, and there is no ordering.
 | `agent_metrics` | one metric the agent's own instrumentation exported |
 | `control_plane` | one change to the authority this box holds |
 | `mcp_unmatched` | one MCP alias invocation that matches no declared command |
+| `mcp_tool_calls` | one MCP tool call's fields in clear text, or how it ended |
 
-**A target naming none receives every one of the seven.** An empty set is refused.
+**A target naming none receives seven of the eight, every one but `mcp_tool_calls`.** An empty set
+is refused.
 
-These seven are this crate's own vocabulary and the spelling a record carries. They are not what an
-operator writes: `box.toml` takes `include`, whose words are `deny`, `permit`, `trace`, `logs`, and
-`metrics`, and the box expands each word into this set. `trace` names both `agent_trace` and
-`control_plane`. `logs` names both `agent_logs` and `mcp_unmatched`.
+These eight are this crate's own vocabulary and the spelling a record carries. They are not what an
+operator writes: `box.toml` takes `include`, whose words are `deny`, `permit`, `trace`, `logs`,
+`metrics`, and `mcp_tool_calls`, and the box expands each word into this set. `trace` names both
+`agent_trace` and `control_plane`. `logs` names both `agent_logs` and `mcp_unmatched`.
 
 ## What a record carries
 
@@ -79,6 +81,19 @@ informational log in scope `strands-box.mcp`, with event name `strands.box.mcp.u
 The constructor bounds the program and redacts expanded arguments. `correlated` attaches the
 caller's available request context. This record has no policy verdict or execution outcome and
 produces no span.
+
+`Collector::mcp_tool_call` accepts `McpToolCall::called(server, tool, arguments)` when a call is
+decided, and `McpToolCall::completed(server, tool, reply, output)` when it ends, with the arguments
+and output as JSON values. It records each as a log in scope `strands-box.mcp`, with event name
+`strands.box.mcp.tool.call` or `strands.box.mcp.tool.completion`, on the `mcp_tool_calls` signal.
+The arguments and the output are flattened into dotted field paths, and each value is bounded at
+construction. `correlated` attaches the call's request context, so the two records join by
+`jsonrpc.request.id`. Neither produces a span.
+
+**A tool-call record carries its values in clear text, so it reaches only a target that names
+`Signal::McpToolCalls`.** `Signal::default_signals` leaves it out, so a target that names no signal
+receives none. `Collector::accepts(signal)` tells a caller whether any target receives a signal at
+all, so it can skip the work for one nobody takes.
 
 ## The agent's own signals
 

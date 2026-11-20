@@ -1,6 +1,7 @@
 /* A static ARM64 workload. Each operation calls Linux directly, without Shell. */
 #include <asm/unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <sys/vfs.h>
 
 static long invoke(long n, long a, long b, long c, long d, long e) {
@@ -184,7 +185,11 @@ void native_main(long *stack) {
         result = invoke(__NR_truncate, (long)path, 3, 0, 0, 0);
     } else if (op == 'j') {
         invoke(__NR_umask, 0027, 0, 0, 0, 0);
-        result = invoke(__NR_mkdirat, AT_FDCWD, (long)path, 0777, 0, 0);
+        long mode = 0777;
+        if (argv[1][1] == '1') mode |= 01000;
+        if (argv[1][1] == '2') mode |= 02000;
+        if (argv[1][1] == '4') mode |= 04000;
+        result = invoke(__NR_mkdirat, AT_FDCWD, (long)path, mode, 0, 0);
         if (argv[1][1] == 'e') {
             long expected = 0;
             for (int i = 0; argv[3][i]; i++) expected = expected * 10 + argv[3][i] - '0';
@@ -200,7 +205,13 @@ void native_main(long *stack) {
     } else if (op == 'm') {
         const char *destination = argv[3];
         if (argv[1][1] == 'l') { for (int i = 0; argv[3][i]; i++) if (argv[3][i] == '/') destination = argv[3] + i + 1; }
-        result = invoke(__NR_renameat, AT_FDCWD, (long)path, AT_FDCWD, (long)destination, 0);
+        if (argv[1][1] == '2') {
+            /* renameat2's flag value 1 is RENAME_NOREPLACE. */
+            long flags = argv[1][2] == 'n' ? 1 : 0;
+            result = invoke(__NR_renameat2, AT_FDCWD, (long)path, AT_FDCWD, (long)destination, flags);
+        } else {
+            result = invoke(__NR_renameat, AT_FDCWD, (long)path, AT_FDCWD, (long)destination, 0);
+        }
     } else {
         long flags = O_WRONLY | O_CLOEXEC | (op == 'c' ? O_CREAT | O_EXCL : O_TRUNC);
         long mode = op == 'c' ? 0600 : 0;
@@ -211,6 +222,9 @@ void native_main(long *stack) {
             if (argv[1][1] == 'w') invoke(__NR_umask, 0027, 0, 0, 0, 0);
             if (argv[1][1] == 'l') invoke(__NR_umask, 0077, 0, 0, 0, 0);
         }
+        if (op == 'c' && argv[1][1] == '1') mode |= 01000;
+        if (op == 'c' && argv[1][1] == '2') mode |= 02000;
+        if (op == 'c' && argv[1][1] == '4') mode |= 04000;
         if (op == 'a') flags = O_WRONLY | O_APPEND | O_CLOEXEC;
         if (op == 'r' || op == 'q' || op == 'u' || op == 'v') flags = O_RDONLY | O_CLOEXEC;
         if (op == 'q') flags |= O_NOCTTY | 0400000;
@@ -254,6 +268,10 @@ void native_main(long *stack) {
             invoke(__NR_close, result, 0, 0, 0, 0);
             if (!valid) result = -1;
         }
+    }
+    if (argv[4][0] == 'E' && result != -EPERM) {
+        invoke(__NR_exit, 111, 0, 0, 0, 0);
+        __builtin_unreachable();
     }
     static const char allowed[] = "NATIVE_ALLOWED\n";
     static const char denied[] = "NATIVE_DENIED\n";

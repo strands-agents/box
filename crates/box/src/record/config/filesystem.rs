@@ -18,6 +18,8 @@ use containment::{ContainmentConfig, Operation, PreparedFilesystemPath, Scope};
 use crate::GrantRefusal;
 use crate::error::{BoxError, ConfigError};
 use crate::record::config::process::{Filesystem, Grant};
+use crate::record::config::secret_source::{ProtectedPath, Spelled};
+use crate::record::layout::{lies_within, resolved_to_its_deepest_existing_ancestor};
 
 /// One host path a process's own syscalls reach, with no policy decision in the path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,9 +149,13 @@ pub(crate) struct DirectReach {
     pub(crate) installation: Option<std::sync::Arc<crate::run::installation::TrustedInstallation>>,
     /// What the process's own syscalls reach.
     pub(crate) grants: Vec<DirectGrant>,
-    /// What stays unreachable inside those grants: `deny` entries, and the directory holding each
-    /// authority source this run loaded.
+    /// What stays unreachable inside those grants: `deny` entries, the directory holding each
+    /// authority source this run loaded, and each path that a secret source protects.
     pub(crate) refusals: Vec<Refusal>,
+    /// The `deny_write` directories, canonical, each inside a `write` tree.
+    pub(crate) write_protections: Vec<PathBuf>,
+    /// The directory each of `write_protections` named when the run judged it.
+    pub(crate) write_protection_identities: Vec<FileIdentity>,
 }
 
 /// What the paths in one spec are judged against.
@@ -172,6 +178,8 @@ pub(crate) struct FilesystemContext<'a> {
     /// `PATH`. A declared program is always a bare name, so the box resolves it there, outside
     /// containment, and a writable directory on that path is a program the workload chose.
     pub(crate) program_search_directories: Vec<PathBuf>,
+    /// Each `reads` and `deny` entry of a secret source of this configuration.
+    pub(crate) source_paths: &'a [ProtectedPath],
 }
 
 /// Every grant the lists state, refusing each class these keys may not express.
@@ -183,13 +191,44 @@ pub(crate) fn direct_grants(
 ) -> Result<DirectReach, ConfigError> {
     let mut grants: Vec<DirectGrant> = Vec::new();
     let mut refusals: Vec<Refusal> = Vec::new();
+    let protected = source_path_spellings(context)?;
+    let mut write_protections: Vec<PathBuf> = Vec::new();
+    let mut write_protection_identities: Vec<FileIdentity> = Vec::new();
     for (kind, entry) in lists.entries() {
         match kind {
             Grant::Deny => refusals.push(denial(entry, context)?),
-            _ => grants.push(entry_grant(kind, entry, context).map_err(|(_, error)| error)?),
+            // A `deny_write` entry authorizes nothing, so it is judged against no path of a
+            // secret source, as a `deny` entry. The `write` tree that holds it is judged below.
+            Grant::DenyWrite => {
+                let (tree, identity) = write_protection(entry, context)?;
+                write_protections.push(tree);
+                write_protection_identities.push(identity);
+            }
+            _ => {
+                // Before the floor, so the refusal names the source for a credential store too.
+                require_outside_source_paths(kind, entry, &protected, context)?;
+                grants.push(entry_grant(kind, entry, context).map_err(|(_, error)| error)?);
+            }
         }
     }
     require_no_overlap(&grants, context)?;
+
+    // Each path that a secret source protects is refused to the process, so no cell that Box
+    // adds beneath the lists reaches it. macOS refuses a path that is not there too, and Linux
+    // skips it, because a mount needs a path that is there.
+    let covered = protected.iter().filter(|(_, spelled)| spelled.covered);
+    for path in covered.flat_map(|(_, spelled)| &spelled.spellings) {
+        if refusals.iter().any(|refusal| &refusal.path == path) {
+            continue;
+        }
+        refusals.push(Refusal {
+            path: path.clone(),
+            // A tree, which covers the path as a file and as a directory.
+            scope: Scope::Root,
+            // No grant holds the path, so no identity is acted on.
+            judged: None,
+        });
+    }
 
     // The directory holding a loaded authority source is subtracted from every tree that strictly
     // encloses it. A grant that is that directory, or lies inside it, keeps the sources' identity
@@ -236,9 +275,27 @@ pub(crate) fn direct_grants(
     for (grant, access) in grants.iter_mut().zip(access) {
         grant.access = access;
     }
+    for (entry, tree) in lists.deny_write.iter().zip(&write_protections) {
+        if !grants.iter().any(|grant| {
+            grant.operation == Operation::Write
+                && grant.scope == Scope::Root
+                && tree.starts_with(&grant.resolved)
+        }) {
+            return Err(refuse(
+                context,
+                &entry.display().to_string(),
+                &format!(
+                    "{} lies inside no `write` directory, so `deny_write` protects nothing there",
+                    tree.display()
+                ),
+            ));
+        }
+    }
     Ok(DirectReach {
         grants,
         refusals,
+        write_protections,
+        write_protection_identities,
         command: None,
         installation: None,
     })
@@ -374,6 +431,115 @@ pub(crate) fn require_judged_identities(
             return Err(changed("was replaced"));
         }
     }
+    for (tree, judged) in reach
+        .write_protections
+        .iter()
+        .zip(&reach.write_protection_identities)
+    {
+        let changed = |reason: &str| ConfigError::Filesystem {
+            table: table.to_string(),
+            entry: tree.display().to_string(),
+            reason: format!(
+                "{} {reason} since the run judged it. A spawn protects the directory the run \
+                 approved, so it is refused",
+                tree.display()
+            ),
+        };
+        let metadata = std::fs::symlink_metadata(tree)
+            .map_err(|source| changed(&format!("cannot be read ({source})")))?;
+        if metadata.is_symlink() {
+            return Err(changed("became a symbolic link"));
+        }
+        let now = tree
+            .canonicalize()
+            .map_err(|source| changed(&format!("cannot be resolved ({source})")))?;
+        if &now != tree {
+            return Err(changed(&format!("resolves to {}", now.display())));
+        }
+        if FileIdentity::of(&metadata) != *judged {
+            return Err(changed("was replaced"));
+        }
+    }
+    Ok(())
+}
+
+/// One path that a secret source protects, with what it names.
+type SourcePath<'a> = (&'a ProtectedPath, Spelled);
+
+/// Each path that a secret source protects, with its spellings and the links on the way to it.
+fn source_path_spellings<'a>(
+    context: &FilesystemContext<'a>,
+) -> Result<Vec<SourcePath<'a>>, ConfigError> {
+    context
+        .source_paths
+        .iter()
+        .map(|protected| Ok((protected, protected.spellings(context.operator_home)?)))
+        .collect()
+}
+
+/// Refuse an authorizing entry that is a path of a secret source, lies inside one, or holds one,
+/// and a writing entry that holds a symbolic link on the way to one.
+fn require_outside_source_paths(
+    kind: Grant,
+    entry: &Path,
+    protected: &[SourcePath<'_>],
+    context: &FilesystemContext<'_>,
+) -> Result<(), ConfigError> {
+    let authored = entry.display().to_string();
+    // An entry that is not a host path is refused as one by `entry_grant`.
+    let Ok(written) = expand_home(entry, &authored, context) else {
+        return Ok(());
+    };
+    let granted = [resolved_to_its_deepest_existing_ancestor(&written), written];
+    for (source, spelled) in protected {
+        let (spellings, links) = (&spelled.spellings, &spelled.links);
+        let reached = spellings.iter().find(|path| {
+            granted
+                .iter()
+                .any(|granted| lies_within(granted, path) || lies_within(path, granted))
+        });
+        if let Some(path) = reached {
+            return Err(refuse(
+                context,
+                &authored,
+                &format!(
+                    "this grant reaches {}, which the secret source `{}` keeps from each \
+                     workload (its `{}` entry {:?}). Keep each grant outside the paths that a \
+                     secret source names in `reads` and `deny`",
+                    path.display(),
+                    source.scheme,
+                    source.list,
+                    source.entry
+                ),
+            ));
+        }
+        // A change to a link needs a write to its folder, so the folder is what no write grant
+        // may reach. A grant on the link itself reaches the path by identity, above.
+        if !kind.writes() {
+            continue;
+        }
+        let held = links.iter().find(|link| {
+            link.parent()
+                .is_some_and(|folder| granted.iter().any(|granted| lies_within(folder, granted)))
+        });
+        if let Some(link) = held {
+            return Err(refuse(
+                context,
+                &authored,
+                &format!(
+                    "this write grant can change {}, a symbolic link on the way to {}, which the \
+                     secret source `{}` keeps from each workload (its `{}` entry {:?}). Keep each \
+                     write grant outside the folders that hold a link on the way to a path that \
+                     a secret source names in `reads` and `deny`",
+                    link.display(),
+                    spellings.last().unwrap_or(link).display(),
+                    source.scheme,
+                    source.list,
+                    source.entry
+                ),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -411,6 +577,74 @@ fn denial(entry: &Path, context: &FilesystemContext<'_>) -> Result<Refusal, Conf
     })
 }
 
+/// A `deny_write` entry, which names an existing directory.
+fn write_protection(
+    entry: &Path,
+    context: &FilesystemContext<'_>,
+) -> Result<(PathBuf, FileIdentity), ConfigError> {
+    let authored = entry.display().to_string();
+    let lexical = expand_home(entry, &authored, context)?;
+    match std::fs::symlink_metadata(&lexical) {
+        Ok(metadata) if metadata.is_symlink() => Err(refuse(
+            context,
+            &authored,
+            &match lexical.canonicalize() {
+                Ok(target) => format!(
+                    "{} is a symbolic link to {}. The link sits where the agent may be able to \
+                     change it, so `deny_write` names the directory itself; name {} instead",
+                    lexical.display(),
+                    target.display(),
+                    target.display()
+                ),
+                Err(error) => format!(
+                    "{} is a symbolic link that cannot be resolved: {error}; name the directory \
+                     itself",
+                    lexical.display()
+                ),
+            },
+        )),
+        Ok(metadata) if metadata.is_dir() => {
+            let resolved = lexical.canonicalize().map_err(|error| {
+                refuse(
+                    context,
+                    &authored,
+                    &format!("cannot resolve {}: {error}", lexical.display()),
+                )
+            })?;
+            if resolved == lexical {
+                Ok((resolved, FileIdentity::of(&metadata)))
+            } else {
+                Err(refuse(
+                    context,
+                    &authored,
+                    &format!(
+                        "{} is not the path the kernel checks, which is {}. A link or a `..` in the \
+                         path can be changed under the protection, so name that path instead",
+                        lexical.display(),
+                        resolved.display()
+                    ),
+                ))
+            }
+        }
+        Ok(_) => Err(refuse(
+            context,
+            &authored,
+            &format!(
+                "{} is not a directory; `deny_write` names a directory",
+                lexical.display()
+            ),
+        )),
+        Err(error) => Err(refuse(
+            context,
+            &authored,
+            &format!(
+                "{} cannot be read: {error}; create the directory before the box starts",
+                lexical.display()
+            ),
+        )),
+    }
+}
+
 /// Judge a read grant on `path` as a box judges a `read` entry, and return whether it lies in a
 /// credential store.
 pub(crate) fn judge_read_grant(path: &Path) -> Result<bool, (GrantRefusal, BoxError)> {
@@ -425,6 +659,7 @@ pub(crate) fn judge_read_grant(path: &Path) -> Result<bool, (GrantRefusal, BoxEr
         authority_directories: Vec::new(),
         upstream_trust: Vec::new(),
         program_search_directories: Vec::new(),
+        source_paths: &[],
     };
     entry_grant(Grant::Read, path, &context)
         .map(|grant| grant.credential_store)
@@ -570,6 +805,7 @@ fn entry_grant(
             (Operation::Exec, Scope::File)
         }
         (Grant::Deny, _) => unreachable!("a denial is built by `denial`"),
+        (Grant::DenyWrite, _) => unreachable!("a write protection is built by `write_protection`"),
     };
 
     // A writable search directory is the same defect one step earlier: the box execs a bare name
@@ -637,16 +873,27 @@ fn expand_home(
     authored: &str,
     context: &FilesystemContext<'_>,
 ) -> Result<PathBuf, ConfigError> {
-    match authored.strip_prefix("~/") {
-        Some(relative) => Ok(context.operator_home.join(relative)),
-        None if authored == "~" => Ok(context.operator_home.to_path_buf()),
-        None if entry.is_absolute() => Ok(entry.to_path_buf()),
-        None => Err(refuse(
+    // The entry itself, so a path that is not text keeps each byte.
+    if entry.is_absolute() {
+        return Ok(entry.to_path_buf());
+    }
+    under_home(authored, context.operator_home).ok_or_else(|| {
+        refuse(
             context,
             authored,
             "a path is absolute or `~`-relative, so a checked-in configuration holds in every \
              clone; this one is neither",
-        )),
+        )
+    })
+}
+
+/// `authored` with `~` or `~/` replaced by `home`, when it is `~`-relative or absolute.
+pub(crate) fn under_home(authored: &str, home: &Path) -> Option<PathBuf> {
+    match authored.strip_prefix("~/") {
+        Some(relative) => Some(home.join(relative)),
+        None if authored == "~" => Some(home.to_path_buf()),
+        None if Path::new(authored).is_absolute() => Some(PathBuf::from(authored)),
+        None => None,
     }
 }
 
@@ -881,6 +1128,7 @@ mod tests {
                 authority_directories: Vec::new(),
                 upstream_trust: Vec::new(),
                 program_search_directories: Vec::new(),
+                source_paths: &[],
             }
         }
 
@@ -908,6 +1156,76 @@ mod tests {
 
     fn text(path: &Path) -> String {
         path.display().to_string()
+    }
+
+    /// **A `deny_write` entry names an existing directory inside a `write` tree**, and is carried
+    /// canonical beside the grants rather than as one.
+    #[test]
+    fn a_deny_write_entry_is_a_directory_inside_a_write_tree() {
+        let fixture = Fixture::new();
+        let context = fixture.context();
+        let reach = fixture.reach(
+            &context,
+            "read = ['~/project']\nwrite = ['~/project']\ndeny_write = ['~/project/src']",
+        );
+        assert_eq!(reach.write_protections, [fixture.home.join("project/src")]);
+        assert!(reach.refusals.is_empty());
+        assert!(
+            reach
+                .grants
+                .iter()
+                .all(|grant| grant.kind != Grant::DenyWrite)
+        );
+
+        for (body, reason) in [
+            (
+                "read = ['~/scratch']\nwrite = ['~/scratch']\ndeny_write = ['~/project/src']",
+                "lies inside no `write`",
+            ),
+            (
+                "read = ['~/project']\ndeny_write = ['~/project/src']",
+                "lies inside no `write`",
+            ),
+            (
+                "read = ['~/notes']\nwrite = ['~/notes']\ndeny_write = ['~/notes/api.md']",
+                "is not a directory",
+            ),
+            (
+                "read = ['~/project']\nwrite = ['~/project']\ndeny_write = ['~/project/absent']",
+                "cannot be read",
+            ),
+        ] {
+            let refusal = fixture.refusal(&context, body);
+            assert!(refusal.contains(reason), "{body:?}: {refusal}");
+        }
+    }
+
+    #[test]
+    fn a_deny_write_entry_refuses_a_link_and_a_non_canonical_spelling() {
+        let fixture = Fixture::new();
+        let context = fixture.context();
+        let project = fixture.home.join("project");
+        std::os::unix::fs::symlink(project.join("src"), project.join("venv-link"))
+            .expect("a link to the directory");
+        std::os::unix::fs::symlink(&project, fixture.home.join("project-link"))
+            .expect("a link to an ancestor");
+        for (body, reason) in [
+            (
+                "read = ['~/project']\nwrite = ['~/project']\ndeny_write = ['~/project/venv-link']",
+                "is a symbolic link",
+            ),
+            (
+                "read = ['~/project']\nwrite = ['~/project']\ndeny_write = ['~/project-link/src']",
+                "is not the path the kernel checks",
+            ),
+            (
+                "read = ['~/project']\nwrite = ['~/project']\ndeny_write = ['~/project/src/../src']",
+                "is not the path the kernel checks",
+            ),
+        ] {
+            let refusal = fixture.refusal(&context, body);
+            assert!(refusal.contains(reason), "{body:?}: {refusal}");
+        }
     }
 
     fn identity(path: &Path) -> FileIdentity {
@@ -1431,6 +1749,431 @@ mod tests {
             refusal.contains("refused beneath every grant"),
             "the home encloses a credential store: {refusal}"
         );
+    }
+
+    /// One `reads` or `deny` entry of the secret source `scheme`.
+    fn protected(scheme: &str, list: &'static str, entry: &str) -> ProtectedPath {
+        ProtectedPath {
+            scheme: scheme.to_string(),
+            list,
+            entry: entry.to_string(),
+        }
+    }
+
+    /// The refusal of `authored` in `[agent]`, which reaches `path` of the source entry.
+    fn source_refusal(
+        authored: &str,
+        path: &Path,
+        scheme: &str,
+        list: &str,
+        entry: &str,
+    ) -> String {
+        format!(
+            "`[agent]` filesystem entry {authored:?} is refused: this grant reaches {}, which \
+             the secret source `{scheme}` keeps from each workload (its `{list}` entry \
+             {entry:?}). Keep each grant outside the paths that a secret source names in \
+             `reads` and `deny`",
+            path.display()
+        )
+    }
+
+    /// **No grant reaches a path that a secret source protects**: the path itself, a path inside
+    /// it, or a folder that holds it, in each list that authorizes.
+    #[test]
+    fn a_grant_that_reaches_a_path_of_a_secret_source_is_refused() {
+        let fixture = Fixture::new();
+        let home = &fixture.home;
+        std::fs::write(home.join("vendor/sdk/config"), "").expect("a file of the source");
+        std::fs::write(home.join("tools/vault"), "").expect("a file of the source");
+        let paths = [
+            protected("op", "reads", "~/vendor/sdk"),
+            protected(
+                "aws-secretsmanager",
+                "deny",
+                &text(&home.join("tools/vault")),
+            ),
+        ];
+        let context = FilesystemContext {
+            source_paths: &paths,
+            ..fixture.context()
+        };
+        let sdk = home.join("vendor/sdk");
+        let mut cases = vec![
+            // The path, a file inside it, and a folder that holds it.
+            ("read", "~/vendor/sdk"),
+            ("write", "~/vendor/sdk"),
+            ("read_file", "~/vendor/sdk/config"),
+            ("write_file", "~/vendor/sdk/config"),
+            ("metadata", "~/vendor"),
+            ("exec", "~/vendor/sdk"),
+            ("read", "~/vendor"),
+        ];
+        if !cfg!(target_os = "linux") {
+            cases.push(("list", "~/vendor"));
+        }
+        for (list, authored) in cases {
+            assert_eq!(
+                fixture.refusal(&context, &format!("{list} = [{authored:?}]")),
+                source_refusal(authored, &sdk, "op", "reads", "~/vendor/sdk"),
+                "{list}"
+            );
+        }
+        // An absolute spelling of the grant, and an entry that names one file.
+        let absolute = text(&home.join("vendor/sdk/config"));
+        assert_eq!(
+            fixture.refusal(&context, &format!("read_file = [{absolute:?}]")),
+            source_refusal(&absolute, &sdk, "op", "reads", "~/vendor/sdk")
+        );
+        let vault = home.join("tools/vault");
+        for authored in ["~/tools/vault", "~/tools"] {
+            assert_eq!(
+                fixture.refusal(&context, &format!("read = [{authored:?}]")),
+                source_refusal(
+                    authored,
+                    &vault,
+                    "aws-secretsmanager",
+                    "deny",
+                    &text(&vault)
+                )
+            );
+        }
+
+        // A grant beside each path stays, and an operator's own `deny` of one is no grant.
+        let reach = fixture.reach(
+            &context,
+            "read = ['~/project', '~/tools/run', '~/scratch']\nwrite = ['~/scratch']\n\
+             deny = ['~/vendor/sdk']",
+        );
+        assert_eq!(reach.grants.len(), 4);
+        assert_eq!(
+            reach.refusals,
+            [
+                Refusal {
+                    path: sdk.clone(),
+                    scope: Scope::Root,
+                    judged: Some(identity(&sdk)),
+                },
+                Refusal {
+                    path: vault,
+                    scope: Scope::Root,
+                    judged: None,
+                },
+            ],
+            "the operator's own `deny` keeps its identity, and the other path is refused once"
+        );
+    }
+
+    /// **A `deny_write` entry authorizes nothing, so no path of a secret source refuses it**: the
+    /// `write` tree that must hold it is what the source refuses, and an entry beside a source
+    /// keeps its protection.
+    #[test]
+    fn a_deny_write_entry_is_judged_against_no_path_of_a_secret_source() {
+        let fixture = Fixture::new();
+        let home = &fixture.home;
+        std::fs::create_dir(home.join("scratch/deps")).expect("a protected directory");
+        let paths = [protected("op", "reads", "~/vendor/sdk")];
+        let context = FilesystemContext {
+            source_paths: &paths,
+            ..fixture.context()
+        };
+        let sdk = home.join("vendor/sdk");
+        // The entry is the path of the source, or holds it: the grant around it is refused.
+        for (tree, entry) in [
+            ("~/vendor/sdk", "~/vendor/sdk"),
+            ("~/vendor", "~/vendor/sdk"),
+            ("~/vendor", "~/vendor"),
+        ] {
+            assert_eq!(
+                fixture.refusal(
+                    &context,
+                    &format!("read = [{tree:?}]\nwrite = [{tree:?}]\ndeny_write = [{entry:?}]")
+                ),
+                source_refusal(tree, &sdk, "op", "reads", "~/vendor/sdk"),
+                "{tree} {entry}"
+            );
+        }
+        // With no grant around it, the entry gets its own refusal, not the refusal of the source.
+        let alone = fixture.refusal(
+            &context,
+            "read = ['~/project']\ndeny_write = ['~/vendor/sdk']",
+        );
+        assert!(
+            alone.contains("lies inside no `write` directory") && !alone.contains("secret source"),
+            "{alone}"
+        );
+        let reach = fixture.reach(
+            &context,
+            "read = ['~/scratch']\nwrite = ['~/scratch']\ndeny_write = ['~/scratch/deps']",
+        );
+        assert_eq!(reach.write_protections, [home.join("scratch/deps")]);
+        assert_eq!(
+            reach.refusals,
+            [Refusal {
+                path: sdk,
+                scope: Scope::Root,
+                judged: None,
+            }]
+        );
+    }
+
+    /// **Each process is refused each path of a secret source**, also a process with no list,
+    /// and no source means no refusal.
+    #[test]
+    fn each_process_is_refused_each_path_of_a_secret_source() {
+        let fixture = Fixture::new();
+        let home = &fixture.home;
+        // On Linux no sandbox denies a path that is not there, so there each path is a folder.
+        if cfg!(target_os = "linux") {
+            for folder in [".op", "scratch/later/socket"] {
+                std::fs::create_dir_all(home.join(folder)).expect("a path of the vault");
+            }
+        }
+        let paths = [
+            protected("op", "reads", "~/vendor/sdk"),
+            protected("op", "reads", "~/.op"),
+            protected("op", "deny", "~/scratch/later/socket"),
+        ];
+        let context = FilesystemContext {
+            source_paths: &paths,
+            ..fixture.context()
+        };
+        let refused = |path: &str| Refusal {
+            path: home.join(path),
+            scope: Scope::Root,
+            judged: None,
+        };
+        let expected = [
+            refused("vendor/sdk"),
+            refused(".op"),
+            refused("scratch/later/socket"),
+        ];
+        let reach = direct_grants(&Filesystem::default(), &context).expect("no list, no grant");
+        assert_eq!(reach.refusals, expected);
+        let reach = fixture.reach(&context, "read = ['~/project']");
+        assert_eq!(reach.refusals, expected);
+        assert!(
+            fixture
+                .reach(&fixture.context(), "read = ['~/project']")
+                .refusals
+                .is_empty(),
+            "a configuration with no source subtracts nothing"
+        );
+    }
+
+    /// **No grant reaches an absent path of a secret source, by its spelling**, and on Linux no
+    /// sandbox gets a refusal for it, because a mount needs a path that is there.
+    #[test]
+    fn a_grant_that_reaches_an_absent_path_of_a_secret_source_is_refused() {
+        let fixture = Fixture::new();
+        let home = &fixture.home;
+        let paths = [
+            protected("op", "reads", "~/.op"),
+            protected("op", "deny", "~/scratch/later/socket"),
+        ];
+        let context = FilesystemContext {
+            source_paths: &paths,
+            ..fixture.context()
+        };
+        assert_eq!(
+            fixture.refusal(&context, "read = ['~/.op']"),
+            source_refusal("~/.op", &home.join(".op"), "op", "reads", "~/.op"),
+            "the refusal names the source, not the absent path"
+        );
+        assert_eq!(
+            fixture.refusal(&context, "write = ['~/scratch']"),
+            source_refusal(
+                "~/scratch",
+                &home.join("scratch/later/socket"),
+                "op",
+                "deny",
+                "~/scratch/later/socket"
+            )
+        );
+        let refused = |path: &str| Refusal {
+            path: home.join(path),
+            scope: Scope::Root,
+            judged: None,
+        };
+        let both = [refused(".op"), refused("scratch/later/socket")];
+        let reach = fixture.reach(&context, "read = ['~/notes']");
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                reach.refusals,
+                [],
+                "no sandbox denies a path that is absent"
+            );
+            // A path that is there is denied beside one that is not.
+            std::fs::create_dir(home.join(".op")).expect("the folder of the vault");
+            let reach = fixture.reach(&context, "read = ['~/notes']");
+            assert_eq!(reach.refusals, [refused(".op")]);
+        } else {
+            assert_eq!(reach.refusals, both);
+        }
+    }
+
+    /// **A credential store that a secret source reads has no exact-name exception**, and the
+    /// refusal names the source where the floor would refuse first.
+    #[test]
+    fn a_credential_store_of_a_secret_source_is_refused_when_named_exactly() {
+        let fixture = Fixture::new();
+        let home = &fixture.home;
+        std::fs::create_dir_all(home.join(".aws")).expect("a credential store");
+        std::fs::write(home.join(".aws/credentials"), "").expect("a credential");
+        let paths = [protected("aws-secretsmanager", "reads", "~/.aws")];
+        let context = FilesystemContext {
+            source_paths: &paths,
+            ..fixture.context()
+        };
+        let aws = home.join(".aws");
+        for authored in ["~/.aws", "~/.aws/credentials", "~"] {
+            assert_eq!(
+                fixture.refusal(&context, &format!("read = [{authored:?}]")),
+                source_refusal(authored, &aws, "aws-secretsmanager", "reads", "~/.aws")
+            );
+        }
+        // Without the source, the store keeps its exception.
+        assert!(
+            fixture
+                .reach(&fixture.context(), "read = ['~/.aws']")
+                .grants[0]
+                .credential_store
+        );
+    }
+
+    /// **A path of a secret source is judged by the file that it names**: a grant that names the
+    /// folder behind a link in the entry is refused, and the refusal spells the path as written.
+    #[test]
+    fn a_grant_that_reaches_a_path_of_a_secret_source_through_a_link_is_refused() {
+        let fixture = Fixture::new();
+        let home = &fixture.home;
+        std::os::unix::fs::symlink(home.join("vendor"), home.join("linked")).expect("a link");
+        let paths = [protected("op", "reads", "~/linked/sdk")];
+        let context = FilesystemContext {
+            source_paths: &paths,
+            ..fixture.context()
+        };
+        for authored in ["~/vendor/sdk", "~/vendor"] {
+            assert_eq!(
+                fixture.refusal(&context, &format!("read = [{authored:?}]")),
+                source_refusal(
+                    authored,
+                    &home.join("linked/sdk"),
+                    "op",
+                    "reads",
+                    "~/linked/sdk"
+                )
+            );
+        }
+        // The process is refused the entry as written and the folder that it resolves to.
+        let refused = |path: &str| Refusal {
+            path: home.join(path),
+            scope: Scope::Root,
+            judged: None,
+        };
+        assert_eq!(
+            fixture.reach(&context, "read = ['~/notes']").refusals,
+            [refused("linked/sdk"), refused("vendor/sdk")]
+        );
+
+        // A link whose target is not there yet, as the last name and in the middle: the target
+        // is protected, because a file that appears there is opened by the path of the target.
+        std::fs::create_dir(home.join("group")).expect("the folder of the target");
+        std::os::unix::fs::symlink(home.join("group/t/agent.sock"), home.join("dangling"))
+            .expect("a link");
+        std::os::unix::fs::symlink("group/absent", home.join("gone")).expect("a link");
+        for (entry, written, target) in [
+            ("~/dangling", "dangling", "group/t/agent.sock"),
+            ("~/gone/socket", "gone/socket", "group/absent/socket"),
+        ] {
+            let paths = [protected("op", "deny", entry)];
+            let context = FilesystemContext {
+                source_paths: &paths,
+                ..fixture.context()
+            };
+            assert_eq!(
+                fixture.refusal(&context, "read = ['~/group']"),
+                source_refusal("~/group", &home.join(target), "op", "deny", entry)
+            );
+            // On Linux no sandbox denies an entry whose link names a target that is not there.
+            let refusals = fixture.reach(&context, "read = ['~/notes']").refusals;
+            if cfg!(target_os = "linux") {
+                assert_eq!(refusals, []);
+            } else {
+                assert_eq!(refusals, [refused(written), refused(target)]);
+            }
+        }
+
+        // A chain of two links: a write grant over the folder that holds the middle link could
+        // point it elsewhere, so it is refused; a read grant there reaches only the denied
+        // target. The middle link of the second chain names a target that is not there yet.
+        for folder in ["dotfiles", "keys/store"] {
+            std::fs::create_dir_all(home.join(folder)).expect("a folder");
+        }
+        std::os::unix::fs::symlink(home.join("keys/store"), home.join("dotfiles/hop"))
+            .expect("a link");
+        std::os::unix::fs::symlink(home.join("dotfiles/hop"), home.join("chain")).expect("a link");
+        std::os::unix::fs::symlink(home.join("keys/absent"), home.join("dotfiles/hop-absent"))
+            .expect("a link");
+        std::os::unix::fs::symlink(home.join("dotfiles/hop-absent"), home.join("chain-absent"))
+            .expect("a link");
+        for (entry, hop, target) in [
+            ("~/chain", "dotfiles/hop", "keys/store"),
+            ("~/chain-absent", "dotfiles/hop-absent", "keys/absent"),
+        ] {
+            let paths = [protected("op", "reads", entry)];
+            let context = FilesystemContext {
+                source_paths: &paths,
+                ..fixture.context()
+            };
+            assert_eq!(
+                fixture.refusal(&context, "read = ['~/dotfiles']\nwrite = ['~/dotfiles']"),
+                format!(
+                    "`[agent]` filesystem entry \"~/dotfiles\" is refused: this write grant can \
+                     change {}, a symbolic link on the way to {}, which the secret source `op` \
+                     keeps from each workload (its `reads` entry {entry:?}). Keep each write \
+                     grant outside the folders that hold a link on the way to a path that a \
+                     secret source names in `reads` and `deny`",
+                    home.join(hop).display(),
+                    home.join(target).display()
+                )
+            );
+            fixture.reach(&context, "read = ['~/dotfiles']");
+            assert_eq!(
+                fixture.refusal(&context, "read = ['~/keys']\nwrite = ['~/keys']"),
+                source_refusal("~/keys", &home.join(target), "op", "reads", entry)
+            );
+        }
+
+        // An entry whose links do not end names no place, so the box does not start.
+        std::os::unix::fs::symlink(home.join("loop-b"), home.join("loop-a")).expect("a link");
+        std::os::unix::fs::symlink(home.join("loop-a"), home.join("loop-b")).expect("a link");
+        let paths = [protected("op", "deny", "~/loop-a")];
+        let context = FilesystemContext {
+            source_paths: &paths,
+            ..fixture.context()
+        };
+        assert_eq!(
+            fixture.refusal(&context, "read = ['~/notes']"),
+            "invalid `[secret-source.op]` table: `deny` entry \"~/loop-a\" cannot be inspected: \
+             the path passes through too many symbolic links"
+        );
+
+        // Two paths that are absent have no file to compare, so each one is compared as it
+        // resolves: a link in the entry, and a link in the grant.
+        for (entry, authored) in [
+            ("~/linked/later", "~/vendor/later"),
+            ("~/vendor/later", "~/linked/later"),
+        ] {
+            let paths = [protected("op", "deny", entry)];
+            let context = FilesystemContext {
+                source_paths: &paths,
+                ..fixture.context()
+            };
+            assert_eq!(
+                fixture.refusal(&context, &format!("read = [{authored:?}]")),
+                source_refusal(authored, &home.join("vendor/later"), "op", "deny", entry)
+            );
+        }
     }
 
     /// **A project entry is granted and the directory holding this box's authority is subtracted**,

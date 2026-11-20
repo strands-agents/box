@@ -69,6 +69,7 @@ impl Fixture {
                 authority_directories: Vec::new(),
                 upstream_trust: Vec::new(),
                 program_search_directories: Vec::new(),
+                source_paths: &[],
             },
         )
         .unwrap()

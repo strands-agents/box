@@ -26,10 +26,6 @@ Use the deployment's normal Box environment and library dependencies.
 
 ## Run the checks
 
-On an x86-64 target, run `export EXPERIMENTAL_X86_SUPPORT=TRUE` in the shell that runs `target_validation.py`.
-Box requires this opt-in to start; the runner passes it unchanged.
-Keep it set for the restoration checks.
-
 ```sh
 python3 target_validation.py run \
   --box /absolute/package/strands-box \
