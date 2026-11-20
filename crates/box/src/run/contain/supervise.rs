@@ -1,5 +1,7 @@
 //! The contained child's OS lifetime: its process group and the terminal.
 
+#[cfg(unix)]
+use std::io::IsTerminal;
 use std::process::{ExitCode, ExitStatus, Stdio};
 use std::time::Duration;
 
@@ -22,39 +24,60 @@ async fn spawn_registered(
     configure_streams: impl FnOnce(&mut Command),
     own_terminal: bool,
     #[cfg(target_os = "linux")] relay_control: Option<&std::os::unix::net::UnixStream>,
-    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
-        crate::run::macos_enforcement::Registration,
-    >,
+    #[cfg(any(
+        all(target_os = "macos", feature = "native-filesystem-policy"),
+        all(target_os = "linux", feature = "native-filesystem-policy")
+    ))]
+    registration: Option<crate::run::native_enforcement::Registration>,
 ) -> Result<(ProcessGroup, Trampoline), BoxError> {
     #[cfg_attr(
-        not(all(target_os = "macos", feature = "native-filesystem-policy")),
+        not(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(target_os = "linux", feature = "native-filesystem-policy")
+        )),
         allow(unused_mut)
     )]
-    let (mut command, mut trampoline) = trampoline::command(trampoline::Launch {
-        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-        hold_for_registration: registration.is_some(),
-        config_path: boundary.containment_config(),
-        config_file: boundary.containment_config_file(),
-        config_sha256: boundary.containment_digest(),
-        target_environment: boundary.target_environment(),
-        executable: boundary.executable(),
-        arguments: boundary.arguments(),
-        argument_zero: boundary.argument_zero(),
-        working_directory: boundary.working_directory(),
-        image_name: &|digest| {
-            Ok(trampoline::ImageCache::new(
-                layout.trampoline_image(digest),
-                layout.open_trampoline_cache()?,
-            ))
+    let (mut command, mut trampoline) = trampoline::command(
+        trampoline::Launch {
+            #[cfg(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(target_os = "linux", feature = "native-filesystem-policy")
+            ))]
+            hold_for_registration: registration.is_some()
+                && (cfg!(target_os = "macos") || boundary.native_filesystem_policy()),
+            config_path: boundary.containment_config(),
+            config_file: boundary.containment_config_file(),
+            config_sha256: boundary.containment_digest(),
+            target_environment: boundary.target_environment(),
+            executable: boundary.executable(),
+            arguments: boundary.arguments(),
+            argument_zero: boundary.argument_zero(),
+            working_directory: boundary.working_directory(),
+            image_name: &|digest| {
+                Ok(trampoline::ImageCache::new(
+                    layout.trampoline_image(digest),
+                    layout.open_trampoline_cache()?,
+                ))
+            },
+            #[cfg(target_os = "linux")]
+            relay_control,
         },
-        #[cfg(target_os = "linux")]
-        relay_control,
-    })?;
+        boundary.installation(),
+    )?;
     configure_streams(&mut command);
-    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    #[cfg(any(
+        all(target_os = "macos", feature = "native-filesystem-policy"),
+        all(target_os = "linux", feature = "native-filesystem-policy")
+    ))]
     let gate = trampoline.take_launch_gate();
-    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-    if registration.is_some() != gate.is_some() {
+    #[cfg(any(
+        all(target_os = "macos", feature = "native-filesystem-policy"),
+        all(target_os = "linux", feature = "native-filesystem-policy")
+    ))]
+    if (registration.is_some()
+        && (cfg!(target_os = "macos") || boundary.native_filesystem_policy()))
+        != gate.is_some()
+    {
         return Err(SuperviseError::Control {
             reason: "native launch gate and registration disagree".into(),
         }
@@ -71,7 +94,10 @@ async fn spawn_registered(
             .map_err(|source| SuperviseError::Spawn { source })?;
     }
     #[cfg_attr(
-        not(all(target_os = "macos", feature = "native-filesystem-policy")),
+        not(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(target_os = "linux", feature = "native-filesystem-policy")
+        )),
         allow(unused_mut)
     )]
     let mut group = ProcessGroup::spawn_with_terminal(command, own_terminal).await?;
@@ -89,6 +115,19 @@ async fn spawn_registered(
             gate.release(|| registration.set_mode(pid, mediated))
         })
         .await;
+        let error = match result {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(reason) = error {
+            let _ = group.stop().await;
+            return Err(SuperviseError::Control { reason }.into());
+        }
+    }
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+    if let (Some(gate), Some(registration)) = (gate, registration) {
+        let result = tokio::task::spawn_blocking(move || gate.release_native(registration)).await;
         let error = match result {
             Ok(Ok(())) => None,
             Ok(Err(error)) => Some(error.to_string()),
@@ -398,10 +437,16 @@ pub(crate) struct Contained {
     #[cfg(target_os = "linux")]
     _relays: Vec<crate::run::netns_relay::NetnsRelay>,
 
+    /// The agent's ingress relays, one per `[[agent.ingress]]` entry, held for exactly the
+    /// workload's lifetime.
+    _ingress: Vec<ingress::Ingress>,
+
     /// This box's trusted half. It outlives the workload it decides for: dropping it unbinds the
     /// broker socket, joins the gateway's thread, withdraws the live record, and releases the box
     /// lock. [`Contained::wait`] also watches its broker, because a boundary that stopped serving
     hosted: crate::run::hosted::HostedBox,
+    #[cfg(unix)]
+    diagnostics: Option<crate::run::diagnostics::Diagnostics>,
 }
 
 impl Contained {
@@ -441,7 +486,9 @@ impl Contained {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let signals = Signals::listen()?;
+        let mut signals = Signals::listen()?;
+        // Tests share the host's process-wide signal handlers.
+        signals.restore_default = false;
         let group = ProcessGroup::spawn(command).await?;
 
         Ok(Self {
@@ -452,7 +499,9 @@ impl Contained {
             _boundary: boundary,
             #[cfg(target_os = "linux")]
             _relays: Vec::new(),
+            _ingress: Vec::new(),
             hosted,
+            diagnostics: None,
         })
     }
 
@@ -472,6 +521,31 @@ impl Contained {
         let (relay_box_side, relay_child_side) =
             crate::run::netns_relay::NetnsRelay::control_pair()?;
 
+        // Bound before the spawn, so a port that is in use refuses the run before the agent starts.
+        let mut ingress = Vec::with_capacity(boundary.ingress().len());
+        for &(address, workload_port) in boundary.ingress() {
+            #[cfg(target_os = "macos")]
+            refuse_a_held_workload_port(workload_port)?;
+            let listener = std::net::TcpListener::bind(address).map_err(|source| {
+                crate::error::SuperviseError::Control {
+                    reason: format!("binding the ingress {address}: {source}"),
+                }
+            })?;
+            ingress.push((listener, address, workload_port));
+        }
+        // The callers the relays hold at once, split evenly across the listeners.
+        let limit = if ingress.is_empty() {
+            0
+        } else {
+            (ingress_connection_limit() / ingress.len()).max(1)
+        };
+        for (_, address, workload_port) in &ingress {
+            eprintln!(
+                "strands-box: [ingress] {address} is relayed to the agent's port \
+                 {workload_port}, at most {limit} callers at once"
+            );
+        }
+
         let own_terminal = terminal.is_some();
         let mut signals = match signals {
             Some(signals) => signals,
@@ -480,6 +554,25 @@ impl Contained {
         if own_terminal {
             signals.restore_default = false;
         }
+        #[cfg(unix)]
+        let diagnostics = if own_terminal || std::io::stderr().is_terminal() {
+            Some(
+                crate::run::diagnostics::Diagnostics::capture()
+                    .map_err(|source| SuperviseError::Diagnostics { source })?,
+            )
+        } else {
+            None
+        };
+        let stderr = Stdio::inherit();
+        #[cfg(unix)]
+        let stderr = match &diagnostics {
+            Some(diagnostics) => Stdio::from(
+                diagnostics
+                    .stderr()
+                    .map_err(|source| SuperviseError::Diagnostics { source })?,
+            ),
+            None => stderr,
+        };
         let (stdin, stdout, stderr) = match terminal {
             Some(file) => {
                 let input = file
@@ -490,7 +583,7 @@ impl Contained {
                     .map_err(|source| SuperviseError::Spawn { source })?;
                 (Stdio::from(input), Stdio::from(output), Stdio::from(file))
             }
-            None => (stdio(), stdio(), Stdio::inherit()),
+            None => (stdio(), stdio(), stderr),
         };
         let (mut group, trampoline) = spawn_registered(
             &boundary,
@@ -501,7 +594,10 @@ impl Contained {
             own_terminal,
             #[cfg(target_os = "linux")]
             Some(&relay_child_side),
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            #[cfg(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(target_os = "linux", feature = "native-filesystem-policy")
+            ))]
             hosted.native_registration(),
         )
         .await?;
@@ -520,14 +616,36 @@ impl Contained {
         // Start the relay only after the child is spawned. `NetnsRelay::start_each` blocks until
         // the descriptor arrives, and the descriptor comes *from* the trampoline.
         #[cfg(target_os = "linux")]
-        let relays = {
+        let (relays, ingress) = {
             drop(relay_child_side);
-            // **The same list the containment config was built from**, gateway first.
-            match crate::run::netns_relay::NetnsRelay::start_each(
-                relay_box_side,
+            // **The same list the containment config was built from**, gateway first. The ingress
+            // relay takes the control socket after the last egress listener has arrived on it.
+            let started = crate::run::netns_relay::NetnsRelay::start_each(
+                &relay_box_side,
                 boundary.served_ports(),
-            ) {
-                Ok(relays) => relays,
+            )
+            .and_then(|relays| {
+                if ingress.is_empty() {
+                    return Ok((relays, Vec::new()));
+                }
+                let ports: Vec<u16> = ingress.iter().map(|(_, _, port)| *port).collect();
+                let workloads = ingress::Workload::in_namespace_ports(relay_box_side, &ports)
+                    .map_err(crate::error::RelayError::from)?;
+                let started = ingress
+                    .into_iter()
+                    .zip(workloads)
+                    .map(|((listener, _, _), workload)| {
+                        ingress::Ingress::start(
+                            ingress::IngressConfig::new(ingress::Source::tcp(listener), workload)
+                                .connection_limit(limit),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(crate::error::RelayError::from)?;
+                Ok((relays, started))
+            });
+            match started {
+                Ok(started) => started,
                 Err(error) => {
                     // No route out means every model request would fail. Tear the
                     // child down rather than run a workload that cannot work.
@@ -540,6 +658,34 @@ impl Contained {
             }
         };
 
+        // On macOS the agent listens on the host's loopback, so each relay connects to it directly.
+        #[cfg(target_os = "macos")]
+        let ingress = match ingress
+            .into_iter()
+            .map(|(listener, _, port)| {
+                ingress::Ingress::start(
+                    ingress::IngressConfig::new(
+                        ingress::Source::tcp(listener),
+                        ingress::Workload::loopback(port),
+                    )
+                    .connection_limit(limit),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(started) => started,
+            Err(error) => {
+                let _ = group.stop().await;
+                if let Some(mut terminal) = terminal {
+                    let _ = terminal.restore();
+                }
+                return Err(crate::error::SuperviseError::Control {
+                    reason: format!("starting the ingress relay: {error}"),
+                }
+                .into());
+            }
+        };
+
         Ok(Self {
             group,
             signals,
@@ -548,7 +694,10 @@ impl Contained {
             _boundary: boundary,
             #[cfg(target_os = "linux")]
             _relays: relays,
+            _ingress: ingress,
             hosted,
+            #[cfg(unix)]
+            diagnostics,
         })
     }
 
@@ -575,35 +724,41 @@ impl Contained {
             let _ = self.group.stop().await;
         }
         let termination_result = self.group.release().await;
-        let native_result = self.hosted.stop_native();
         // A piped run never claimed the terminal, so there is nothing to give back.
         let terminal_result = match self.terminal.as_mut() {
             Some(terminal) => terminal.restore(),
             None => Ok(()),
         };
+        let _shutdown_signals = self.signals.arm_shutdown();
+        let shutdown_result = self.hosted.shutdown();
         let setup_result = self.trampoline.setup_failure();
+        #[cfg(unix)]
+        let diagnostics_result = match self.diagnostics.as_mut() {
+            Some(diagnostics) => {
+                drop(self.hosted);
+                diagnostics
+                    .finish()
+                    .map_err(|source| SuperviseError::Diagnostics { source })
+            }
+            None => Ok(()),
+        };
 
         // The drain moved to `command::run::execute`, which is the one point every exit reaches —
         // including the failures before a `HostedBox` exists. A run that ends in an error still
         // keeps its records, because this collector outlives the `?`-returns below.
 
-        let status = match completion {
-            Completion::Workload(result) => result?,
-            Completion::Hosted(failure) => return Err(failure),
-        };
-        termination_result?;
-        native_result?;
-        terminal_result?;
-        // A setup failure outranks the status: `exit 3` from a refused apply is
-        // the trampoline's, not the workload's.
-        if let Some(stage) = setup_result? {
-            return Err(TrampolineError::SetupFailed {
-                stage,
-                detail: None,
-            }
-            .into());
-        }
-        Ok(exit_code(status))
+        let outcome = (|| {
+            let status = match completion {
+                Completion::Workload(result) => result?,
+                Completion::Hosted(failure) => return Err(failure),
+            };
+            termination_result?;
+            terminal_result?;
+            #[cfg(unix)]
+            diagnostics_result?;
+            contained_exit_code(status, setup_result)
+        })();
+        crate::run::hosted::with_shutdown(outcome, shutdown_result)
     }
 }
 
@@ -646,9 +801,11 @@ impl LeafBox {
         stdin: Stdio,
         stdout: Stdio,
         stderr: Stdio,
-        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
-            crate::run::macos_enforcement::Registration,
-        >,
+        #[cfg(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(target_os = "linux", feature = "native-filesystem-policy")
+        ))]
+        registration: Option<crate::run::native_enforcement::Registration>,
     ) -> Result<LaunchedLeaf, BoxError> {
         // The relay's control socket must exist before the trampoline is spawned, because the
         // trampoline sends its listening descriptor over it during containment setup.
@@ -666,7 +823,10 @@ impl LeafBox {
             false,
             #[cfg(target_os = "linux")]
             Some(&relay_child_side),
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            #[cfg(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(target_os = "linux", feature = "native-filesystem-policy")
+            ))]
             registration,
         )
         .await?;
@@ -677,7 +837,7 @@ impl LeafBox {
         let relays = {
             drop(relay_child_side);
             match crate::run::netns_relay::NetnsRelay::start_each(
-                relay_box_side,
+                &relay_box_side,
                 boundary.served_ports(),
             ) {
                 Ok(relays) => relays,
@@ -716,9 +876,11 @@ impl LeafBox {
     pub(crate) async fn run(
         boundary: Boundary,
         layout: &BoxRoot,
-        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
-            crate::run::macos_enforcement::Registration,
-        >,
+        #[cfg(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(target_os = "linux", feature = "native-filesystem-policy")
+        ))]
+        registration: Option<crate::run::native_enforcement::Registration>,
     ) -> Result<CapturedLeaf, BoxError> {
         // Captured, so the bytes come back to the Shell and leave through its own streams. stdin is
         // null: a leaf binary reads no stdin, and one that blocked would hold the Call to its deadline.
@@ -733,7 +895,10 @@ impl LeafBox {
             Stdio::null(),
             Stdio::piped(),
             Stdio::piped(),
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            #[cfg(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(target_os = "linux", feature = "native-filesystem-policy")
+            ))]
             registration,
         )
         .await?;
@@ -763,18 +928,15 @@ impl LeafBox {
         })
     }
 
-    /// Spawn a host binary in a leaf box with long-lived piped stdin and stdout, for a streaming
-    /// session — a contained stdio MCP server, which speaks JSON-RPC over those pipes for its whole
-    /// lifetime rather than running to completion. Containment is confirmed to have reached `exec`
-    /// (via the trampoline's status pipe) BEFORE the live streams are handed back, so a containment
-    /// setup failure surfaces as [`TrampolineError::SetupFailed`] here and is never mistaken for a
-    /// broken MCP protocol later.
+    /// Return live streams after setup completes without a reported executable launch failure.
     pub(crate) async fn spawn_streaming(
         boundary: Boundary,
         layout: &BoxRoot,
-        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
-            crate::run::macos_enforcement::Registration,
-        >,
+        #[cfg(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(target_os = "linux", feature = "native-filesystem-policy")
+        ))]
+        registration: Option<crate::run::native_enforcement::Registration>,
     ) -> Result<StreamingLeaf, BoxError> {
         // stderr is piped, not nulled: a containment setup failure must carry the trampoline's own
         // message as `detail`, the same reason the buffered `run` path reports. On success the
@@ -792,7 +954,10 @@ impl LeafBox {
             Stdio::piped(),
             Stdio::piped(),
             Stdio::piped(),
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            #[cfg(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(target_os = "linux", feature = "native-filesystem-policy")
+            ))]
             registration,
         )
         .await?;
@@ -802,11 +967,7 @@ impl LeafBox {
         let stdout = group.child_mut().stdout.take();
         let mut stderr = group.child_mut().stderr.take();
 
-        // Confirm containment reached `exec`. `setup_failure` reads one status byte: `0` or EOF is
-        // success — the reaper writes `0` once the mount view is up, and macOS and the buffered path
-        // signal by EOF at exec — and any other byte names the failure stage. It blocks on the pipe,
-        // so it runs on a blocking task, not the async runtime. The trampoline is dropped there: its
-        // job ends once exec is confirmed; the boundary and relays are what the running server retains.
+        // The reader waits for completed preparation and channel closure, or a reported failure.
         let setup = tokio::task::spawn_blocking(move || {
             let mut trampoline = trampoline;
             trampoline.close_setup_writer();
@@ -832,9 +993,7 @@ impl LeafBox {
             return Err(TrampolineError::SetupFailed { stage, detail }.into());
         }
 
-        // Containment reached `exec`: the workload owns stderr now. Drain it to nowhere for the
-        // server's life so a chatty server never blocks on a full pipe. The task ends on its own when
-        // the child exits — `kill_on_drop` closes the pipe, so the copy reaches EOF and returns.
+        // Drain stderr so a running server cannot block on a full pipe.
         if let Some(mut stderr) = stderr {
             tokio::spawn(async move {
                 let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
@@ -909,23 +1068,47 @@ impl StreamingLeaf {
     }
 }
 
-/// The trampoline's own last line on a captured stderr, without its prefix.
+/// The trampoline's setup diagnostic, including continuation lines.
 fn trampoline_message(stderr: &[u8]) -> Option<String> {
     const PREFIX: &str = "strands-box-contain-trampoline: ";
-    const MAXIMUM_BYTES: usize = 2048;
+    // Containment's MissingReads caps its reason at 6000 bytes, leaving room for error framing.
+    const MAXIMUM_CHARACTERS: usize = 8192;
     let text = String::from_utf8_lossy(stderr);
-    let lines: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
-    let line = lines
-        .iter()
-        .rev()
-        .find(|line| line.starts_with(PREFIX))
-        .map(|line| &line[PREFIX.len()..])
-        .or_else(|| lines.last().copied())?;
-    Some(line.chars().take(MAXIMUM_BYTES).collect())
+    let start = text
+        .match_indices(PREFIX)
+        .filter(|(offset, _)| *offset == 0 || text.as_bytes()[offset - 1] == b'\n')
+        .last()
+        .map(|(offset, _)| offset + PREFIX.len());
+    let message = match start {
+        Some(start) => text[start..].trim(),
+        None => text
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())?
+            .trim(),
+    };
+    Some(message.chars().take(MAXIMUM_CHARACTERS).collect())
+}
+
+pub(super) fn contained_exit_code(
+    status: ExitStatus,
+    setup: Result<Option<crate::error::SetupStage>, TrampolineError>,
+) -> Result<ExitCode, BoxError> {
+    match setup {
+        #[cfg(unix)]
+        Err(TrampolineError::SetupIncomplete)
+            if std::os::unix::process::ExitStatusExt::signal(&status).is_some() => {}
+        result => {
+            if let Some(stage) = result? {
+                return Err(TrampolineError::SetupFailed {
+                    stage,
+                    detail: None,
+                }
+                .into());
+            }
+        }
+    }
+    Ok(exit_code(status))
 }
 
 /// A process's exit code, or `128 + signal` when it died from one.
@@ -981,6 +1164,35 @@ impl Signals {
         }
     }
 
+    /// Temporarily arm forced interruption for a run that owns its termination signals.
+    fn arm_shutdown(&self) -> ShutdownSignals {
+        let mut guard = ShutdownSignals::default();
+        #[cfg(unix)]
+        if self.restore_default {
+            let signals = [
+                Some(libc::SIGINT),
+                Some(libc::SIGTERM),
+                self.hangup.as_ref().map(|_| libc::SIGHUP),
+            ];
+            for signal in signals.into_iter().flatten() {
+                // SAFETY: zeroed storage is a valid action with no flags.
+                let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+                action.sa_sigaction = libc::SIG_DFL;
+                // SAFETY: action owns initialized storage for the signal mask.
+                unsafe { libc::sigemptyset(&mut action.sa_mask) };
+                let mut previous = std::mem::MaybeUninit::uninit();
+                // SAFETY: a valid signal and action atomically replace and save the old disposition.
+                if unsafe { libc::sigaction(signal, &action, previous.as_mut_ptr()) } == 0 {
+                    // SAFETY: a successful sigaction initialized the complete previous action.
+                    guard
+                        .previous
+                        .push((signal, unsafe { previous.assume_init() }));
+                }
+            }
+        }
+        guard
+    }
+
     /// Wait for the leader, forwarding `SIGINT` to its group and stopping the group on `SIGTERM`
     /// or `SIGHUP`.
     async fn wait_forwarding(&mut self, group: &mut ProcessGroup) -> Result<ExitStatus, BoxError> {
@@ -1023,6 +1235,23 @@ fn is_ignored(signal: libc::c_int) -> bool {
         let mut current: libc::sigaction = std::mem::zeroed();
         libc::sigaction(signal, std::ptr::null(), &mut current) == 0
             && current.sa_sigaction == libc::SIG_IGN
+    }
+}
+
+/// The termination signal actions to restore when hosted cleanup finishes or unwinds.
+#[derive(Default)]
+struct ShutdownSignals {
+    #[cfg(unix)]
+    previous: Vec<(libc::c_int, libc::sigaction)>,
+}
+
+impl Drop for ShutdownSignals {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        for (signal, action) in &self.previous {
+            // SAFETY: each complete action was saved for this signal before cleanup began.
+            unsafe { libc::sigaction(*signal, action, std::ptr::null_mut()) };
+        }
     }
 }
 
@@ -1070,12 +1299,60 @@ fn exit_code(status: ExitStatus) -> ExitCode {
     ExitCode::from(value)
 }
 
+/// The callers the ingress relay holds at once: an eighth of this process's raised descriptor limit,
+/// so each caller's relay and egress descriptors leave the rest of the box room.
+fn ingress_connection_limit() -> usize {
+    let Some(limit) = crate::run::descriptor_limit::raise() else {
+        return INGRESS_CONNECTION_FLOOR;
+    };
+    connection_limit_for(limit)
+}
+
+fn connection_limit_for(descriptor_limit: u64) -> usize {
+    usize::try_from(descriptor_limit / 8)
+        .unwrap_or(INGRESS_CONNECTION_CEILING)
+        .clamp(INGRESS_CONNECTION_FLOOR, INGRESS_CONNECTION_CEILING)
+}
+
+/// The fewest callers the ingress relay holds at once, however low the descriptor limit.
+const INGRESS_CONNECTION_FLOOR: usize = 16;
+/// The most callers the ingress relay holds at once, however high the descriptor limit.
+const INGRESS_CONNECTION_CEILING: usize = 10_000;
+
+/// Refuse the run when another process already listens on the agent's port: on macOS the port is on
+/// the host's loopback, so the relay would carry callers to that process.
+#[cfg(target_os = "macos")]
+fn refuse_a_held_workload_port(port: u16) -> Result<(), BoxError> {
+    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    if std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(200)).is_ok()
+    {
+        return Err(crate::error::SuperviseError::Control {
+            reason: format!(
+                "the agent's port {port} already has a listener at {address}; another process \
+                 holds it, so the ingress relay would reach that process and not the agent"
+            ),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::SetupStage;
     use crate::test_support::{HELD_GROUP, SIGNALS, processes_exit, wait_for_pids};
     use std::os::unix::process::ExitStatusExt as _;
+
+    /// **The relay holds an eighth of the descriptor limit in callers**, within its floor and
+    /// ceiling.
+    #[test]
+    fn the_ingress_connection_limit_is_an_eighth_of_the_descriptor_limit() {
+        assert_eq!(connection_limit_for(1_024), 128);
+        assert_eq!(connection_limit_for(10_240), 1_280);
+        assert_eq!(connection_limit_for(64), INGRESS_CONNECTION_FLOOR);
+        assert_eq!(connection_limit_for(1_048_576), INGRESS_CONNECTION_CEILING);
+    }
 
     /// **A leaf setup failure carries the trampoline's message**, which names the binary and the
     /// library the view could not resolve, rather than the stage alone.
@@ -1103,6 +1380,40 @@ mod tests {
     }
 
     #[test]
+    fn a_startup_failure_preserves_grouped_reads_and_additive_guidance() {
+        let stderr = b"earlier log\nstrands-box-contain-trampoline: containment apply failed: 2 dependencies lack read access\nDependency: /vendor/codec\nDependency: /vendor/storage\nKeep existing filesystem entries. Append these paths to read_file\nNo configuration files changed.\n";
+        let detail = trampoline_message(stderr).unwrap();
+        for required in [
+            "/vendor/codec",
+            "/vendor/storage",
+            "Keep existing",
+            "read_file",
+            "No configuration files changed.",
+        ] {
+            assert!(detail.contains(required), "{detail}");
+        }
+        assert!(!detail.contains("earlier log"));
+    }
+
+    #[test]
+    fn a_maximum_missing_read_reason_keeps_its_final_guidance() {
+        // This fixture reaches MissingReads::require_complete's 6000-byte reason limit.
+        let mut reason = "2 dependencies lack read access\nDependency: /vendor/界\nDependency: /vendor/storage\nRequested by: /project/".to_owned();
+        let guidance = "\nKeep existing filesystem entries. Append these paths to read_file\nNo configuration files changed.";
+        reason.push_str(&"x".repeat(6000 - reason.len() - guidance.len()));
+        reason.push_str(guidance);
+        let error = containment::ContainmentError::ApplyFailed {
+            backend: "seatbelt".to_owned(),
+            reason,
+        };
+        let expected = format!("containment apply failed: {error}");
+        let stderr = format!("earlier log\nstrands-box-contain-trampoline: {expected}\n");
+        let detail = trampoline_message(stderr.as_bytes()).unwrap();
+        assert_eq!(detail, expected);
+        assert!(detail.ends_with("No configuration files changed."));
+    }
+
+    #[test]
     fn a_normal_exit_reports_its_own_code() {
         assert_eq!(
             format!("{:?}", exit_code(ExitStatus::from_raw(7 << 8))),
@@ -1117,6 +1428,42 @@ mod tests {
         assert_eq!(
             format!("{:?}", exit_code(ExitStatus::from_raw(libc::SIGINT))),
             format!("{:?}", ExitCode::from(128 + libc::SIGINT as u8))
+        );
+    }
+
+    #[test]
+    fn incomplete_agent_setup_preserves_signal_exit_codes() {
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGKILL] {
+            let status = ExitStatus::from_raw(signal);
+            let result = contained_exit_code(status, Err(TrampolineError::SetupIncomplete));
+            assert_eq!(
+                format!("{:?}", result.unwrap()),
+                format!("{:?}", exit_code(status))
+            );
+        }
+        for code in [0, 1, 127] {
+            assert!(
+                contained_exit_code(
+                    ExitStatus::from_raw(code << 8),
+                    Err(TrampolineError::SetupIncomplete),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn an_agent_signal_does_not_hide_reported_or_malformed_setup() {
+        let status = ExitStatus::from_raw(libc::SIGTERM);
+        assert!(contained_exit_code(status, Ok(Some(SetupStage::Apply))).is_err());
+        assert!(
+            contained_exit_code(
+                status,
+                Err(TrampolineError::StatusProtocol {
+                    reason: "unknown marker".into(),
+                })
+            )
+            .is_err()
         );
     }
 
@@ -1218,6 +1565,112 @@ mod tests {
             signals.hangup.is_none(),
             "an ignored SIGHUP gets no listener"
         );
+    }
+
+    #[tokio::test]
+    async fn teardown_respects_signal_ownership_and_ignored_hangup() {
+        const CHILD: &str = "STRANDS_BOX_TEST_TEARDOWN_SIGNALS";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "run::contain::supervise::tests::teardown_respects_signal_ownership_and_ignored_hangup",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .expect("run the signal-disposition control in a subprocess");
+            assert!(output.status.success(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("teardown signal controls completed"),
+                "the subprocess must execute the control: {output:?}"
+            );
+            return;
+        }
+        let _signals = SIGNALS.lock().await;
+        let read_action = |signal| {
+            // SAFETY: initialized storage and a null action only read the signal disposition.
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::sigaction(signal, std::ptr::null(), &mut action) },
+                0
+            );
+            action
+        };
+        let assert_action = |actual: &libc::sigaction, expected: &libc::sigaction| {
+            assert_eq!(actual.sa_sigaction, expected.sa_sigaction);
+            assert_eq!(actual.sa_flags, expected.sa_flags);
+            for signal in [
+                libc::SIGINT,
+                libc::SIGTERM,
+                libc::SIGHUP,
+                libc::SIGUSR1,
+                libc::SIGUSR2,
+            ] {
+                // SAFETY: both masks came from successful sigaction calls.
+                assert_eq!(
+                    unsafe { libc::sigismember(&actual.sa_mask, signal) },
+                    unsafe { libc::sigismember(&expected.sa_mask, signal) }
+                );
+            }
+        };
+        for (restore_default, has_hangup) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let mut signals = Signals::listen().unwrap();
+            signals.restore_default = restore_default;
+            signals.hangup = has_hangup.then(|| {
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).unwrap()
+            });
+            let watched = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+            let previous = watched.map(read_action);
+            for signal in watched {
+                // SAFETY: initialized action storage is filled before installing it for a valid signal.
+                let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+                action.sa_sigaction = libc::SIG_IGN;
+                action.sa_flags = libc::SA_RESTART;
+                unsafe {
+                    assert_eq!(libc::sigemptyset(&mut action.sa_mask), 0);
+                    assert_eq!(libc::sigaddset(&mut action.sa_mask, libc::SIGUSR1), 0);
+                    assert_eq!(libc::sigaddset(&mut action.sa_mask, libc::SIGUSR2), 0);
+                    assert_eq!(libc::sigaction(signal, &action, std::ptr::null_mut()), 0);
+                }
+            }
+            let expected = watched.map(read_action);
+            let observed = {
+                let _shutdown_signals = signals.arm_shutdown();
+                watched.map(read_action)
+            };
+            let restored = watched.map(read_action);
+            let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _shutdown_signals = signals.arm_shutdown();
+                std::panic::resume_unwind(Box::new(()));
+            }));
+            let restored_after_unwind = watched.map(read_action);
+            for (signal, action) in watched.into_iter().zip(&previous) {
+                // SAFETY: restore the action saved for this signal in the isolated subprocess.
+                assert_eq!(
+                    unsafe { libc::sigaction(signal, action, std::ptr::null_mut()) },
+                    0
+                );
+            }
+            assert!(unwound.is_err());
+            for (index, signal) in watched.into_iter().enumerate() {
+                let armed = restore_default && (signal != libc::SIGHUP || has_hangup);
+                assert_eq!(
+                    observed[index].sa_sigaction,
+                    if armed { libc::SIG_DFL } else { libc::SIG_IGN },
+                    "signal={signal}, restore_default={restore_default}, has_hangup={has_hangup}"
+                );
+                if !armed {
+                    assert_action(&observed[index], &expected[index]);
+                }
+                assert_action(&restored[index], &expected[index]);
+                assert_action(&restored_after_unwind[index], &expected[index]);
+            }
+        }
+        println!("teardown signal controls completed");
     }
 
     #[tokio::test]

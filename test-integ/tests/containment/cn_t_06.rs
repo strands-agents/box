@@ -10,7 +10,7 @@ det_case! {
     id:   "CN-T-06",
     desc: "A tool leaf's environment holds its [tool.x.env] TOOL_V, and not the agent's [agent.env] AGENT_V nor a host variable set on strands-box run; the agent sees AGENT_V",
     run: |b| {
-        let probe = b.compile_probe("leafprobe-t06", PROBE);
+        let probe = b.install_tool(&b.compile_probe("leafprobe-t06", PROBE));
         let quoted = |p: &std::path::Path| serde_json::to_string(&p.to_string_lossy()).unwrap();
         let host_secret = format!("DET_HOST_SECRET_T06_{}", std::process::id());
         let agent_value = "DET_AGENT_VALUE_T06";

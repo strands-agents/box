@@ -182,8 +182,8 @@ wl_resolve_paths() {
     WL_NODE="$(wl_canon "$(wl_first /usr/bin/node-20 /usr/bin/node || echo /usr/bin/node)")"
     WL_NODE_TREE="$(wl_first /usr/lib/nodejs20 /usr/lib/nodejs || echo /usr/lib/nodejs20)"
     WL_NPM_CLI="$WL_NODE_TREE/lib/node_modules/npm/bin/npm-cli.js"
-    # F29/F64: the box refuses a memory permission change that adds execution and
-    # NODE_OPTIONS is a refused name, so V8 needs the flag in `command` itself.
+    # F29/F64: the box refuses a memory permission change that adds execution, so
+    # V8 needs --jitless, and the suite puts it in `command` itself.
     WL_NODE_JITLESS="--jitless"
     WL_SCRIPT_SHELL="$WL_BASH"
   fi

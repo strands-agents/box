@@ -1,0 +1,235 @@
+use super::*;
+
+async fn discover_script(script: &str, log: &Path) -> io::Result<Value> {
+    let server = McpServer {
+        argument_wildcards: false,
+        name: "modern".to_string(),
+        command: vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            script.to_string(),
+            "modern-mcp".to_string(),
+            log.to_string_lossy().into_owned(),
+        ],
+    };
+    list_tools(&server, Path::new("/tmp"), Path::new("/tmp")).await
+}
+
+#[tokio::test]
+async fn offline_modern_discovery_collects_every_page_without_initialize() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let tools = discover_script(
+        r#"while IFS= read -r frame; do
+printf '%s\n' "$frame" >> "$1"
+case "$frame" in
+  *'"method":"server/discover"'*) printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":0,"cacheScope":"private"}}' ;;
+  *'"cursor":"next"'*) printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"resultType":"complete","tools":[{"name":"second","inputSchema":{"type":"object"}}],"ttlMs":0,"cacheScope":"private"}}' ;;
+  *'"method":"tools/list"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","tools":[{"name":"first","inputSchema":{"type":"object"}}],"nextCursor":"next","ttlMs":0,"cacheScope":"private"}}' ;;
+esac
+done"#,
+        log.path(),
+    ).await.expect("modern schema discovery");
+    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 2);
+    let frames: Vec<Value> = std::fs::read_to_string(log.path())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frames[0]["method"], "server/discover");
+    assert!(frames.iter().all(
+        |frame| frame["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] == "2026-07-28"
+    ));
+    assert!(!frames.iter().any(|frame| frame["method"] == "initialize"));
+}
+
+#[tokio::test]
+async fn offline_modern_version_errors_do_not_fall_back_to_initialize() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let error = discover_script(
+        r#"while IFS= read -r frame; do
+printf '%s\n' "$frame" >> "$1"
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"error":{"code":-32022,"message":"Unsupported protocol version","data":{"supported":["2099-01-01"],"requested":"2026-07-28"}}}'
+done"#,
+        log.path(),
+    ).await.expect_err("unsupported modern version");
+    assert!(error.to_string().contains("modern discovery"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(log.path()).unwrap().lines().count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn offline_probe_timeout_preserves_legacy_fallback() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let tools = discover_script(
+        r#"while IFS= read -r frame; do
+printf '%s\n' "$frame" >> "$1"
+case "$frame" in
+  *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"legacy","version":"1"}}}' ;;
+  *'"method":"tools/list"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}' ;;
+esac
+done"#,
+        log.path(),
+    ).await.expect("legacy discovery after a silent probe");
+    assert_eq!(tools["result"]["tools"], json!([]));
+    let frames: Vec<Value> = std::fs::read_to_string(log.path())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(frames[0]["method"], "server/discover");
+    assert_eq!(frames[1]["method"], "initialize");
+    assert_eq!(frames[2]["method"], "notifications/initialized");
+}
+
+#[tokio::test]
+async fn a_partial_probe_response_cannot_become_a_legacy_frame() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let error = discover_script(
+        r#"IFS= read -r frame
+printf '%s\n' "$frame" >> "$1"
+printf '{"jsonrpc":"2.0",'
+while IFS= read -r frame; do printf '%s\n' "$frame" >> "$1"; done"#,
+        log.path(),
+    )
+    .await
+    .expect_err("partial frame");
+    assert!(
+        error.to_string().contains("within a response frame"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(log.path()).unwrap().lines().count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn offline_discovery_restarts_a_legacy_server_that_exits_on_the_probe() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let tools = discover_script(
+        r#"while IFS= read -r frame; do
+printf '%s\n' "$frame" >> "$1"
+case "$frame" in
+  *'"method":"server/discover"'*) exit 1 ;;
+  *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"legacy","version":"1"}}}' ;;
+  *'"method":"tools/list"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}' ;;
+esac
+done"#,
+        log.path(),
+    ).await.expect("fresh legacy handshake");
+    assert_eq!(tools["result"]["tools"], json!([]));
+    let frames: Vec<Value> = std::fs::read_to_string(log.path())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        frames
+            .iter()
+            .map(|frame| frame["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "server/discover",
+            "initialize",
+            "notifications/initialized",
+            "tools/list"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn offline_discovery_does_not_restart_a_partial_probe_response() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let error = discover_script(
+        r#"IFS= read -r frame
+printf '%s\n' "$frame" >> "$1"
+printf '{"jsonrpc":"2.0",'
+exit 1"#,
+        log.path(),
+    )
+    .await
+    .expect_err("partial response must fail");
+    assert!(
+        error.to_string().contains("within a response frame"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(log.path()).unwrap().lines().count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn discovery_lifecycle_accepts_a_slow_modern_only_server() {
+    for reversed in [false, true] {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let mut script = r#"printf '{"pid":%s}\n' "$$" >> "$1"
+sleep 3
+while IFS= read -r frame; do
+printf '%s\n' "$frame" >> "$1"
+case "$frame" in
+  *'"method":"server/discover"'*) printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":0,"cacheScope":"private"}}' ;;
+  *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"modern only"}}'; exit 1 ;;
+  *'"method":"tools/list"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","tools":[],"ttlMs":0,"cacheScope":"private"}}' ;;
+esac
+done"#.to_string();
+        if reversed {
+            script = script
+                .replace("sleep 3\n", "")
+                .replace(
+                    "*'\"method\":\"server/discover\"'*) printf",
+                    "*'\"method\":\"server/discover\"'*) (sleep 3; printf",
+                )
+                .replacen(
+                    "\"cacheScope\":\"private\"}}' ;;",
+                    "\"cacheScope\":\"private\"}}') & ;;",
+                    1,
+                );
+            script = script.replace("; exit 1 ;;", " ;;");
+        }
+        let tools = discover_script(&script, log.path())
+            .await
+            .expect("late discovery selects modern requests");
+        assert_eq!(tools["result"]["tools"], json!([]));
+        let frames: Vec<Value> = std::fs::read_to_string(log.path())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let starts: Vec<_> = frames
+            .iter()
+            .filter_map(|frame| frame["pid"].as_u64())
+            .collect();
+        assert_eq!(
+            starts.len(),
+            2,
+            "discovery restarts exactly once: {frames:?}"
+        );
+        assert_ne!(starts[0], starts[1]);
+        let requests: Vec<_> = frames
+            .iter()
+            .filter(|frame| frame.get("method").is_some())
+            .collect();
+        assert_eq!(requests[0]["method"], "server/discover");
+        if reversed {
+            assert_eq!(requests[1]["method"], "initialize");
+        }
+        let replacement = frames
+            .iter()
+            .position(|frame| frame["pid"] == starts[1])
+            .unwrap();
+        assert_eq!(
+            frames.len(),
+            replacement + 2,
+            "fresh process receives only tools/list"
+        );
+        assert_eq!(frames[replacement + 1]["method"], "tools/list");
+        assert_eq!(
+            frames[replacement + 1]["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"],
+            "2026-07-28"
+        );
+    }
+}

@@ -63,9 +63,12 @@ fn server_script(program: &str, tools: &Value) -> String {
     format!(
         r#"#!/bin/sh
 set -eu
+IFS= read -r probe
+printf '%s\n' "$probe" > "{program}.trace"
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"error":{{"code":-32601,"message":"legacy"}}}}'
 IFS= read -r initialize
 printf '%s' "$HOME" > "{program}.home"
-printf '%s\n' "$initialize" > "{program}.trace"
+printf '%s\n' "$initialize" >> "{program}.trace"
 printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"{program}","version":"0.1"}}}}}}'
 IFS= read -r initialized
 printf '%s\n' "$initialized" >> "{program}.trace"
@@ -142,6 +145,8 @@ fn install_duplicate_tool_server(bin: &Path, program: &str, across_pages: bool) 
     let script = format!(
         r#"#!/bin/sh
 set -eu
+IFS= read -r probe
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"error":{{"code":-32601,"message":"legacy"}}}}'
 IFS= read -r initialize
 printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"duplicate","version":"0.1"}}}}}}'
 IFS= read -r initialized
@@ -235,6 +240,7 @@ fn read_http_json(stream: &std::net::TcpStream) -> Value {
     );
 
     let mut content_length = 0;
+    let mut authorization = None;
     loop {
         let mut line = String::new();
         reader.read_line(&mut line).expect("read an HTTP header");
@@ -244,10 +250,20 @@ fn read_http_json(stream: &std::net::TcpStream) -> Value {
         if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
             content_length = value.trim().parse().expect("parse Content-Length");
         }
+        if line.to_ascii_lowercase().starts_with("authorization:") {
+            authorization = line
+                .split_once(':')
+                .map(|(_, value)| value.trim().to_string());
+        }
     }
     let mut body = vec![0; content_length];
     reader.read_exact(&mut body).expect("read the HTTP body");
-    serde_json::from_slice(&body).expect("parse the JSON-RPC request")
+    let mut request: Value = serde_json::from_slice(&body).expect("parse the JSON-RPC request");
+    // A request that carries a credential keeps it beside its JSON-RPC members.
+    if let Some(authorization) = authorization {
+        request["http.authorization"] = Value::String(authorization);
+    }
+    request
 }
 
 fn write_http_json(
@@ -463,10 +479,109 @@ fn generate_schema_uses_the_selected_config_outside_the_operator_home() {
         std::fs::read(directory.join("events.dwschema")).expect("read events"),
         EVENT_SCHEMA
     );
-    assert_eq!(trace(&working, "chosen-mcp").len(), 3);
+    assert_eq!(trace(&working, "chosen-mcp").len(), 4);
     assert!(!root.path().join("chosen-mcp.trace").exists());
     assert!(!root.path().join("schemas").exists());
     assert_existing_artifacts(&existing);
+}
+
+#[test]
+fn generate_schema_uses_an_absolute_command_instead_of_a_path_decoy() {
+    let home = tempfile::tempdir().expect("an operator home");
+    let workspace = home.path().join("workspace");
+    let selected = home.path().join("selected tools");
+    let decoy = home.path().join("bin");
+    for directory in [&workspace, &selected, &decoy] {
+        std::fs::create_dir(directory).expect("create a fixture directory");
+    }
+    install_server(&selected, "chosen-mcp", "selected_tool", "value");
+    install_server(&decoy, "chosen-mcp", "decoy_tool", "wrong");
+    let config = workspace.join("box.toml");
+    let executable = toml::Value::String(selected.join("chosen-mcp").display().to_string());
+    std::fs::write(
+        &config,
+        format!(
+            "name = \"selected\"\nbox_dir = \"/nonexistent/schema-generation\"\n\
+             [mcp.selected]\ntype = \"stdio\"\ncommand = [{executable}]\n"
+        ),
+    )
+    .expect("write the selected executable");
+
+    let output = Command::new(box_binary())
+        .args(["policy", "generate-schema", "--config"])
+        .arg(&config)
+        .args(["--output-dir", "schemas"])
+        .env("HOME", home.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", decoy.display()))
+        .current_dir(&workspace)
+        .output()
+        .expect("run the schema command");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actions = std::fs::read_to_string(workspace.join("schemas/actions.cedarschema"))
+        .expect("read the generated actions");
+    assert!(
+        actions.contains(r#"action "selected_tool" appliesTo"#),
+        "{actions}"
+    );
+    assert!(
+        !actions.contains(r#"action "decoy_tool" appliesTo"#),
+        "{actions}"
+    );
+    let requests = trace(&workspace, "chosen-mcp");
+    assert_eq!(requests.len(), 4, "{requests:?}");
+    assert_eq!(requests[0]["method"], "server/discover");
+    assert_eq!(requests[1]["method"], "initialize");
+    assert_eq!(requests[2]["method"], "notifications/initialized");
+    assert_eq!(requests[3]["method"], "tools/list");
+}
+
+#[test]
+fn generate_schema_writes_the_actions_of_each_tool_grammar() {
+    const GRAMMAR: &str = "[tool.git]\ncommand = [\"/usr/bin/git\"]\n[tool.git.grammar]\n\
+        format = 1\nversion = 1\nname = \"git\"\nprogram = \"git\"\n\
+        [tool.git.grammar.shell.push]\nusage = \"git push [<remote>]\"\n";
+    let home = tempfile::tempdir().expect("an operator home");
+    let workspace = home.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("create the workspace");
+    let config = workspace.join("box.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "name = \"grammar\"\nbox_dir = \"/nonexistent/schema-generation\"\n{GRAMMAR}\
+             [experimental-features]\ntool-grammars = true\n"
+        ),
+    )
+    .expect("write the config");
+
+    let output = Command::new(box_binary())
+        .args(["policy", "generate-schema", "--config"])
+        .arg(&config)
+        .args(["--output-dir", "schemas"])
+        .env("HOME", home.path())
+        .current_dir(&workspace)
+        .output()
+        .expect("run the schema command");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actions = std::fs::read_to_string(workspace.join("schemas/actions.cedarschema"))
+        .expect("read actions");
+    assert!(actions.contains("namespace Tool::git {"), "{actions}");
+    assert!(actions.contains(r#"action "push" in ["*"]"#), "{actions}");
+    assert!(
+        actions.contains(r#"action "unmodeled" appliesTo"#),
+        "{actions}"
+    );
+    let (_, warnings) = Schema::from_cedarschema_str(&actions).expect("the composed schema parses");
+    assert_eq!(warnings.count(), 0);
 }
 
 #[test]
@@ -657,11 +772,12 @@ fn generate_schema_writes_the_engine_composition_from_a_nested_directory() {
 
     for program in ["fake-issues-mcp", "fake-aws-mcp"] {
         let requests = trace(&nested, program);
-        assert_eq!(requests.len(), 3, "{program} received {requests:?}");
-        assert_eq!(requests[0]["method"], "initialize");
-        assert_eq!(requests[0]["params"]["protocolVersion"], "2024-11-05");
-        assert_eq!(requests[1]["method"], "notifications/initialized");
-        assert_eq!(requests[2]["method"], "tools/list");
+        assert_eq!(requests.len(), 4, "{program} received {requests:?}");
+        assert_eq!(requests[0]["method"], "server/discover");
+        assert_eq!(requests[1]["method"], "initialize");
+        assert_eq!(requests[1]["params"]["protocolVersion"], "2024-11-05");
+        assert_eq!(requests[2]["method"], "notifications/initialized");
+        assert_eq!(requests[3]["method"], "tools/list");
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -737,6 +853,383 @@ fn generate_schema_composes_lowered_remote_mcp_tools() {
     assert_eq!(
         methods,
         ["initialize", "notifications/initialized", "tools/list"]
+    );
+}
+
+/// **`policy generate-schema` reads a remote MCP server's secret through its declared source**:
+/// the program runs once, each discovery request carries the secret, and no artifact holds it.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_schema_reads_a_remote_mcp_secret_through_its_declared_source() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = tempfile::tempdir().expect("an operator home");
+    let home_path = home.path().canonicalize().expect("the home resolves");
+    let workspace = home_path.join("work");
+    let directory = workspace.join("schemas");
+    std::fs::create_dir_all(&workspace).expect("create the working directory");
+    let program = home_path.join("vault-stand-in");
+    let runs = home_path.join("runs");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nprintf 'sk_live_discovery_secret_4a7f\\n'\n",
+            runs.display()
+        ),
+    )
+    .expect("write the stand-in program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("make the stand-in program executable");
+    let tools = json!([{
+        "name": "inspect",
+        "inputSchema": {"type": "object", "properties": {"state": {"type": "string"}}}
+    }]);
+    let (destination, requests) = remote_mcp_server(tools);
+    std::fs::write(
+        workspace.join("box.toml"),
+        format!(
+            "name = \"schema\"\nbox_dir = \"/nonexistent/schema-generation\"\n\
+             [experimental-features]\nsecret-sources = true\n\
+             [secret-source.vault]\nprotocol = \"box.secret-source.v1\"\n\
+             command = [{:?}, \"read\", \"{{ref}}\"]\n\
+             [mcp.remote]\ntype = \"http\"\ndestinations = [\"{destination}\"]\n\
+             secret.ref = \"vault://team/remote\"\nsecret.env = \"REMOTE_TOKEN\"\n",
+            program.display().to_string()
+        ),
+    )
+    .expect("write box.toml");
+
+    let output = Command::new(box_binary())
+        .args(["policy", "generate-schema", "--config", "box.toml"])
+        .arg("--output-dir")
+        .arg(&directory)
+        .env("HOME", &home_path)
+        .current_dir(&workspace)
+        .output()
+        .expect("run the schema command");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "schema generation failed: {stderr}"
+    );
+    assert_eq!(
+        stderr,
+        format!(
+            "strands-box: [secret-source.vault]: reads each vault:// secret with {}, which runs \
+             outside every sandbox\n",
+            program.display()
+        )
+    );
+    assert_eq!(
+        std::fs::read_to_string(&runs).expect("the program ran"),
+        "read team/remote\n",
+        "the program runs once, with the reference"
+    );
+    let authorizations = requests
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("receive the remote MCP trace")
+        .into_iter()
+        .map(|request| request["http.authorization"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        authorizations,
+        vec![Some("Bearer sk_live_discovery_secret_4a7f".to_string()); 3]
+    );
+    for artifact in ["actions.cedarschema", "events.dwschema"] {
+        let text = std::fs::read_to_string(directory.join(artifact)).expect("the artifact");
+        assert!(
+            !text.contains("sk_live_discovery_secret_4a7f"),
+            "{artifact}"
+        );
+    }
+}
+
+/// **`policy generate-schema` checks no program when no server names a declared scheme**: a
+/// declaration whose program is absent does not stop it, and it prints no line.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_schema_checks_no_program_when_no_server_names_a_declared_scheme() {
+    let home = tempfile::tempdir().expect("an operator home");
+    let home_path = home.path().canonicalize().expect("the home resolves");
+    let directory = home_path.join("schemas");
+    let tools = json!([{"name": "inspect", "inputSchema": {"type": "object"}}]);
+    let (destination, _requests) = remote_mcp_server(tools);
+    std::fs::write(
+        home_path.join("box.toml"),
+        format!(
+            "name = \"schema\"\nbox_dir = \"/nonexistent/schema-generation\"\n\
+             [experimental-features]\nsecret-sources = true\n\
+             [secret-source.vault]\nprotocol = \"box.secret-source.v1\"\n\
+             command = [\"/nonexistent/vault\", \"read\", \"{{ref}}\"]\n\
+             [mcp.remote]\ntype = \"http\"\ndestinations = [\"{destination}\"]\n"
+        ),
+    )
+    .expect("write box.toml");
+
+    let output = Command::new(box_binary())
+        .args(["policy", "generate-schema", "--config", "box.toml"])
+        .arg("--output-dir")
+        .arg(&directory)
+        .env("HOME", &home_path)
+        .current_dir(&home_path)
+        .output()
+        .expect("run the schema command");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert!(output.status.success());
+    assert!(directory.join("actions.cedarschema").exists());
+}
+
+/// **`policy generate-schema` starts no source program that a write grant covers**: the refusal
+/// names the grant and the program, and the program does not run.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_schema_refuses_a_write_grant_over_a_source_program() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = tempfile::tempdir().expect("an operator home");
+    let home_path = home.path().canonicalize().expect("the home resolves");
+    let tools = home_path.join("tools");
+    std::fs::create_dir(&tools).expect("create the program folder");
+    let program = tools.join("vault-stand-in");
+    let runs = home_path.join("runs");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\necho run >> '{}'\nprintf 'secret\\n'\n",
+            runs.display()
+        ),
+    )
+    .expect("write the stand-in program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("make the stand-in program executable");
+    std::fs::write(
+        home_path.join("box.toml"),
+        format!(
+            "name = \"schema\"\nbox_dir = \"/nonexistent/schema-generation\"\n\
+             [experimental-features]\nsecret-sources = true\n\
+             [agent]\ncommand = [\"/bin/bash\"]\n\
+             [agent.filesystem]\nread = [{tools:?}]\nwrite = [{tools:?}]\n\
+             [secret-source.vault]\nprotocol = \"box.secret-source.v1\"\n\
+             command = [{:?}, \"read\", \"{{ref}}\"]\n\
+             [mcp.remote]\ntype = \"http\"\ndestinations = [\"127.0.0.1:9\"]\n\
+             secret.ref = \"vault://team/remote\"\nsecret.env = \"REMOTE_TOKEN\"\n",
+            program.display().to_string(),
+            tools = tools.display().to_string()
+        ),
+    )
+    .expect("write box.toml");
+
+    let output = Command::new(box_binary())
+        .args(["policy", "generate-schema", "--config", "box.toml"])
+        .arg("--output-dir")
+        .arg(home_path.join("schemas"))
+        .env("HOME", &home_path)
+        .current_dir(&home_path)
+        .output()
+        .expect("run the schema command");
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "strands-box: error: `[agent]` filesystem entry {:?} is refused: this write grant \
+             can change [secret-source.vault] command {} or its path. Keep the program of each \
+             secret source outside every process's write grants\n",
+            tools.display().to_string(),
+            program.display()
+        )
+    );
+    assert!(!runs.exists(), "the program must not start");
+}
+
+/// **`policy generate-schema` starts no source program in a configuration that lets a workload
+/// go around the source**: a grant that reaches a path of the source.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_schema_refuses_a_table_that_exposes_a_secret_source() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = tempfile::tempdir().expect("an operator home");
+    let home_path = home.path().canonicalize().expect("the home resolves");
+    let store = home_path.join("store");
+    std::fs::create_dir(&store).expect("create the folder of the vault");
+    let program = home_path.join("vault-stand-in");
+    let runs = home_path.join("runs");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\necho run >> '{}'\nprintf 'secret\\n'\n",
+            runs.display()
+        ),
+    )
+    .expect("write the stand-in program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("make the stand-in program executable");
+    let store_text = store.display().to_string();
+    std::fs::write(
+        home_path.join("box.toml"),
+        format!(
+            "name = \"schema\"\nbox_dir = \"/nonexistent/schema-generation\"\n\
+             [experimental-features]\nsecret-sources = true\n\
+             [agent]\ncommand = [\"/bin/bash\"]\n\
+             [agent.filesystem]\nread = [{store_text:?}]\n\
+             [secret-source.vault]\nprotocol = \"box.secret-source.v1\"\n\
+             command = [{:?}, \"read\", \"{{ref}}\"]\n\
+             pass-secret-env = [\"VAULT_TOKEN\"]\nreads = [{store_text:?}]\n\
+             [mcp.remote]\ntype = \"http\"\ndestinations = [\"127.0.0.1:9\"]\n\
+             secret.ref = \"vault://team/remote\"\nsecret.env = \"REMOTE_TOKEN\"\n",
+            program.display().to_string()
+        ),
+    )
+    .expect("write box.toml");
+
+    let output = Command::new(box_binary())
+        .args(["policy", "generate-schema", "--config", "box.toml"])
+        .arg("--output-dir")
+        .arg(home_path.join("schemas"))
+        .env("HOME", &home_path)
+        .current_dir(&home_path)
+        .output()
+        .expect("run the schema command");
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "strands-box: error: `[agent]` filesystem entry {store_text:?} is refused: this \
+             grant reaches {store_text}, which the secret source `vault` keeps from each \
+             workload (its `reads` entry {store_text:?}). Keep each grant outside the paths \
+             that a secret source names in `reads` and `deny`\n"
+        )
+    );
+    assert!(!runs.exists(), "the program must not start");
+}
+
+/// **`policy generate-schema` refuses a placement that discovery cannot use before it starts
+/// the program** of the secret source that holds that secret.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_schema_refuses_a_placement_before_it_starts_the_program() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = tempfile::tempdir().expect("an operator home");
+    let home_path = home.path().canonicalize().expect("the home resolves");
+    let program = home_path.join("vault-stand-in");
+    let runs = home_path.join("runs");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\necho run >> '{}'\nprintf 'secret\\n'\n",
+            runs.display()
+        ),
+    )
+    .expect("write the stand-in program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("make the stand-in program executable");
+    std::fs::write(
+        home_path.join("box.toml"),
+        format!(
+            "name = \"schema\"\nbox_dir = \"/nonexistent/schema-generation\"\n\
+             [experimental-features]\nsecret-sources = true\n\
+             [secret-source.vault]\nprotocol = \"box.secret-source.v1\"\n\
+             command = [{:?}, \"read\", \"{{ref}}\"]\n\
+             [mcp.remote]\ntype = \"http\"\ndestinations = [\"127.0.0.1:9\"]\n\
+             secret.ref = \"vault://team/remote\"\nsecret.env = \"REMOTE_TOKEN\"\n\
+             secret.placement = \"query_param\"\nsecret.param = \"key\"\n",
+            program.display().to_string()
+        ),
+    )
+    .expect("write box.toml");
+
+    let output = Command::new(box_binary())
+        .args(["policy", "generate-schema", "--config", "box.toml"])
+        .arg("--output-dir")
+        .arg(home_path.join("schemas"))
+        .env("HOME", &home_path)
+        .current_dir(&home_path)
+        .output()
+        .expect("run the schema command");
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "strands-box: [secret-source.vault]: reads each vault:// secret with {}, which runs \
+             outside every sandbox\n\
+             strands-box: error: MCP server \"remote\" uses credential placement \
+             \"query_param\", which schema discovery does not support\n",
+            program.display()
+        )
+    );
+    assert!(!runs.exists(), "the program must not start");
+}
+
+/// **A secret source that fails stops `policy generate-schema` before a stdio server starts**,
+/// and the refusal names the server.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_schema_stops_when_a_declared_source_returns_no_secret() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = tempfile::tempdir().expect("an operator home");
+    let home_path = home.path().canonicalize().expect("the home resolves");
+    let directory = home_path.join("schemas");
+    let program = home_path.join("vault-stand-in");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\necho 'no item of that name' >&2\nexit 3\n",
+    )
+    .expect("write the stand-in program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("make the stand-in program executable");
+    // A stdio server that leaves a marker when it starts.
+    let server = home_path.join("stdio-server");
+    let started = home_path.join("stdio-server-started");
+    std::fs::write(
+        &server,
+        format!("#!/bin/sh\ntouch '{}'\n", started.display()),
+    )
+    .expect("write the stdio server");
+    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755))
+        .expect("make the stdio server executable");
+    std::fs::write(
+        home_path.join("box.toml"),
+        format!(
+            "name = \"schema\"\nbox_dir = \"/nonexistent/schema-generation\"\n\
+             [experimental-features]\nsecret-sources = true\n\
+             [secret-source.vault]\nprotocol = \"box.secret-source.v1\"\n\
+             command = [{:?}, \"read\", \"{{ref}}\"]\n\
+             [mcp.local]\ntype = \"stdio\"\ncommand = [{:?}]\n\
+             [mcp.remote]\ntype = \"http\"\ndestinations = [\"127.0.0.1:9\"]\n\
+             secret.ref = \"vault://team/remote\"\nsecret.env = \"REMOTE_TOKEN\"\n",
+            program.display().to_string(),
+            server.display().to_string()
+        ),
+    )
+    .expect("write box.toml");
+
+    let output = Command::new(box_binary())
+        .args(["policy", "generate-schema", "--config", "box.toml"])
+        .arg("--output-dir")
+        .arg(&directory)
+        .env("HOME", &home_path)
+        .current_dir(&home_path)
+        .output()
+        .expect("run the schema command");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr,
+        format!(
+            "strands-box: [secret-source.vault]: reads each vault:// secret with {program}, \
+             which runs outside every sandbox\n\
+             strands-box: error: cannot resolve the credential for MCP server \"remote\": \
+             credential error: the secret source \"vault\" (\"{program}\") for \
+             vault://[REDACTED] exited unsuccessfully (exit status: 3): no item of that name\n",
+            program = program.display()
+        )
+    );
+    assert!(!directory.join("actions.cedarschema").exists());
+    assert!(
+        !started.exists(),
+        "no stdio server starts before the secret source returns its secret"
     );
 }
 
@@ -849,13 +1342,17 @@ fn duplicate_tool_names_are_refused_before_schema_install() {
         install_duplicate_tool_server(&bin, "fake-duplicate-mcp", across_pages);
         std::fs::write(
             config.join("box.toml"),
-            r#"
+            format!(
+                r#"
             name = "schema"
         box_dir = "/nonexistent/schema-generation"
             [mcp.duplicate]
             type = "stdio"
-            command = ["fake-duplicate-mcp"]
+            command = ["/usr/bin/env", "/bin/sh", {}]
             "#,
+                serde_json::to_string(&bin.join("fake-duplicate-mcp"))
+                    .expect("quote the fake server path"),
+            ),
         )
         .expect("write box.toml");
 
@@ -1031,6 +1528,8 @@ fn paginated_tools_and_a_server_ping_complete_one_schema() {
         &bin.join("fake-paged-mcp"),
         r##"#!/bin/sh
 set -eu
+IFS= read -r probe
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"legacy"}}'
 IFS= read -r initialize
 printf '%s\n' "$initialize" > paged.trace
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"paged","version":"0.1"}}}'
@@ -1187,6 +1686,8 @@ fn an_incompatible_initialize_result_is_refused_before_tools_list() {
         &bin.join("fake-future-mcp"),
         r#"#!/bin/sh
 set -eu
+IFS= read -r probe
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"legacy"}}'
 IFS= read -r initialize
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2099-01-01","capabilities":{},"serverInfo":{"name":"future","version":"0.1"}}}'
 "#,
@@ -1237,6 +1738,8 @@ fn a_server_without_the_tools_capability_is_refused_before_tools_list() {
         &bin.join("fake-no-tools-mcp"),
         r#"#!/bin/sh
 set -eu
+IFS= read -r probe
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"legacy"}}'
 IFS= read -r initialize
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"no-tools","version":"0.1"}}}'
 "#,

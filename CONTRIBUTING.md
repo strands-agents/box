@@ -32,15 +32,21 @@ Please read before contributing: [Strands AI usage policy](https://github.com/st
 
 ## Before you open a pull request
 
+Prepare the dependency cache with `cargo fetch --locked` before running tests through
+`just` or Cargo. Repeat this step after `Cargo.lock` changes or cached dependencies
+are removed. The `shell_dependency_guard` tests inspect dependency sources without
+network access. Their metadata query needs archives for all target platforms; a build
+for the host platform alone may leave archives missing.
+
 Run the gates with [`just`](https://github.com/casey/just):
 
 ```console
+$ cargo fetch --locked
 $ just check
 ```
 
 That runs `just fmt-check`, `just clippy`, and `just test`. Use the recipes rather than
-writing the `cargo` calls yourself: `just clippy` carries the lint allowances the vendored
-`strands-shell` needs, and the bare `cargo clippy ... -D warnings` fails on that crate.
+writing the `cargo` calls yourself.
 `just --list` shows every recipe.
 
 Three notes on the test suites:
@@ -50,10 +56,11 @@ Three notes on the test suites:
   success. `just test` passes the flag.
 - **A test that cannot run on your host skips instead of failing.** Watch the output for
   `skipping:`, because a skipped test has proved nothing.
-- **On Linux, some containment tests need capabilities an ordinary host refuses.**
-  Continuous integration skips that set by name, which
-  `.github/workflows/rust-test-lint.yml` lists. A failure in one of those on your own
-  machine is the host, not your change.
+- **Linux continuous integration runs on Ubuntu ARM64 and x86-64 with namespace support.**
+  Both architectures run the workspace tests without the former namespace exclusions and reject unexpected
+  prerequisite skips. The accepted alias-read limitation and missing credential-daemon
+  fixture remain explicit reported gaps.
+  Local machines without the required architecture or permissions can still skip tests.
 
 ## Writing code
 
@@ -62,10 +69,6 @@ Three notes on the test suites:
 This project follows the standard conventions that
 [`rustfmt`](https://github.com/rust-lang/rustfmt) imposes, and it treats clippy warnings as
 errors on owned code. Run `just fmt` to format, and `just clippy` to lint.
-
-The vendored crate under `crates/shell/` carries upstream clippy warnings that we do not fix
-here. `just clippy` allows exactly those lints at the driver level, which is why it is the
-command to run.
 
 ### Dependencies
 

@@ -1,0 +1,106 @@
+name: Cloud examples
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'examples/cloud-deployments/**'
+      - 'crates/policy/**'
+      - '.github/workflows/cloud-examples.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'examples/cloud-deployments/**'
+      - 'crates/policy/**'
+      - '.github/workflows/cloud-examples.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    name: Offline cloud example tests
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install pinned test dependencies
+        working-directory: examples/cloud-deployments/agentcore-runtime
+        run: |
+          python -m pip install -r requirements-deploy.txt
+          python -c 'import prepare; prepare.install_framework("langchain")'
+      - name: Test Runtime adapters, packaging, and failure handling
+        working-directory: examples/cloud-deployments/agentcore-runtime
+        run: python run-tests.py
+      - name: Test EKS Job receipts without a cluster
+        run: python examples/cloud-deployments/eks/test_run.py
+      - name: Test deployment service and cooldown checks without a model
+        run: python examples/cloud-deployments/eks/claude/test_deployment.py
+
+  gcp-offline:
+    name: Google Cloud example tests
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+      - name: Install the Google Cloud example dependencies
+        run: python -m pip install -r examples/cloud-deployments/gcp/dependency-lock.txt
+      - name: Test provisioning, model calls, and result verification without cloud credentials
+        run: python -B -m unittest discover -s examples/cloud-deployments/gcp -p 'test_*.py' -v
+      - name: Check the VM startup script
+        run: bash -n examples/cloud-deployments/gcp/setup-vm.sh
+
+  deployment-policy:
+    name: Deployment policy through real Box
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      EXPERIMENTAL_LINUX_SUPPORT: "TRUE"
+      RUSTFLAGS: "-C debuginfo=0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check system Python
+        run: /usr/bin/python3.12 -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version'
+      - name: Require Linux namespace support
+        run: |
+          test "$(uname -m)" = aarch64
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$knob" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount --pid --fork --mount-proc true
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Build Box and its helpers
+        run: cargo build --workspace --locked --all-features --bins
+      - name: Verify repeated cooldowns
+        run: |
+          /usr/bin/python3.12 examples/cloud-deployments/eks/claude/test_deployment_policy.py \
+            --box-binary "$PWD/target/debug/strands-box" \
+            --evidence-dir "$RUNNER_TEMP/deployment-policy-evidence"
+      - name: Upload deployment policy evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: deployment-policy-evidence
+          path: ${{ runner.temp }}/deployment-policy-evidence
+          if-no-files-found: warn

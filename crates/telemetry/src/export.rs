@@ -10,10 +10,12 @@ use opentelemetry_proto::transform::common::tonic::ResourceAttributesWithSchema;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
 use opentelemetry_sdk::logs::LogBatch;
-use tokio::io::AsyncWriteExt as _;
+use std::io::Write as _;
+use std::sync::Arc;
+
 use tokio::sync::Mutex;
 
-use crate::config::{Target, TargetKind, TargetSecret};
+use crate::config::{Payload, Target, TargetKind, TargetSecret};
 use crate::error::{Result, TelemetryError};
 
 /// The box a record belongs to, so a merged store stays attributable.
@@ -42,12 +44,14 @@ pub(crate) const REQUEST_DEADLINE: Duration = Duration::from_secs(4);
 #[derive(Debug)]
 enum Wire {
     /// One OTLP-JSON request per line, appended through one handle held open.
-    File(Mutex<tokio::fs::File>),
+    File(Arc<Mutex<std::fs::File>>),
     /// OTLP over HTTP, protobuf.
     Otlp {
         base: String,
         client: reqwest::Client,
         secret: Option<TargetSecret>,
+        headers: Vec<(String, String)>,
+        vault: Option<std::sync::Arc<credentials::Vault>>,
     },
 }
 
@@ -55,10 +59,14 @@ enum Wire {
 #[derive(Debug)]
 pub(crate) struct TargetExporter {
     wire: Wire,
+    /// The payloads the destination takes. A batch of any other payload is not sent.
+    accepts: Vec<Payload>,
     /// Set once when the provider is built.
     resource: std::sync::OnceLock<ResourceAttributesWithSchema>,
     /// Bumped for every batch a target refused, so a failing endpoint is not silent.
     dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Whether a failed batch is also printed to stderr, as the config asks.
+    reports_failures: bool,
 }
 
 impl TargetExporter {
@@ -67,6 +75,16 @@ impl TargetExporter {
         target: &Target,
         dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ) -> Result<Self> {
+        Self::open_with(target, dropped, reqwest::Client::builder())
+    }
+
+    /// [`open`](Self::open) over a caller's client builder, so a test can pin name resolution.
+    fn open_with(
+        target: &Target,
+        dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        client: reqwest::ClientBuilder,
+    ) -> Result<Self> {
+        let accepts = target.accepts();
         let wire = match target.kind() {
             TargetKind::File => {
                 if let Some(file) = target.file() {
@@ -74,9 +92,11 @@ impl TargetExporter {
                         reason: format!("{} could not be cloned: {source}", target.destination()),
                     })?;
                     return Ok(Self {
-                        wire: Wire::File(Mutex::new(tokio::fs::File::from_std(file))),
+                        wire: Wire::File(Arc::new(Mutex::new(file))),
+                        accepts,
                         resource: std::sync::OnceLock::new(),
                         dropped,
+                        reports_failures: false,
                     });
                 }
                 // Only the parent chain; `O_NOFOLLOW` still guards the final component.
@@ -100,11 +120,13 @@ impl TargetExporter {
                     .map_err(|source| TelemetryError::Config {
                         reason: format!("{} could not be opened: {source}", target.destination()),
                     })?;
-                Wire::File(Mutex::new(tokio::fs::File::from_std(file)))
+                Wire::File(Arc::new(Mutex::new(file)))
             }
             TargetKind::Otlp => Wire::Otlp {
-                base: crate::config::dialed(target.destination()),
-                client: reqwest::Client::builder()
+                base: crate::config::dialed(target.destination())
+                    .trim_end_matches('/')
+                    .to_string(),
+                client: client
                     .timeout(REQUEST_DEADLINE)
                     .redirect(reqwest::redirect::Policy::none())
                     .no_proxy()
@@ -113,13 +135,23 @@ impl TargetExporter {
                         reason: format!("the OTLP client could not be built: {source}"),
                     })?,
                 secret: target.secret().cloned(),
+                headers: target.headers().to_vec(),
+                vault: target.vault().cloned(),
             },
         };
         Ok(Self {
             wire,
+            accepts,
             resource: std::sync::OnceLock::new(),
             dropped,
+            reports_failures: false,
         })
+    }
+
+    /// Print each failed batch to stderr, with its full cause, when `on` is set.
+    pub(crate) fn reporting_failures(mut self, on: bool) -> Self {
+        self.reports_failures = on;
+        self
     }
 
     /// Take the provider's resource. Later calls are ignored.
@@ -140,20 +172,26 @@ impl TargetExporter {
                     &batch, resource,
                 ),
         };
-        let traces = box_spans(&request);
+        let traces = if self.accepts.contains(&Payload::Traces) {
+            box_spans(&request)
+        } else {
+            ExportTraceServiceRequest {
+                resource_spans: Vec::new(),
+            }
+        };
         if traces.resource_spans.is_empty() {
-            return self.deliver("/v1/logs", &request).await;
+            return self.deliver(Payload::Logs, &request).await;
         }
         let (logs, spans) = tokio::join!(
-            self.deliver("/v1/logs", &request),
-            self.deliver("/v1/traces", &traces)
+            self.deliver(Payload::Logs, &request),
+            self.deliver(Payload::Traces, &traces)
         );
         logs.and(spans)
     }
 
     /// Relay one span batch the agent already encoded.
     pub(crate) async fn relay_trace(&self, request: &ExportTraceServiceRequest) -> OTelSdkResult {
-        self.deliver("/v1/traces", request).await
+        self.deliver(Payload::Traces, request).await
     }
 
     /// Relay one log batch the agent already encoded.
@@ -161,7 +199,7 @@ impl TargetExporter {
     /// Separate from [`Self::export_logs`], which encodes the box's own records and derives their
     /// spans. An agent's batch is relayed unchanged, so no `box_spans` pass runs over it.
     pub(crate) async fn relay_logs(&self, request: &ExportLogsServiceRequest) -> OTelSdkResult {
-        self.deliver("/v1/logs", request).await
+        self.deliver(Payload::Logs, request).await
     }
 
     /// Relay one metric batch the agent already encoded.
@@ -169,18 +207,25 @@ impl TargetExporter {
         &self,
         request: &ExportMetricsServiceRequest,
     ) -> OTelSdkResult {
-        self.deliver("/v1/metrics", request).await
+        self.deliver(Payload::Metrics, request).await
     }
 
-    /// Send one batch, counting it when it does not go.
-    async fn deliver<T>(&self, route: &str, request: &T) -> OTelSdkResult
+    /// Send one batch, counting it when it does not go. A payload the destination does not take is
+    /// not sent and not counted.
+    async fn deliver<T>(&self, payload: Payload, request: &T) -> OTelSdkResult
     where
         T: serde::Serialize + prost::Message,
     {
-        let outcome = self.attempt(route, request).await;
-        if outcome.is_err() {
+        if !self.accepts.contains(&payload) {
+            return Ok(());
+        }
+        let outcome = self.attempt(payload.route(), request).await;
+        if let Err(error) = &outcome {
             self.dropped
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.reports_failures {
+                eprintln!("strands-box: telemetry export failed: {error}");
+            }
         }
         outcome
     }
@@ -193,40 +238,232 @@ impl TargetExporter {
         match &self.wire {
             Wire::File(handle) => {
                 let line = one_line(request)?;
-                let mut file = handle.lock().await;
-                file.write_all(&line)
+                // Waiting for the file stays cancellable; once held, the write runs to its end.
+                let mut file = Arc::clone(handle).lock_owned().await;
+                tokio::task::spawn_blocking(move || append(&mut file, &line))
                     .await
-                    .map_err(|source| OTelSdkError::InternalFailure(source.to_string()))?;
-                file.sync_all()
-                    .await
+                    .map_err(|source| OTelSdkError::InternalFailure(source.to_string()))?
                     .map_err(|source| OTelSdkError::InternalFailure(source.to_string()))
             }
             Wire::Otlp {
                 base,
                 client,
                 secret,
+                headers,
+                vault,
             } => {
+                // One deadline covers the credential lookup and the send, so a slow `credsd`
+                // cannot outlast the export and leave the failure uncounted.
+                let started = std::time::Instant::now();
                 let url = format!("{base}{route}");
+                let body = request.encode_to_vec();
+                let mut fixed: Vec<(String, String)> =
+                    vec![("content-type".to_string(), PROTOBUF.to_string())];
+                fixed.extend(headers.iter().cloned());
+                let attachment = match vault {
+                    Some(vault) => tokio::time::timeout(
+                        REQUEST_DEADLINE,
+                        attachment_for(vault, &url, &fixed, &body),
+                    )
+                    .await
+                    .map_err(|_| {
+                        OTelSdkError::InternalFailure(format!(
+                            "the credential for {url} did not attach within {} s",
+                            REQUEST_DEADLINE.as_secs()
+                        ))
+                    })??,
+                    None => None,
+                };
+                if let Some(attachment) = &attachment {
+                    fixed.retain(|(name, _)| {
+                        !attachment
+                            .strip_headers()
+                            .any(|stripped| stripped.eq_ignore_ascii_case(name))
+                    });
+                }
                 let mut sending = client
                     .post(&url)
-                    .header("content-type", "application/x-protobuf")
-                    .body(request.encode_to_vec());
+                    .timeout(REQUEST_DEADLINE.saturating_sub(started.elapsed()))
+                    .body(body);
+                for (name, value) in &fixed {
+                    sending = sending.header(name, value);
+                }
                 if let Some(secret) = secret {
                     sending = sending.header(secret.header(), secret.value());
                 }
+                if let Some(attachment) = &attachment {
+                    for (name, value) in attachment.set_headers() {
+                        let mut value = reqwest::header::HeaderValue::from_str(value.as_str())
+                            .map_err(|_| {
+                                OTelSdkError::InternalFailure(format!(
+                                    "the credential for {url} is not a valid {name} header value"
+                                ))
+                            })?;
+                        value.set_sensitive(true);
+                        sending = sending.header(name, value);
+                    }
+                }
                 let response = sending.send().await.map_err(|source| {
-                    OTelSdkError::InternalFailure(format!("{url} did not answer: {source}"))
+                    OTelSdkError::InternalFailure(format!(
+                        "{url} did not answer: {}",
+                        with_causes(&source)
+                    ))
                 })?;
-                if response.status().is_success() {
+                let status = response.status();
+                if status.is_success() {
                     Ok(())
                 } else {
+                    let detail = if self.reports_failures {
+                        let mut attached: Vec<&str> = Vec::new();
+                        if let Some(secret) = secret {
+                            attached.push(secret.value());
+                        }
+                        if let Some(attachment) = &attachment {
+                            for (_, value) in attachment.set_headers() {
+                                attached.push(value.as_str());
+                            }
+                        }
+                        let fragments = credential_fragments(attached.into_iter());
+                        let body = redacted(&response.text().await.unwrap_or_default(), &fragments);
+                        let body: String = body.chars().take(FAILURE_DETAIL_CHARS).collect();
+                        format!(": {}", body.trim())
+                    } else {
+                        String::new()
+                    };
                     Err(OTelSdkError::InternalFailure(format!(
-                        "{url} answered {}",
-                        response.status()
+                        "{url} answered {status}{detail}"
                     )))
                 }
             }
         }
+    }
+}
+
+/// How much of a refusing endpoint's answer a failure report quotes.
+const FAILURE_DETAIL_CHARS: usize = 300;
+
+/// The shortest piece of a credential a failure report redacts, so a scheme word such as `Bearer`
+/// or a date in a SigV4 scope stays readable.
+const SHORTEST_REDACTED: usize = 12;
+
+/// Every form of the attached credentials an endpoint could echo: each whole value, each token in
+/// it, and for HTTP Basic the decoded pair and each half.
+fn credential_fragments<'a>(
+    attached: impl Iterator<Item = &'a str>,
+) -> Vec<zeroize::Zeroizing<String>> {
+    use base64::Engine as _;
+
+    let mut fragments = Vec::new();
+    for value in attached {
+        fragments.push(zeroize::Zeroizing::new(value.to_string()));
+        for token in value.split([' ', ',', '=', '/']) {
+            fragments.push(zeroize::Zeroizing::new(token.to_string()));
+        }
+        if let Some(encoded) = value.strip_prefix("Basic ")
+            && let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded.trim())
+            && let Ok(pair) = String::from_utf8(decoded)
+        {
+            for half in pair.split(':') {
+                fragments.push(zeroize::Zeroizing::new(half.to_string()));
+            }
+            fragments.push(zeroize::Zeroizing::new(pair));
+        }
+    }
+    fragments.retain(|fragment| fragment.len() >= SHORTEST_REDACTED);
+    fragments.sort_by_key(|fragment| std::cmp::Reverse(fragment.len()));
+    fragments
+}
+
+/// `text` with every credential fragment replaced, longest first.
+fn redacted(text: &str, fragments: &[zeroize::Zeroizing<String>]) -> String {
+    let mut text = text.to_string();
+    for fragment in fragments {
+        text = text.replace(fragment.as_str(), "[REDACTED]");
+    }
+    text
+}
+
+/// An error and each cause beneath it, on one line.
+fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        text.push_str(": ");
+        text.push_str(&next.to_string());
+        cause = next.source();
+    }
+    text
+}
+
+/// The OTLP/HTTP body encoding every request carries.
+const PROTOBUF: &str = "application/x-protobuf";
+
+/// What the vault attaches to one request, asked on a detached thread because a signing resolve
+/// may read a file or a socket. Not the runtime's blocking pool: the runtime waits for that pool on
+/// shutdown, so a lookup the deadline gave up on would hold the process open.
+async fn attachment_for(
+    vault: &std::sync::Arc<credentials::Vault>,
+    url: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> std::result::Result<Option<credentials::Attachment>, OTelSdkError> {
+    let vault = std::sync::Arc::clone(vault);
+    let url = url.to_string();
+    let headers = headers.to_vec();
+    let body = body.to_vec();
+    let (answer, answered) = tokio::sync::oneshot::channel();
+    let lookup = move || {
+        let parsed =
+            url::Url::parse(&url).map_err(|_| format!("{url} is not a URL the vault can match"))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| format!("{url} names no host"))?;
+        let port = parsed
+            .port_or_known_default()
+            .ok_or_else(|| format!("{url} names no port"))?;
+        vault
+            .attach_for(credentials::Outbound {
+                destination: credentials::Destination {
+                    host,
+                    port,
+                    path: parsed.path(),
+                },
+                method: "POST",
+                // The URL as the client sends it: `reqwest` drops a default port and lowercases
+                // the host, so signing the written URL would cover a different `Host`.
+                url: parsed.as_str(),
+                query: parsed.query().unwrap_or(""),
+                headers: &headers,
+                body: &body,
+            })
+            .map_err(|error| format!("the credential for {url} did not attach: {error}"))
+    };
+    std::thread::Builder::new()
+        .name("telemetry-credential".to_string())
+        .spawn(move || {
+            let _ = answer.send(lookup());
+        })
+        .map_err(|error| OTelSdkError::InternalFailure(error.to_string()))?;
+    let attachment = answered
+        .await
+        .map_err(|_| OTelSdkError::InternalFailure("the credential lookup stopped".to_string()))?
+        .map_err(OTelSdkError::InternalFailure)?;
+    match attachment {
+        Some(attachment)
+            if attachment.rewrite_path_to().is_some()
+                || attachment.set_query().next().is_some() =>
+        {
+            Err(OTelSdkError::InternalFailure(
+                "a telemetry credential attaches in a header, never in the path or the query"
+                    .to_string(),
+            ))
+        }
+        // The vault was opened for this destination alone, so an empty answer is a defect, and a
+        // request without its credential is not sent.
+        None => Err(OTelSdkError::InternalFailure(
+            "the target's vault governs no credential for its own destination".to_string(),
+        )),
+        attached => Ok(attached),
     }
 }
 
@@ -371,6 +608,44 @@ fn box_spans(logs: &ExportLogsServiceRequest) -> ExportTraceServiceRequest {
     ExportTraceServiceRequest { resource_spans }
 }
 
+/// Append one whole line and sync it.
+fn append(file: &mut std::fs::File, line: &[u8]) -> std::io::Result<()> {
+    let before = file.metadata().map(|metadata| metadata.len()).ok();
+    let mut written = 0;
+    while written < line.len() {
+        match file.write(&line[written..]) {
+            Ok(0) => {
+                return Err(cut_back(
+                    file,
+                    before,
+                    written,
+                    std::io::ErrorKind::WriteZero.into(),
+                ));
+            }
+            Ok(count) => written += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(cut_back(file, before, written, error)),
+        }
+    }
+    file.sync_all()
+}
+
+/// Remove the fragment a failed append left, when no other writer appended after it.
+fn cut_back(
+    file: &std::fs::File,
+    before: Option<u64>,
+    written: usize,
+    error: std::io::Error,
+) -> std::io::Error {
+    if let Some(before) = before
+        && written > 0
+        && file.metadata().map(|metadata| metadata.len()).ok() == Some(before + written as u64)
+    {
+        let _ = file.set_len(before);
+    }
+    error
+}
+
 /// One request as one newline-terminated JSON line, so a reader never sees half a record.
 fn one_line<T: serde::Serialize>(request: &T) -> std::result::Result<Vec<u8>, OTelSdkError> {
     let mut line = serde_json::to_vec(request)
@@ -382,6 +657,7 @@ fn one_line<T: serde::Serialize>(request: &T) -> std::result::Result<Vec<u8>, OT
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt as _;
 
     /// A file target opens under a directory that does not exist yet.
     #[test]
@@ -400,6 +676,26 @@ mod tests {
         );
     }
 
+    /// A transport failure names each cause beneath it, so a timeout reads apart from a reset.
+    #[tokio::test]
+    async fn a_transport_failure_names_its_cause() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        drop(listener);
+        let failure = reqwest::Client::new()
+            .post(format!("http://{address}/v1/traces"))
+            .send()
+            .await
+            .expect_err("nothing listens");
+        let text = with_causes(&failure);
+        assert!(
+            text.starts_with(&failure.to_string()) && text.len() > failure.to_string().len(),
+            "the causes follow the error: {text}"
+        );
+    }
+
     /// A serialized request is one line, so two batches never share one.
     #[test]
     fn the_serialized_request_is_one_line() {
@@ -409,6 +705,232 @@ mod tests {
         let line = one_line(&request).expect("serialize");
         assert_eq!(line.iter().filter(|byte| **byte == b'\n').count(), 1);
         assert_eq!(line.last(), Some(&b'\n'));
+    }
+
+    /// A file target on a full FIFO, so its next write blocks, and the handle that keeps it open.
+    fn stalled_pipe(directory: &std::path::Path) -> (Target, std::fs::File) {
+        let fifo = directory.join("stalled");
+        let named = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).expect("a C path");
+        // SAFETY: `named` is a valid NUL-terminated path that outlives the call.
+        let made = unsafe { libc::mkfifo(named.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+        // A read-write handle keeps a reader on the pipe, and the fill makes the next write block.
+        let mut pipe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+            .expect("open the pipe");
+        let chunk = [0_u8; 4096];
+        loop {
+            match pipe.write(&chunk) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill the pipe: {error}"),
+            }
+        }
+        let target = Target::new(TargetKind::File, fifo.to_string_lossy().to_string());
+        (target, pipe)
+    }
+
+    /// Everything the pipe receives until `written` is set and it is empty, without the fill.
+    fn drained(pipe: &mut std::fs::File, written: &std::sync::atomic::AtomicBool) -> Vec<u8> {
+        use std::io::Read as _;
+
+        let mut received = Vec::new();
+        let mut buffer = [0_u8; 65536];
+        loop {
+            match pipe.read(&mut buffer) {
+                Ok(read) => received.extend_from_slice(&buffer[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if written.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("empty the pipe: {error}"),
+            }
+        }
+        let start = received
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(received.len());
+        received.split_off(start)
+    }
+
+    /// A relay cancelled during its write still writes the whole line.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_relay_never_tears_the_file() {
+        use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
+        use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (target, mut pipe) = stalled_pipe(directory.path());
+        let exporter = std::sync::Arc::new(
+            TargetExporter::open(&target, std::sync::Arc::default()).expect("open"),
+        );
+
+        let large = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![Span {
+                        attributes: vec![KeyValue {
+                            key: "padding".to_string(),
+                            value: Some(AnyValue {
+                                value: Some(any_value::Value::StringValue(
+                                    "x".repeat(3 * 1024 * 1024),
+                                )),
+                            }),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        // The full pipe blocks the write, so the deadline always cuts the relay inside it.
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(100), exporter.relay_trace(&large)).await;
+        assert!(
+            cancelled.is_err(),
+            "the relay finished before it was cancelled"
+        );
+
+        // The next record waits behind the cut write, so the pipe must empty while it waits.
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let written = std::sync::Arc::clone(&written);
+            std::thread::spawn(move || drained(&mut pipe, &written))
+        };
+        let next = exporter
+            .relay_trace(&ExportTraceServiceRequest {
+                resource_spans: Vec::new(),
+            })
+            .await;
+        written.store(true, std::sync::atomic::Ordering::Release);
+        // `fsync` on a pipe is `EINVAL` on Linux, so the pipe's bytes are the evidence, not the result.
+        let _ = next;
+
+        let written = reader.join().expect("the pipe is read");
+        assert_eq!(written.last(), Some(&b'\n'), "the pipe ends inside a line");
+        let lines: Vec<&[u8]> = written
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .collect();
+        for line in &lines {
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(line).is_ok(),
+                "a torn line of {} bytes",
+                line.len()
+            );
+        }
+        assert_eq!(lines.len(), 2, "the cut relay and the next record");
+    }
+
+    /// An append that fails partway leaves no fragment for the next record to join.
+    #[test]
+    fn a_failed_append_leaves_no_fragment() {
+        const CHILD: &str = "STRANDS_BOX_TELEMETRY_FAILED_APPEND_CHILD";
+        // The file-size limit is per process, so the test runs alone in a child process.
+        if std::env::var_os(CHILD).is_none() {
+            let module = module_path!();
+            let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+            let name = format!("{module}::a_failed_append_leaves_no_fragment");
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", &name, "--test-threads=1"])
+                .env(CHILD, "1")
+                .output()
+                .expect("run the child");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "the child failed: {stdout}");
+            // A renamed or moved test matches nothing, and libtest still exits 0.
+            assert!(
+                stdout.contains("test result: ok. 1 passed"),
+                "the child ran no test named {name}: {stdout}"
+            );
+            return;
+        }
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let destination = directory.path().join("records.jsonl");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&destination)
+            .expect("open");
+        append(&mut file, b"{}\n").expect("the first line is written");
+
+        // SAFETY: plain libc calls on this single-threaded child process.
+        let limit = unsafe {
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            let mut limit = std::mem::zeroed::<libc::rlimit>();
+            assert_eq!(libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit), 0);
+            let lowered = libc::rlimit {
+                rlim_cur: 4096,
+                rlim_max: limit.rlim_max,
+            };
+            assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &lowered), 0);
+            limit
+        };
+        let large = [b'x'; 8192];
+        let failed = append(&mut file, &large);
+        // SAFETY: restores the soft limit read above, which the hard limit still allows.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) }, 0);
+        assert!(failed.is_err(), "the append past the limit succeeded");
+
+        append(&mut file, b"{}\n").expect("the next line is written");
+        assert_eq!(
+            std::fs::read(&destination).expect("read"),
+            b"{}\n{}\n",
+            "a fragment stayed in the file"
+        );
+    }
+
+    /// A relay cancelled while it waits for the file leaves no write behind.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_relay_cancelled_while_waiting_leaves_no_write_behind() {
+        use std::io::Read as _;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (target, mut pipe) = stalled_pipe(directory.path());
+        let exporter = std::sync::Arc::new(
+            TargetExporter::open(&target, std::sync::Arc::default()).expect("open"),
+        );
+        let empty = || ExportTraceServiceRequest {
+            resource_spans: Vec::new(),
+        };
+        // The first relay holds the file inside a write the full pipe blocks.
+        let holder = {
+            let exporter = std::sync::Arc::clone(&exporter);
+            tokio::spawn(async move { exporter.relay_trace(&empty()).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        for _ in 0..20 {
+            let waited =
+                tokio::time::timeout(Duration::from_millis(5), exporter.relay_trace(&empty()))
+                    .await;
+            assert!(waited.is_err(), "a relay finished while the file was held");
+        }
+
+        // Empty the pipe until the held write and anything queued behind it have arrived.
+        let mut received = Vec::new();
+        let mut buffer = [0_u8; 65536];
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        while tokio::time::Instant::now() < deadline {
+            match pipe.read(&mut buffer) {
+                Ok(read) => received.extend_from_slice(&buffer[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("empty the pipe: {error}"),
+            }
+        }
+        let _ = holder.await.expect("the held relay ends");
+
+        let lines = received.iter().filter(|byte| **byte == b'\n').count();
+        assert_eq!(lines, 1, "a cancelled relay still wrote its line");
     }
 
     /// **A redirect never carries the credential to the host it names.**
@@ -470,6 +992,491 @@ mod tests {
         );
     }
 
+    /// A stand-in endpoint that answers `200` and hands back each request's head and body.
+    async fn stand_in() -> (
+        std::net::SocketAddr,
+        tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>,
+    ) {
+        stand_in_at("127.0.0.1:0").await
+    }
+
+    /// A stand-in endpoint listening on `bind`.
+    async fn stand_in_at(
+        bind: &str,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>,
+    ) {
+        use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
+
+        let listener = tokio::net::TcpListener::bind(bind)
+            .await
+            .expect("bind a stand-in endpoint");
+        let address = listener.local_addr().expect("its address");
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let sender = sender.clone();
+                tokio::spawn(async move {
+                    let mut reader = tokio::io::BufReader::new(stream);
+                    loop {
+                        let mut head = String::new();
+                        let mut length = 0usize;
+                        loop {
+                            let mut line = String::new();
+                            if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                                return;
+                            }
+                            if line == "\r\n" {
+                                break;
+                            }
+                            if let Some(value) =
+                                line.to_ascii_lowercase().strip_prefix("content-length:")
+                            {
+                                length = value.trim().parse().unwrap_or(0);
+                            }
+                            head.push_str(&line);
+                        }
+                        let mut body = vec![0u8; length];
+                        if reader.read_exact(&mut body).await.is_err() {
+                            return;
+                        }
+                        let _ = sender.send((head, body));
+                        let _ = reader
+                            .get_mut()
+                            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                            .await;
+                    }
+                });
+            }
+        });
+        (address, receiver)
+    }
+
+    /// One header's value in a received head, matched case-insensitively.
+    fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+        head.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim()
+                .eq_ignore_ascii_case(name)
+                .then_some(value.trim())
+        })
+    }
+
+    /// The first line of a received head, which names the route.
+    fn request_line(head: &str) -> &str {
+        head.lines().next().unwrap_or("")
+    }
+
+    fn empty_spans() -> ExportTraceServiceRequest {
+        ExportTraceServiceRequest {
+            resource_spans: Vec::new(),
+        }
+    }
+
+    fn empty_logs() -> ExportLogsServiceRequest {
+        ExportLogsServiceRequest {
+            resource_logs: Vec::new(),
+        }
+    }
+
+    fn opened(target: &Target) -> TargetExporter {
+        TargetExporter::open(target, std::sync::Arc::default()).expect("open")
+    }
+
+    /// A secret written to a file, as the operator's `file://` reference names it.
+    fn secret_file(directory: &tempfile::TempDir, value: &str) -> credentials::Locator {
+        let path = directory.path().join("secret");
+        std::fs::write(&path, value).expect("write the secret");
+        credentials::Locator::parse_uri(&format!("file://{}", path.display())).expect("a locator")
+    }
+
+    /// One vault holding one opaque route, and the phantom it minted.
+    fn opaque_vault(
+        address: std::net::SocketAddr,
+        locator: credentials::Locator,
+        mode: credentials::InjectMode,
+    ) -> (std::sync::Arc<credentials::Vault>, String) {
+        let pattern = match address.ip() {
+            std::net::IpAddr::V6(ip) => credentials::DestinationPattern::ipv6(ip, address.port()),
+            std::net::IpAddr::V4(ip) => {
+                credentials::DestinationPattern::parse(&format!("{ip}:{}", address.port()))
+                    .expect("a pattern")
+            }
+        };
+        let opened = credentials::Vault::open(
+            credentials::VaultConfig::new(credentials::Backend::local(), "telemetry-test")
+                .route(credentials::RouteSpec::opaque(pattern, locator, mode))
+                .require_every_route(),
+        )
+        .expect("the vault opens");
+        let phantom = opened.phantoms()[0].token().to_string();
+        (std::sync::Arc::new(opened.into_vault()), phantom)
+    }
+
+    /// **A traces-only destination receives spans and is never sent a log or a metric batch.**
+    ///
+    /// Langfuse and LangSmith answer `404` on `/v1/logs`, so a target that sent one would count a
+    /// dropped batch every second.
+    #[tokio::test]
+    async fn a_traces_only_target_is_sent_no_other_payload() {
+        let (address, mut received) = stand_in().await;
+        let target = Target::new(TargetKind::Otlp, format!("http://{address}"))
+            .accepting(vec![Payload::Traces]);
+        let exporter = opened(&target);
+
+        exporter
+            .relay_logs(&empty_logs())
+            .await
+            .expect("an unaccepted payload is no failure");
+        exporter
+            .relay_metrics(&ExportMetricsServiceRequest {
+                resource_metrics: Vec::new(),
+            })
+            .await
+            .expect("an unaccepted payload is no failure");
+        exporter
+            .relay_trace(&empty_spans())
+            .await
+            .expect("the span batch is delivered");
+
+        let (head, _) = received.recv().await.expect("one request");
+        assert!(
+            request_line(&head).starts_with("POST /v1/traces "),
+            "{head}"
+        );
+        assert!(received.try_recv().is_err(), "no other payload was sent");
+        assert_eq!(
+            exporter.dropped.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a payload the destination does not take is not a dropped batch"
+        );
+    }
+
+    /// **A destination with a path keeps it**, which is how Langfuse and LangSmith spell theirs.
+    #[tokio::test]
+    async fn a_destination_path_prefixes_the_route() {
+        let (address, mut received) = stand_in().await;
+        let target = Target::new(
+            TargetKind::Otlp,
+            format!("http://{address}/api/public/otel/"),
+        );
+        opened(&target)
+            .relay_trace(&empty_spans())
+            .await
+            .expect("delivered");
+        let (head, _) = received.recv().await.expect("one request");
+        assert!(
+            request_line(&head).starts_with("POST /api/public/otel/v1/traces "),
+            "{head}"
+        );
+    }
+
+    /// **The vault swaps the phantom for the real key, so the exporter never holds it.** This is
+    /// the LangSmith shape: `x-api-key` plus a fixed project header.
+    #[tokio::test]
+    async fn the_vault_attaches_an_api_key_header() {
+        let (address, mut received) = stand_in().await;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mode = credentials::InjectMode::header("{}", Some("x-api-key".to_string()))
+            .expect("a header mode");
+        let (vault, phantom) =
+            opaque_vault(address, secret_file(&directory, "lsv2_pt_real_key"), mode);
+        let target = Target::new(TargetKind::Otlp, format!("http://{address}/otel"))
+            .accepting(vec![Payload::Traces])
+            .with_header("Langsmith-Project", "strands-box")
+            .with_header("x-api-key", phantom.clone())
+            .with_vault(vault);
+        let exporter = opened(&target);
+        assert!(
+            !format!("{exporter:?}").contains("lsv2_pt_real_key"),
+            "the exporter does not hold the key"
+        );
+
+        exporter
+            .relay_trace(&empty_spans())
+            .await
+            .expect("delivered");
+        let (head, _) = received.recv().await.expect("one request");
+        assert!(
+            request_line(&head).starts_with("POST /otel/v1/traces "),
+            "{head}"
+        );
+        assert_eq!(
+            header(&head, "x-api-key"),
+            Some("lsv2_pt_real_key"),
+            "{head}"
+        );
+        assert_eq!(
+            header(&head, "langsmith-project"),
+            Some("strands-box"),
+            "{head}"
+        );
+        assert!(
+            !head.contains(&phantom),
+            "the phantom never rides upstream: {head}"
+        );
+    }
+
+    /// **A target on an IPv6 address gets its credential**, bound to the bracketed host a URL
+    /// writes.
+    #[tokio::test]
+    async fn the_vault_attaches_a_credential_on_an_ipv6_address() {
+        let (address, mut received) = stand_in_at("[::1]:0").await;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mode = credentials::InjectMode::header("{}", Some("x-api-key".to_string()))
+            .expect("a header mode");
+        let (vault, phantom) = opaque_vault(address, secret_file(&directory, "real_key"), mode);
+        let target = Target::new(TargetKind::Otlp, format!("http://{address}"))
+            .with_header("x-api-key", phantom)
+            .with_vault(vault);
+        let exporter = opened(&target);
+
+        exporter
+            .relay_trace(&empty_spans())
+            .await
+            .expect("delivered");
+        let (head, _) = received.recv().await.expect("one request");
+        assert_eq!(header(&head, "x-api-key"), Some("real_key"), "{head}");
+    }
+
+    /// **Basic auth carries the `public:secret` pair, encoded by the vault.** This is the Langfuse
+    /// shape, with its ingestion-version header.
+    #[tokio::test]
+    async fn the_vault_attaches_basic_auth() {
+        use base64::Engine as _;
+
+        let (address, mut received) = stand_in().await;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (vault, phantom) = opaque_vault(
+            address,
+            secret_file(&directory, "pk-lf-1234:sk-lf-5678"),
+            credentials::InjectMode::basic_auth(),
+        );
+        let presented = base64::engine::general_purpose::STANDARD.encode(format!("box:{phantom}"));
+        let target = Target::new(
+            TargetKind::Otlp,
+            format!("http://{address}/api/public/otel"),
+        )
+        .accepting(vec![Payload::Traces])
+        .with_header("x-langfuse-ingestion-version", "4")
+        .with_header("authorization", format!("Basic {presented}"))
+        .with_vault(vault);
+
+        opened(&target)
+            .relay_trace(&empty_spans())
+            .await
+            .expect("delivered");
+        let (head, _) = received.recv().await.expect("one request");
+        let expected = base64::engine::general_purpose::STANDARD.encode("pk-lf-1234:sk-lf-5678");
+        assert_eq!(
+            header(&head, "authorization"),
+            Some(format!("Basic {expected}").as_str()),
+            "{head}"
+        );
+        assert_eq!(header(&head, "x-langfuse-ingestion-version"), Some("4"));
+        assert_eq!(
+            head.to_ascii_lowercase().matches("authorization:").count(),
+            1,
+            "one authorization header, the real one: {head}"
+        );
+    }
+
+    /// **A request that presents no phantom is refused by the vault and never sent.**
+    #[tokio::test]
+    async fn a_request_without_its_phantom_is_not_sent() {
+        let (address, mut received) = stand_in().await;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mode = credentials::InjectMode::header("{}", Some("x-api-key".to_string()))
+            .expect("a header mode");
+        let (vault, _phantom) = opaque_vault(address, secret_file(&directory, "real"), mode);
+        let target = Target::new(TargetKind::Otlp, format!("http://{address}")).with_vault(vault);
+        let exporter = opened(&target);
+
+        assert!(exporter.relay_trace(&empty_spans()).await.is_err());
+        assert_eq!(
+            exporter.dropped.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        let nothing = tokio::time::timeout(Duration::from_millis(200), received.recv()).await;
+        assert!(nothing.is_err(), "no request reached the destination");
+    }
+
+    /// A stand-in `credsd` that answers every `credential/get` with fixed session credentials.
+    fn stand_in_credsd(directory: &tempfile::TempDir) -> std::path::PathBuf {
+        use std::io::{BufRead as _, Write as _};
+
+        let socket = directory.path().join("credsd.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind credsd");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut line = String::new();
+                let _ = std::io::BufReader::new(&stream).read_line(&mut line);
+                let id = serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .and_then(|request| request.get("id").cloned())
+                    .unwrap_or(serde_json::Value::Null);
+                let answer = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "credential": "login",
+                        "material": {
+                            "type": "session_credentials",
+                            "access_key_id": "ASIATELEMETRYTEST",
+                            "secret_access_key": "telemetry-secret-access-key",
+                            "session_token": "telemetry-session-token"
+                        },
+                        "expires_at": "2099-01-01T00:00:00Z",
+                        "provenance": "minted_for_request"
+                    }
+                });
+                let _ = writeln!(stream, "{answer}");
+            }
+        });
+        socket
+    }
+
+    /// **A CloudWatch Logs target is SigV4-signed by the vault for `logs` in its region**, with the
+    /// log-group and log-stream headers inside the signature.
+    ///
+    /// The host must be the real AWS name, because the vault derives the signing scope from it, so
+    /// the client resolves that name to the stand-in.
+    #[tokio::test]
+    async fn a_cloudwatch_logs_target_is_signed_for_logs() {
+        let (address, mut received) = stand_in().await;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let socket = stand_in_credsd(&directory);
+        let host = "logs.us-west-2.amazonaws.com";
+        let pattern = credentials::DestinationPattern::parse(&format!("{host}:{}", address.port()))
+            .expect("a pattern");
+        let opened = credentials::Vault::open(
+            credentials::VaultConfig::new(credentials::Backend::local(), "telemetry-test")
+                .credsd_socket(&socket)
+                .route(credentials::RouteSpec::signed_aws(
+                    pattern,
+                    credentials::Locator::parse_uri("credsd://telemetry").expect("a locator"),
+                ))
+                .require_every_route(),
+        )
+        .expect("the vault opens");
+        assert!(
+            opened.phantoms().is_empty(),
+            "a signed route mints no phantom"
+        );
+        let target = Target::new(
+            TargetKind::Otlp,
+            format!("http://{host}:{}", address.port()),
+        )
+        .accepting(vec![Payload::Logs])
+        .with_header("x-aws-log-group", "/strands-box/test")
+        .with_header("x-aws-log-stream", "box")
+        .with_vault(std::sync::Arc::new(opened.into_vault()));
+        let exporter = TargetExporter::open_with(
+            &target,
+            std::sync::Arc::default(),
+            reqwest::Client::builder().resolve(host, address),
+        )
+        .expect("open");
+
+        exporter
+            .relay_trace(&empty_spans())
+            .await
+            .expect("traces are not accepted, so skipped");
+        exporter.relay_logs(&empty_logs()).await.expect("delivered");
+        let (head, _) = received.recv().await.expect("one request");
+        assert!(request_line(&head).starts_with("POST /v1/logs "), "{head}");
+        let authorization = header(&head, "authorization").expect("signed");
+        assert!(
+            authorization.starts_with("AWS4-HMAC-SHA256 Credential=ASIATELEMETRYTEST/"),
+            "{authorization}"
+        );
+        assert!(
+            authorization.contains("/us-west-2/logs/aws4_request"),
+            "{authorization}"
+        );
+        let signed = authorization
+            .split("SignedHeaders=")
+            .nth(1)
+            .and_then(|rest| rest.split(',').next())
+            .expect("a signed-header list");
+        for name in [
+            "content-type",
+            "host",
+            "x-aws-log-group",
+            "x-aws-log-stream",
+        ] {
+            assert!(
+                signed.split(';').any(|signed| signed == name),
+                "{name} in {signed}"
+            );
+        }
+        assert_eq!(
+            header(&head, "x-amz-security-token"),
+            Some("telemetry-session-token")
+        );
+        assert!(header(&head, "x-amz-date").is_some(), "{head}");
+        assert!(
+            !head.contains("telemetry-secret-access-key"),
+            "the secret key never crosses: {head}"
+        );
+        assert!(
+            received.try_recv().is_err(),
+            "the unaccepted trace batch was not sent"
+        );
+    }
+
+    /// **An X-Ray target is signed for `xray`**, which is where CloudWatch takes OTLP spans.
+    #[tokio::test]
+    async fn an_xray_target_is_signed_for_xray() {
+        let (address, mut received) = stand_in().await;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let socket = stand_in_credsd(&directory);
+        let host = "xray.us-west-2.amazonaws.com";
+        let pattern = credentials::DestinationPattern::parse(&format!("{host}:{}", address.port()))
+            .expect("a pattern");
+        let opened = credentials::Vault::open(
+            credentials::VaultConfig::new(credentials::Backend::local(), "telemetry-test")
+                .credsd_socket(&socket)
+                .route(credentials::RouteSpec::signed_aws(
+                    pattern,
+                    credentials::Locator::parse_uri("credsd://telemetry").expect("a locator"),
+                )),
+        )
+        .expect("the vault opens");
+        let target = Target::new(
+            TargetKind::Otlp,
+            format!("http://{host}:{}", address.port()),
+        )
+        .accepting(vec![Payload::Traces])
+        .with_vault(std::sync::Arc::new(opened.into_vault()));
+        let exporter = TargetExporter::open_with(
+            &target,
+            std::sync::Arc::default(),
+            reqwest::Client::builder().resolve(host, address),
+        )
+        .expect("open");
+
+        exporter
+            .relay_trace(&empty_spans())
+            .await
+            .expect("delivered");
+        let (head, _) = received.recv().await.expect("one request");
+        assert!(
+            request_line(&head).starts_with("POST /v1/traces "),
+            "{head}"
+        );
+        let authorization = header(&head, "authorization").expect("signed");
+        assert!(
+            authorization.contains("/us-west-2/xray/aws4_request"),
+            "{authorization}"
+        );
+    }
+
     /// The exporter never prints the credential it carries.
     #[test]
     fn an_exporters_debug_output_holds_no_secret() {
@@ -491,6 +1498,197 @@ mod tests {
         assert!(
             printed.contains("x-api-key"),
             "the header name is not secret"
+        );
+    }
+
+    /// **A failure report never quotes the credential**, even when the endpoint echoes back the key
+    /// it refused.
+    #[tokio::test]
+    async fn a_failure_report_redacts_an_echoed_credential() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buffer = vec![0u8; 16384];
+            let mut read = 0;
+            loop {
+                let more = stream.read(&mut buffer[read..]).await.unwrap_or(0);
+                read += more;
+                if more == 0
+                    || buffer[..read]
+                        .windows(4)
+                        .any(|window| window == b"\r\n\r\n")
+                {
+                    break;
+                }
+            }
+            let head = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let key = head
+                .lines()
+                .find_map(|line| line.strip_prefix("x-api-key: "))
+                .unwrap_or_default()
+                .to_string();
+            let body = format!("Invalid API key: {key}");
+            let reply = format!(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(reply.as_bytes()).await;
+        });
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mode = credentials::InjectMode::header("{}", Some("x-api-key".to_string()))
+            .expect("a header mode");
+        let (vault, phantom) = opaque_vault(
+            address,
+            secret_file(&directory, "lsv2_pt_echoed_real_key"),
+            mode,
+        );
+        let target = Target::new(TargetKind::Otlp, format!("http://{address}"))
+            .with_header("x-api-key", phantom)
+            .with_vault(vault);
+        let exporter = opened(&target).reporting_failures(true);
+
+        let error = exporter
+            .relay_trace(&empty_spans())
+            .await
+            .expect_err("a 401 is a failure")
+            .to_string();
+        assert!(
+            error.contains("401") && error.contains("Invalid API key: [REDACTED]"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("lsv2_pt_echoed_real_key"),
+            "the key leaked: {error}"
+        );
+    }
+
+    /// **The signature covers the URL the client sends.** `reqwest` drops a default port and
+    /// lowercases the host, so a signature over the written URL would cover another `Host`.
+    #[tokio::test]
+    async fn a_signature_covers_the_url_the_client_sends() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let socket = stand_in_credsd(&directory);
+        let opened = credentials::Vault::open(
+            credentials::VaultConfig::new(credentials::Backend::local(), "telemetry-test")
+                .credsd_socket(&socket)
+                .route(credentials::RouteSpec::signed_aws(
+                    credentials::DestinationPattern::parse("logs.us-west-2.amazonaws.com")
+                        .expect("a pattern"),
+                    credentials::Locator::parse_uri("credsd://telemetry").expect("a locator"),
+                ))
+                .require_every_route(),
+        )
+        .expect("the vault opens");
+        let vault = std::sync::Arc::new(opened.into_vault());
+        let fixed = vec![("content-type".to_string(), PROTOBUF.to_string())];
+        let named = |attachment: &credentials::Attachment, name: &str| {
+            attachment
+                .set_headers()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str().to_string())
+        };
+        let normal = "https://logs.us-west-2.amazonaws.com/v1/logs";
+        for written in [
+            "https://LOGS.us-west-2.amazonaws.com/v1/logs",
+            "https://logs.us-west-2.amazonaws.com:443/v1/logs",
+        ] {
+            // Sign both spellings within one second, so their signing times agree.
+            let mut compared = false;
+            for _ in 0..5 {
+                let sent = attachment_for(&vault, written, &fixed, b"batch")
+                    .await
+                    .expect("signed")
+                    .expect("an attachment");
+                let expected = attachment_for(&vault, normal, &fixed, b"batch")
+                    .await
+                    .expect("signed")
+                    .expect("an attachment");
+                if named(&sent, "x-amz-date") != named(&expected, "x-amz-date") {
+                    continue;
+                }
+                assert_eq!(
+                    named(&sent, "authorization"),
+                    named(&expected, "authorization"),
+                    "{written} is signed as {normal}"
+                );
+                compared = true;
+                break;
+            }
+            assert!(compared, "no two signatures shared a signing time");
+        }
+    }
+
+    /// **A credential lookup that never answers is bounded by the export deadline, and does not
+    /// hold the runtime open when it shuts down.**
+    #[test]
+    fn a_slow_credential_lookup_is_bounded_and_does_not_hold_shutdown() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let socket = directory.path().join("credsd.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind credsd");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                // Accept and never answer.
+                std::thread::sleep(Duration::from_secs(30));
+                drop(stream);
+            }
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let error = runtime.block_on(async {
+            let (address, _received) = stand_in().await;
+            let host = "logs.us-west-2.amazonaws.com";
+            let opened = credentials::Vault::open(
+                credentials::VaultConfig::new(credentials::Backend::local(), "telemetry-test")
+                    .credsd_socket(&socket)
+                    .route(credentials::RouteSpec::signed_aws(
+                        credentials::DestinationPattern::parse(&format!(
+                            "{host}:{}",
+                            address.port()
+                        ))
+                        .expect("a pattern"),
+                        credentials::Locator::parse_uri("credsd://telemetry").expect("a locator"),
+                    ))
+                    .require_every_route(),
+            )
+            .expect("the vault opens");
+            let target = Target::new(
+                TargetKind::Otlp,
+                format!("http://{host}:{}", address.port()),
+            )
+            .with_vault(std::sync::Arc::new(opened.into_vault()));
+            let exporter = TargetExporter::open_with(
+                &target,
+                std::sync::Arc::default(),
+                reqwest::Client::builder().resolve(host, address),
+            )
+            .expect("open");
+            let started = std::time::Instant::now();
+            let error = exporter
+                .relay_logs(&empty_logs())
+                .await
+                .expect_err("the lookup never answers")
+                .to_string();
+            assert!(
+                started.elapsed() < REQUEST_DEADLINE + Duration::from_secs(1),
+                "{:?}",
+                started.elapsed()
+            );
+            error
+        });
+        assert!(error.contains("did not attach within"), "{error}");
+        let stopping = std::time::Instant::now();
+        drop(runtime);
+        assert!(
+            stopping.elapsed() < Duration::from_secs(1),
+            "shutdown waited {:?} for the abandoned lookup",
+            stopping.elapsed()
         );
     }
 }

@@ -21,8 +21,8 @@ det_case! {
     id:   "CN-T-07",
     desc: "Two tools hold disjoint grants: tool a (write=[a-work]) cannot read tool b's read_file or write b's directory, tool b cannot write a-work, and each reaches its own grant (host witness, file bytes)",
     run: |b| {
-        let probe_a = b.compile_probe("fsprobe-t07a", PROBE);
-        let probe_b = b.compile_probe("fsprobe-t07b", PROBE);
+        let probe_a = b.install_tool(&b.compile_probe("fsprobe-t07a", PROBE));
+        let probe_b = b.install_tool(&b.compile_probe("fsprobe-t07b", PROBE));
         let root = b.workspace().parent().unwrap().to_path_buf();
         let a_work = root.join("a-work");
         let b_dir = root.join("b-dir");

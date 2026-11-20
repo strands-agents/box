@@ -1,0 +1,66 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="drawio" type="device">
+  <diagram id="namespace-mount-inventory" name="Namespace mounts remain visible to Box protection">
+    <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1120" pageHeight="980" math="0" shadow="0" background="#ffffff">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="box-checks" value="&lt;div style=&quot;font-size:22px;line-height:30px;font-weight:bold;color:#232F3E&quot;&gt;Box filesystem checks&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=none;strokeWidth=2;dashed=0;verticalAlign=top;align=left;spacing=0;spacingLeft=16;spacingTop=6;fontSize=14;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="200" width="1040" height="730" />
+        </mxCell>
+        <mxCell id="mount-table" value="&lt;div style=&quot;font-size:22px;line-height:30px;font-weight:bold;color:#232F3E&quot;&gt;Linux mount table&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:25px;font-weight:normal;color:#5F6B7A&quot;&gt;Filesystem paths and&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:25px;font-weight:normal;color:#5F6B7A&quot;&gt;namespace resource handles&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;dashed=0;verticalAlign=top;align=left;spacing=0;spacingLeft=16;spacingTop=12;fontSize=14;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="380" y="40" width="320" height="120" />
+        </mxCell>
+        <mxCell id="validate" value="&lt;div style=&quot;font-size:22px;line-height:30px;font-weight:bold;color:#232F3E&quot;&gt;Validate every mount&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:25px;font-weight:normal;color:#5F6B7A&quot;&gt;Absolute filesystem path&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:25px;font-weight:normal;color:#5F6B7A&quot;&gt;or namespace token (nsfs)&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:25px;font-weight:normal;color:#5F6B7A&quot;&gt;Numeric device identity&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;dashed=0;verticalAlign=top;align=left;spacing=0;spacingLeft=16;spacingTop=12;fontSize=14;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="380" y="280" width="320" height="140" />
+        </mxCell>
+        <mxCell id="refuse" value="&lt;div style=&quot;font-size:22px;line-height:30px;font-weight:bold;color:#DD344C&quot;&gt;Malformed record&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:25px;font-weight:normal;color:#5F6B7A&quot;&gt;Refuse the inventory&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#DD344C;fillColor=#ffffff;strokeWidth=2;dashed=0;verticalAlign=top;align=left;spacing=0;spacingLeft=16;spacingTop=12;fontSize=14;fontStyle=1;fontColor=#DD344C;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="800" y="300" width="240" height="100" />
+        </mxCell>
+        <mxCell id="aliases" value="&lt;div style=&quot;font-size:22px;line-height:30px;font-weight:bold;color:#232F3E&quot;&gt;Protect Box executables&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:25px;font-weight:normal;color:#5F6B7A&quot;&gt;Find ordinary file aliases&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:25px;font-weight:normal;color:#5F6B7A&quot;&gt;Exclude namespace handles&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:25px;font-weight:normal;color:#5F6B7A&quot;&gt;only if no protected executable&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:25px;font-weight:normal;color:#5F6B7A&quot;&gt;has the same device ID&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:25px;font-weight:normal;color:#5F6B7A&quot;&gt;Otherwise refuse the inventory&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;dashed=0;verticalAlign=top;align=left;spacing=0;spacingLeft=16;spacingTop=12;fontSize=14;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="80" y="550" width="400" height="220" />
+        </mxCell>
+        <mxCell id="command-files" value="&lt;div style=&quot;font-size:22px;line-height:30px;font-weight:bold;color:#232F3E&quot;&gt;Protect command files&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:25px;font-weight:normal;color:#5F6B7A&quot;&gt;Keep every mount ID&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:25px;font-weight:normal;color:#5F6B7A&quot;&gt;and mount location&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:25px;font-weight:normal;color:#5F6B7A&quot;&gt;Namespace records stay visible&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;dashed=0;verticalAlign=top;align=left;spacing=0;spacingLeft=16;spacingTop=12;fontSize=14;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="640" y="550" width="400" height="220" />
+        </mxCell>
+        <mxCell id="stability" value="&lt;div style=&quot;font-size:22px;line-height:30px;font-weight:bold;color:#232F3E&quot;&gt;Compare the complete mount table&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:25px;font-weight:normal;color:#5F6B7A&quot;&gt;Both checks compare every record before and after inspection.&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=none;strokeWidth=2;dashed=0;verticalAlign=top;align=left;spacing=0;spacingLeft=16;spacingTop=0;fontSize=14;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="80" y="830" width="960" height="60" />
+        </mxCell>
+        <mxCell id="read" value="&lt;div style=&quot;font-size:18px;line-height:21.6px;font-style:italic;font-weight:normal&quot;&gt;Read&lt;/div&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;align=left;" edge="1" parent="1" source="mount-table" target="validate">
+          <mxGeometry as="geometry" x="0" relative="1">
+            <mxPoint as="offset" x="12" y="0" />
+            <Array as="points">
+              <mxPoint x="540" y="220" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bad-record" value="&lt;div style=&quot;font-size:18px;line-height:21.6px;font-style:italic;font-weight:normal&quot;&gt;Refused&lt;/div&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#DD344C;strokeWidth=2.5;dashed=1;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;align=center;dashPattern=8 6;fixDash=1;" edge="1" parent="1" source="validate" target="refuse">
+          <mxGeometry as="geometry" x="0" relative="1">
+            <mxPoint as="offset" x="0" y="-18" />
+            <Array as="points">
+              <mxPoint x="750" y="350" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="alias-lookup" value="&lt;div style=&quot;font-size:18px;line-height:21.6px;font-style:italic;font-weight:normal&quot;&gt;Alias lookup&lt;/div&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;align=center;" edge="1" parent="1" source="validate" target="aliases">
+          <mxGeometry as="geometry" x="-0.06" relative="1">
+            <mxPoint as="offset" x="0" y="-18" />
+            <Array as="points">
+              <mxPoint x="460" y="470" />
+              <mxPoint x="280" y="470" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="command-checks" value="&lt;div style=&quot;font-size:18px;line-height:21.6px;font-style:italic;font-weight:normal&quot;&gt;Command checks&lt;/div&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;align=center;" edge="1" parent="1" source="validate" target="command-files">
+          <mxGeometry as="geometry" x="-0.04" relative="1">
+            <mxPoint as="offset" x="0" y="-18" />
+            <Array as="points">
+              <mxPoint x="620" y="470" />
+              <mxPoint x="840" y="470" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -33,8 +33,10 @@ fn contained(config: &ContainmentConfig, directory: &Path, arguments: &[&str]) -
 
 #[test]
 fn a_contained_build_runs_its_library_and_a_new_launch_keeps_operator_bytes_private() {
-    if !cfg!(target_arch = "aarch64") {
-        println!("skipping: Linux containment supports ARM64 (aarch64), not this architecture");
+    if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
+        println!(
+            "skipping: Linux containment supports ARM64 (aarch64) or x86-64 (x86_64), not this architecture"
+        );
         return;
     }
     let directory = tempfile::tempdir().unwrap();
@@ -75,16 +77,26 @@ int main(int argc, char **argv) {
         .unwrap()
         .allow("/usr/lib", Operation::Read, Scope::Root)
         .unwrap();
+    if Path::new("/usr/lib64").is_dir() {
+        build = build
+            .allow("/usr/lib64", Operation::Read, Scope::Root)
+            .unwrap();
+    }
     for program in ["/bin/sh", "/usr/bin/cc", "/usr/bin/as", "/usr/bin/ld"] {
         build = build.allow(program, Operation::Exec, Scope::File).unwrap();
     }
-    for name in ["cc1", "collect2"] {
+    // GCC can install its loadable linker plugin beside its helpers, outside /usr/lib.
+    for name in ["cc1", "collect2", "liblto_plugin.so"] {
         let path = Command::new("/usr/bin/cc")
             .arg(format!("-print-prog-name={name}"))
             .output()
             .unwrap();
         assert!(path.status.success());
         let path = String::from_utf8(path.stdout).unwrap();
+        if name == "liblto_plugin.so" && path.trim() == name {
+            println!("skipping: the compiler does not report an installed linker plugin");
+            return;
+        }
         build = build
             .allow(path.trim(), Operation::Exec, Scope::File)
             .unwrap();
@@ -118,15 +130,26 @@ int main(int argc, char **argv) {
         &project,
         &[app.to_str().unwrap(), note.to_str().unwrap()],
     );
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("writable dependency"));
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let execute = execute
+        .allow(project.join("libbuilt.so"), Operation::Exec, Scope::File)
+        .unwrap();
+    let output = contained(
+        &execute,
+        &project,
+        &[app.to_str().unwrap(), note.to_str().unwrap()],
+    );
     assert!(
         output.status.success(),
-        "new contained launch failed: {output:?}"
+        "explicitly authorized library launch failed: {output:?}"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("BUILT_LIBRARY_RAN"), "{stdout}");
     assert!(stdout.contains("OPERATOR_BYTES_REFUSED"), "{stdout}");
     eprintln!(
-        "contained build and run: passed; writable app with private library: passed; ungranted read: refused"
+        "contained build and run: passed; implicit writable library: refused; explicit library execution: passed; ungranted read: refused"
     );
 
     let output = contained(
@@ -176,4 +199,26 @@ int main(int argc, char **argv) {
     eprintln!(
         "malicious compiled dependency: refused before target startup; operator bytes exposed=0"
     );
+    let installed = directory.path().join("installed-evil");
+    std::fs::hard_link(project.join("evil"), &installed).unwrap();
+    let linked = ContainmentConfig::new()
+        .allow(&project, Operation::Read, Scope::Root)
+        .unwrap()
+        .allow(&project, Operation::Write, Scope::Root)
+        .unwrap()
+        .allow(&installed, Operation::Exec, Scope::File)
+        .unwrap()
+        .allow("/usr/bin/cat", Operation::Exec, Scope::File)
+        .unwrap();
+    let output = contained(&linked, &project, &["/usr/bin/cat", note.to_str().unwrap()]);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "writable hard link was not refused: {output:?}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "operator bytes exposed: {output:?}"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no filesystem grant reaches"));
 }

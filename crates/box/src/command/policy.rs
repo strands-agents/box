@@ -4,12 +4,15 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
 
-use policy::{compose_action_schema, event_schema_source, generate_mcp_schema};
+use policy::{event_schema_source, generate_mcp_schema};
 
 use crate::error::{BoxError, McpSchemaError};
 use crate::record::config::egress::EgressSecret;
-use crate::record::config::{read_mcp_servers, read_remote_mcp_servers};
+use crate::record::config::{
+    read_mcp_servers, read_remote_mcp_servers, read_secret_sources, read_tool_grammars,
+};
 use crate::record::layout::operator_home_directory;
+use crate::run::secret_sources::{SchemaSecrets, SecretSources};
 
 const ACTION_SCHEMA_FILE: &str = "actions.cedarschema";
 const EVENT_SCHEMA_FILE: &str = "events.dwschema";
@@ -21,7 +24,34 @@ pub(crate) async fn generate_schema(
     let working =
         std::env::current_dir().map_err(|source| McpSchemaError::WorkingDirectory { source })?;
     let config = working.join(config);
+    let grammars = read_tool_grammars(&config)?;
     let servers = read_mcp_servers(&config)?;
+    // Read the remote servers first: a re-routed one is refused here, so the whole run fails before
+    // the stdio loop below spawns any server, rather than spawning them and discarding the result.
+    let remote_servers = read_remote_mcp_servers(&config)?;
+    // Check each declared program and read each secret that it holds before a stdio server
+    // starts, so a source that fails stops the run first, as it stops `run` before a workload.
+    let (entries, enabled, tables) = read_secret_sources(&config)?;
+    let references = remote_servers
+        .iter()
+        .filter_map(|server| server.secret.as_ref())
+        .map(|secret| secret.reference.as_str());
+    let secrets = SecretSources::check_for_references(
+        &entries,
+        enabled,
+        &tables,
+        references,
+        std::io::stderr(),
+    )?;
+    for server in &remote_servers {
+        if let Some(secret) = &server.secret
+            && secrets.reads(&secret.reference)
+        {
+            // A placement that discovery cannot use is refused before a program starts for it.
+            header_placement(&server.name, secret)?;
+            with_secret(&server.name, secret, &secrets, |_| ())?;
+        }
+    }
     let home = operator_home_directory()?;
 
     let mut generated = Vec::with_capacity(servers.len());
@@ -40,9 +70,9 @@ pub(crate) async fn generate_schema(
     // Remote MCP servers (`[egress.<name>]` speaking `mcp`) are discovered over HTTP by a direct
     // client, not spawned. There is no gateway before `run`, so the credential is resolved and
     // attached here rather than injected as a phantom.
-    for server in read_remote_mcp_servers(&config)? {
+    for server in remote_servers {
         let auth = match &server.secret {
-            Some(secret) => Some(resolve_auth(&server.name, secret)?),
+            Some(secret) => Some(resolve_auth(&server.name, secret, &secrets)?),
             None => None,
         };
         let response = crate::run::broker::mcp_remote::list_tools(&server.url, auth)
@@ -60,7 +90,9 @@ pub(crate) async fn generate_schema(
         .iter()
         .map(|(server, schema)| (server.as_str(), schema.as_str()))
         .collect::<Vec<_>>();
-    let actions = compose_action_schema(&schemas).map_err(McpSchemaError::from)?;
+    let actions = grammars
+        .compose_action_schema(&schemas)
+        .map_err(McpSchemaError::from)?;
     let directory = working.join(output_dir);
     std::fs::create_dir_all(&directory).map_err(|source| McpSchemaError::Write {
         path: directory.clone(),
@@ -76,11 +108,25 @@ pub(crate) async fn generate_schema(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Resolve a remote server's credential and build the `(header, value)` to attach to its discovery
-/// requests. `env://` reads the operator's variable through the sanctioned resolver; the value is
-/// zeroized when it drops and never reaches the generated schema. Only header placement is
-/// supported here — the common case, and the one github uses.
-fn resolve_auth(server: &str, secret: &EgressSecret) -> Result<(String, String), McpSchemaError> {
+/// What `used` makes of the secret of `server`, which is read through `secrets` and wiped after.
+fn with_secret<T>(
+    server: &str,
+    secret: &EgressSecret,
+    secrets: &SchemaSecrets,
+    used: impl FnOnce(&str) -> T,
+) -> Result<T, McpSchemaError> {
+    let refused = |source: credentials::CredentialError| McpSchemaError::Credential {
+        server: server.to_string(),
+        reason: source.to_string(),
+    };
+    let locator = credentials::Locator::parse_uri(&secret.reference).map_err(refused)?;
+    let token = secrets.backend().resolve(&locator).map_err(refused)?;
+    Ok(used(token.as_str()))
+}
+
+/// Refuse a secret of `server` whose placement is not a header, which is the one placement that
+/// discovery supports.
+fn header_placement(server: &str, secret: &EgressSecret) -> Result<(), McpSchemaError> {
     if let Some(placement) = &secret.placement
         && !placement.eq_ignore_ascii_case("header")
     {
@@ -89,18 +135,17 @@ fn resolve_auth(server: &str, secret: &EgressSecret) -> Result<(String, String),
             placement: placement.clone(),
         });
     }
-    let locator = credentials::Locator::parse_uri(&secret.reference).map_err(|source| {
-        McpSchemaError::Credential {
-            server: server.to_string(),
-            reason: source.to_string(),
-        }
-    })?;
-    let token = credentials::Backend::local()
-        .resolve(&locator)
-        .map_err(|source| McpSchemaError::Credential {
-            server: server.to_string(),
-            reason: source.to_string(),
-        })?;
+    Ok(())
+}
+
+/// The `(header, value)` that discovery attaches for `server`, with its secret read through
+/// `secrets` and only header placement supported.
+fn resolve_auth(
+    server: &str,
+    secret: &EgressSecret,
+    secrets: &SchemaSecrets,
+) -> Result<(String, String), McpSchemaError> {
+    header_placement(server, secret)?;
     let header = secret
         .header
         .clone()
@@ -114,7 +159,8 @@ fn resolve_auth(server: &str, secret: &EgressSecret) -> Result<(String, String),
         .prefix
         .clone()
         .unwrap_or_else(|| default_prefix.to_string());
-    Ok((header, format!("{prefix}{}", token.as_str())))
+    let value = with_secret(server, secret, secrets, |token| format!("{prefix}{token}"))?;
+    Ok((header, value))
 }
 
 fn write_schema(directory: &Path, path: &Path, schema: &[u8]) -> Result<(), McpSchemaError> {

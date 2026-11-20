@@ -1,12 +1,12 @@
 //! [`MitmHandle`] — the supervisor's control surface for a running adapter.
 
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
-use crate::audit::{NetworkAuditEvent, SharedAuditLog};
+use super::listener::Connections;
 
 /// Which transport the adapter actually bound.
 pub(super) enum BoundTransport {
@@ -16,24 +16,13 @@ pub(super) enum BoundTransport {
     Unix(PathBuf),
 }
 
-/// A phantom-token env pair the supervisor seeds into the workload (a `*_BASE_URL` plus the phantom).
-#[derive(Debug, Clone)]
-pub(super) struct CredentialEnv {
-    /// The env var name (e.g. `OPENAI_API_KEY`, `GITHUB_TOKEN`).
-    pub(super) name: String,
-    /// The value — a phantom token, never a real secret.
-    pub(super) value: String,
-}
-
 /// The running MITM adapter's control surface.
 pub struct MitmHandle {
     transport: BoundTransport,
     ca_path: Option<PathBuf>,
-    ssl_cert_file: Option<PathBuf>,
-    credential_env: Vec<CredentialEnv>,
-    audit: SharedAuditLog,
-    stop: Arc<AtomicBool>,
+    connections: Arc<Connections>,
     accept_thread: Option<JoinHandle<()>>,
+    shutdown_connection: OnceLock<OwnedFd>,
 }
 
 impl MitmHandle {
@@ -41,20 +30,15 @@ impl MitmHandle {
     pub(super) fn new(
         transport: BoundTransport,
         ca_path: Option<PathBuf>,
-        ssl_cert_file: Option<PathBuf>,
-        credential_env: Vec<CredentialEnv>,
-        audit: SharedAuditLog,
-        stop: Arc<AtomicBool>,
+        connections: Arc<Connections>,
         accept_thread: JoinHandle<()>,
     ) -> Self {
         Self {
             transport,
             ca_path,
-            ssl_cert_file,
-            credential_env,
-            audit,
-            stop,
+            connections,
             accept_thread: Some(accept_thread),
+            shutdown_connection: OnceLock::new(),
         }
     }
 
@@ -94,47 +78,32 @@ impl MitmHandle {
             }
             BoundTransport::Unix(_) => Vec::new(),
         };
-        if let Some(cert) = &self.ssl_cert_file {
+        if let Some(cert) = &self.ca_path {
             vars.push(("SSL_CERT_FILE".to_string(), cert.display().to_string()));
         }
         vars
     }
 
-    /// The credential env vars (`*_BASE_URL` + phantom token) the supervisor seeds the workload
-    /// with. The phantom is non-secret; the real secret never enters the box.
-    pub fn credential_env_vars(&self) -> Vec<(String, String)> {
-        self.credential_env
-            .iter()
-            .map(|e| (e.name.clone(), e.value.clone()))
-            .collect()
-    }
-
-    /// Drain the buffered fast-lane audit events. Leaves the log empty.
-    pub fn drain_audit_events(&self) -> Vec<NetworkAuditEvent> {
-        self.audit.drain()
-    }
-
-    /// Shut the adapter down: flip the stop flag and unblock the accept loop by poking the
-    /// listener. Idempotent — a second call (or `Drop`) is a no-op.
+    /// Stop admission, interrupt client sockets, and wake the listener; `Drop` joins its workers.
     pub fn shutdown(&self) {
-        if self.stop.swap(true, Ordering::SeqCst) {
+        if !self.connections.shutdown() {
             return; // already shutting down
         }
-        // Unblock the blocking `accept()` by opening (and dropping) a throwaway connection over the
-        // same transport the accept loop is waiting on.
-        match &self.transport {
+        // Keep the wakeup connection open until the accept thread exits.
+        let connection = match &self.transport {
             BoundTransport::Tcp(port) => {
-                let _ = std::net::TcpStream::connect(("127.0.0.1", *port));
+                std::net::TcpStream::connect(("127.0.0.1", *port)).map(OwnedFd::from)
             }
-            BoundTransport::Unix(path) => {
-                let _ = UnixStream::connect(path);
-            }
+            BoundTransport::Unix(path) => UnixStream::connect(path).map(OwnedFd::from),
+        };
+        if let Ok(connection) = connection {
+            let _ = self.shutdown_connection.set(connection);
         }
     }
 }
 
 impl Drop for MitmHandle {
-    /// Shut down and join the accept thread on drop.
+    /// Shut down and join the accept thread and its connection workers on drop.
     fn drop(&mut self) {
         self.shutdown();
         if let Some(handle) = self.accept_thread.take() {
@@ -148,7 +117,7 @@ mod tests {
     use std::collections::HashMap;
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -171,12 +140,12 @@ mod tests {
         // A stale socket file from a crashed prior run would fail bind; clear it first (best-effort).
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path).unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
+        let connections = Arc::new(Connections::new(1));
         let accept_thread = {
-            let stop = stop.clone();
+            let connections = connections.clone();
             std::thread::spawn(move || {
                 for incoming in listener.incoming() {
-                    if stop.load(Ordering::SeqCst) {
+                    if connections.is_stopped() {
                         break;
                     }
                     drop(incoming);
@@ -186,10 +155,7 @@ mod tests {
         let handle = MitmHandle::new(
             BoundTransport::Unix(path.clone()),
             None,
-            None,
-            Vec::new(),
-            SharedAuditLog::new(),
-            stop,
+            connections,
             accept_thread,
         );
         (handle, path)
@@ -199,27 +165,19 @@ mod tests {
     fn tcp_handle() -> MitmHandle {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let stop = Arc::new(AtomicBool::new(false));
+        let connections = Arc::new(Connections::new(1));
         let accept_thread = {
-            let stop = stop.clone();
+            let connections = connections.clone();
             std::thread::spawn(move || {
                 for incoming in listener.incoming() {
-                    if stop.load(Ordering::SeqCst) {
+                    if connections.is_stopped() {
                         break;
                     }
                     drop(incoming);
                 }
             })
         };
-        MitmHandle::new(
-            BoundTransport::Tcp(port),
-            None,
-            None,
-            Vec::new(),
-            SharedAuditLog::new(),
-            stop,
-            accept_thread,
-        )
+        MitmHandle::new(BoundTransport::Tcp(port), None, connections, accept_thread)
     }
 
     /// `port()`/`unix_socket_path()` each report the transport actually bound.

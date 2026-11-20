@@ -6,10 +6,13 @@ use std::sync::Arc;
 
 mod authority;
 
-use crate::dogwood::{DogwoodEngine, parse_policy_source};
+use crate::check::{Finding, PolicyCheck};
+use crate::dogwood::{DogwoodEngine, check_and_expand, validate_staged_source};
+use crate::request::ActionRequest;
 use crate::schema::GovernedBox;
 use crate::{
-    Decision, Operator, Outcome, PolicyError, PolicyStagingError, PolicyWarning, Principal, Request,
+    Decision, GrammarBindings, Operator, Outcome, PolicyError, PolicyStagingError, PolicyWarning,
+    Principal, Request, RequestId, ToolGrammars,
 };
 use authority::Authority;
 
@@ -55,8 +58,19 @@ pub enum SchemaStage {
 /// One durable policy authority.
 pub struct PolicyEngine {
     authority: Authority,
+    #[cfg(feature = "experimental-idle-flush")]
+    history_flusher_active: std::sync::atomic::AtomicBool,
+    grammars: ToolGrammars,
+    issuer: u64,
+    bindings: GrammarBindings,
     effective: EffectivePolicy,
     observer: Option<Arc<dyn crate::observe::DecisionObserver>>,
+}
+
+/// A number that no other engine in this process holds.
+fn next_issuer() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl std::fmt::Debug for PolicyEngine {
@@ -69,6 +83,62 @@ impl std::fmt::Debug for PolicyEngine {
 }
 
 impl PolicyEngine {
+    /// Select event-count and submission-time persistence thresholds for this experiment.
+    #[cfg(feature = "experimental-idle-flush")]
+    pub fn set_periodic_history(
+        &self,
+        max_events: u32,
+        max_interval: std::time::Duration,
+    ) -> Result<(), PolicyError> {
+        self.authority
+            .set_periodic_history(max_events, max_interval)
+    }
+
+    /// Persist all history submitted before this call obtains the authority lock.
+    #[cfg(feature = "experimental-idle-flush")]
+    pub fn flush_history(&self) -> Result<(), PolicyError> {
+        self.authority.flush_history()
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    pub(crate) fn flush_history_for_timer(&self) -> Result<(), PolicyError> {
+        self.authority.flush_history_for_timer()
+    }
+
+    /// Start one owned idle-flush worker; stop event producers before shutting down its guard.
+    #[cfg(feature = "experimental-idle-flush")]
+    pub fn start_history_flusher(
+        self: &Arc<Self>,
+        interval: std::time::Duration,
+    ) -> Result<crate::HistoryFlusher, PolicyError> {
+        use std::sync::atomic::Ordering;
+        if interval.is_zero() {
+            return Err(PolicyError::Evaluation(
+                "history flush interval must be positive".to_string(),
+            ));
+        }
+        self.history_flusher_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                PolicyError::Evaluation(
+                    "a history flush worker already owns this engine".to_string(),
+                )
+            })?;
+        match crate::history_flush::HistoryFlusher::start(Arc::clone(self), interval) {
+            Ok(worker) => Ok(worker),
+            Err(error) => {
+                self.release_history_flusher();
+                Err(error)
+            }
+        }
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    pub(crate) fn release_history_flusher(&self) {
+        self.history_flusher_active
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
     /// Open durable history, then parse and install owned policy sources for an unanchored operator.
     pub fn open(sources: Vec<Policy>, history: &Path) -> Result<Self, PolicyError> {
         Self::open_with_mcp_schemas(sources, &[], history)
@@ -85,11 +155,11 @@ impl PolicyEngine {
             policy_id: effective_policy_id(&sources),
         };
 
-        Ok(Self {
-            authority: Authority::open_complete(sources, mcp_schemas, history)?,
+        Ok(Self::assemble(
+            Authority::open_complete(sources, mcp_schemas, history)?,
+            ToolGrammars::default(),
             effective,
-            observer: None,
-        })
+        ))
     }
 
     /// Open durable history and stage policies against runtime MCP schemas.
@@ -102,11 +172,11 @@ impl PolicyEngine {
             engine: ENGINE_ID,
             policy_id: effective_policy_id(&sources),
         };
-        Ok(Self {
-            authority: Authority::open_staged(operator, sources, history)?,
+        Ok(Self::assemble(
+            Authority::open_staged(operator, sources, history)?,
+            ToolGrammars::default(),
             effective,
-            observer: None,
-        })
+        ))
     }
 
     /// Open durable history through an already-open file and stage runtime MCP schemas.
@@ -116,15 +186,127 @@ impl PolicyEngine {
         history: File,
         label: PathBuf,
     ) -> Result<Self, PolicyStagingError> {
+        Self::open_staged_file_with_grammars(
+            operator,
+            sources,
+            ToolGrammars::default(),
+            history,
+            label,
+        )
+    }
+
+    /// Open durable history through an already-open file with the schema of each tool grammar in
+    /// `grammars`, and stage runtime MCP schemas over them. The engine owns `grammars`, and
+    /// [`grammar_bindings`](Self::grammar_bindings) gives out bindings for exactly those.
+    pub fn open_staged_file_with_grammars(
+        operator: &Operator,
+        sources: Vec<Policy>,
+        grammars: ToolGrammars,
+        history: File,
+        label: PathBuf,
+    ) -> Result<Self, PolicyStagingError> {
         let effective = EffectivePolicy {
             engine: ENGINE_ID,
             policy_id: effective_policy_id(&sources),
         };
-        Ok(Self {
-            authority: Authority::open_staged_file(operator, sources, history, label)?,
+        let authority =
+            Authority::open_staged_file(operator, sources, grammars.schemas(), history, label)?;
+        Ok(Self::assemble(authority, grammars, effective))
+    }
+
+    fn assemble(authority: Authority, grammars: ToolGrammars, effective: EffectivePolicy) -> Self {
+        let issuer = next_issuer();
+        Self {
+            authority,
+            bindings: GrammarBindings::installed(&grammars, issuer),
+            grammars,
+            issuer,
             effective,
             observer: None,
-        })
+            #[cfg(feature = "experimental-idle-flush")]
+            history_flusher_active: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// The bindings of the tool grammars this engine installs, with no program declared yet.
+    #[must_use]
+    pub fn grammar_bindings(&self) -> GrammarBindings {
+        GrammarBindings::installed(&self.grammars, self.issuer)
+    }
+
+    /// Decide each spawn that `bindings` covers as its grammar action, for the whole life of the
+    /// engine. Refuses bindings that another engine issued.
+    pub fn bound_by(mut self, bindings: GrammarBindings) -> Result<Self, crate::BindingRefusal> {
+        if bindings.issuer() != self.issuer {
+            return Err(crate::BindingRefusal::AnotherEngine);
+        }
+        self.bindings = bindings;
+        Ok(self)
+    }
+
+    /// How this engine's bound grammars cover a spawn spelled `spelling` of the file at
+    /// `program_path`, or `None` when `shell:spawn` decides it.
+    #[cfg(feature = "shell-adapter")]
+    pub(crate) fn grammar_coverage(
+        &self,
+        program_path: &str,
+        spelling: &str,
+        starter: crate::grammar::Starter,
+    ) -> Option<crate::grammar::GrammarCoverage<'_>> {
+        if self.bindings.is_empty() && !self.bindings.requires_binding(spelling, starter) {
+            return None;
+        }
+        self.bindings.coverage_for(
+            crate::grammar::ProgramFile::read(program_path),
+            spelling,
+            starter,
+        )
+    }
+
+    /// Open durable history with the schema fragment of each tool grammar in `grammars`.
+    #[cfg(test)]
+    pub(crate) fn open_with_grammars<'a>(
+        sources: Vec<Policy>,
+        grammars: impl IntoIterator<Item = &'a crate::grammar::Grammar>,
+        history: &Path,
+    ) -> Result<Self, PolicyError> {
+        let grammar_schemas: Vec<String> = grammars
+            .into_iter()
+            .map(crate::grammar::Grammar::schema)
+            .collect();
+        Self::open_complete_with_grammar_schemas(
+            sources,
+            &grammar_schemas,
+            ToolGrammars::default(),
+            history,
+        )
+    }
+
+    /// Open durable history with `grammars` installed, so the engine issues bindings for them.
+    #[cfg(all(test, feature = "shell-adapter"))]
+    pub(crate) fn open_with_tool_grammars(
+        sources: Vec<Policy>,
+        grammars: ToolGrammars,
+        history: &Path,
+    ) -> Result<Self, PolicyError> {
+        let schemas = grammars.schemas();
+        Self::open_complete_with_grammar_schemas(sources, &schemas, grammars, history)
+    }
+
+    #[cfg(test)]
+    fn open_complete_with_grammar_schemas(
+        sources: Vec<Policy>,
+        grammar_schemas: &[String],
+        grammars: ToolGrammars,
+        history: &Path,
+    ) -> Result<Self, PolicyError> {
+        let effective = EffectivePolicy {
+            engine: ENGINE_ID,
+            policy_id: effective_policy_id(&sources),
+        };
+        let authority =
+            Authority::open_complete_with_grammars(sources, grammar_schemas, &[], history)?;
+        Ok(Self::assemble(authority, grammars, effective))
     }
 
     /// Open with a fault injector on the durable log, for tests that pause the store.
@@ -138,11 +320,11 @@ impl PolicyEngine {
             engine: ENGINE_ID,
             policy_id: effective_policy_id(&sources),
         };
-        Ok(Self {
-            authority: Authority::open_with_faults(sources, history, faults)?,
+        Ok(Self::assemble(
+            Authority::open_with_faults(sources, history, faults)?,
+            ToolGrammars::default(),
             effective,
-            observer: None,
-        })
+        ))
     }
 
     /// Puts the store into its terminal fault state, for fail-closed tests.
@@ -183,6 +365,21 @@ impl PolicyEngine {
         Self::validate_with_mcp_schemas(operator, sources, &[])
     }
 
+    /// Strict-validate candidate sources against the schema of each tool grammar in `grammars`.
+    pub fn validate_with_grammars(
+        operator: &Operator,
+        sources: &[Policy],
+        grammars: &ToolGrammars,
+    ) -> Result<(), PolicyError> {
+        crate::dogwood::validate_with_schemas(
+            &authored(sources),
+            &grammars.schemas(),
+            &[],
+            operator,
+        )
+        .map(|_| ())
+    }
+
     /// Strict-validate candidate sources with generated MCP action-schema fragments.
     pub fn validate_with_mcp_schemas(
         operator: &Operator,
@@ -193,13 +390,60 @@ impl PolicyEngine {
             .map(|_| ())
     }
 
-    /// Validate syntax, macro expansion, and provider use without an action schema.
+    /// Return every finding in `sources`, as `open` (`complete`) or `open_staged` would load them.
+    pub fn check(operator: &Operator, sources: &[Policy], complete: bool) -> PolicyCheck {
+        Self::check_with_grammars(operator, sources, complete, &ToolGrammars::default())
+    }
+
+    /// Return every finding in `sources`, as the opener with `grammars` would load them.
+    pub fn check_with_grammars(
+        operator: &Operator,
+        sources: &[Policy],
+        complete: bool,
+        grammars: &ToolGrammars,
+    ) -> PolicyCheck {
+        let text = authored(sources);
+        let warning = |warning: PolicyWarning| Finding::new(warning.to_string());
+        let placed = |findings: Vec<Finding>| {
+            findings
+                .into_iter()
+                .map(|finding| {
+                    if sources.len() == 1 {
+                        finding
+                    } else {
+                        finding.without_span()
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        if complete {
+            return match check_and_expand(&text, &grammars.schemas(), &[], operator, true, &[]) {
+                Ok((_, _, warnings)) => PolicyCheck::new(
+                    Vec::new(),
+                    warnings.into_iter().map(warning).collect(),
+                    Vec::new(),
+                ),
+                Err(refused) => PolicyCheck::new(placed(refused.findings), Vec::new(), Vec::new()),
+            };
+        }
+        match authority::check_staged(operator, sources, grammars.schemas()) {
+            Ok((warnings, unchecked)) => PolicyCheck::new(
+                Vec::new(),
+                warnings.into_iter().map(warning).collect(),
+                unchecked,
+            ),
+            Err(findings) => PolicyCheck::new(placed(findings), Vec::new(), Vec::new()),
+        }
+    }
+
+    /// Validate syntax, macro expansion, provider use, and that a rule reading `context.input`
+    /// names one action family, without an action schema.
     ///
     /// A `tools/list`-denied-plus-typed-rule policy is NOT refused here:
     /// it loads, and `finish_mcp_discovery` degrades that one server at run rather than blocking
     /// the whole box.
     pub fn validate_staged(sources: &[Policy]) -> Result<(), PolicyError> {
-        parse_policy_source(&authored(sources)).map(|_| ())
+        validate_staged_source(&authored(sources))
     }
 
     /// Propose one generated MCP action-schema fragment.
@@ -234,7 +478,7 @@ impl PolicyEngine {
         self.authority.reload(sources)
     }
 
-    /// Decide whether `principal` may perform `request`.
+    /// Decide whether `principal` may perform `request`, returning its identifier after confirmed submission.
     ///
     /// An installed [`DecisionObserver`](crate::DecisionObserver) sees every verdict this
     /// returns, including a default-deny. It sees the verdict *after* it is reached and can
@@ -245,22 +489,104 @@ impl PolicyEngine {
         governed: &GovernedBox,
         principal: &Principal,
         request: &Request<'_>,
-    ) -> Decision {
-        let identity = crate::schema::ActionIdentity::for_request(request);
-        let decision = self
-            .authority
-            .decide(governed, principal, request, &identity);
-        self.conclude(&identity, request, decision)
+    ) -> (Decision, Option<RequestId>) {
+        self.decide_request(governed, principal, ActionRequest::Request(request))
     }
 
-    /// Name the request's resource on the verdict, then report it once.
+    /// Admit an effect with its confirmed request token or return the refusal.
+    #[cfg(any(
+        feature = "egress-adapter",
+        feature = "script-adapter",
+        feature = "shell-adapter"
+    ))]
+    pub(crate) fn admit(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request: &Request<'_>,
+    ) -> Result<RequestId, Decision> {
+        let (decision, request_id) = self.decide(governed, principal, request);
+        match decision {
+            Decision::Allow { .. } => request_id.ok_or_else(Decision::internal_fault),
+            denied => Err(denied),
+        }
+    }
+
+    /// Decide one request through the one authority, then name and report the verdict.
+    fn decide_request(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request: ActionRequest<'_>,
+    ) -> (Decision, Option<RequestId>) {
+        let (decision, request_id) = self.authority.decide(governed, principal, request);
+        (
+            self.conclude(&request.identity(), request.resource(), decision),
+            request_id,
+        )
+    }
+
+    /// Enter `request` into history as an attempt that Box refused before any rule decided it, and
+    /// report no verdict for it.
+    #[cfg(feature = "shell-adapter")]
+    pub(crate) fn observe_refused(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request: &Request<'_>,
+    ) {
+        let _ = self
+            .authority
+            .decide(governed, principal, ActionRequest::Request(request));
+    }
+
+    /// Decide one parsed command line as its grammar action, in the box's one history
+    /// (docs/design/decisions.md#a-grammar-action-names-no-enforcement-point,
+    /// docs/design/decisions.md#an-unmodeled-command-is-denied-by-default).
+    #[cfg_attr(
+        not(any(test, feature = "shell-adapter")),
+        expect(dead_code, reason = "only the shell adapter decides a grammar action")
+    )]
+    pub(crate) fn decide_grammar_action(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        invocation: &crate::grammar::GrammarInvocation<'_>,
+    ) -> (Decision, Option<crate::grammar::PendingGrammarResponse>) {
+        let request = invocation.request();
+        let (decision, request_id) =
+            self.decide_request(governed, principal, ActionRequest::Grammar(&request));
+        let pending = request.allowed_by(&decision, request_id);
+        (decision, pending)
+    }
+
+    /// Record the `::response` that an allowed grammar action owes, with the program's exit status.
+    #[cfg_attr(
+        not(any(test, feature = "shell-adapter")),
+        expect(
+            dead_code,
+            reason = "only the shell adapter records a grammar response"
+        )
+    )]
+    pub(crate) fn record_grammar_response(
+        &self,
+        response: crate::grammar::PendingGrammarResponse,
+        status: i32,
+    ) -> Result<(), PolicyError> {
+        response.complete(|identity, input, request_id| {
+            self.authority
+                .record_response(identity, input, request_id, status)
+        })
+    }
+
+    /// Name the resource on the verdict, then report it once.
     fn conclude(
         &self,
         identity: &crate::schema::ActionIdentity,
-        request: &Request<'_>,
+        resource: String,
         decision: Decision,
     ) -> Decision {
-        let decision = decision.naming(request.resource());
+        let decision = decision.naming(resource);
         if let Some(observer) = &self.observer {
             observer.observed(
                 identity.observer_action().as_ref(),
@@ -271,14 +597,16 @@ impl PolicyEngine {
         decision
     }
 
-    /// Record one completed effect as policy history.
+    /// Record one completed effect with its confirmed request identifier from this opened authority.
     pub fn record(
         &self,
         governed: &GovernedBox,
         principal: &Principal,
+        request_id: &RequestId,
         outcome: &Outcome<'_>,
     ) -> Result<(), PolicyError> {
-        self.authority.record(governed, principal, outcome)
+        self.authority
+            .record(governed, principal, request_id, outcome)
     }
 
     /// Return the loaded engine and source identity.
@@ -293,16 +621,13 @@ impl PolicyEngine {
         self.authority.warnings()
     }
 
-    pub(crate) fn declares_tool_action(&self, action: &cedar_policy::EntityUid) -> bool {
-        self.authority.declares_tool_action(action)
-    }
-
-    /// The per-tool refinement for one `tools/call`.
+    /// The per-tool refinement for one `tools/call`, and the `::response` an allowed call owes.
     ///
     /// Returns `Allow` when the composed schema declares no per-tool action for the tool (it rides
     /// the coarse grant) or when no rule forbids it; returns `Deny` only on an explicit `forbid` or
     /// an evaluation fault. `arguments` is the raw `params.arguments`, typed against the composed
-    /// schema by the engine's request gate (`context_for`'s `from_json`).
+    /// schema by the engine's request gate (`context_for`'s `from_json`). The pending response is
+    /// present only when the call is allowed and its per-tool request was recorded.
     pub fn refine_tool_call(
         &self,
         governed: &GovernedBox,
@@ -310,7 +635,7 @@ impl PolicyEngine {
         server: &str,
         tool: &str,
         arguments: &serde_json::Value,
-    ) -> Decision {
+    ) -> (Decision, Option<crate::PendingToolResponse>) {
         let identity = crate::schema::ActionIdentity::mcp_tool(server, tool);
         let request = Request::McpCall {
             server,
@@ -320,46 +645,40 @@ impl PolicyEngine {
             uri: None,
             arguments: Some(arguments),
         };
-        let action = match identity.cedar_uid() {
-            Ok(action) => action,
-            Err(_) => return self.conclude(&identity, &request, Decision::internal_fault()),
-        };
-        if !self.declares_tool_action(&action) {
-            // A tool with no declared per-tool action can be one of three things while its schema is
-            // absent: degraded (its server's `tools/list` was denied, so it never stages) →
-            // deny fail-closed, so a hardcoded call cannot ride the coarse allow with its argument
-            // constraint unenforceable; pending (still discovering) → hold transiently; or a
-            // genuinely unruled tool → ride the coarse allow as before.
-            let decision = if self.authority.is_tool_degraded(&identity) {
-                Decision::no_match()
-            } else if self.authority.is_tool_pending(&identity) {
-                Decision::policy_pending()
-            } else {
-                Decision::Allow {
-                    rule: crate::RuleId::default_deny(),
-                    attribution: Vec::new(),
-                    resource: String::new(),
-                }
-            };
-            return self.conclude(&identity, &request, decision);
-        }
-        let decision = match self
+        let (decision, pending) = self
             .authority
-            .decide(governed, principal, &request, &identity)
-        {
-            // No per-tool rule matched: ride the coarse `mcp:call` allow rather than default-denying.
-            Decision::Deny {
-                reason: crate::DenyReason::NoMatch,
-                ..
-            } => Decision::Allow {
-                rule: crate::RuleId::default_deny(),
-                attribution: Vec::new(),
-                resource: String::new(),
-            },
-            // An explicit `forbid`, an internal fault, or an allow — enforce as decided.
-            other => other,
-        };
-        self.conclude(&identity, &request, decision)
+            .refine_tool_call(governed, principal, &request, &identity);
+        (
+            self.conclude(&identity, request.resource(), decision),
+            pending,
+        )
+    }
+
+    /// Record the `::response` of one per-tool `tools/call`, beside its `mcp:call::response`.
+    ///
+    /// `reply` is how the call ended. A cancelled call, a call whose connection ended, and an
+    /// unread reply still record a response, so a budget counts them, and a precondition that
+    /// needs the server's answer requires `output.reply` to be `result`.
+    pub fn record_tool_response(
+        &self,
+        response: crate::PendingToolResponse,
+        reply: crate::McpReply,
+    ) -> Result<(), PolicyError> {
+        self.authority.record_tool_response(response, reply, None)
+    }
+
+    /// Record the `::response` of one per-tool `tools/call`, with `output.reply` and
+    /// `output.structured`, from the server's JSON-RPC reply.
+    pub fn record_tool_reply(
+        &self,
+        response: crate::PendingToolResponse,
+        reply: &serde_json::Value,
+    ) -> Result<(), PolicyError> {
+        self.authority.record_tool_response(
+            response,
+            crate::McpReply::of_reply(reply),
+            reply.pointer("/result/structuredContent"),
+        )
     }
 }
 
@@ -390,6 +709,44 @@ mod tests {
 
     use super::*;
     use crate::path::ApprovedPath;
+
+    #[cfg(feature = "shell-adapter")]
+    #[test]
+    fn a_server_requires_its_grammar_before_the_engine_has_any_bindings() {
+        let directory = tempfile::tempdir().expect("a history directory");
+        let engine = PolicyEngine::open_with_tool_grammars(
+            Vec::new(),
+            ToolGrammars::corpus(&["git"]),
+            &directory.path().join("history.redb"),
+        )
+        .expect("the policy opens without program bindings");
+        let program = directory.path().join("git");
+        std::fs::write(&program, "a newly created program").expect("the program is created");
+        let path = program.to_str().expect("a UTF-8 program path");
+        let coverage = engine.grammar_coverage(path, "git", crate::grammar::Starter::Server);
+        let Some(crate::grammar::GrammarCoverage::Refused(refusal)) = coverage else {
+            panic!("an empty binding table must not bypass the server's required grammar");
+        };
+        assert_eq!(
+            refusal,
+            crate::grammar::CoverageRefusal::UnboundServer {
+                name: "git".into(),
+                program_path: program
+                    .canonicalize()
+                    .expect("the program path is canonical"),
+            }
+        );
+        assert!(
+            engine
+                .grammar_coverage(path, "git", crate::grammar::Starter::Agent)
+                .is_none()
+        );
+        assert!(
+            engine
+                .grammar_coverage(path, "notes", crate::grammar::Starter::Server)
+                .is_none()
+        );
+    }
 
     struct PolicyFixture {
         authority: PolicyEngine,
@@ -452,15 +809,15 @@ mod tests {
 
     fn policy_at(source: &str, history: &Path, now_secs: i64) -> PolicyEngine {
         let sources = self::source(source);
-        PolicyEngine {
-            authority: Authority::open_with_test_clock(sources.clone(), history, now_secs)
+        PolicyEngine::assemble(
+            Authority::open_with_test_clock(sources.clone(), history, now_secs)
                 .expect("policy opens"),
-            effective: EffectivePolicy {
+            ToolGrammars::default(),
+            EffectivePolicy {
                 engine: ENGINE_ID,
                 policy_id: effective_policy_id(&sources),
             },
-            observer: None,
-        }
+        )
     }
 
     #[test]
@@ -499,6 +856,7 @@ unless temporal {
             assert!(
                 !authority
                     .decide(&governed, &principal, &attempted_read)
+                    .0
                     .is_allow(),
                 "the first attempt must be denied"
             );
@@ -510,6 +868,7 @@ unless temporal {
             assert!(
                 !recovered
                     .decide(&governed, &principal, &dependent_write)
+                    .0
                     .is_allow(),
                 "the recovered denied attempt must remain in force within one hour"
             );
@@ -527,6 +886,7 @@ unless temporal {
             assert!(
                 !within_window
                     .decide(&governed, &principal, &dependent_write)
+                    .0
                     .is_allow(),
                 "reapplying the same policy must retain the attempt within one hour"
             );
@@ -537,8 +897,190 @@ unless temporal {
         assert!(
             recovered
                 .decide(&governed, &principal, &dependent_write)
+                .0
                 .is_allow(),
             "the recovered denied attempt must expire after one hour"
+        );
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    #[test]
+    fn final_flush_reports_a_clock_delayed_outcome_until_recovery() {
+        use std::time::Duration;
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = Arc::new(policy_at(
+            "permit(principal, action, resource);",
+            &history.path().join("history.redb"),
+            1_000_000,
+        ));
+        engine
+            .set_periodic_history(u32::MAX, Duration::from_secs(3600))
+            .expect("periodic history");
+        let file = history.path().join("read-marker");
+        std::fs::write(&file, b"marker").expect("fixture file");
+        let file = file.canonicalize().expect("canonical fixture");
+        let approved = ApprovedPath::interpreter_resolved(&file);
+        let governed = GovernedBox::assigned("clock-final");
+        let principal = Principal::agent();
+        let (verdict, request) = engine.decide(
+            &governed,
+            &principal,
+            &Request::Fs {
+                path: &approved,
+                operation: crate::FsOperation::ReadContent,
+            },
+        );
+        assert!(verdict.is_allow(), "{verdict:?}");
+        assert_eq!(std::fs::read(&file).expect("permitted read"), b"marker");
+        engine.authority.advance_clock(-400);
+        assert!(matches!(
+            engine.record(
+                &governed,
+                &principal,
+                &request.expect("request token"),
+                &Outcome::Fs {
+                    path: &file,
+                    operation: crate::FsOperation::ReadContent,
+                    result: crate::FsResult::Completed,
+                }
+            ),
+            Err(PolicyError::OutcomeKept(_))
+        ));
+        let error = engine
+            .start_history_flusher(Duration::from_secs(3600))
+            .expect("timer starts")
+            .shutdown()
+            .expect_err("final flush must report the kept outcome");
+        assert!(
+            error
+                .to_string()
+                .contains("policy outcome kept until the history accepts it"),
+            "{error}"
+        );
+        engine.authority.advance_clock(410);
+        engine
+            .start_history_flusher(Duration::from_secs(3600))
+            .expect("failed final flush releases ownership")
+            .shutdown()
+            .expect("a recovered final flush can record the outcome");
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    #[test]
+    fn periodic_flush_keeps_a_clock_delayed_outcome_retryable() {
+        use std::time::{Duration, Instant};
+        const SOURCE: &str = r#"
+permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource);
+forbid(principal, action == Box::Action::"fs:write", resource)
+when temporal { formerly within 1h (Box::Action::"fs:read"::response{
+    input.operation: Box::FsReadOperation::"read_content"
+}) };
+"#;
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        let engine = Arc::new(policy_at(SOURCE, &path, 1_000_000));
+        engine
+            .set_periodic_history(u32::MAX, Duration::from_secs(3600))
+            .expect("disable automatic flush thresholds");
+        let file = history.path().join("read-marker");
+        std::fs::write(&file, b"marker").expect("fixture file");
+        let file = file.canonicalize().expect("canonical fixture");
+        let approved = ApprovedPath::interpreter_resolved(&file);
+        let governed = GovernedBox::assigned("clock-retry");
+        let principal = Principal::agent();
+        let (verdict, request) = engine.decide(
+            &governed,
+            &principal,
+            &Request::Fs {
+                path: &approved,
+                operation: crate::FsOperation::ReadContent,
+            },
+        );
+        assert!(verdict.is_allow(), "{verdict:?}");
+        assert_eq!(std::fs::read(&file).expect("permitted read"), b"marker");
+        engine.authority.advance_clock(-400);
+        assert!(matches!(
+            engine.record(
+                &governed,
+                &principal,
+                &request.expect("confirmed request"),
+                &Outcome::Fs {
+                    path: &file,
+                    operation: crate::FsOperation::ReadContent,
+                    result: crate::FsResult::Completed,
+                }
+            ),
+            Err(PolicyError::OutcomeKept(_))
+        ));
+        let flusher = engine
+            .start_history_flusher(Duration::from_millis(10))
+            .expect("timer starts");
+        let wait_for = |attempts: u64| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while flusher.snapshot().attempts < attempts {
+                assert!(
+                    Instant::now() < deadline,
+                    "timer did not complete {attempts} attempts"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        wait_for(3);
+        let delayed = flusher.snapshot();
+        assert_eq!(
+            delayed.failures, 0,
+            "clock delay must not become a fatal timer failure: {delayed:?}"
+        );
+        assert!(delayed.last_error.is_none());
+        assert!(delayed.successes >= 3, "accepted history was flushed");
+        let blocked = engine
+            .decide(
+                &governed,
+                &principal,
+                &Request::Fs {
+                    path: &approved,
+                    operation: crate::FsOperation::WriteContent,
+                },
+            )
+            .0;
+        assert!(
+            matches!(
+                blocked,
+                Decision::Deny {
+                    reason: crate::DenyReason::InternalFault,
+                    ..
+                }
+            ),
+            "kept outcome still denies requests: {blocked:?}"
+        );
+        engine.authority.advance_clock(410);
+        wait_for(delayed.attempts + 3);
+        let stopped = flusher
+            .stop()
+            .expect("recovered timer has no latched failure");
+        assert_eq!(stopped.failures, 0);
+        let copy = history.path().join("copy.redb");
+        std::fs::copy(&path, &copy).expect("copy before original engine drop");
+        let recovered = policy_at(SOURCE, &copy, 1_000_020);
+        let verdict = recovered
+            .decide(
+                &governed,
+                &principal,
+                &Request::Fs {
+                    path: &approved,
+                    operation: crate::FsOperation::WriteContent,
+                },
+            )
+            .0;
+        assert!(
+            matches!(
+                verdict,
+                Decision::Deny {
+                    reason: crate::DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "timer must durably retry the completed read: {verdict:?}"
         );
     }
 
@@ -566,7 +1108,7 @@ unless temporal {
         faults.arm(FaultPoint::AppendBeforeCommit);
         let verdict = std::thread::scope(|scope| {
             scope.spawn(|| {
-                let verdict = authority.decide(&governed, &principal, &request);
+                let verdict = authority.decide(&governed, &principal, &request).0;
                 decided.send(verdict).expect("the test is waiting");
             });
             let reached = faults.wait_until_reached(std::time::Duration::from_secs(30));
@@ -628,24 +1170,33 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
         ]
     }
 
-    fn assert_every_permit_is_live(authority: &PolicyEngine, notes: &ApprovedPath) {
+    fn assert_every_permit_is_live(authority: &PolicyEngine, notes: &ApprovedPath) -> RequestId {
         let governed = GovernedBox::assigned("test-box");
         let principal = Principal::agent();
+        let mut first_request_id = None;
         for request in &five_requests(notes) {
+            let (decision, request_id) = authority.decide(&governed, &principal, request);
             assert!(
-                authority.decide(&governed, &principal, request).is_allow(),
+                decision.is_allow(),
                 "every permit is live before the fault: {request:?}"
             );
+            let request_id = request_id.expect("the permitted request has an identifier");
+            first_request_id.get_or_insert(request_id);
         }
+        first_request_id.expect("the first request has an identifier")
     }
 
     /// Ten decisions across the five requests, each an `InternalFault` with the rendered text,
     /// then a record that is refused rather than lost.
-    fn assert_every_verdict_is_an_internal_fault(authority: &PolicyEngine, notes: &ApprovedPath) {
+    fn assert_every_verdict_is_an_internal_fault(
+        authority: &PolicyEngine,
+        notes: &ApprovedPath,
+        request_id: &RequestId,
+    ) {
         let governed = GovernedBox::assigned("test-box");
         let principal = Principal::agent();
         for request in five_requests(notes).iter().cycle().take(10) {
-            let decision = authority.decide(&governed, &principal, request);
+            let decision = authority.decide(&governed, &principal, request).0;
             assert!(
                 matches!(
                     decision,
@@ -668,6 +1219,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
                 .record(
                     &governed,
                     &principal,
+                    request_id,
                     &Outcome::Fs {
                         path: Path::new("/workspace/notes.txt"),
                         operation: crate::request::FsOperation::ReadContent,
@@ -683,11 +1235,11 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
     fn every_decision_after_the_store_poisons_is_an_internal_fault() {
         let authority = five_permits();
         let notes = ApprovedPath::interpreter_resolved("/workspace/notes.txt");
-        assert_every_permit_is_live(&authority, &notes);
+        let request_id = assert_every_permit_is_live(&authority, &notes);
 
         authority.poison_store_for_test();
 
-        assert_every_verdict_is_an_internal_fault(&authority, &notes);
+        assert_every_verdict_is_an_internal_fault(&authority, &notes, &request_id);
     }
 
     #[test]
@@ -696,11 +1248,11 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
     fn decisions_meet_a_store_that_refuses_every_write() {
         let authority = five_permits();
         let notes = ApprovedPath::interpreter_resolved("/workspace/notes.txt");
-        assert_every_permit_is_live(&authority, &notes);
+        let request_id = assert_every_permit_is_live(&authority, &notes);
 
         crate::rerun::refuse_every_file_write();
 
-        assert_every_verdict_is_an_internal_fault(&authority, &notes);
+        assert_every_verdict_is_an_internal_fault(&authority, &notes, &request_id);
     }
 
     #[test]
@@ -784,6 +1336,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
                     &Principal::agent(),
                     &request
                 )
+                .0
                 .is_allow(),
             "the rule names Box::Agent::\"self\", which is what the default principal is"
         );
@@ -794,6 +1347,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
                     &Principal::agent().with_id("worker-1"),
                     &request
                 )
+                .0
                 .is_allow(),
             "integration ids must not change the fixed Box::Agent::\"self\" identity"
         );
@@ -816,6 +1370,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
                         cwd: "/home",
                     }
                 )
+                .0
                 .is_allow()
         );
     }
@@ -836,6 +1391,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
                             operation: crate::request::FsOperation::WriteContent,
                         }
                     )
+                    .0
                     .is_allow(),
                 "the authored catch-all permit must govern {path}"
             );
@@ -882,23 +1438,27 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
 
         let governed = GovernedBox::assigned("observed-box");
         let approved = ApprovedPath::interpreter_resolved("/workspace/main.py");
-        let permitted = authority.decide(
-            &governed,
-            &Principal::agent(),
-            &Request::Fs {
-                path: &approved,
-                operation: crate::request::FsOperation::ReadContent,
-            },
-        );
+        let permitted = authority
+            .decide(
+                &governed,
+                &Principal::agent(),
+                &Request::Fs {
+                    path: &approved,
+                    operation: crate::request::FsOperation::ReadContent,
+                },
+            )
+            .0;
         // Nothing permits a write, so this is the default deny.
-        let refused = authority.decide(
-            &governed,
-            &Principal::agent(),
-            &Request::Fs {
-                path: &approved,
-                operation: crate::request::FsOperation::WriteContent,
-            },
-        );
+        let refused = authority
+            .decide(
+                &governed,
+                &Principal::agent(),
+                &Request::Fs {
+                    path: &approved,
+                    operation: crate::request::FsOperation::WriteContent,
+                },
+            )
+            .0;
 
         assert!(permitted.is_allow());
         assert!(!refused.is_allow());
@@ -951,9 +1511,11 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
             assert_eq!(
                 observed
                     .decide(&governed, &Principal::agent(), &request)
+                    .0
                     .is_allow(),
                 plain
                     .decide(&governed, &Principal::agent(), &request)
+                    .0
                     .is_allow(),
                 "an observer must not move a verdict for {operation:?}"
             );
@@ -971,13 +1533,15 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
         .expect("the policy opens")
         .observed_by(recording.clone());
 
-        let decision = authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "issues-mcp",
-            "read",
-            &serde_json::json!({"path": "/workspace/input"}),
-        );
+        let decision = authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "issues-mcp",
+                "read",
+                &serde_json::json!({"path": "/workspace/input"}),
+            )
+            .0;
 
         assert!(decision.is_allow());
         assert!(decision.attribution().is_empty());
@@ -1002,13 +1566,15 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
         .observed_by(recording.clone());
         let arguments = serde_json::json!({"path": "/workspace/input"});
 
-        let decision = authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "issues-mcp",
-            "read",
-            &arguments,
-        );
+        let decision = authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "issues-mcp",
+                "read",
+                &arguments,
+            )
+            .0;
 
         assert!(decision.is_allow());
         assert!(decision.attribution().is_empty());
@@ -1038,13 +1604,15 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
         .observed_by(recording.clone());
         let arguments = serde_json::json!({"path": "/workspace/input"});
 
-        let decision = authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "issues-mcp",
-            "read",
-            &arguments,
-        );
+        let decision = authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "issues-mcp",
+                "read",
+                &arguments,
+            )
+            .0;
 
         assert!(matches!(
             decision,
@@ -1073,13 +1641,15 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
         authority.authority.poison_live_for_test();
         let arguments = serde_json::json!({"path": "/workspace/input"});
 
-        let decision = authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "issues-mcp",
-            "read",
-            &arguments,
-        );
+        let decision = authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "issues-mcp",
+                "read",
+                &arguments,
+            )
+            .0;
 
         assert!(matches!(
             decision,
@@ -1124,13 +1694,15 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
 
         let arguments = serde_json::json!({"path": "/workspace/input"});
         assert!(matches!(
-            authority.refine_tool_call(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                "alpha",
-                "read",
-                &arguments,
-            ),
+            authority
+                .refine_tool_call(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    "alpha",
+                    "read",
+                    &arguments,
+                )
+                .0,
             Decision::Deny {
                 reason: crate::DenyReason::InternalFault,
                 ..
@@ -1154,11 +1726,11 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
         for name in ["codex", "review"] {
             let governed = GovernedBox::assigned(name);
             assert!(
-                fixed.decide(&governed, &shell, &request).is_allow(),
+                fixed.decide(&governed, &shell, &request).0.is_allow(),
                 "{name} must map to Resource::\"unused\""
             );
             assert!(
-                !other.decide(&governed, &shell, &request).is_allow(),
+                !other.decide(&governed, &shell, &request).0.is_allow(),
                 "no box may map to another resource id"
             );
         }
@@ -1175,14 +1747,16 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
 
     fn write_allowed(engine: &PolicyEngine, path: &ApprovedPath) -> bool {
         matches!(
-            engine.decide(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                &Request::Fs {
-                    path,
-                    operation: crate::request::FsOperation::WriteContent,
-                },
-            ),
+            engine
+                .decide(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    &Request::Fs {
+                        path,
+                        operation: crate::request::FsOperation::WriteContent,
+                    },
+                )
+                .0,
             Decision::Allow { .. }
         )
     }
@@ -1243,5 +1817,122 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
             write_allowed(&engine, &target),
             "the refused reload validated before the live lock, so the previous policy serves"
         );
+    }
+
+    fn read_tool(engine: &PolicyEngine, server: &str) -> Decision {
+        engine
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                server,
+                "read",
+                &serde_json::json!({"path": "/workspace/input"}),
+            )
+            .0
+    }
+
+    /// During discovery, a reload that names a server whose tools have not arrived is refused,
+    /// and the installed forbid keeps serving through the end of discovery.
+    #[test]
+    fn a_reload_naming_an_undiscovered_server_is_refused_and_keeps_the_forbid() {
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = PolicyEngine::open_staged(
+            &Operator::unanchored(),
+            source(
+                r#"permit(principal, action, resource);
+                   forbid(principal, action == gamma::Action::"read", resource);"#,
+            ),
+            &history.path().join("dogwood.redb"),
+        )
+        .unwrap();
+        engine
+            .stage_mcp_schema("alpha", mcp_fragment("alpha", "read"))
+            .unwrap();
+        assert!(matches!(
+            read_tool(&engine, "gamma"),
+            Decision::Deny {
+                reason: crate::DenyReason::PolicyPending,
+                ..
+            }
+        ));
+        engine
+            .reload(&source(
+                r#"permit(principal, action, resource);
+                   forbid(principal, action == alpha::Action::"read", resource);"#,
+            ))
+            .unwrap();
+        assert!(!read_tool(&engine, "alpha").is_allow());
+
+        for rule in [
+            r#"forbid(principal, action == beta::Action::"read", resource);"#,
+            r#"forbid(principal, action in [alpha::Action::"read", beta::Action::"read"], resource);"#,
+        ] {
+            let replacement = source(&format!("permit(principal, action, resource);\n{rule}"));
+            assert!(engine.reload(&replacement).is_err(), "{rule}");
+            assert!(
+                !read_tool(&engine, "alpha").is_allow(),
+                "the forbid must remain"
+            );
+        }
+        engine.finish_mcp_discovery().unwrap();
+        assert!(
+            !read_tool(&engine, "alpha").is_allow(),
+            "the forbid must survive discovery"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_policy_is_refused_after_tool_discovery_is_denied() {
+        let original = r#"permit(principal, action == Box::Action::"mcp:call", resource)
+                when { context.input.server == "alpha" };
+            forbid(principal, action == Box::Action::"mcp:call", resource)
+                when { context.input.server == "alpha" && context.input.method == "tools/list" };
+            forbid(principal, action == alpha::Action::"read", resource);"#;
+        let history = tempfile::tempdir().unwrap();
+        let engine = PolicyEngine::open_staged(
+            &Operator::unanchored(),
+            source(original),
+            &history.path().join("dogwood.redb"),
+        )
+        .unwrap();
+        assert_eq!(
+            engine.finish_mcp_discovery().unwrap(),
+            vec!["alpha".to_string()]
+        );
+        assert!(engine.reload(&source(original)).is_err());
+        assert!(
+            !read_tool(&engine, "alpha").is_allow(),
+            "a refused reload must keep the tool blocked"
+        );
+    }
+
+    /// A staged tool whose server degrades stays denied, and a reload that drops the
+    /// unresolved rule lifts the block.
+    #[test]
+    fn a_degraded_tool_stays_denied_until_a_reload_drops_its_rule() {
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = PolicyEngine::open_staged(
+            &Operator::unanchored(),
+            source(
+                r#"permit(principal, action, resource);
+                   forbid(principal, action == alpha::Action::"read", resource)
+                   when { context.input.never_declared == "x" };"#,
+            ),
+            &history.path().join("dogwood.redb"),
+        )
+        .unwrap();
+        engine
+            .stage_mcp_schema("alpha", mcp_fragment("alpha", "read"))
+            .unwrap();
+        engine.finish_mcp_discovery().unwrap();
+        assert!(
+            !read_tool(&engine, "alpha").is_allow(),
+            "an unresolved forbid must keep its staged tool blocked"
+        );
+
+        engine
+            .reload(&source("permit(principal, action, resource);"))
+            .unwrap();
+        assert!(read_tool(&engine, "alpha").is_allow());
     }
 }

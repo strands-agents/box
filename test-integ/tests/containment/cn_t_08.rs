@@ -13,7 +13,7 @@ det_case! {
     id:   "CN-T-08",
     desc: "Tool deny, list, write_file: a denied file in a read tree yields no bytes while its sibling reads; a list tree enumerates and its content is refused (macOS; refused at load on Linux); write_file writes its file and no neighbour",
     run: |b| {
-        let probe = b.compile_probe("fsprobe-t08", PROBE);
+        let probe = b.install_tool(&b.compile_probe("fsprobe-t08", PROBE));
         let root = b.workspace().parent().unwrap().join("t08");
         let tree = root.join("read-tree");
         let listed = root.join("listed");

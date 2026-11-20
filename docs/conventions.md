@@ -6,8 +6,9 @@ House style for a crate under `crates/`, derived from the established siblings
 directory layout and the package names agree.
 
 > **One crate cited below no longer exists in the tree.** `journal`
-> predates the 2026-07-12 crate reset; [`Cargo.toml`](../Cargo.toml) lists the live members. `box` is
-> `[[bin]]`-only, so the `lib.rs` façade items below do not apply to it. Their examples are kept because each is a
+> predates the 2026-07-12 crate reset; [`Cargo.toml`](../Cargo.toml) lists the live members. `box` is a
+> thin binary over a narrow `lib.rs` library, not a mechanism crate, so the mechanism-crate façade
+> items below do not apply to it. Their examples are kept because each is a
 > worked illustration of the rule it sits under — read them as *the shape to copy*,
 > not as a file to open. Where you need a live reference, use `containment`. This is a **mechanical checklist** — each item is
 phrased so an agent (or a reviewer, or a CI gate) can verify it by reading the
@@ -23,6 +24,13 @@ behaviour, and [`docs/design/decisions.md`](design/decisions.md) owns why.
 
 ---
 
+## Opt-in configuration
+
+Opt-in behavior can use an ordinary `box.toml` setting scoped to the component it affects.
+For example, `argument_wildcards` belongs on the stdio MCP entry whose arguments it changes.
+Use `experimental-features` when a capability needs an experimental rollout. Requiring explicit
+enablement alone is not a reason to place a setting there.
+
 ## MUST — universal (every existing crate does this, with the product-name exception below)
 
 Verify per crate under its `<crate-path>/` (for example,
@@ -31,8 +39,7 @@ Verify per crate under its `<crate-path>/` (for example,
 - [ ] **The package name is the product name plus the crate directory.**
 
       > **Adopted 2026-08-11.** Owned box packages use the `strands-box` product name.
-      > The vendored `strands-shell` keeps its upstream name because its `UPSTREAM.md`
-      > pins it, and `.agents/pocs/` is unchanged because it is outside the workspace.
+      > `.agents/pocs/` is unchanged because it is outside the workspace.
 
       A crate at
       `crates/<name>/` is the package `strands-box-<name>`, and `crates/box` is the
@@ -42,10 +49,6 @@ Verify per crate under its `<crate-path>/` (for example,
 
       **The package name identifies the product.** The repository is `box`;
       the product is `strands-box`. The box is a binary target.
-
-      **Vendored crates keep their upstream names.** `strands-shell` is a pinned copy
-      with an `UPSTREAM.md`; renaming it would make a re-vendor a merge. It is outside
-      this rule by construction, not by exception.
 - [ ] **Explicit `[lib]` block splits package name from import name.** `Cargo.toml`
       has `[lib]` with `name = "<name>"` (the short, unprefixed import name) and
       `path = "src/lib.rs"`. So the package is `strands-box-credentials` but code does
@@ -228,15 +231,15 @@ cargo fmt     -p <package-name> --check
 
 ### Why `--all-features`, and not "default plus `--no-default-features`"
 
-**A plain `cargo test` reports success while skipping the tests that matter.** `strands-box` declares
-`test-support`, and `box_shell` and `box_credentials` each carry
-`required-features = ["test-support"]`. Without the flag, cargo runs one integration suite instead of
-three, says nothing about the two it dropped, and exits `0`. Those two are the suites asserting the
-Shell boundary and the credential phantom.
+**A plain `cargo test` omits tests that require `test-support`.** `strands-box` declares
+this feature, and `box_shell` and `box_credentials` each carry
+`required-features = ["test-support"]`. Cargo skips those targets when the feature is absent,
+even if other tests pass. These suites assert the Shell boundary and credential handling.
 
-**"Default features and `--no-default-features`" does not reach it.** `strands-box` declares no
-`default` feature, so both spellings are the same empty set, and neither enables `test-support`. The
-older wording therefore prescribed running the same configuration twice.
+**Default and `--no-default-features` builds exercise different history modes.**
+`strands-box` enables `experimental-idle-flush` by default; `--no-default-features`
+alone retains per-event persistence. Neither selection enables `test-support`.
+The gates above still need `--all-features` to run the suites that require it.
 
 ### Clippy: `-D warnings` is scoped, and it is unpassable per binary crate
 
@@ -247,8 +250,8 @@ warning count the root `AGENTS.md` prescribes:
 cargo clippy -p <owned-crate> --all-targets --all-features -- -D warnings
 ```
 
-**It is unpassable for a crate that pulls in a vendored path dependency or a
-platform-conditional backend.** Measured on 2026-08-20:
+**It is unpassable for a crate that pulls in a platform-conditional backend.** Measured on
+2026-08-20, while Box still held a copy of the Shell:
 `cargo clippy -p strands-box --all-targets -- -D warnings` exits `101` with 58 errors, and none of
 them is in `crates/box`. Forty-four come from `containment`'s `backend/macos` and
 `backend/linux`, which are dead code on the other platform, and fourteen come from the vendored
@@ -261,6 +264,3 @@ directory, which must print `0`:
 cargo clippy -p <package-name> --all-targets --all-features 2>&1 \
   | grep -c -- '--> crates/<crate-directory>'
 ```
-
-This is why `-D warnings` is not set workspace-wide. The vendored crates carry upstream lint
-failures, so the check for them is an *unchanged* count, never zero.

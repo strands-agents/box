@@ -117,6 +117,11 @@ impl Fixture {
 
     /// The trampoline applies `config` and execs the copied probe in `--exec-target` mode.
     fn through_trampoline(&self, config: &ContainmentConfig) -> Output {
+        self.through_trampoline_running(config, &self.tools_probe)
+    }
+
+    /// The trampoline applies `config` and execs `target` in `--exec-target` mode.
+    fn through_trampoline_running(&self, config: &ContainmentConfig, target: &Path) -> Output {
         let (config_path, digest) = self.write_config(config, "trampoline.json");
         Command::new(env!("CARGO_BIN_EXE_strands-box-contain-trampoline"))
             .arg("--config")
@@ -126,7 +131,7 @@ impl Fixture {
             .arg("--target-env-json")
             .arg("{}")
             .arg("--")
-            .arg(&self.tools_probe)
+            .arg(target)
             .arg("--exec-target")
             .current_dir(&self.work)
             .stdin(Stdio::null())
@@ -258,4 +263,194 @@ fn all_three_cells_compose_in_one_profile() {
     let text = report("all-three", &output);
     println!("{text}");
     assert_eq!(output.status.code(), Some(0), "{text}");
+}
+
+/// The kernel admits a listen on the granted port and refuses one on any other port.
+#[test]
+fn a_listen_port_is_the_only_port_the_workload_can_listen_on() {
+    let fixture = Fixture::new();
+    let granted = free_port();
+    let other = free_port();
+    let config = probe_runs(fixture.baseline())
+        .set_network(Network::localhost().connect(43123).listen(granted))
+        .expect("a listen port");
+    let output = fixture.self_contained(
+        &config,
+        &[
+            format!("expect-ok:listen:127.0.0.1:{granted}"),
+            format!("expect-ok:listen:0.0.0.0:{granted}"),
+            format!("expect-deny:listen:127.0.0.1:{other}"),
+        ],
+    );
+    assert!(output.status.success(), "{}", report("listen", &output));
+
+    let without = fixture.self_contained(
+        &probe_runs(fixture.baseline()),
+        &[format!("expect-deny:listen:127.0.0.1:{granted}")],
+    );
+    assert!(
+        without.status.success(),
+        "{}",
+        report("no listen", &without)
+    );
+}
+
+/// A write-protected tree inside a write root runs a program from it, and refuses every write there.
+#[test]
+fn a_write_protected_tree_runs_its_programs_and_refuses_writes() {
+    let f = Fixture::new();
+    let venv = f.work.join("venv");
+    std::fs::create_dir(&venv).expect("the protected tree");
+    let program = venv.join("probe");
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_BIN_EXE_containment-test-probe")),
+        &program,
+    )
+    .expect("copy the probe into the protected tree");
+    std::fs::write(venv.join("module.py"), "x = 1").expect("a file in the tree");
+    let file_grant = probe_runs(f.baseline())
+        .allow(&program, Operation::Exec, Scope::File)
+        .expect("exec on a file inside the tree")
+        .protect_write_tree(&venv)
+        .expect("protect the tree");
+    let output = f.through_trampoline_running(&file_grant, &program);
+    let text = report("protected tree file exec", &output);
+    assert_eq!(output.status.code(), Some(0), "{text}");
+
+    let config = probe_runs(f.baseline())
+        .allow(&venv, Operation::Exec, Scope::Root)
+        .expect("exec over the tree")
+        .protect_write_tree(&venv)
+        .expect("protect the tree");
+
+    let output = f.through_trampoline_running(&config, &program);
+    let text = report("protected tree exec", &output);
+    assert_eq!(output.status.code(), Some(0), "{text}");
+
+    let output = f.self_contained(
+        &config,
+        &[
+            format!("expect-ok:write:{}", s(&f.work.join("out.txt"))),
+            format!("expect-ok:read:{}", s(&venv.join("module.py"))),
+            format!("expect-deny:write:{}", s(&venv.join("module.py"))),
+            format!("expect-deny:write:{}", s(&venv.join("planted.so"))),
+            format!("expect-deny:unlink:{}", s(&venv.join("module.py"))),
+            format!("expect-deny:rmdir:{}", s(&venv)),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        report("protected tree", &output)
+    );
+
+    let unprotected = f.self_contained(
+        &probe_runs(f.baseline()),
+        &[format!("expect-ok:write:{}", s(&venv.join("module.py")))],
+    );
+    assert!(
+        unprotected.status.success(),
+        "{}",
+        report("unprotected tree", &unprotected)
+    );
+}
+
+/// **A leaf keeps a write-protected tree**: with broad exec, and with its writable grants mapped
+/// executable, it runs a program from the tree and is refused every write there.
+#[test]
+fn a_leaf_runs_from_a_write_protected_tree_and_refuses_writes() {
+    let f = Fixture::new();
+    let venv = f.work.join("venv");
+    std::fs::create_dir(&venv).expect("the protected tree");
+    let program = venv.join("probe");
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_BIN_EXE_containment-test-probe")),
+        &program,
+    )
+    .expect("copy the probe into the protected tree");
+    std::fs::write(venv.join("module.py"), "x = 1").expect("a file in the tree");
+    let config = probe_runs(f.baseline())
+        .allow_broad_exec()
+        .protect_write_tree(&venv)
+        .expect("protect the tree");
+
+    let output = f.through_trampoline_running(&config, &program);
+    let text = report("leaf protected tree exec", &output);
+    assert_eq!(output.status.code(), Some(0), "{text}");
+
+    let output = f.self_contained(
+        &config,
+        &[
+            format!("expect-ok:write:{}", s(&f.work.join("out.txt"))),
+            format!("expect-ok:read:{}", s(&venv.join("module.py"))),
+            format!("expect-deny:write:{}", s(&venv.join("module.py"))),
+            format!("expect-deny:write:{}", s(&venv.join("planted.so"))),
+            format!("expect-deny:unlink:{}", s(&venv.join("module.py"))),
+            format!("expect-deny:rmdir:{}", s(&venv)),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        report("leaf protected tree", &output)
+    );
+
+    let unprotected = f.self_contained(
+        &probe_runs(f.baseline()).allow_broad_exec(),
+        &[format!("expect-ok:write:{}", s(&venv.join("module.py")))],
+    );
+    assert!(
+        unprotected.status.success(),
+        "{}",
+        report("leaf unprotected tree", &unprotected)
+    );
+}
+
+/// With write but no read over the project, a nested write-protected directory still lets the box
+/// start: the check after the profile applies can look the directory up.
+#[test]
+fn a_write_protected_tree_under_a_write_only_root_lets_the_box_start() {
+    let f = Fixture::new();
+    let venv = f.work.join("deps").join("venv");
+    std::fs::create_dir_all(&venv).expect("the protected tree");
+    let config = ContainmentConfig::new()
+        .allow(&f.work, Operation::Write, Scope::Root)
+        .expect("write the work directory")
+        .allow(Path::new("/"), Operation::Read, Scope::Dir)
+        .expect("the root's own entry")
+        .allow(Path::new("/dev/null"), Operation::Write, Scope::File)
+        .expect("write the null device")
+        .allow(&f.tools_probe, Operation::Exec, Scope::File)
+        .expect("exec the probe outside the tree")
+        .set_network(Network::localhost().connect(43123))
+        .expect("one proxy port")
+        .protect_write_tree(&venv)
+        .expect("protect the tree");
+
+    let output = f.through_trampoline(&config);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        report("write-only root with a protected tree", &output)
+    );
+}
+
+/// `config` with the probe's own exec grant, so the probe can contain itself.
+fn probe_runs(config: ContainmentConfig) -> ContainmentConfig {
+    config
+        .allow(
+            PathBuf::from(env!("CARGO_BIN_EXE_containment-test-probe")),
+            Operation::Exec,
+            Scope::File,
+        )
+        .expect("exec the probe")
+}
+
+/// A port that is free now.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("a free port")
+        .port()
 }

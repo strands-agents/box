@@ -84,7 +84,7 @@ fn interceptor_maps_connect_request_and_the_response_phase() {
         .record_outcome(EffectOutcome::Completed(100))
         .expect("local outcome recording succeeds");
     interceptor
-        .intercept(&response_attempt(443, 84))
+        .intercept(&response_attempt(443))
         .expect("response release is allowed")
         .record_outcome(EffectOutcome::Completed(120))
         .expect("local outcome recording succeeds");
@@ -131,7 +131,7 @@ fn the_request_is_decided_and_the_release_is_not() {
         .expect("http:request allows the request")
         .mark_indeterminate();
     request_only
-        .intercept(&response_attempt(443, 0))
+        .intercept(&response_attempt(443))
         .expect("the release takes no decision, so it is admitted")
         .mark_indeterminate();
 
@@ -142,7 +142,7 @@ fn the_request_is_decided_and_the_release_is_not() {
         "an unpermitted request must be refused"
     );
     nothing
-        .intercept(&response_attempt(443, 0))
+        .intercept(&response_attempt(443))
         .expect("the release is admitted whatever policy says")
         .mark_indeterminate();
 }
@@ -195,6 +195,56 @@ fn connect_authorizes_the_exact_host_and_port() {
     );
 }
 
+/// The address the gateway pinned reaches history as the connect outcome's `ip4`.
+///
+/// A probe connect on port 9001 is refused once history holds a `net:connect::response` on the
+/// pinned address, so the field a rule reads comes from the attempt the gateway raised.
+#[test]
+fn the_pinned_address_reaches_history_as_the_connect_outcomes_ip4() {
+    let interceptor = egress_interceptor(
+        r#"
+        permit(principal, action == Box::Action::"net:connect", resource)
+        when { context.input.host == "api.github.com" };
+        @id("after-pinned-address")
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when { context.input.port == 9001 }
+        when temporal {
+            formerly within 3600s (
+                Box::Action::"net:connect"::response{ input.ip4: "192.0.2.1" }
+            )
+        };
+        "#,
+    );
+    let probe = EffectAttempt::Connect {
+        host: "api.github.com",
+        port: 9001,
+        address: "198.51.100.9:9001".parse().unwrap(),
+        http_visibility: true,
+    };
+
+    interceptor
+        .intercept(&probe)
+        .expect("nothing is in history yet, so the probe is permitted")
+        .mark_indeterminate();
+
+    let pinned: SocketAddr = "192.0.2.1:443".parse().unwrap();
+    interceptor
+        .intercept(&EffectAttempt::Connect {
+            host: "api.github.com",
+            port: 443,
+            address: pinned,
+            http_visibility: true,
+        })
+        .expect("the permitted host is allowed")
+        .record_outcome(EffectOutcome::Connected(pinned))
+        .expect("the outcome records");
+
+    assert!(
+        interceptor.intercept(&probe).is_err(),
+        "a rule keyed on `input.ip4` must read the address the gateway pinned"
+    );
+}
+
 fn request_attempt(port: u16, body_bytes: usize) -> EffectAttempt<'static> {
     EffectAttempt::HttpRequest {
         host: "api.github.com",
@@ -207,14 +257,13 @@ fn request_attempt(port: u16, body_bytes: usize) -> EffectAttempt<'static> {
     }
 }
 
-fn response_attempt(port: u16, body_bytes: usize) -> EffectAttempt<'static> {
+fn response_attempt(port: u16) -> EffectAttempt<'static> {
     EffectAttempt::ResponseRelease {
         host: "api.github.com",
         port,
         method: "POST",
         path: "/v1/messages",
         status: 201,
-        body_bytes,
     }
 }
 

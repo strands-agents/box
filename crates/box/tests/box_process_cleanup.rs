@@ -127,17 +127,22 @@ fn configured(kind: &str) -> fixture::Configured {
             .to_string(),
         _ => String::new(),
     };
-    let path = format!(
-        "{}:/usr/bin:/bin",
-        std::path::Path::new(probe).parent().unwrap().display()
-    );
-    fixture::Request::with_config(
+    let request = fixture::Request::with_config(
         "cleanup",
         "permit(principal, action, resource);",
         &declaration,
-    )
-    .env("PATH", &path)
-    .expect()
+    );
+    let programs = request.operator_home().join("programs");
+    std::fs::create_dir(&programs).expect("create the fixture program directory");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&programs, std::fs::Permissions::from_mode(0o700))
+            .expect("make the fixture program directory private");
+    }
+    std::fs::copy(probe, programs.join("box-exit-probe"))
+        .expect("copy the probe to one fixture-owned filesystem name");
+    let path = format!("{}:/usr/bin:/bin", programs.display());
+    request.env("PATH", &path).expect()
 }
 
 fn cleanup_case(kind: &str, trigger: &str) {

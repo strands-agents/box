@@ -1,0 +1,13 @@
+# expect: `<grammar>.shell.helper.usage`: spells `+helper`, whose first word starts with `+`, and the `[+<toolchain>]` of `<grammar>.shell.send.usage` reads that word as a toolchain
+# A tool grammar for gws, with one helper command.
+
+name    = "gws"
+program = "gws"
+format  = 1
+version = 1
+
+[shell.send]
+usage = "gws [+<toolchain>] gmail +send"
+
+[shell.helper]
+usage = "gws +helper"

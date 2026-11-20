@@ -29,12 +29,14 @@ workload reaches each of these directly. Policy is not asked, and the decision l
   the program runs. Its file operations are not decided.
 
 You own what `box.toml` grants. Review each path in `[agent.filesystem]` and each `[tool.<name>]`
-table, because direct reach raises no decision.
+table, because direct reach raises no decision. When adapting grants between macOS and Linux,
+see the [platform comparison](../design/platform-differences.md).
 
 **`policy.dw` governs each request through the box's trusted process, and the policy engine enforces
 it:** each command line and file operation in Strands Shell (the box's shell), each file operation
 in Monty (the box's Python), each connection and HTTP request through the egress gateway, and each
-MCP request. [When the box asks policy](policy.md#when-the-box-asks-policy) lists them, and
+MCP request through a declared server. Remote MCP checks require a
+[matching configured host](mcp.md#remote-destination-matching). [When the box asks policy](policy.md#when-the-box-asks-policy) lists the decisions, and
 [policy limitations](#policy-limitations) says what a broad permit reaches. An
 [`[egress.<name>]`](egress.md) credential is attached to a request only after policy permits it. The
 table binds the credential, and the policy's permits open the destination.
@@ -63,11 +65,21 @@ resolves into trusted Box state, which no policy may open
 resolves to an authority source that this run loaded, which no policy may open or change
 ```
 
-**Cloud metadata protection is two `forbid` rules in your policy.** `metadata_hosts` refuses the
+These protections cover the current box's files.
+On macOS, a process that opts into [file watching](config.md#file-watching) can still
+receive names and event metadata for denied paths, including outside the workspace and from past events,
+as well as the host-wide event count and each volume's history identifier.
+FSEvents does not grant direct file-content or write access, except that a root process can delete any volume's event history.
+Keep other boxes' configuration, policy, and generated state outside the workload's write access.
+Apply the [placement and access guidance](config.md#protect-other-boxes) to filesystem grants and requests through Strands Shell and Monty.
+
+**For gateway traffic, cloud metadata protection requires two `forbid` rules in your policy.** `metadata_hosts` refuses the
 metadata services by name. `metadata_addresses` refuses link-local and metadata addresses, checked
 on the address the gateway dials. Add both to the policy you wrote in
 [getting started](getting-started.md), and to any policy you write by hand. The example policies in
-the Box repository, under `examples/strands-box/`, carry both:
+the Box repository, under `examples/strands-box/`, carry both.
+
+Connections with [`contain_egress = false`](mcp.md#network) bypass these policy checks.
 
 ```dw
 @id("metadata_hosts")
@@ -82,11 +94,14 @@ when {
 @description("Refuse link-local and cloud metadata addresses, on the address resolution pinned.")
 forbid (principal, action == Box::Action::"net:connect", resource)
 when {
-  context.input has ip && (
-    context.input.ip like "169.254.*" ||
-    context.input.ip == "fd00:ec2::254" ||
-    context.input.ip like "fe8*" || context.input.ip like "fe9*" ||
-    context.input.ip like "fea*" || context.input.ip like "feb*")
+  (context.input has ip4 && (
+    context.input.ip4 like "169.254.*" ||
+    context.input.ip4 == "168.63.129.16" ||
+    context.input.ip4 == "100.100.100.200")) ||
+  (context.input has ip6 && (
+    context.input.ip6 == "fd00:ec2::254" ||
+    context.input.ip6 like "fe8*" || context.input.ip6 like "fe9*" ||
+    context.input.ip6 like "fea*" || context.input.ip6 like "feb*"))
 };
 ```
 
@@ -102,6 +117,8 @@ records why, the item links it.
   your home, including `~/.aws` and `~/.ssh`. A `permit` on `fs:read` with no path condition grants
   all of them. Write every filesystem rule with a path condition. See
   [where policy sits](../design/policy.md#where-policy-sits).
+- **Remote MCP tool restrictions apply only to matching configured hosts.** [Restrict other routes](mcp-policy.md#scope-of-remote-server-rules)
+  when every request to the application must use those restrictions.
 - **Box does not check that the rules of a policy agree with one another.** Two permits that admit
   the same requests load without a word. Write every cap as a `forbid`.
   [A cap written as a permit](policy.md#a-cap-written-as-a-permit) describes what the load does
@@ -128,6 +145,32 @@ records why, the item links it.
 - **A long temporal window slows every decision on that action.** Each decision recounts the events
   in the window, so a `24h` window on a busy action costs more than a `1m` one. Pick the shortest
   window the rule needs. See [residual risk](../design/policy.md#residual-risk).
+
+## File attributes on macOS
+
+By default, a write folder on macOS lets a process create, change, and delete files, and refuses
+calls that set file times. The top-level [`file-attributes`](config.md#file-attributes) key
+allows those calls. It also allows more than
+you may expect, because macOS cannot allow one without the others.
+
+With the switch on, a process in a write folder can:
+
+- Set the set-user-ID or set-group-ID bit on a file it can write, through `setattrlist`. The
+  `chmod` call stays refused. Anything that later runs the file runs as the file's owner or group,
+  outside the sandbox. If the box runs as root, that owner is root.
+- Change the group of a file to a group the box's user holds. A box that runs as root can use any
+  group.
+- Store an access control list on a file or folder through `setattrlist`. An entry can deny delete
+  or grant other users access to what the folder holds later.
+- Give a file to another user through `setattrlist`, when the box runs as root. A box that runs as
+  your user can give a file only to you.
+
+File flags, Finder information, `chown`, and `acl_set_file` stay refused, and so does every change
+outside the write folders.
+
+Turn the switch on only for a box whose write folders you review afterwards, and take extra care
+before you turn it on for a box that runs as root. To find set-ID files that a run left, run `find <folder> -perm +6000`.
+To remove a list that blocks deleting a folder, run `chmod -R -N <folder>`.
 
 ## See also
 

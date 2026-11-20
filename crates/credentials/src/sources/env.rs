@@ -9,7 +9,7 @@ use crate::sources::uri_reference;
 use crate::{CredentialError, Locator, Result, Secret, redact_credential_ref};
 
 /// The scheme this source claims.
-const SCHEME: &str = "env";
+pub(crate) const SCHEME: &str = "env";
 
 /// Environment variable names `env://` refuses to read (case-insensitive).
 const DENYLIST: &[&str] = &[
@@ -135,12 +135,15 @@ mod tests {
     #[test]
     fn denylisted_name_is_refused_hard() {
         // Even if the sensitive variable is actually set, env:// must refuse to read it.
-        // SAFETY: unique to this test's assertion; removed immediately after.
+        // `AWS_SECRET_ACCESS_KEY` is global, so serialize against the other env-mutating tests and
+        // restore it on exit (including a panic).
+        let _guard = crate::sources::test_env::lock_env();
+        let _restore = crate::sources::test_env::EnvRestore::capture(&["AWS_SECRET_ACCESS_KEY"]);
+        // SAFETY: `_guard` holds `ENV_LOCK` and `_restore` restores the value on drop.
         unsafe { env::set_var("AWS_SECRET_ACCESS_KEY", "should-never-be-read") };
         let err = EnvSource::new()
             .fetch(&locator("env://AWS_SECRET_ACCESS_KEY"))
             .unwrap_err();
-        unsafe { env::remove_var("AWS_SECRET_ACCESS_KEY") };
         assert!(
             !err.is_soft(),
             "a denylisted name must fail closed, not soft-skip"

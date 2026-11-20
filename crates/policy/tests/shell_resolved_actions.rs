@@ -48,7 +48,7 @@ fn args(words: &[&str]) -> Vec<String> {
 
 fn allows(policy: &PolicyEngine, request: &Request<'_>) -> bool {
     matches!(
-        policy.decide(&governed(), &Principal::agent(), request),
+        policy.decide(&governed(), &Principal::agent(), request).0,
         Decision::Allow { .. }
     )
 }
@@ -382,11 +382,17 @@ fn a_resolved_run_records_history_under_its_own_action() {
     let policy = loaded(PERMIT_RUN);
     let words = args(&["-rf", "x"]);
 
-    assert!(allows(&policy, &run("rm -rf x", "rm", &words)));
+    let (decision, request_id) = policy.decide(
+        &governed(),
+        &Principal::agent(),
+        &run("rm -rf x", "rm", &words),
+    );
+    assert!(decision.is_allow());
     policy
         .record(
             &governed(),
             &Principal::agent(),
+            &request_id.expect("the request records"),
             &Outcome::ShellRun {
                 command: "rm -rf x",
                 program: "rm",
@@ -418,14 +424,17 @@ fn a_temporal_rule_counts_resolved_runs_of_one_program() {
     let words = args(&["build"]);
     // Three runs are recorded, then the fourth attempt exceeds the budget.
     for _ in 0..3 {
-        assert!(
-            allows(&policy, &run("make build", "make", &words)),
-            "a run inside the budget is permitted"
+        let (decision, request_id) = policy.decide(
+            &governed(),
+            &Principal::agent(),
+            &run("make build", "make", &words),
         );
+        assert!(decision.is_allow(), "a run inside the budget is permitted");
         policy
             .record(
                 &governed(),
                 &Principal::agent(),
+                &request_id.expect("the request records"),
                 &Outcome::ShellRun {
                     command: "make build",
                     program: "make",
@@ -498,10 +507,27 @@ fn credential_reads_enter_durable_temporal_history() {
 
     let words = args(&["s3", "ls"]);
     let paths = vec!["~/.aws".to_string()];
+    let (decision, request_id) = policy.decide(
+        &governed(),
+        &Principal::agent(),
+        &Request::ShellSpawn {
+            command: "aws s3 ls",
+            program: "aws",
+            program_path: "/usr/local/bin/aws",
+            credential_reads: &paths,
+            args: &words,
+            cwd: "/workspace",
+        },
+    );
+    assert!(
+        decision.is_allow(),
+        "the credential-bearing command is admitted"
+    );
     policy
         .record(
             &governed(),
             &Principal::agent(),
+            &request_id.expect("the request records"),
             &Outcome::ShellSpawn {
                 command: "aws s3 ls",
                 program: "aws",

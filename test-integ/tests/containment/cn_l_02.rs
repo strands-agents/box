@@ -1,5 +1,5 @@
 use crate::phase3::{git_identity, with_git};
-use strands_det_harness::{Platform, det_case, git_only_spawn_policy, sh_quote};
+use strands_det_harness::{Platform, det_case, git_only_spawn_policy, host_output, sh_quote};
 
 det_case! {
     name: cn_l_02,
@@ -46,7 +46,7 @@ det_case! {
         } else {
             let path = b.exec_tree().join("git");
             std::fs::copy(&git, &path).expect("DET_ERROR: copy the second Git identity");
-            let control = std::process::Command::new(&path).arg("--version").output()
+            let control = host_output(std::process::Command::new(&path).arg("--version"))
                 .expect("DET_ERROR: run the second Git identity on the host");
             assert!(crate::phase3::text(control).contains("git version"));
             path
@@ -55,7 +55,9 @@ det_case! {
             &format!("{} --version", sh_quote(&other_git.to_string_lossy())));
         other.assert_shell_denied();
         let resource = if Platform::current() == Platform::Linux {
-            format!("~/{}", other_git.strip_prefix(strands_det_harness::user_home()).unwrap().display())
+            let home = strands_det_harness::user_home().canonicalize()
+                .expect("DET_ERROR: resolve the operator home");
+            format!("~/{}", other_git.strip_prefix(home).unwrap().display())
         } else {
             other_git.to_string_lossy().into_owned()
         };

@@ -16,7 +16,7 @@ def covered(name, packages):
         return False
     if name in (
         "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
-        ".github/workflows/native-filesystem.yml",
+        ".github/workflows/rust-test-lint.yml",
         "crates/box/tests/support/bounded_output.rs",
     ) or name.startswith((".cargo/", "test-native-filesystem/")):
         return True

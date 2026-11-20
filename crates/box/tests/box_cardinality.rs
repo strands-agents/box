@@ -227,31 +227,32 @@ printf "|elapsed=%s" "$SECONDS"
     );
 }
 /// A non-yielding request does not delay a concurrent one.
-///
-/// The Lua interpreter never awaits, so it once pinned the runtime every request
-/// shared and an unrelated probe took 27.73s. Each connection owns its thread now. Both requests
-/// come from one run, for the reason E2 states.
 #[test]
 fn e2b_a_non_yielding_request_does_not_delay_a_concurrent_one() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let box_ = Request::with_policy("card-e2b", PERMISSIVE).expect();
+    let box_ =
+        Request::with_config("card-e2b", PERMISSIVE, "[limits]\nshell.timeout = 6\n").expect();
 
     let output = box_.bash(
         r#"
-zsh -c "lua -e 'while true do end'" &
-zsh -c "sleep 3"
 SECONDS=0
+zsh -c 'lua -e "local ready = assert(io.open(\"{box_home}/spinning\", \"w\")); ready:write(\"ready\"); ready:close(); while true do end"' &
+spinner=$!
+while [[ ! -s "{box_home}/spinning" ]]; do
+    (( SECONDS < 4 )) || { printf 'LUA_NOT_READY'; exit 1; }
+done
+# Lua's file close yields once; include its settling time in the measurement.
+zsh -c "sleep 0.1"
 zsh -c "printf quick"
 printf "|elapsed=%s" "$SECONDS"
+wait "$spinner"
+printf "|spinner_status=%s" "$?"
 "#,
     );
 
-    eprintln!(
-        "E2b MEASURED: {:?} (was 27.73s before each connection got its own thread)",
-        stdout(&output)
-    );
+    eprintln!("E2b MEASURED: {:?}", stdout(&output));
     assert_workload_launched(&output, "E2b's probe");
     assert!(
         stdout(&output).contains("quick"),
@@ -259,10 +260,14 @@ printf "|elapsed=%s" "$SECONDS"
     );
     let elapsed = elapsed_seconds(&stdout(&output));
     assert!(
-        elapsed < 5,
+        elapsed < 4,
         "EXPERIMENT E2b: a non-yielding command must pin its own thread and nobody else's. \
          If this regresses, the connections went back onto one shared runtime. elapsed={elapsed}s, \
          output={output:?}"
+    );
+    assert!(
+        stdout(&output).contains("|spinner_status=1") && stderr(&output).contains("timeout"),
+        "the competing Lua request must run until its deadline: {output:?}"
     );
 }
 /// One temporal history per box: shared across requests and durable across runs.
@@ -443,21 +448,13 @@ fn e4b_concurrent_python_requests_are_admitted() {
 // E5 — Bidirectionality: what request/reply cannot carry
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// The alias forwards no stdin, so a command that reads gets nothing.
+/// A command that reads stdin through the alias gets what the workload piped to it.
 ///
-/// `ShellRequest` carries `version` and `command` and nothing else, and the alias closes
-/// every descriptor above stdio before connecting. So there is no channel for input at
-/// all — not an empty one, none.
-///
-/// This was the concrete blocker behind an MCP-over-stdio plan: an MCP server is a bidirectional
-/// stdio session, and version 1 of this protocol has no frame that could carry one.
-///
-/// The decision that answers it is docs/design/decisions.md#a-box-is-one-kernel-and-many-programs.
-/// The blocker is now lifted for the *transport* protocol (version 2), which carries in-band stdin
-/// and many frames per connection; this test pins version 1's behaviour, which is unchanged and
-/// still what the alias speaks.
+/// **Inverted 2026-11-11.** This asserted that no stdin arrived, and its own failure message said
+/// to update the decisions once the protocol carried input. The Shell alias now streams finite
+/// stdin as `Input` frames after its `Call`.
 #[test]
-fn e5a_no_stdin_reaches_a_shell_command() {
+fn e5a_stdin_reaches_a_shell_command() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
@@ -471,10 +468,8 @@ fn e5a_no_stdin_reaches_a_shell_command() {
     eprintln!("E5a stdin: {text:?} stderr={:?}", stderr(&output));
     assert_workload_launched(&output, "E5a");
     assert!(
-        !text.contains("read=[from_workload_stdin]"),
-        "EXPERIMENT E5a: the protocol carries no stdin, so a piped value cannot arrive. \
-         If this ever passes, the protocol gained an input channel, so update \
-         docs/design/decisions.md#no-state-crosses-a-call-boundary. \
+        text.contains("read=[from_workload_stdin]|status=0"),
+        "EXPERIMENT E5a: a piped value must reach the command through the alias. \
          output={output:?}"
     );
 }
@@ -840,7 +835,7 @@ fn e9a_the_bind_passes_through_to_the_host_rather_than_copying() {
 
 /// A write refused through a REDIRECT says *why*, not just exit non-zero.
 ///
-/// Regression guard on a defect in the vendored shell's `exec.rs`, found while establishing
+/// Regression guard on a defect in the Shell's `exec.rs`, found while establishing
 /// that the bind passes through. Its single-builtin path calls `set_err_tx` to route
 /// `err_msg` into a channel, then returns on a redirect failure *before* spawning the task
 /// that drains it — so the message went into a receiver nobody read, and the failure surfaced

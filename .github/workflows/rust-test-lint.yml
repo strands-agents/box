@@ -24,15 +24,20 @@ on:
         type: string
         default: ""
       os:
-        description: 'JSON array of runner OSes for the test matrix. Default runs both; a dispatch narrows it, e.g. ["macos-latest"].'
+        description: 'JSON array of runner OSes for the test matrix. Default runs all three runners; a dispatch narrows it, e.g. ["macos-latest"].'
         required: false
         type: string
-        default: '["ubuntu-latest", "macos-latest"]'
+        default: '["ubuntu-24.04-arm", "ubuntu-24.04", "macos-latest"]'
       run_lint:
         description: "Run the lint job. Default true (normal CI); a scoped dispatch sets it false to skip fmt/clippy and save minutes."
         required: false
         type: boolean
         default: true
+      containment_macos:
+        description: "Run the deterministic containment suite on the macOS unit-test runner, so a push holds one macOS runner. Linux runs the suite in containment-deterministic.yml."
+        required: false
+        type: boolean
+        default: false
 
 env:
   # Colorize cargo output in Actions logs (from the starter template).
@@ -47,23 +52,122 @@ env:
   RUSTFLAGS: "-C debuginfo=0"
 
 jobs:
+  history-persistence:
+    name: History persistence (${{ matrix.mode }}, ${{ matrix.os }})
+    # Exercise the batched default and the per-event opt-out independently of all-feature builds.
+    if: ${{ inputs.filter == '' }}
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    # Dispatched runs can select a different revision; deny cache writes from that code.
+    cache-mode: read
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_FEATURE_ARGS: ${{ matrix.mode == 'per-event' && '--no-default-features' || '' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os) }}
+        mode: [default, per-event]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Enable experimental x86 runtime tests
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: echo "EXPERIMENTAL_X86_SUPPORT=TRUE" >> "$GITHUB_ENV"
+
+      - name: Require Linux namespace support
+        if: runner.os == 'Linux'
+        run: |
+          case "$(uname -m)" in
+            aarch64|x86_64) ;;
+            *) echo "Unsupported Linux test architecture" >&2; exit 1 ;;
+          esac
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$knob" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount --pid --fork --mount-proc true
+
+      - name: Build Box and launcher binaries for the selected persistence mode
+        run: cargo build --locked -p strands-box -p strands-box-containment --bins $CARGO_FEATURE_ARGS
+
+      - name: Install launcher images beside test binaries (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          install -m 0755 target/debug/strands-box-sock-alias target/debug/deps/strands-box-sock-alias
+          install -m 0755 target/debug/strands-box-contain-trampoline target/debug/deps/strands-box-contain-trampoline
+
+      - name: Test crash recovery for the selected persistence mode
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+          cargo test --locked -p strands-box $CARGO_FEATURE_ARGS --test box_killed_run -- --show-output \
+            2>&1 | tee crash-recovery.log
+          test_status=$?
+          set -e
+          if [ "$test_status" -ne 0 ]; then
+            exit "$test_status"
+          fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            python3 scripts/check-linux-test-output.py crash-recovery.log | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import re
+
+          output = Path("crash-recovery.log").read_text()
+          output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+          results = re.findall(r"^test result:.*$", output, re.MULTILINE)
+          expected = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;"
+          if len(results) != 1 or not results[0].startswith(expected):
+              raise SystemExit("Expected one passing crash-recovery test with no ignored or filtered cases.")
+          PYTHON
+
+      - name: Test the default idle history timer
+        if: matrix.mode == 'default'
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p strands-box --lib \
+            run::hosted::tests::hosted_idle_timer_flushes_pending_history_without_shutdown \
+            -- --exact --show-output 2>&1 | tee default-idle-history.log
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import re
+
+          output = Path("default-idle-history.log").read_text()
+          output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+          expected = "test run::hosted::tests::hosted_idle_timer_flushes_pending_history_without_shutdown ... ok"
+          if expected not in output or not re.search(r"^test result: ok\. 1 passed; 0 failed; 0 ignored;", output, re.MULTILINE):
+              raise SystemExit("Expected the default build to execute and pass the idle history test.")
+          PYTHON
+
+      - name: Upload history persistence output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: history-persistence-${{ matrix.mode }}-${{ matrix.os }}
+          path: |
+            crash-recovery.log
+            default-idle-history.log
+          if-no-files-found: warn
+
   unit-test:
     name: Unit Tests (${{ matrix.os }})
     permissions:
       contents: read
     runs-on: ${{ matrix.os }}
-    # Cargo test on the full workspace typically finishes in a few minutes;
-    # 30 min caps a hung step instead of running to the 6-hour default.
-    timeout-minutes: 30
-    # macOS is advisory for now. The `strands-meta-harness/python_handler_e2e`
-    # suite fails on Homebrew's `/opt/homebrew/bin/python3`: the box's
-    # Seatbelt profile grants `process-exec` on the resolved literal, but
-    # Homebrew's symlink chain reaches a target the profile does not name
-    # (see `box/AGENTS.md` — "A rule must name the path a load asks for").
-    # Landing the fix belongs in a follow-up; failing this leg for now would
-    # block every merge on an unrelated defect. The failure is visible in
-    # the Actions UI so the pressure to fix it remains.
-    continue-on-error: ${{ matrix.os == 'macos-latest' }}
+    # Allow a cold build and the complete workspace suite on slower runners.
+    # The x86 runner can still be making progress after 30 minutes. The macOS
+    # runner also runs the deterministic containment suite when asked to.
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && inputs.containment_macos && 70 || 45 }}
     strategy:
       # Report every OS's outcome even if one fails. A single Linux failure
       # is not a reason to hide the macOS one.
@@ -78,28 +182,46 @@ jobs:
           persist-credentials: false
 
       - name: Free disk (Linux only)
-        if: matrix.os == 'ubuntu-latest'
-        # ubuntu-latest starts with about 1 GB free after the checkout. A debug
-        # `--all-targets` link of the workspace (many test binaries that each
-        # statically link pyo3, napi, mlua, rustls, and now opentelemetry) fills
-        # the disk, and the link dies: rustc reports `No space left on device`,
-        # or lld faults on its mmap-ed output with `ld terminated with signal 7
-        # [Bus error]`. debuginfo is already off (see RUSTFLAGS above), so the
-        # remaining lever is disk. Deleting the preinstalled Android and .NET
-        # SDKs, which this suite never uses, reclaims about 17 GB. A measured run
-        # kept about 17.5 GB free at the low point and passed at full build
-        # parallelism. The runner is a single-use VM, so the delete is local to
-        # this job.
+        if: runner.os == 'Linux'
+        # Free space for the all-targets build on the disposable Ubuntu runner.
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+
+      - name: Require Linux namespace support
+        if: runner.os == 'Linux'
+        run: |
+          case "$(uname -m)" in
+            aarch64|x86_64) ;;
+            *) echo "Unsupported Linux test architecture" >&2; exit 1 ;;
+          esac
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$knob" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount --pid --fork --mount-proc true
 
       - name: Cache cargo
         # Wraps actions/cache with keys tuned for cargo (registry, git, target).
-        # rust-cache keys include the runner OS, so each matrix leg gets its
-        # own cache line rather than fighting over one entry. Only a push to the
+        # rust-cache keys include the runner OS and architecture, so each
+        # matrix leg gets its own cache entry. Only a push to the
         # default branch writes the cache; same guard as verdict-hermetic.yml.
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Cache cargo for the deterministic suite (macOS only)
+        if: ${{ matrix.os == 'macos-latest' && inputs.containment_macos }}
+        # A distinct shared-key keeps the release target and the standalone
+        # test-integ crate apart from the unit-test cache above.
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: containment-deterministic
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          workspaces: |
+            .
+            test-integ
+
+      - name: Fetch locked dependencies for offline metadata
+        run: cargo fetch --locked
 
       - name: Install non-framework Python (macOS only)
         if: matrix.os == 'macos-latest'
@@ -139,34 +261,51 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked --all-targets --all-features --verbose
 
+      - name: Install launcher images beside unit-test binaries
+        if: runner.os == 'Linux'
+        run: |
+          install -m 0755 target/debug/strands-box-sock-alias target/debug/deps/strands-box-sock-alias
+          install -m 0755 target/debug/strands-box-contain-trampoline target/debug/deps/strands-box-contain-trampoline
+
       - name: Run tests (linux)
-        if: matrix.os == 'ubuntu-latest'
-        # The `backend::linux::namespace::*` tests need capabilities the
-        # runner's AppArmor `unprivileged_userns` profile refuses:
-        # `unshare(CLONE_NEWUSER)`, `mount(2)`, and `capset` inside a fresh
-        # user namespace. Those tests belong on the AL2023 EC2 host that
-        # `scripts/test-linux-i4.sh` and `scripts/al2023-i4-test-host.yaml`
-        # provision, not on a hosted GitHub runner. The `view::tests` cases
-        # that only build a mount plan run here; the ones that actually enter a
-        # namespace and mount are skipped by name alongside the module skips.
-        # The four `*_establishes` / `*_is_refused` / `*_not_created_on_the_host`
-        # cases below are in that set too. Every remaining test in the workspace
-        # stays fatal.
+        shell: bash
+        if: runner.os == 'Linux'
         env:
           FAIL_FAST_FLAG: ${{ !inputs.fail_fast && '--no-fail-fast' || '' }}
           FILTER: ${{ inputs.filter }}
+          # ubuntu-latest is a stock GitHub-hosted runner (kernel well above 5.9, no seccomp
+          # block), so close_range is available and the fast-path test must exercise it rather
+          # than skip. Setting this makes a skip there a hard failure instead of a quiet pass.
+          BOX_REQUIRE_CLOSE_RANGE: "1"
         run: |
+          set -o pipefail
+          set +e
           cargo test --workspace --locked --all-features $FAIL_FAST_FLAG --verbose ${FILTER:+"$FILTER"} \
-            -- --show-output \
-            --skip 'backend::linux::namespace::authority' \
-            --skip 'backend::linux::namespace::netns' \
-            --skip 'backend::linux::namespace::reaper' \
-            --skip 'backend::linux::namespace::view::tests::a_read_only_directory_grant_may_enclose_an_exec_literals_file_bind' \
-            --skip 'backend::linux::namespace::view::tests::a_submount_under_a_read_only_grant_is_also_read_only' \
-            --skip 'backend::linux::namespace::view::tests::an_exec_file_under_a_read_root_establishes' \
-            --skip 'backend::linux::namespace::view::tests::a_symlinked_exec_file_under_a_read_root_establishes' \
-            --skip 'backend::linux::namespace::view::tests::a_symlink_at_a_mountpoint_outside_any_bind_is_refused' \
-            --skip 'backend::linux::namespace::view::tests::an_absent_mountpoint_is_not_created_on_the_host'
+            -- --show-output 2>&1 | tee linux-workspace-tests.log
+          test_status=$?
+          set -e
+          python3 scripts/check-linux-test-output.py linux-workspace-tests.log | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$test_status"
+
+      - name: Test Linux native filesystem forwarding
+        if: ${{ !cancelled() && runner.os == 'Linux' && inputs.filter == '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p strands-box-containment --lib --all-features \
+            backend::linux::namespace::filesystem_queries::forwarding_tests:: \
+            -- --test-threads=1 2>&1 | tee linux-native-forwarding-tests.log
+          grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' linux-native-forwarding-tests.log
+
+      - name: Upload Linux test output
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: workspace-tests-${{ matrix.os }}
+          path: |
+            linux-workspace-tests.log
+            linux-native-forwarding-tests.log
+          if-no-files-found: warn
 
       - name: Run tests (macos)
         if: matrix.os == 'macos-latest'
@@ -179,10 +318,93 @@ jobs:
         run: |
           cargo test --workspace --locked --all-features $FAIL_FAST_FLAG --verbose ${FILTER:+"$FILTER"}
 
+      # The native filesystem checks the workspace run above does not cover: the
+      # standalone signed test package, startup refusal without the Cargo feature,
+      # and the signed receipt checker. They run after a workspace test failure,
+      # and a filtered dispatch skips them.
+      - name: Check the native filesystem test package (macOS only)
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.filter == '' }}
+        run: |
+          cargo test --manifest-path test-native-filesystem/Cargo.toml --locked --no-run
+          cargo test --manifest-path test-native-filesystem/Cargo.toml --locked --test bridge -- --nocapture
+          cargo fmt --manifest-path test-native-filesystem/Cargo.toml --check
+          cargo clippy --manifest-path test-native-filesystem/Cargo.toml --locked --all-targets --all-features -- -D warnings
+
+      - name: Test native startup without native enforcement in both history modes (macOS only)
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.filter == '' }}
+        run: |
+          cargo test --locked -p strands-box --test macos_file_enforcement
+          cargo test --locked -p strands-box --no-default-features --test macos_file_enforcement
+
+      - name: Test signed receipt checker (macOS only)
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.filter == '' }}
+        run: python3 -m unittest discover -s test-native-filesystem -p '*_test.py'
+
+      - name: Check signed receipt freshness (informational, macOS only)
+        id: signed-receipt
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.filter == '' }}
+        continue-on-error: true
+        run: python3 test-native-filesystem/receipt.py
+
+      - name: Summarize native validation (macOS only)
+        if: matrix.os == 'macos-latest' && inputs.filter == ''
+        env:
+          RECEIPT_OUTCOME: ${{ steps.signed-receipt.outcome }}
+        run: |
+          echo "Native adapter, configuration, and startup tests passed. The full signed native enforcement suite did not run." >> "$GITHUB_STEP_SUMMARY"
+          echo "Signed receipt freshness: ${RECEIPT_OUTCOME} (informational only)." >> "$GITHUB_STEP_SUMMARY"
+
+      # The deterministic containment suite (test-integ/) on macOS. These steps
+      # are the macOS leg of containment-deterministic.yml, run here so a push
+      # holds one macOS runner. They run after a unit-test failure, and each
+      # one waits for the one before it, as in a job of their own.
+      - name: Build strands-box and the containment trampoline (macOS only)
+        id: det_build
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment_macos }}
+        run: cargo build -p strands-box -p strands-box-containment --release --locked --features test-support
+
+      - name: Check downloader behavior (macOS only)
+        id: det_download
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment_macos && steps.det_build.outcome == 'success' }}
+        run: python3 -m unittest discover -s scripts -p 'test_download.py' -v
+
+      - name: Test filesystem modes on a supported backend (macOS only)
+        id: det_filesystem_modes
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment_macos && steps.det_download.outcome == 'success' }}
+        run: cargo test -p strands-box --release --locked --all-features --test filesystem_modes -- --nocapture
+
+      - name: Run the deterministic suite (macOS only)
+        id: det_suite
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment_macos && steps.det_filesystem_modes.outcome == 'success' }}
+        env:
+          DET_RESULTS_DIR: ${{ github.workspace }}/det-results
+          PLATFORM: macos
+        run: |
+          echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
+          export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
+          command -v strands-box
+          bash test-integ/run.sh
+
+      - name: Summarize the verdict (macOS only)
+        if: ${{ always() && matrix.os == 'macos-latest' && inputs.containment_macos }}
+        run: python3 test-integ/tools/summarize-verdict.py "$GITHUB_WORKSPACE/det-results/verdict.json"
+
+      - name: Upload verdict and logs (macOS only)
+        if: ${{ always() && matrix.os == 'macos-latest' && inputs.containment_macos }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: deterministic-${{ matrix.os }}
+          path: |
+            det-results/verdict.json
+            det-results/cargo-test.log
+            det-results/*.jsonl
+          if-no-files-found: warn
+          retention-days: 14
+
   lint:
     name: Lint
     if: ${{ inputs.run_lint }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     # Lint typically runs in ~2 min; 20 min caps a hung step instead of
     # letting it run to the 6-hour default.
     timeout-minutes: 20
@@ -204,39 +426,7 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: cargo fmt
-        # Owned-crate fmt is the gate. The vendored `strands-shell` and its
-        # `strands-shell-macros` sibling are skipped for the same reason as the
-        # clippy step below: upstream is the source of truth for that tree, and
-        # a fix belongs upstream.
-        run: |
-          cargo fmt --check \
-            -p strands-box \
-            -p strands-box-containment \
-            -p strands-box-credentials \
-            -p strands-box-egress-gateway \
-            -p strands-box-policy \
-            -p strands-box-telemetry
+        run: cargo fmt --all --check
 
       - name: cargo clippy
-        # `-D warnings` is the gate, but the vendored `strands-shell` carries
-        # warnings we do not fix here:
-        # the root `AGENTS.md` says "owned clippy warnings are not expected;
-        # vendored ones are", and a fix here would diverge from upstream.
-        # `cargo clippy -p` / `--exclude` cannot skip a
-        # workspace crate that is a build dependency of an owned crate, so the
-        # lints are allowed at the driver level. The set was measured against
-        # the current pinned upstream — add a lint when it fires on a fresh
-        # sync, drop one when its `UPSTREAM.md` records an upstream fix. Every
-        # entry stays fatal on owned code because `#[warn(<lint>)]` at the
-        # owned crate root overrides `-A`, which is why this driver-level allow
-        # does not weaken the owned gate.
-        run: |
-          cargo clippy --workspace --all-targets --all-features -- \
-            -D warnings \
-            -A clippy::too_many_arguments \
-            -A clippy::only_used_in_recursion \
-            -A clippy::await_holding_refcell_ref \
-            -A clippy::explicit_auto_deref \
-            -A clippy::chunks_exact_to_as_chunks \
-            -A dead_code \
-            -A non_snake_case
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings

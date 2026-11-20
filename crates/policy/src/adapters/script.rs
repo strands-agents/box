@@ -20,7 +20,7 @@ use crate::GovernedBox;
 use crate::outcome::FsResult;
 use crate::path::{ApprovedPath, normalize_virtual};
 use crate::request::FsOperation;
-use crate::{Decision, Outcome, PolicyEngine, Principal, Request};
+use crate::{Decision, Outcome, PolicyEngine, Principal, Request, RequestId};
 
 /// Binds one policy and Script principal to Monty's OS-call seam.
 pub struct ScriptPolicyInterceptor<'p> {
@@ -48,6 +48,9 @@ pub struct ScriptPermit<'p> {
     /// Integration metadata for the box this boundary serves.
     governed: GovernedBox,
     admitted: Admitted,
+    request_id: Option<RequestId>,
+    source_read_id: Option<RequestId>,
+    removal_id: Option<RequestId>,
     /// Whether an outcome has been submitted, so `Drop` does not submit a second one.
     reported: bool,
 }
@@ -97,8 +100,8 @@ impl<'p> ScriptPolicyInterceptor<'p> {
         let admitted = Self::classify(call, self.home.as_deref())
             .ok_or_else(|| ScriptRefusal::Unsupported(call.on_no_handler()))?;
 
-        let decision = match &admitted {
-            Admitted::Filesystem { path, operation } => self.policy.decide(
+        let admission = match &admitted {
+            Admitted::Filesystem { path, operation } => self.policy.admit(
                 &self.governed,
                 &self.principal,
                 &Request::Fs {
@@ -108,13 +111,11 @@ impl<'p> ScriptPolicyInterceptor<'p> {
             ),
             Admitted::Rename { .. } => unreachable!("rename is admitted through admit_rename"),
             // The one kind admitted with no decision. See `Admitted::Ungoverned`.
-            Admitted::Ungoverned => return Ok(self.permit(admitted)),
+            Admitted::Ungoverned => return Ok(self.permit(admitted, None)),
         };
 
-        match decision {
-            Decision::Allow { .. } => Ok(self.permit(admitted)),
-            Decision::Deny { .. } => Err(policy_refusal(&decision)),
-        }
+        let request_id = admission.map_err(ScriptRefusal::Denied)?;
+        Ok(self.permit(admitted, Some(request_id)))
     }
 
     /// The spelling a decision names for `path`.
@@ -124,12 +125,15 @@ impl<'p> ScriptPolicyInterceptor<'p> {
     }
 
     /// Issue a permit for an already-authorized effect.
-    fn permit(&self, admitted: Admitted) -> ScriptPermit<'p> {
+    fn permit(&self, admitted: Admitted, request_id: Option<RequestId>) -> ScriptPermit<'p> {
         ScriptPermit {
             policy: self.policy,
             principal: self.principal.clone(),
             governed: self.governed.clone(),
             admitted,
+            request_id,
+            source_read_id: None,
+            removal_id: None,
             reported: false,
         }
     }
@@ -279,62 +283,43 @@ impl<'p> ScriptPolicyInterceptor<'p> {
         let source = resolve(args.src.as_str(), home);
         let destination = resolve(args.dst.as_str(), home);
 
+        let authorize = |request: &Request<'_>| {
+            self.policy
+                .admit(&self.governed, &self.principal, request)
+                .map_err(ScriptRefusal::Denied)
+        };
+
         // A move of the source name still makes the source's bytes reachable through the
         // destination. Without this leg, a `forbid fs:read` on the source is laundered by a
         // permitted rename and a later read from the new name.
-        let source_read_decision = self.policy.decide(
-            &self.governed,
-            &self.principal,
-            &Request::Fs {
-                path: &source,
-                operation: FsOperation::ReadContent,
-            },
-        );
-        if !matches!(source_read_decision, Decision::Allow { .. }) {
-            return Err(policy_refusal(&source_read_decision));
-        }
+        let source_read_id = authorize(&Request::Fs {
+            path: &source,
+            operation: FsOperation::ReadContent,
+        })?;
 
         // The source is being removed from its name, which is a write to it.
-        let source_decision = self.policy.decide(
-            &self.governed,
-            &self.principal,
-            &Request::Fs {
-                path: &source,
-                operation: FsOperation::Rename,
-            },
-        );
-        if !matches!(source_decision, Decision::Allow { .. }) {
-            return Err(policy_refusal(&source_decision));
-        }
+        authorize(&Request::Fs {
+            path: &source,
+            operation: FsOperation::Rename,
+        })?;
 
         // A name bound at the destination is removed by the rename, so that removal is
         // decided as `fs:delete` on the destination before the move onto it.
         let destination_removal = bound_at(destination.as_path()).removal();
-        if let Some(removal) = destination_removal {
-            let removal_decision = self.policy.decide(
-                &self.governed,
-                &self.principal,
-                &Request::Fs {
-                    path: &destination,
-                    operation: removal,
-                },
-            );
-            if !matches!(removal_decision, Decision::Allow { .. }) {
-                return Err(policy_refusal(&removal_decision));
-            }
-        }
-
-        let destination_decision = self.policy.decide(
-            &self.governed,
-            &self.principal,
-            &Request::Fs {
+        let removal_id = if let Some(removal) = destination_removal {
+            let removal_id = authorize(&Request::Fs {
                 path: &destination,
-                operation: FsOperation::Rename,
-            },
-        );
-        if !matches!(destination_decision, Decision::Allow { .. }) {
-            return Err(policy_refusal(&destination_decision));
-        }
+                operation: removal,
+            })?;
+            Some(removal_id)
+        } else {
+            None
+        };
+
+        let destination_id = authorize(&Request::Fs {
+            path: &destination,
+            operation: FsOperation::Rename,
+        })?;
 
         let permit = ScriptPermit {
             policy: self.policy,
@@ -345,6 +330,9 @@ impl<'p> ScriptPolicyInterceptor<'p> {
                 target_path: destination.clone(),
                 destination_removal,
             },
+            request_id: Some(destination_id),
+            source_read_id: Some(source_read_id),
+            removal_id,
             reported: false,
         };
         Ok((
@@ -353,10 +341,6 @@ impl<'p> ScriptPolicyInterceptor<'p> {
             permit,
         ))
     }
-}
-
-fn policy_refusal(decision: &Decision) -> ScriptRefusal {
-    ScriptRefusal::Denied(decision.clone())
 }
 
 /// What a rename finds bound at its destination.
@@ -436,6 +420,7 @@ impl ScriptPermit<'_> {
 
     fn record_fs_outcome(
         &self,
+        request_id: &RequestId,
         path: &ApprovedPath,
         operation: FsOperation,
         result: FsResult,
@@ -444,6 +429,7 @@ impl ScriptPermit<'_> {
         self.policy.record(
             &self.governed,
             &self.principal,
+            request_id,
             &Outcome::Fs {
                 path: std::path::Path::new(reported.as_ref()),
                 operation,
@@ -454,22 +440,35 @@ impl ScriptPermit<'_> {
 
     /// Submit one outcome as history.
     fn submit(&self, result: FsResult) -> Result<(), crate::PolicyError> {
+        let Some(request_id) = self.request_id.as_ref() else {
+            // Ungoverned calls never submitted a policy request.
+            return Ok(());
+        };
         match &self.admitted {
             Admitted::Filesystem { path, operation } => {
-                self.record_fs_outcome(path, *operation, result)
+                self.record_fs_outcome(request_id, path, *operation, result)
             }
             Admitted::Rename {
                 source_read_path,
                 target_path,
                 destination_removal,
             } => {
-                if result.response_result().is_some() {
-                    self.record_fs_outcome(source_read_path, FsOperation::ReadContent, result)?;
+                if result.response_result().is_some()
+                    && let Some(source_read_id) = &self.source_read_id
+                {
+                    self.record_fs_outcome(
+                        source_read_id,
+                        source_read_path,
+                        FsOperation::ReadContent,
+                        result,
+                    )?;
                 }
-                if let Some(removal) = destination_removal {
-                    self.record_fs_outcome(target_path, *removal, result)?;
+                if let Some((removal, removal_id)) =
+                    destination_removal.as_ref().zip(self.removal_id.as_ref())
+                {
+                    self.record_fs_outcome(removal_id, target_path, *removal, result)?;
                 }
-                self.record_fs_outcome(target_path, FsOperation::Rename, result)
+                self.record_fs_outcome(request_id, target_path, FsOperation::Rename, result)
             }
             // Nothing to report: an ungoverned call has no filesystem identity.
             Admitted::Ungoverned => Ok(()),
@@ -562,6 +561,52 @@ mod tests {
             Principal::agent(),
             GovernedBox::assigned("test-box"),
         )
+    }
+
+    #[test]
+    fn a_rename_drop_records_each_uncertain_outcome_with_its_own_leg_id() {
+        use crate::adapters::correlation_tests::{assert_pair, events, id};
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        let policy = PolicyEngine::open(
+            vec![Policy {
+                origin: PathBuf::from("rename-correlation.dw"),
+                text: r#"
+                permit(principal, action == Box::Action::"fs:read", resource);
+                permit(principal, action == Box::Action::"fs:move", resource);
+                permit(principal, action == Box::Action::"fs:delete", resource);
+            "#
+                .to_string(),
+            }],
+            &path,
+        )
+        .expect("policy opens");
+        let call = OsFunctionCall::Rename(monty_types::RenameCallArgs {
+            src: MontyPath::new("/work/source".to_string()),
+            dst: MontyPath::new("/work/target".to_string()),
+        });
+        let (_, _, permit) = interceptor(&policy)
+            .admit_rename(&call, |_| RenameDestination::File)
+            .expect("all rename legs admitted");
+        drop(permit);
+        drop(policy);
+        let events = events(&path);
+        assert_eq!(events.len(), 7, "four requests and three existing outcomes");
+        assert_pair(&events[0], &events[4]);
+        assert_pair(&events[2], &events[5]);
+        assert_pair(&events[3], &events[6]);
+        assert_eq!(
+            events[..4]
+                .iter()
+                .map(id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            4
+        );
+        assert!(
+            events[4..].iter().all(|event| id(event) != id(&events[1])),
+            "the source mutation remains request-only"
+        );
     }
 
     #[test]

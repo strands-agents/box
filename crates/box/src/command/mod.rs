@@ -27,6 +27,20 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+    let native_setup = match &cli.command {
+        Command::Run { config, .. } => {
+            match run::prepare_native(config, options.on_ready.is_some()) {
+                Ok(setup) => Some(setup),
+                Err(error) => {
+                    eprintln!("strands-box: refusing to run: {error}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        _ => None,
+    };
+
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -48,7 +62,16 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
                 reason: format!("on_ready callback failed: {source}"),
             })?;
         }
-        dispatch(cli, options.terminal, signals).await
+        dispatch(
+            cli,
+            options.terminal,
+            signals,
+            options.box_id.as_deref(),
+            options.policy_decisions,
+            #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+            native_setup,
+        )
+        .await
     }) {
         Ok(code) => code,
         Err(error) => {
@@ -63,10 +86,25 @@ async fn dispatch(
     cli: Cli,
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
+    box_id: Option<&str>,
+    policy_decisions: Option<crate::PolicyDecisionSender>,
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))] native_setup: Option<
+        run::NativeSetup,
+    >,
 ) -> Result<ExitCode, BoxError> {
     match &cli.command {
         Command::Run { config, workload } => {
-            run::execute(config, workload, terminal, signals).await
+            run::execute(
+                config,
+                workload,
+                terminal,
+                signals,
+                box_id,
+                policy_decisions,
+                #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+                native_setup.expect("native capabilities prepared before runtime startup"),
+            )
+            .await
         }
         Command::Policy {
             command: PolicyCommand::GenerateSchema { config, output_dir },

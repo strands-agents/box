@@ -1,8 +1,9 @@
 //! Python, as one interpreter behind the box's one broker socket. Monty is the implementation.
 //!
-//! No listener and no protocol of its own: `run::broker::host` dispatches an
-//! `Interpreter::Python` Call here. The interpreter is stateless per Call, which is why this is a
-//! function rather than a host.
+//! No listener and no protocol of its own: the Shell's `python3` reaches `drive_monty` through the
+//! script hook `run::broker::shell` installs. `run_python`, the route an `Interpreter::Python` Call
+//! took, is unreachable since protocol 9 refuses that mode. The interpreter is stateless per Call,
+//! which is why this is a function rather than a host.
 
 mod clock;
 mod effects;
@@ -45,22 +46,6 @@ const _: () = assert!(
     REQUEST_TIMEOUT.as_nanos() > SCRIPT_TIMEOUT.as_nanos(),
     "the outer bound must outlast the interpreter's, or a script stopped at its own deadline is \
      reported as a broker failure"
-);
-
-// When Monty is reached through the Shell's `python` command, it runs under the transport's hard
-// `SERVE_REQUEST_TIMEOUT` rather than `run_python`'s outer wrap — the seam calls `drive_monty`
-// directly (docs/design/decisions.md#python-in-the-shell-is-monty). So each bound below must fire
-// *before* the transport's hard kill, or a wedged script reports the transport's generic "call
-// exceeded its deadline" instead of its own message.
-const _: () = assert!(
-    SCRIPT_TIMEOUT.as_nanos() < super::host::SERVE_REQUEST_TIMEOUT.as_nanos(),
-    "Monty's in-VM script timeout must be shorter than the transport's request timeout, so a \
-     Shell `python` reports Monty's own deadline rather than the transport's generic kill"
-);
-
-const _: () = assert!(
-    SLEEP_TOTAL_LIMIT.as_nanos() < super::host::SERVE_REQUEST_TIMEOUT.as_nanos(),
-    "the sleep bound must fire before the transport's request timeout"
 );
 
 /// Compile and run one script, servicing every suspension through policy.
@@ -111,13 +96,7 @@ pub(super) struct PythonOutcome {
 /// The origin a traceback names for source that arrived over the wire.
 pub(super) const PYTHON_ORIGIN: &str = "<box>";
 
-/// Drive Monty over one script to completion, servicing every suspension through policy.
-///
-/// This is the un-wrapped inner run: it applies Monty's own `SCRIPT_TIMEOUT` through
-/// `ResourceTracker`, but **not** the outer `REQUEST_TIMEOUT`. The direct program path reaches it
-/// through [`run_python`], which adds that wrap; the Shell `python` command calls this
-/// directly, so on that path the transport's `SERVE_REQUEST_TIMEOUT` is the hard backstop and
-/// Monty's in-VM deadline is what a wedged script reports.
+/// Drive Monty through policy; synchronous VM execution can delay the enclosing Shell deadline.
 pub(super) async fn drive_monty(
     source: String,
     origin: String,
@@ -366,12 +345,22 @@ fn abort_error(aborted: Result<RunProgress, MontyException>) -> MontyException {
 }
 
 /// A script that raised, reported the way CPython reports one.
+///
+/// A failed import usually means the agent wanted a package Monty doesn't have, so its note says
+/// how the operator turns real Python on.
 fn raised(exception: &MontyException, captured: String) -> PythonOutcome {
+    let note = match exception.exc_type() {
+        ExcType::ModuleNotFoundError | ExcType::ImportError => format!(
+            "this box's Python is Monty, Box's built-in Python subset. {}",
+            box_shell::REAL_PYTHON_HINT
+        ),
+        _ => "this box's Python is Monty, a subset — see the box's docs".to_string(),
+    };
     PythonOutcome {
         status: SCRIPT_RAISED_STATUS,
         stdout: captured,
         stderr: format!(
-            "{}: {}\n(this box's Python is Monty, a subset — see the box's docs)\n",
+            "{}: {}\n({note})\n",
             exception.exc_type(),
             exception.message().unwrap_or_default()
         ),

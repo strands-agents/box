@@ -34,16 +34,30 @@
 //! guards, in the file whose own header calls that spelling load-bearing. It now calls
 //! `parser_source::fields_of`, which takes the last token before the colon.
 //!
-//! # The configuration holds nine keys, and the four inputs still stand
+//! # The configuration holds fourteen keys, and the four inputs still stand
 //!
 //! `policy` and credentials are authority, `name` and `box_dir` select state, and `[agent] command`
-//! plus the trailing argv select the workload. `[mcp]`, `[telemetry]`, and `[tool]` are keys and not
-//! additional inputs: none decides which requests are governed.
+//! plus the trailing argv select the workload. `[mcp]`, `[telemetry]`, `[tool]`, and `[agent.ingress]`
+//! are keys and not additional inputs: none decides which requests are governed.
+//!
+//! `[secret-source.<scheme>]` is part of the credentials input. It names the host program that
+//! reads the secret of a reference in that scheme, and a reference is still attached only where an
+//! `[egress.<name>]` entry, an `[mcp.<name>]` entry, or a `[telemetry.<label>]` target names it.
+//! So the key decides where a secret comes from, and it permits no request.
 //!
 //! `[agent] env` names variables the box adds to the composed environment. It cannot name a
 //! reserved variable, so it cannot reach proxy routing, CA trust, or the fixed identity, and it
 //! makes no path reachable. `[agent.filesystem]` IS reach the policy does not judge, disclosed on
 //! stderr at startup; it grants no authority over which requests are governed.
+//!
+//! `file-attributes` lets each macOS write grant also set file times, which brings set-ID bits, the
+//! group, the owner, and ACLs with them. It widens only what the workload's own `write` lists allow,
+//! and each process discloses it, so it is part of the workload input and not a fifth one.
+//!
+//! `[gateway] upgrade_http` names hosts whose plain `http://` request to port 80 the gateway sends as
+//! `https://` on port 443. Policy still decides each such request, on port 443, as it decides a
+//! CONNECT to the same host, so the key changes which port a request is judged on and grants no
+//! reach a permit does not.
 //!
 //! `mcp` declares which local MCP servers exist, with a program and its argv. The configuration
 //! selects which servers can start, and `shell:spawn` decides each start. `mcp:call` decides each
@@ -193,14 +207,22 @@ fn the_config_record_carries_only_the_four_inputs() {
             "box_dir",
             "egress",
             "experimental_features",
+            "file_attributes",
+            "gateway",
+            "limits",
             "mcp",
+            "monty",
             "name",
             "policy",
+            "secret_source",
             "telemetry",
             "tool"
         ],
-        "the nine config keys include explicit experimental enforcement selection. \
-         `experimental-features` adds native policy checks without granting filesystem reach. \
+        "the fourteen config keys include execution limits, explicit experimental enforcement selection, \
+         `file-attributes`, which widens only the workload's own write grants, `[gateway]`, \
+         whose upgraded requests policy still decides, `monty`, which selects what a bare \
+         `python3` runs and grants nothing, and `[secret-source]`, which names where a \
+         credential comes from and permits no request. \
          Unknown keys must remain errors; any further input requires a deliberate contract change."
     );
 }
@@ -268,7 +290,10 @@ fn telemetry_names_a_destination_and_grants_nothing() {
         .expect("the function closes")
         .0;
     assert!(
-        telemetry_block.contains("Backend::local()") && telemetry_block.contains("Locator::"),
+        telemetry_block.contains("backend: &credentials::Backend")
+            && telemetry_block.contains("credentials::Vault::open")
+            && telemetry_block.contains("backend.clone()")
+            && telemetry_block.contains("Locator::"),
         "a telemetry secret must resolve through `credentials`, which owns the `env://` denylist"
     );
     // **Comment lines are stripped first.** The code carries a comment naming `std::env::var` to say
@@ -279,6 +304,11 @@ fn telemetry_names_a_destination_and_grants_nothing() {
         .filter(|line| !line.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
+    assert!(
+        !telemetry_code.contains("Backend::local()"),
+        "a telemetry secret reads through the one backend of the run, so a target and a route \
+         with one secret share one run of a declared program"
+    );
     assert!(
         !telemetry_code.contains("std::env::var"),
         "reading the variable directly bypasses that denylist, which is how an ambient AWS \

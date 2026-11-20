@@ -17,7 +17,7 @@ state, and one selects the workload:
 |---|---|---|---|
 | Policy | authority | `policy` in the config file | Which effects this box may cause, decided per request. Scoped to this box |
 | Credentials | authority | `[egress.<name>]` in the config file | Which secret is attached once a request is permitted |
-| Identity and state | state | `name` in the config file | Which box this is, and where it keeps its persistent state |
+| Identity and state | state | `name` in the config file, and `RunOptions::box_id` for a library caller | Which box this is, and where it keeps its persistent state |
 | Workload | selection | `[agent] command` in the config file, and `run`'s trailing argv | Which process runs |
 
 The caller always passes one configuration path. `[agent] command` is the complete command the box
@@ -38,12 +38,16 @@ strands-box run    --config <file> [-- <args>...]
 strands-box policy generate-schema --config <file> --output-dir <dir>
 ```
 
+On Linux ARM64 and x86-64, neither verb requires an environment opt-in. The Rust
+library functions `run` and `generate_policy_schema` follow the same startup behavior.
+Configuration validation and sandbox requirements still apply.
+
 There are two verbs. The caller that created `box_dir` owns its lifecycle: it holds the path, so it
 stops a box by ending the `run` process and deletes one by removing the directory.
 
 `policy generate-schema` reads the MCP servers that `--config` declares and requests each one's tool
-descriptions. It writes `actions.cedarschema`, with the Box action schema and each generated server
-schema, and `events.dwschema`, with the event kinds available to temporal policy, into
+descriptions. It writes `actions.cedarschema`, with the Box action schema, the actions of each tool
+grammar the configuration installs, and each generated server schema, and `events.dwschema`, with the event kinds available to temporal policy, into
 `--output-dir`. A configuration with zero declared servers receives both canonical files. It starts
 each `stdio` server outside containment, from the trusted process, which `run` never does. Runtime
 policy staging uses live server discovery.
@@ -73,21 +77,40 @@ every harness's stored credentials, through an interpreter that runs outside con
 refusal tells the operator to make a directory for the workspace and to work there, and
 `the_operator_home_is_not_a_project` pins it.
 
-The config file's complete key set is **eight**: `name`, `box_dir`, `policy`, `[agent]`,
-`[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, and `[telemetry.<kind>]`. `name` and `box_dir`
-are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
+The config file's complete key set is **fourteen**: `name`, `box_dir`, `policy`, `[agent]`,
+`[tool.<label>]`, `[egress.<name>]`, `[secret-source.<scheme>]`, `[mcp.<name>]`,
+`[telemetry.<kind>]`, `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.
+`name` and `box_dir` are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
 every removed spelling is refused by its own name with its replacement.
 `four_inputs.rs::the_config_record_carries_only_the_four_inputs` pins the set, and
 `run_config.rs::name_is_required_and_every_removed_key_is_refused_by_name` pins the refusals.
 
-**Four of those eight are keys and not inputs.** The four inputs are policy, credentials, name, and
-workload; a key becomes an input when it decides which requests are governed.
+The four inputs are policy, credentials, name, and workload; a key becomes an input when it decides
+which requests are governed.
+
+`[limits]` accepts `shell.timeout`, a positive integer number of seconds or `false` to disable
+the execution timeout for each submitted Strands Shell call. The default is 30 seconds.
+For ten minutes, set `shell.timeout = 600`; for unlimited execution, set `shell.timeout = false`.
+The nested table `[limits.shell]` accepts the same values under `timeout`.
+`shell.max_input` and `shell.max_output` accept nonnegative integer byte counts, with defaults
+of 262144 and 1048576. Shell applies the output limit to both output buffers and source-file reads, and Box applies it to each `curl` response body.
+Set either size to `0` to disable that Shell limit, or omit it to keep its default.
+`shell.max_stdin` is a positive byte count, 1048576 by default, of the standard input one command
+receives through a Shell alias; it cannot be disabled.
+Invalid or unrepresentable durations and sizes are load errors. Python retains its existing limits.
+See [execution limits](../../docs/user/config.md#limits).
+
+`[gateway]` accepts `upgrade_http`, a list of host names whose plain `http://` request to port 80
+the egress gateway decides and sends as `https://` on port 443. Policy still decides each such
+request, on port 443, so the key grants no reach a permit does not. An entry with a scheme, a port, a
+path, a wildcard, or an IP address is a load error. See
+[upgrade plain HTTP to HTTPS](../../docs/user/egress.md#upgrade-plain-http-to-https).
 
 **`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the
 operator starts. A `[tool.<label>]` is a process the Shell runs for a request the policy already
 decided, so a tool needs no authority of its own.
 
-Both tables hold the same four fields:
+Both tables hold the same four fields, and a `[tool.<label>]` also holds `grammar`:
 
 | Field | What it states |
 |---|---|
@@ -95,18 +118,39 @@ Both tables hold the same four fields:
 | `workspace` | The initial working directory. It grants nothing |
 | `env` | Variables the box adds to this process's composed environment |
 | `filesystem` | The direct reach of this process's own filesystem calls |
+| `grammar` | `[tool.<label>]` only, and experimental: the tool grammar for the program the tool runs. It loads only when `[experimental-features] tool-grammars = true` |
+| `ingress` | `[agent]` only, as `[[agent.ingress]]`: up to five listeners, each an address the box listens on for callers and the agent's port it relays them to; needs `ingress = true` in `[experimental-features]` |
+
+`tool_grammars.rs` pins the `tool-grammars` switch, the startup refusals, and the grammar action
+that decides a spawn of a bound program.
+
+`[agent]`, each `[tool.<label>]`, and each stdio `[mcp.<name>]` also take `file-watching`,
+`false` by default, which permits macOS FSEvents for that process alone. It can disclose denied names,
+event metadata, the host-wide event count, and each volume's history identifier. A root process can
+also delete any volume's event history. Box prints these limitations at startup. See
+[file watching](../../docs/user/config.md#file-watching).
 
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
-`exec`, and `deny`. They give this process's own filesystem calls direct reach, because an
+`exec`, and `deny` — and also takes `deny_write`, which keeps an existing directory inside a
+`write` directory read-only. A tool and a local MCP server take `deny_write` too.
+They give this process's own filesystem calls direct reach, because an
 unmodified coding agent's `Read`, `Write` and `Edit` issue those calls and containment refuses every
 one. A directory entry is recursive, and a file entry is exact. `write` does not imply `read`. Linux
 is the residual: a writable bind reads there, and the startup disclosure says so on that entry's
 line.
 
-What a grant costs is that no `fs:*` decision records these operations, so the box prints each one
+Without experimental native filesystem policy, no `fs:*` decision records these operations, so the box prints each grant
 on stderr when it starts. A grant that would expose the box's own directory is refused, which
 `run_config.rs::a_tool_grant_cannot_expose_the_box_directory` pins, and a command inside a writable
 grant is disclosed as a warning, which `a_writable_command_is_disclosed_as_a_warning` pins.
+
+The top-level `file-attributes` key, off by default, lets a macOS write folder set file times, and
+with them the set-ID bits, the group, the owner (as far as the ownership check allows), and access
+control lists through `setattrlist`. It applies to the agent, every tool, and every local MCP server,
+and Linux ignores it.
+`record::config::tests::the_file_attributes_key_is_off_by_default_and_parses_on_every_operating_system`
+pins the key, and `run::contain::boundary::tests::the_file_attributes_switch_reaches_every_process_and_is_disclosed_on_macos`
+pins its reach.
 
 **A `filesystem` list governs one process, and nothing else.** The agent's lists do not govern a
 tool, and a tool's lists do not govern the agent. A path absent from a process's own lists is a path
@@ -130,6 +174,17 @@ program in its own contained leaf box, once `shell:spawn` permits it. The first 
 exposes the server after its schema is accepted and the complete policy bundle is ready. Each tool
 call uses its generated `<normalized-server>::Action::"<tool>"` action. Other MCP methods use
 `Box::Action::"mcp:call"`.
+
+For stdio MCP, `command[0]` accepts a bare program name or an absolute executable path. The
+executable's filename names the alias the harness calls. The configured path selects the file Box
+launches, even when that file is outside `PATH`. See [executable paths](../../docs/user/mcp.md#select-an-executable-by-path).
+
+`[mcp.<name>] argument_wildcards = true` lets that local MCP `command` use `"*"`
+for one complete argument. For example, `command = ["server", "--token", "*"]` accepts the
+harness's token argument and starts the server with that value after `shell:spawn` permits the
+effective command. The program, argument count, and fixed arguments must still match. This flag
+defaults to false. See [argument wildcards](../../docs/user/mcp.md#argument-wildcards) for the
+matching rules and offline schema generation limit.
 
 For example, server `issues-mcp` and tool `SearchIssues` use
 `issues_mcp::Action::"SearchIssues"`. Run `strands-box policy generate-schema` and copy the
@@ -156,8 +211,8 @@ Two properties of that table carry the design:
   reachable. An entry with no `secret` is refused, because a destination alone *would* be a
   reachability claim — which is the policy's to make.
 - **The server name is policy identity.** An `mcp:call` decision reads it as
-  `context.input.server`. The command's program names the executable alias, so the
-  two values are not interchangeable.
+  `context.input.server`. The executable's filename names the alias, and that alias with its
+  arguments selects the server, so the two values are not interchangeable.
 
 ## Policy
 
@@ -187,7 +242,7 @@ its own action, so a permit written for a different verb never inherits it.
 The rest of the fixed vocabulary is `Box::Action::"net:connect"`,
 `Box::Action::"http:request"`, `Box::Action::"shell:exec"`,
 `Box::Action::"shell:spawn"`, and `Box::Action::"mcp:call"`. MCP discovery adds one namespaced
-action for each tool.
+action for each tool, and each tool grammar adds its `Tool::<name>` actions.
 
 **There is no `net:response` action.** The reply is a phase of `http:request`. It takes no
 decision, and one exchange records one `http:request::response` at reply time, carrying the
@@ -238,6 +293,48 @@ so nothing is reachable.
 Egress is the enforced principal. The proxy asks the policy per request, and no
 destination allowlist exists beside it.
 
+<a id="experimental-history-timer"></a>
+### History persistence
+
+Box batches policy-history writes by default. The `experimental-idle-flush` Cargo
+feature in `crates/box/Cargo.toml` is enabled by default and selects this behavior.
+Both persistence modes use the public Dogwood 1.1.2 packages.
+
+Box selects thresholds of 1,000 events or one second, checked when an event arrives,
+and owns a separate one-second timer that also flushes while Box is idle. One second
+is a polling target, not a maximum persistence delay. A process crash before a
+completed flush can lose recent requests and outcomes. After restart, a count-based
+limit can admit requests that the missing events would have denied. These values
+are fixed by the build, not runtime configuration keys.
+
+To persist each event before returning from its submission, build Box and its helpers
+from the repository root with batching disabled:
+
+```sh
+cargo build --release --locked -p strands-box -p strands-box-containment --no-default-features
+```
+
+To retain the native filesystem policy build feature, also pass
+`--features native-filesystem-policy`. Its runtime selection remains separate.
+Passing `--all-features` or `--features experimental-idle-flush` enables batching again.
+There is no `box.toml` key for this build selection.
+
+After successful startup, explicit shutdown first stops the workload, closes policy reload and discovery admission,
+and joins the broker, discovery, native monitoring, and gateway connection workers.
+Box then stops and joins the timer and performs the final history flush. Gateway shutdown
+interrupts client sockets while allowing the existing upstream outcome handling to finish.
+Cleanup after a startup error is best effort; it does not certify that every producer stopped.
+Gateway workers are joined in both persistence modes.
+Shutdown can wait for an upstream request or callback to finish; it has no fixed completion deadline.
+
+A recorded timer failure stops the supervised workload and makes the run fail, even if
+a later flush succeeds. A final-flush failure also makes the run fail; an earlier run
+failure remains visible. If native monitoring cannot stop, Box reports the failure and
+stops the timer without claiming a final flush after all producers stopped.
+
+The [policy timer interface](../policy/README.md#experimental-idle-history-flushing)
+describes explicit shutdown and completed-call counters.
+
 ## Egress targets
 
 `.strands-box/box.toml` declares which host-side secret is attached at which
@@ -276,16 +373,37 @@ secret.ref   = "aws://prod"
 |---|---|---|
 | `destinations` | required | One or more destinations this secret is attached at. Each is an exact host, a `*.` suffix wildcard, an explicit `:port`, and a path prefix or `/*suffix`. Not a regex. |
 | `protocol` | `http` | What the destination speaks. `mcp` makes the gateway parse JSON-RPC frames and raise `mcp:call`; `http` is an ordinary request. |
-| `secret.ref` | required | `env://NAME` or `aws://profile`. No other scheme. An `aws://` profile must carry **static keys**; see below. |
+| `secret.ref` | required unless a backend is declared | `env://NAME`, `aws://profile` (static keys), a bare `aws://` (the AWS default credential chain), or a reference in a scheme that a `[secret-source.<scheme>]` table declares. No other scheme. See below. Beside a backend it must be `env://`, and it is phantom-only: the box provisions the placeholder and strips it, and never injects the real destination credential (the backend handles the destination's auth). |
+| `secret.env` | `NAME` for `env://NAME` | Experimental: refused unless `[experimental-features] secret-sources = true`. The workload variable that holds the phantom. Required with a declared scheme. With `env://NAME` it is optional and equals `NAME`. A signed route and a backend `auth` take none. Two entries with one variable and different references are refused. |
+| `backends.url` | — | A single backend this destination re-routes to, as `scheme://host[:port][/prefix]` (`https` or `http`; a path prefix is allowed, a query or fragment is not). Box dials the backend, presents the backend host (SNI, certificate, and `Host`), prepends the `url`'s path prefix to the agent's path, and keeps the original destination and path in policy and audit. At most one. |
+| `backends.auth.ref` | — | `env://NAME`, or a reference in a declared scheme, for the backend's own token. The box attaches it (no phantom; it takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `env`, `inject`, or `phantom_prefix`). A signed (`aws://` or `credsd://`) auth is refused, and an auth needs an `https` backend. |
 | `secret.placement` | `header` | Where the credential lands: `header`, `basic_auth`, or `query_param`. |
 | `secret.header` | `Authorization` | The header the credential is attached under. `header` placement only. |
 | `secret.prefix` | `Bearer ` for `Authorization`, else empty | Literal text prepended to the credential in the header value. `header` placement only, and carries no braces. |
 | `secret.param` | required for `query_param` | The query-parameter name the credential is attached under. |
-| `secret.inject` | `phantom` | When the gateway attaches the real secret. `phantom` attaches it only to a request that carries the route's phantom, and refuses any other; `always` attaches it to every request to the destinations, and warns. `env://` only. |
-| `secret.phantom_prefix` | `strands_box_` | The literal prefix the minted phantom carries, before its random suffix. `env://` only, so a harness that checks its key format accepts the phantom. |
+| `secret.inject` | `phantom` | When the gateway attaches the real secret. `phantom` attaches it only to a request that carries the route's phantom, and refuses any other; `always` attaches it to every request to the destinations, and warns. `env://` and a declared scheme only. |
+| `secret.phantom_prefix` | `strands_box_` | The literal prefix the minted phantom carries, before its random suffix. `env://` and a declared scheme only, so a harness that checks its key format accepts the phantom. |
 
 The entry carries no credential-type key, so a `secret.type` on any scheme is an unknown key the box
 refuses.
+
+**A `[secret-source.<scheme>]` table declares the host program that reads a secret for a scheme.**
+It is experimental: it needs `[experimental-features] secret-sources = true`, and it loads on macOS
+only. The `secret.env` key needs the same switch, on each operating system. The table takes `protocol`, `command`, `output`, `pass-env`, `pass-secret-env`, `reads`, and
+`deny`, and `credentials::SecretSourceCommand` checks the first five. A reference in that scheme is
+then valid on an egress route and a remote MCP server (with `secret.env`), and on a backend
+`auth.ref` and a telemetry `secret.ref` (with no placeholder variable). An `env://NAME` or
+`secret://NAME` reference is refused when a `pass-secret-env` entry names `NAME`. The record stores
+each declaration at record version 39. `record::config::secret_source` holds the table and its
+checks. When a run starts, `run::secret_sources` checks each program file, prints one line for each
+source on stderr, and runs each program once for each secret before a workload starts: the secrets
+of telemetry targets first, then the others. The workload gets a placeholder in the `secret.env`
+variable. `policy generate-schema` reads the secret of a remote MCP server through the same
+declarations. `run::commands` protects each source program as it protects a configured tool
+command: no write grant covers it, and no interpreter changes it. Before a program first starts,
+`run::secret_sources` also refuses a grant that reaches a `reads` or `deny` path. Each
+sandbox denies the `reads` and `deny` paths. The interpreters do not: policy alone decides a
+read or a change of those paths through Strands Shell or Monty.
 
 **A host pattern is not a reachability claim.** An entry says only what is
 attached to a request the policy already permitted, so widening one attaches a
@@ -300,34 +418,39 @@ unambiguous credential.
 
 An `env://` credential mints one phantom and places it in the workload's
 environment under that name; the real secret is read by the box and never crosses
-the boundary, and the proxy swaps the phantom back at the edge.
+the boundary, and the proxy swaps the phantom back at the edge. Every destination that names
+one variable, in one route or in several, shares that one phantom.
 
 **Every process in the box gets every route.** The agent, each tool, and each MCP server receive
 every phantom and every signing placeholder the box provisions. No table selects a subset, because
 every process shares one gateway and the gateway cannot tell which process made a call. The box is
 the credential boundary: if a process must not get a credential, put it in another box.
 
-An `aws://` credential is a **signed route**. The box resolves the profile on the trusted side and
+An `aws://` credential is a **signed route**. The box resolves the identity on the trusted side and
 signs each request, so the workload holds no credential at all. It receives placeholder AWS
 credentials, and the signed leg strips whatever it signed with before signing again.
 
-**An `aws://` profile must carry static keys.** `credential_process` is **refused**, and the refusal
-names the command it would have run. Honouring it means the trusted `run` process executes a program named by
-`~/.aws/config`, outside containment and at the operator's uid. No floor defends that file, so a policy
-permitting writes across the home would turn an agent write into trusted-process code execution.
+**Both `aws://` forms resolve through the AWS SDK.** `aws://PROFILE` resolves only the named
+profile: its static keys, `credential_process`, assume-role, or web identity. It never reads the
+ambient `AWS_*` keys or instance metadata, and a missing profile is refused rather than signing as
+the ambient identity. A bare `aws://` resolves the default chain under the host's ambient identity,
+and the box warns on every signed request. AWS SSO and `aws login` profiles are refused (the `sso` provider is
+compiled out), and the refusal names the missing provider.
 
-A profile that assumes a role or uses SSO is refused too. Resolving one needs an HTTP call to STS, and
-the credentials crate carries no HTTP client. Export `AWS_BEARER_TOKEN_BEDROCK` and bind that instead.
+Because either form reads `credential_process`, which the trusted process runs outside containment,
+an `aws://` route is a remote-code-execution path when the workload can write `~/.aws`; the shipped
+box has no setting that refuses the bare form. See
+[the egress guide](../../docs/user/egress.md#credential-sources) for both forms, the warning, and the
+`~/.aws` rule.
 
-**Only `env://` and `aws://` are accepted**, and the config load refuses the rest by
-name.
-`file://` and `op://` resolve host-side and place nothing in the workload's
-environment — which for a credential the workload must present is not a different
-mode but an unusable one: the vault mints a phantom the box cannot deliver, so every
-request to that destination is refused for a missing placeholder. `cmd://` and
-`oauth2://` have no mint path at all. The vault still dereferences `file://` and
-`op://` for callers that need one secret and no placeholder, such as an ingress
-front door; this narrows the box's config surface, not the crate's.
+**Only `env://`, `aws://`, and a scheme that a `[secret-source.<scheme>]` table declares are
+accepted**, and the config load refuses the rest by name. `file://` resolves host-side and names no
+variable for a placeholder, so the box cannot deliver a credential that the workload must present.
+`op://` is accepted only when a `[secret-source.op]` table declares it. `secret.env` then names the
+variable that holds the phantom. `cmd://` and `oauth2://` have no mint path at all. The vault still
+dereferences `file://` and its built-in `op://` source for callers that need one secret and no
+placeholder, such as an ingress front door. This rule narrows the config surface of the box, not
+the surface of the crate.
 
 A credential whose value is empty, only whitespace, or carrying a control character
 is refused — at the config load for `env://`, and by the vault at box load for any
@@ -361,6 +484,12 @@ Refused, each at startup with the destination named:
 | `secret.header = "X-Bad: injected"` | An HTTP field name is a token (RFC 7230 §3.2.6). |
 | `heder = "x-api-key"` | An unknown key is a load error, not a silent drop. |
 | Two entries whose destinations overlap | Such a request has no unambiguous credential. Checked by overlap, not string equality. |
+| A signed (`aws://`/`credsd://`) `secret` beside a backend | A re-routed destination secret is phantom-only, so it must be `env://`; a signed secret mints no phantom to strip. |
+| Two `[[egress.x.backends]]` tables | At most one backend per destination in this version. |
+| A backend `url` with a query or fragment | A backend is an origin plus an optional path prefix; merging a query or sending a fragment is request rewriting. |
+| A backend entry whose destination is not one exact host (a path, a wildcard, or several destinations) | A re-route is matched per connection (host and port), and the box presents the backend host on the wire, so anything but one exact host would bypass the backend or reach it with the agent's host lost. |
+| A signed (`aws://`/`credsd://`) `backends.auth` | A re-route rewrites the `Host`, which invalidates a SigV4 signature. |
+| A `backends.auth` on an `http` backend | A credential does not ride a plaintext upstream. |
 
 `destinations = ["*.example.com"]` and `destinations = ["api.example.com/v1"]` are
 **accepted**. Both narrow which requests carry the credential, and neither makes a
@@ -372,8 +501,9 @@ destination reachable.
 creates that one directory with mode `0700`, owned by the current operating-system user, when its
 parent exists, and creates no directory above it. An existing symbolic link at that path, or at any
 child the box creates, is refused rather than followed. Box validates and opens the root, then uses
-the opened directory identity for persistent and generated state. It generates an immutable `box_id`
-and creates the children. The root persists across runs, so an agent's logins, caches, and history
+the opened directory identity for persistent and generated state. It stores an immutable `box_id`,
+the one a library caller supplies through `RunOptions::box_id` or one it generates, and creates the
+children. The root persists across runs, so an agent's logins, caches, and history
 persist with it. Everything below is relative to `box_dir`:
 
 ```text
@@ -398,7 +528,8 @@ private/mcp/                 where a local MCP server is started
 and no namespace a verb can enumerate: a caller holds the path, so Box cannot locate a box it was
 not handed.
 
-Each declared MCP server adds one more alias to `bin/`, named for its program.
+Each executable filename that a declared MCP server starts from adds one more alias to `bin/`.
+Servers that share a filename share its alias, and the alias's arguments select the server.
 
 **There are four children, and none of them is a home.** `HOME` is the operator's own home unless
 `[agent] env.HOME` names another directory, and the box copies no configuration into the box
@@ -408,8 +539,12 @@ default.
 `private/` is the tree no profile placeholder names, which is what puts the record,
 the policy copy, and the containment configs out of the workload's reach.
 
-Distinct directories are distinct boxes and share no state. The generated `box_id` labels a box
-but does not locate it.
+Distinct directories are distinct boxes and share no state. The `box_id` labels a box but does not
+locate it. A generated one is `box-` and 16 lowercase hexadecimal digits. A supplied one is a prefix
+of 1 to 15 letters, digits, `.`, `_`, or `-`, then `-` and 16 lowercase hexadecimal digits. A box
+that already has an ID refuses a different supplied one, so a box first run without a supplied ID
+keeps the ID it generated. `run` checks a supplied ID's format before it starts, so a malformed ID
+does not use up the process's one `run` attempt.
 
 ## Workload
 
@@ -489,13 +624,13 @@ Three facts about the hosted Shell are worth knowing.
   CA key and the resolved secrets. What holds is *mediation*, not a process boundary: the
   Shell asks policy before every operation, and the deny-only floors above protect the
   run process's own state whatever a rule permits.
-- **Every `Shell` is `!Send`** (one `Rc` field in the vendored crate), and a command future
+- **Every `Shell` is `!Send`** (one `Rc` field in Strands Shell), and a command future
   is not `Send` either. So each connection gets its **own thread** and its own
   current-thread runtime. `ShellSpec` is `Send`, which is what crosses that boundary; the
   Shell is built on the thread that serves it. A non-yielding command — the embedded Lua
   interpreter — pins its own thread and nothing else. The broker serves 64 connections at
   once and reaps one before it accepts the next.
-- **The vendored Shell embeds a Lua 5.4 C interpreter**, non-optionally. Its `io.popen` and
+- **Strands Shell embeds a Lua 5.4 C interpreter**, non-optionally. Its `io.popen` and
   `os.execute` bypassed `shell:exec` admission until 2026-08-08
   ([one admission point](../../docs/design/decisions.md#one-admission-point-after-resolution)). That is
   **closed**: admission moved into the one function every command-text route funnels
@@ -520,12 +655,51 @@ credential phantom can never displace proxy routing or CA trust:
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL` | This box's loopback collector, and `http/protobuf`. Always set |
 | one per `env://` binding | The minted phantom |
 
+A `contain_egress = false` process gets none of the proxy and CA rows above. Its table's `env` may
+set them instead.
+
 `PATH` is composed rather than owned. The box prepends its alias directory and keeps the rest, so
 an alias wins a bare-name search while the operator's own tools stay resolvable. A profile still
 permits exec on the literals the box granted, so a longer `PATH` advertises nothing the box will
 run. `a_declared_home_and_path_win_beneath_cores_names` pins the order.
 
 `TERM`, `TMPDIR`, `LANG`, and `TZ` are the operator's to set, in `env`.
+
+## Policy decisions for a library caller
+
+A program that runs a box through the library can receive each policy decision as the box makes it,
+without reading a records file. Make a channel with `policy_decisions(capacity)`, pass its sender in
+`RunOptions::policy_decisions`, and read the receiver from a thread that `RunOptions::on_ready`
+starts, because a host starts its threads only after hardening.
+
+```rust
+let (sender, receiver) = strands_box::policy_decisions(4096);
+strands_box::run(config, workload, strands_box::RunOptions {
+    policy_decisions: Some(sender),
+    on_ready: Some(Box::new(move || {
+        std::thread::spawn(move || {
+            while let Ok(decision) = receiver.recv() {
+                if !decision.permitted {
+                    eprintln!("denied {} {} ({})", decision.action, decision.resource, decision.rule);
+                }
+            }
+        });
+        Ok(())
+    })),
+    ..Default::default()
+});
+```
+
+A `PolicyDecision` holds the values that the decision's record states in its
+`strands.box.policy.*` attributes: the time, the verdict, the action and its category, the
+resource, the rule, the cause, and the reason. The channel reserves room for `capacity` decisions
+when it is made. The box never waits for the reader. When the channel
+holds `capacity` unread decisions, the box drops the next one from the channel, and
+`PolicyDecisionReceiver::dropped` counts it. The records file and the telemetry targets still
+receive it as their `include` lists select. `recv` waits for the next decision. Once the run has
+ended and the channel is empty, it returns an error, and `try_recv` and `recv_timeout` return
+`Disconnected`, so the reader above stops with the run. While the run goes on, they return `Empty`
+and `Timeout` instead.
 
 ## Running
 

@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use egress_gateway::McpTarget;
 use policy::{
-    Decision, DiscoveryFailure, GovernedBox, ListPage, Outcome, PolicyEngine, Principal, Request,
-    ServerDiscovery,
+    Decision, DiscoveryFailure, GovernedBox, ListPage, McpReply, Outcome, PendingToolResponse,
+    PolicyEngine, Principal, Request, RequestId, ServerDiscovery,
 };
 use serde_json::Value;
 
@@ -23,7 +23,9 @@ use super::server::{
     MCP_BROKER_IO_TIMEOUT, MCP_DISCOVERY_RESPONSE_TIMEOUT, RunningMcpServer, read_server_frame,
     validate_initialize_result,
 };
-use crate::run::telemetry::{DecisionRecorder, EffectiveDecision};
+use crate::run::telemetry::{DecisionRecorder, EffectiveDecision, McpToolCallRecord};
+
+mod protocol_2026_07_28;
 
 /// How long an MCP caller can wait to enter the exchange input queue.
 pub(super) const MCP_INPUT_SEND_TIMEOUT: std::time::Duration =
@@ -91,14 +93,20 @@ enum McpConnectionPhase {
     AwaitingInitialize,
     AwaitingInitialized,
     Active,
+    PerRequestMetadata,
 }
 
-/// A decided client request awaiting its reply, so the reply can record `mcp:call::response`.
+/// An admitted item call awaiting a terminal or indeterminate outcome.
 struct RecordedCall {
+    request_id: RequestId,
+    /// The per-tool `::response` an allowed `tools/call` owes beside `mcp:call::response`.
+    tool_response: Option<PendingToolResponse>,
     method: String,
     tool: Option<String>,
     prompt: Option<String>,
     uri: Option<String>,
+    /// The call's tool-call record, which this call's reply ends.
+    tool_call: Option<McpToolCallRecord>,
 }
 
 /// A client's `tools/list` awaiting the server's reply.
@@ -127,6 +135,10 @@ struct McpConnection {
     lists: BTreeMap<String, PendingList>,
     /// Server requests forwarded to the client, by id, with the method each one asked.
     server_requests: BTreeMap<String, String>,
+    modern_requests: BTreeMap<String, super::protocol_2026_07_28::ModernRequest>,
+    /// Cancelled request IDs and their retained string allocations, in bytes.
+    cancelled: BTreeMap<String, usize>,
+    pending_inputs: VecDeque<super::protocol_2026_07_28::PendingInputs>,
     /// Final-page replies waiting for their schema, in the order the server sent them.
     held: VecDeque<HeldReply>,
     policy: Arc<PolicyEngine>,
@@ -264,11 +276,15 @@ async fn run_mcp_program(
         decided_calls: BTreeMap::new(),
         lists: BTreeMap::new(),
         server_requests: BTreeMap::new(),
+        modern_requests: BTreeMap::new(),
+        cancelled: BTreeMap::new(),
+        pending_inputs: VecDeque::new(),
         held: VecDeque::new(),
         policy: Arc::clone(&policy),
         governed: governed.clone(),
     };
     let mut client_frames = VecDeque::new();
+    let mut client_input_closed = false;
 
     let result = if let Err(error) = initial_admission {
         Err(error)
@@ -335,6 +351,9 @@ async fn run_mcp_program(
                     connection: &mut connection,
                 };
                 let outcome = match event {
+                    ProgramEvent::Input(Some(McpInput::Bytes(_))) if client_input_closed => Err(
+                        io::Error::new(io::ErrorKind::BrokenPipe, "MCP stdin is closed"),
+                    ),
                     ProgramEvent::Input(Some(McpInput::Bytes(bytes))) => {
                         exchange.running.complete_frames(&bytes).map(|complete| {
                             client_frames.extend(complete);
@@ -342,14 +361,21 @@ async fn run_mcp_program(
                         })
                     }
                     ProgramEvent::Input(Some(McpInput::Eof)) => {
-                        if let Some(frame) = exchange.running.take_pending() {
-                            client_frames.push_back(frame);
+                        client_input_closed = true;
+                        let final_frame = match exchange.running.take_pending() {
+                            Some(frame) => {
+                                handle_client_frame(frame, &mut exchange, &policy, &governed).await
+                            }
+                            None => Ok(ProgramAction::Continue),
+                        };
+                        match final_frame {
+                            Ok(ProgramAction::Continue) => exchange
+                                .running
+                                .close_stdin()
+                                .await
+                                .map(|()| ProgramAction::Continue),
+                            outcome => outcome,
                         }
-                        exchange
-                            .running
-                            .close_stdin()
-                            .await
-                            .map(|()| ProgramAction::Continue)
                     }
                     ProgramEvent::Input(Some(McpInput::Stop) | None) => Ok(ProgramAction::Close),
                     ProgramEvent::Output(Some(Ok(frame))) => {
@@ -394,11 +420,23 @@ async fn run_mcp_program(
     registry.connection_closed(&connection.key);
     reader.abort_and_join().await;
     let cleanup = running.stop_and_wait().await;
-    match (result, cleanup) {
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+    let pending = std::mem::take(&mut connection.decided_calls);
+    let exchange = Exchange {
+        running: &mut running,
+        registry: &registry,
+        frames: &frames,
+        program,
+        connection: &mut connection,
+    };
+    let mut recorded = Ok(());
+    for call in pending.into_values() {
+        recorded = recorded.and(record_response_leg(
+            &exchange,
+            call,
+            CallEnd::Ended(McpReply::Indeterminate),
+        ));
     }
+    result.and(cleanup).and(recorded)
 }
 
 async fn next_staged(held: &mut VecDeque<HeldReply>) -> StagedList {
@@ -601,10 +639,57 @@ async fn handle_client_frame(
                     String::from_utf8_lossy(&canonical).into_owned()
                 });
             let request = parse_client_frame(&text)?;
+            // A request that also answers would cross as an undecided method and skip the reply's
+            // decision. A modern request with an id meets the same refusal in its own parser.
+            if exchange.connection.phase != McpConnectionPhase::PerRequestMetadata
+                && request.get("method").is_some()
+                && (request.get("result").is_some() || request.get("error").is_some())
+            {
+                let reason =
+                    "an MCP client frame cannot carry both 'method' and 'result' or 'error'";
+                exchange
+                    .connection
+                    .recorder
+                    .record(EffectiveDecision::enforcement_deny(
+                        r#"Box::Action::"mcp:call""#,
+                        exchange.running.server(),
+                        "mcp-frame",
+                        reason,
+                    ));
+                emit_request_error(
+                    exchange.frames,
+                    exchange.program,
+                    None,
+                    -32600,
+                    reason,
+                    None,
+                )
+                .await?;
+                return Ok(ProgramAction::Continue);
+            }
             let Some(method) = request.get("method").and_then(Value::as_str) else {
+                if exchange.connection.phase == McpConnectionPhase::PerRequestMetadata {
+                    return Err(invalid_data(
+                        "modern MCP clients cannot send JSON-RPC responses",
+                    ));
+                }
                 return handle_client_response(&text, &request, exchange, policy, governed).await;
             };
             let method = method.to_string();
+            let notification = method.starts_with("notifications/") && request.get("id").is_none();
+            if !notification
+                && (exchange.connection.phase == McpConnectionPhase::PerRequestMetadata
+                    || super::protocol_2026_07_28::carries_metadata(&request)
+                    || method == "server/discover")
+            {
+                return protocol_2026_07_28::handle_request(
+                    &text, &request, exchange, policy, governed,
+                )
+                .await;
+            }
+            if notification {
+                protocol_2026_07_28::cancel_request(&request, exchange)?;
+            }
             if method == "tools/list" {
                 if exchange.connection.phase != McpConnectionPhase::Active {
                     emit_request_error(
@@ -620,7 +705,7 @@ async fn handle_client_frame(
                 }
                 return handle_tools_list(&text, &request, exchange, policy, governed).await;
             }
-            handle_request(&text, &request, &method, exchange, policy, governed).await
+            handle_request(&text, &request, &method, exchange, policy, governed, &[]).await
         })
         .await
 }
@@ -664,7 +749,7 @@ async fn handle_client_response(
         return Ok(ProgramAction::Continue);
     }
     let server = exchange.running.server().to_string();
-    let decision = policy.decide(
+    let (decision, request_id) = policy.decide(
         governed,
         &Principal::agent(),
         &Request::McpCall {
@@ -681,6 +766,9 @@ async fn handle_client_response(
         EffectiveDecision::from_policy(r#"Box::Action::"mcp:call""#, &resource, &decision);
     match &decision {
         Decision::Allow { .. } => {
+            request_id.ok_or_else(|| {
+                io::Error::other("permitted MCP response has no committed request token")
+            })?;
             exchange.connection.recorder.record(effective);
             exchange.running.forward(frame).await?;
         }
@@ -699,7 +787,12 @@ async fn handle_client_response(
 
 enum ClientRequestAdmission {
     Undecided,
-    Permit(Box<EffectiveDecision>),
+    Permit(
+        Box<EffectiveDecision>,
+        Option<RequestId>,
+        Option<PendingToolResponse>,
+        Option<Box<McpToolCallRecord>>,
+    ),
     Refused,
 }
 
@@ -717,29 +810,51 @@ async fn admit_client_request(
         &Principal::agent(),
         exchange.running.server(),
         frame,
+        recorder,
     )? {
         McpRequestAdmission::Undecided => Ok(ClientRequestAdmission::Undecided),
-        McpRequestAdmission::Allowed(decision) => {
-            Ok(ClientRequestAdmission::Permit(Box::new(decision)))
+        McpRequestAdmission::Allowed(decision, request_id, tool_response, tool_call) => {
+            Ok(ClientRequestAdmission::Permit(
+                Box::new(decision),
+                Some(request_id),
+                tool_response,
+                tool_call.map(Box::new),
+            ))
         }
-        McpRequestAdmission::PolicyPending(decision, _) if pending_is_bootstrap => {
-            Ok(ClientRequestAdmission::Permit(Box::new(
-                decision.into_enforcement_permit("policy-pending-bootstrap"),
-            )))
+        McpRequestAdmission::PolicyPending(decision, _, tool_call) if pending_is_bootstrap => {
+            Ok(ClientRequestAdmission::Permit(
+                Box::new(decision.into_enforcement_permit("policy-pending-bootstrap")),
+                None,
+                None,
+                tool_call.map(Box::new),
+            ))
         }
-        McpRequestAdmission::PolicyPending(decision, refusal)
-        | McpRequestAdmission::Denied {
-            decision, refusal, ..
-        } => {
-            recorder.record(decision);
-            match policy_denial_response(frame, &refusal.to_string()) {
-                Some(response) => {
-                    emit_text(exchange.frames, exchange.program, response.as_bytes(), None).await?;
-                    Ok(ClientRequestAdmission::Refused)
-                }
-                None => Err(refusal),
+        McpRequestAdmission::PolicyPending(decision, refusal, tool_call) => {
+            if let Some(record) = tool_call {
+                record.refused();
             }
+            refuse_client_request(frame, exchange, decision, refusal).await
         }
+        McpRequestAdmission::Denied { decision, refusal } => {
+            refuse_client_request(frame, exchange, decision, refusal).await
+        }
+    }
+}
+
+/// Record a refused client request and answer it with the refusal.
+async fn refuse_client_request(
+    frame: &str,
+    exchange: &Exchange<'_>,
+    decision: EffectiveDecision,
+    refusal: io::Error,
+) -> io::Result<ClientRequestAdmission> {
+    exchange.connection.recorder.record(decision);
+    match policy_denial_response(frame, &refusal.to_string()) {
+        Some(response) => {
+            emit_text(exchange.frames, exchange.program, response.as_bytes(), None).await?;
+            Ok(ClientRequestAdmission::Refused)
+        }
+        None => Err(refusal),
     }
 }
 
@@ -788,7 +903,9 @@ async fn handle_tools_list(
         }
     };
     match admit_client_request(frame, exchange, policy, governed, true).await? {
-        ClientRequestAdmission::Permit(decision) => exchange.connection.recorder.record(*decision),
+        ClientRequestAdmission::Permit(decision, ..) => {
+            exchange.connection.recorder.record(*decision)
+        }
         ClientRequestAdmission::Undecided => {}
         ClientRequestAdmission::Refused => {
             exchange.registry.list_denied(exchange.running.server());
@@ -821,9 +938,12 @@ async fn handle_request(
     exchange: &mut Exchange<'_>,
     policy: &PolicyEngine,
     governed: &GovernedBox,
+    input_methods: &[String],
 ) -> io::Result<ProgramAction> {
     if method == "initialize" {
-        if exchange.connection.phase != McpConnectionPhase::AwaitingInitialize {
+        if exchange.connection.phase != McpConnectionPhase::AwaitingInitialize
+            || exchange.connection.initialize_id.is_some()
+        {
             emit_request_error(
                 exchange.frames,
                 exchange.program,
@@ -905,6 +1025,18 @@ async fn handle_request(
                 policy::CatalogRefusal::NotListed => refusal.to_string(),
                 _ => policy::CatalogRefusal::NotAccepted.to_string(),
             };
+            // A call the catalog refuses still states its arguments, as one policy refuses does,
+            // and never ran, so it records no completion.
+            if let Some(record) = target.as_ref().and_then(|target| {
+                exchange.connection.recorder.mcp_tool_called(
+                    exchange.running.server(),
+                    tool,
+                    &target.arguments,
+                    telemetry::Correlation::from_mcp(frame),
+                )
+            }) {
+                record.refused();
+            }
             exchange
                 .connection
                 .recorder
@@ -926,15 +1058,25 @@ async fn handle_request(
             return Ok(ProgramAction::Continue);
         }
     }
-    let forward = match admit_client_request(frame, exchange, policy, governed, false).await? {
-        ClientRequestAdmission::Undecided => true,
-        ClientRequestAdmission::Permit(decision) => {
-            exchange.connection.recorder.record(*decision);
-            true
+    let mut policy_request_id =
+        match admit_client_request(frame, exchange, policy, governed, false).await? {
+            ClientRequestAdmission::Undecided => None,
+            ClientRequestAdmission::Permit(decision, request_id, tool_response, tool_call) => {
+                let request_id = request_id.ok_or_else(|| {
+                    io::Error::other("permitted MCP request has no committed request token")
+                })?;
+                exchange.connection.recorder.record(*decision);
+                Some((request_id, tool_response, tool_call))
+            }
+            ClientRequestAdmission::Refused => return Ok(ProgramAction::Continue),
+        };
+    if !protocol_2026_07_28::admit_input_answers(input_methods, request, exchange, policy, governed)
+        .await?
+    {
+        // The input answers were refused, so the call is never forwarded and never ran.
+        if let Some((_, _, Some(record))) = policy_request_id {
+            record.refused();
         }
-        ClientRequestAdmission::Refused => false,
-    };
-    if !forward {
         return Ok(ProgramAction::Continue);
     }
     if let Some((key, _)) = request_id {
@@ -946,10 +1088,22 @@ async fn handle_request(
             exchange.connection.decided_calls.insert(
                 key.clone(),
                 RecordedCall {
+                    request_id: policy_request_id
+                        .as_ref()
+                        .map(|(id, ..)| id.clone())
+                        .ok_or_else(|| {
+                            io::Error::other("recorded MCP call has no committed request token")
+                        })?,
                     method: target.method().to_string(),
                     tool: target.tool().map(str::to_string),
                     prompt: target.prompt().map(str::to_string),
                     uri: target.uri().map(str::to_string),
+                    tool_call: policy_request_id
+                        .as_mut()
+                        .and_then(|(_, _, tool_call)| tool_call.take())
+                        .map(|record| *record),
+                    tool_response: policy_request_id
+                        .and_then(|(_, tool_response, _)| tool_response),
                 },
             );
         }
@@ -963,6 +1117,7 @@ async fn forward_server_frame(
     raw: &[u8],
     exchange: &mut Exchange<'_>,
 ) -> io::Result<ProgramAction> {
+    egress_gateway::refuse_duplicate_mcp_keys(raw)?;
     let response: Value = serde_json::from_slice(raw)
         .map_err(|error| invalid_data(format!("invalid MCP server frame: {error}")))?;
     let object = response
@@ -973,8 +1128,21 @@ async fn forward_server_frame(
             "an MCP server frame must declare JSON-RPC 2.0",
         ));
     }
+    // A reply that also names a method would take the request branch and skip the response record.
+    if object.contains_key("method")
+        && (object.contains_key("result") || object.contains_key("error"))
+    {
+        return Err(invalid_data(
+            "an MCP server frame cannot carry both 'method' and 'result' or 'error'",
+        ));
+    }
     if let Some(method) = object.get("method") {
         if let Some(id) = object.get("id") {
+            if exchange.connection.phase == McpConnectionPhase::PerRequestMetadata {
+                return Err(invalid_data(
+                    "modern MCP servers cannot send JSON-RPC requests",
+                ));
+            }
             let method = method.as_str().unwrap_or_default();
             let key = id_key(id)?;
             if exchange.connection.server_requests.len() >= MAXIMUM_PENDING_SERVER_REQUESTS
@@ -1014,28 +1182,95 @@ async fn forward_server_frame(
             "the MCP server returned an unknown response id",
         ));
     }
+    if exchange.connection.cancelled.remove(&key).is_some() {
+        exchange.connection.modern_requests.remove(&key);
+        return Ok(ProgramAction::Continue);
+    }
+    let terminal = match protocol_2026_07_28::accept_reply(&key, &response, exchange) {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            if exchange.connection.lists.remove(&key).is_some() {
+                exchange.registry.list_failed(
+                    exchange.running.server(),
+                    &exchange.connection.key,
+                    DiscoveryFailure::CatalogCapture,
+                );
+            }
+            emit_request_error(
+                exchange.frames,
+                exchange.program,
+                Some(id),
+                -32603,
+                &error.to_string(),
+                None,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
     if let Some(list) = exchange.connection.lists.remove(&key) {
         return forward_list_reply(raw, &response, list, exchange).await;
     }
     let response_leg = exchange.connection.decided_calls.remove(&key);
-    // The reply reaches the client before its usage is recorded, so bookkeeping never drops it.
-    emit_text(exchange.frames, exchange.program, raw, None).await?;
-    if let Some(call) = response_leg
-        && let Err(error) = exchange.connection.policy.record(
-            &exchange.connection.governed,
-            &Principal::agent(),
-            &Outcome::Mcp {
-                server: exchange.running.server(),
-                method: &call.method,
-                tool: call.tool.as_deref(),
-                prompt: call.prompt.as_deref(),
-                uri: call.uri.as_deref(),
-            },
-        )
-    {
-        eprintln!("[broker] failed to record mcp:call response leg: {error}");
+    if let Some(call) = response_leg.filter(|_| terminal) {
+        record_response_leg(exchange, call, CallEnd::Reply(&response))?;
     }
+    emit_text(exchange.frames, exchange.program, raw, None).await?;
     Ok(ProgramAction::Continue)
+}
+
+/// How an item call ended: with the server's reply frame, or without one.
+pub(super) enum CallEnd<'a> {
+    /// The server's terminal reply.
+    Reply(&'a Value),
+    /// The call ended without a reply: cancelled, or its connection ended.
+    Ended(McpReply),
+}
+
+/// Record a call's response legs, with the reply frame when the server sent one.
+fn record_response_leg(
+    exchange: &Exchange<'_>,
+    call: RecordedCall,
+    end: CallEnd<'_>,
+) -> io::Result<()> {
+    let policy = &exchange.connection.policy;
+    let coarse = policy.record(
+        &exchange.connection.governed,
+        &Principal::agent(),
+        &call.request_id,
+        &Outcome::Mcp {
+            server: exchange.running.server(),
+            method: &call.method,
+            tool: call.tool.as_deref(),
+            prompt: call.prompt.as_deref(),
+            uri: call.uri.as_deref(),
+        },
+    );
+    // A kept coarse event appends later, and the tool's leg queues behind it.
+    let coarse_recorded = matches!(coarse, Ok(()) | Err(policy::PolicyError::OutcomeKept(_)));
+    let tool = match call.tool_response {
+        Some(response) if coarse_recorded => match end {
+            CallEnd::Reply(frame) => policy.record_tool_reply(response, frame),
+            CallEnd::Ended(reply) => policy.record_tool_response(response, reply),
+        },
+        _ => Ok(()),
+    };
+    // Every tool call states how it ended, whether or not a rule named the tool, so a reader
+    // learns the answer the agent got and not only that the call was permitted.
+    if let Some(record) = call.tool_call {
+        let (reply, output) = match end {
+            CallEnd::Reply(frame) => (
+                McpReply::of_reply(frame),
+                frame.pointer("/result/structuredContent"),
+            ),
+            CallEnd::Ended(reply) => (reply, None),
+        };
+        record.completed(reply, output);
+    }
+    coarse.and(tool).map_err(|error| {
+        eprintln!("[broker] failed to record mcp:call response leg: {error}");
+        io::Error::other(format!("failed to record MCP response: {error}"))
+    })
 }
 
 /// Capture one `tools/list` reply, and hold the final page until its schema stages.
@@ -1097,6 +1332,8 @@ async fn emit_list_failure(
 
 #[cfg(test)]
 mod tests {
+    mod protocol_2026_07_28;
+
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -1132,6 +1369,7 @@ mod tests {
         );
         let registry = DiscoveryRegistry::testing_with_policy(
             &[McpServer {
+                argument_wildcards: false,
                 name: "issues-mcp".to_string(),
                 command: vec!["issues-mcp".to_string()],
             }],
@@ -1185,6 +1423,7 @@ done"#
         tokio::sync::mpsc::Receiver<super::super::super::host::OutboundFrame>,
     ) {
         let admitted = McpServer {
+            argument_wildcards: false,
             name: "issues-mcp".to_string(),
             command,
         };
@@ -1217,6 +1456,11 @@ done"#
             panic!("non-output frame: {:?}", outbound.frame);
         };
         let bytes = crate::run::broker::protocol::decode_payload(&data).expect("output payload");
+        assert_eq!(
+            bytes.last(),
+            Some(&b'\n'),
+            "an MCP response ends with a newline"
+        );
         serde_json::from_slice(&bytes).expect("the MCP output is JSON")
     }
 
@@ -1260,6 +1504,104 @@ done"#
                 .expect("test runtime"),
             tokio::task::LocalSet::new(),
         )
+    }
+
+    #[test]
+    fn out_of_order_mcp_replies_keep_their_admitted_request_ids() {
+        let (runtime, local) = local_runtime();
+        runtime.block_on(local.run_until(async {
+            let correlated_alpha = r#"exists (id: String). (
+                formerly within 3600s (
+                    Box::Action::"mcp:call"::request{
+                        requestId: id, input.uri: "file:///alpha"
+                    }
+                ) && formerly within 3600s (
+                    Box::Action::"mcp:call"::response{
+                        requestId: id, input.uri: "file:///alpha"
+                    }
+                )
+            )"#;
+            let fixture = fixture(&format!(
+                r#"permit (principal, action == Box::Action::"mcp:call", resource);
+                   permit (principal, action == Box::Action::"net:connect", resource);
+                   @id("completed-alpha")
+                   forbid (principal, action == Box::Action::"mcp:call", resource)
+                   when {{ context.input has uri && context.input.uri == "file:///alpha" }}
+                   when temporal {{ {correlated_alpha} }};
+                   forbid (principal, action == Box::Action::"net:connect", resource)
+                   when temporal {{ {correlated_alpha} }};"#
+            ));
+            let log = tempfile::NamedTempFile::new().expect("frame log");
+            let command = vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                format!(
+                    r#"alpha=
+while IFS= read -r frame; do
+printf '%s\n' "$frame" >> "$1"
+id=$(printf '%s\n' "$frame" | sed -nE 's/.*"id":("[^"]*"|[0-9]+).*/\1/p')
+case "$frame" in
+  *'"method":"initialize"'*) printf '%s\n' '{INITIALIZE_REPLY}' ;;
+  *'file:///alpha'*)
+    if test -z "$alpha"; then alpha=$id
+    else printf '{{"jsonrpc":"2.0","id":%s,"result":{{"contents":[]}}}}\n' "$id"
+    fi
+    ;;
+  *'file:///beta'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"contents":[]}}}}\n' "$id" ;;
+  *'"method":"ping"'*)
+    printf '{{"jsonrpc":"2.0","id":%s,"result":{{"contents":[]}}}}\n' "$alpha"
+    printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+    ;;
+esac
+done"#
+                ),
+                "test-mcp".to_string(),
+                log.path().to_string_lossy().into_owned(),
+            ];
+            let (mut program, mut output) = exchange(command, &fixture).await;
+            initialize(&program, &mut output).await;
+            let read = |id, uri| {
+                json!({"jsonrpc": "2.0", "id": id, "method": "resources/read", "params": {"uri": uri}})
+            };
+            send(&program, read(10, "file:///alpha")).await;
+            send(&program, read(11, "file:///beta")).await;
+            let beta = next_output(&mut output).await;
+            assert_eq!(beta["id"], 11, "the second request completes first");
+            assert!(beta.get("result").is_some(), "{beta}");
+
+            let (before_alpha, request_id) = fixture.policy.decide(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                &Request::Connect {
+                    host: "probe.example",
+                    ip: None,
+                    port: 443,
+                },
+            );
+            assert!(before_alpha.is_allow(), "beta must not complete alpha: {before_alpha:?}");
+            assert!(request_id.is_some(), "the permitted probe has a committed request");
+
+            send(&program, json!({"jsonrpc": "2.0", "id": 12, "method": "ping"})).await;
+            let alpha = next_output(&mut output).await;
+            assert_eq!(alpha["id"], 10);
+            assert!(alpha.get("result").is_some(), "{alpha}");
+            assert_eq!(next_output(&mut output).await["id"], 12);
+
+            send(&program, read(13, "file:///alpha")).await;
+            let denied = next_output(&mut output).await;
+            assert_eq!(denied["id"], 13);
+            assert_eq!(denied["error"]["code"], -32001, "{denied}");
+            assert!(
+                denied["error"]["message"].as_str().is_some_and(|message| message.contains("completed-alpha")),
+                "the recorded response must fire the authored temporal prohibition: {denied}"
+            );
+            assert_eq!(
+                read_log(log.path()).iter().filter(|frame| frame["method"] == "resources/read").count(),
+                2,
+                "only the two permitted resource reads reach the server"
+            );
+            program.stop_and_wait().await.expect("stop the exchange");
+        }));
     }
 
     #[test]
@@ -1516,6 +1858,77 @@ done"#
             assert!(
                 reply.get("result").is_none(),
                 "the client's answer must not reach the server"
+            );
+            program.stop_and_wait().await.expect("stop the exchange");
+        }));
+    }
+
+    #[test]
+    fn a_client_answer_that_also_names_a_method_is_refused_and_the_request_is_still_decided() {
+        let (runtime, local) = local_runtime();
+        runtime.block_on(local.run_until(async {
+            let fixture = fixture(&format!(
+                r#"{PERMIT_ALL_MCP}
+                forbid (principal, action == Box::Action::"mcp:call", resource)
+                when {{ context.input.method == "elicitation/create" }};"#
+            ));
+            let log = tempfile::NamedTempFile::new().expect("frame log");
+            let (mut program, mut output, recorder) = recorded_exchange(
+                requesting_server(
+                    log.path(),
+                    r#"{"jsonrpc":"2.0","id":5,"method":"elicitation/create","params":{}}"#,
+                ),
+                &fixture,
+            )
+            .await;
+            initialize(&program, &mut output).await;
+            assert_eq!(
+                next_output(&mut output).await["method"],
+                "elicitation/create"
+            );
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 5, "method": "ping",
+                    "result": {"action": "accept", "content": {"secret": "x"}}}),
+            )
+            .await;
+
+            let before = recorder.recorded().len();
+            let refused = next_output(&mut output).await;
+            assert_eq!(refused["error"]["code"], -32600, "{refused}");
+            let decisions = recorder.recorded();
+            assert!(
+                decisions[before..].iter().any(|decision| {
+                    let (action, resource, rule, verdict, _) = decision.parts();
+                    action == r#"Box::Action::"mcp:call""#
+                        && resource == "issues-mcp"
+                        && rule == &crate::run::telemetry::EffectiveRule::Enforcement("mcp-frame")
+                        && verdict == crate::run::telemetry::EffectiveVerdict::Deny
+                }),
+                "the refusal is recorded as an mcp-frame deny: {:?}",
+                &decisions[before..]
+            );
+            assert!(
+                refused["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("cannot carry both 'method'")),
+                "the wrong refusal: {refused}"
+            );
+
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 5, "result": {"action": "accept", "content": {"value": "y"}}}),
+            )
+            .await;
+            let reply = wait_for_logged(log.path(), |frame| frame["id"] == 5).await;
+            assert_eq!(
+                reply["error"]["code"], -32001,
+                "a plain answer to the same request is still decided and denied: {reply}"
+            );
+            let logged = std::fs::read_to_string(log.path()).expect("frame log");
+            assert!(
+                !logged.contains("secret"),
+                "the forbidden answer must not reach the server: {logged}"
             );
             program.stop_and_wait().await.expect("stop the exchange");
         }));
@@ -1860,6 +2273,106 @@ done"#
         }));
     }
 
+    /// A stdio server whose `tools/list` policy refused stays open, so a later list that a rule
+    /// reading history permits lifts the degraded refusal.
+    #[test]
+    fn a_stdio_server_whose_list_policy_refused_recovers_when_a_later_list_is_permitted() {
+        let (runtime, local) = local_runtime();
+        runtime.block_on(local.run_until(async {
+            let fixture = fixture(
+                r#"
+permit (principal, action == Box::Action::"mcp:call", resource);
+forbid (principal, action == Box::Action::"mcp:call", resource)
+when { context.input.method == "tools/list" }
+unless temporal {
+    formerly within 600s Box::Action::"mcp:call"::request{ input.method: "prompts/list" }
+};
+forbid (principal, action == issues_mcp::Action::"Search", resource)
+when { context.input has value && context.input.value == "secret" };
+"#,
+            );
+            let search = |value: &str| {
+                fixture
+                    .policy
+                    .refine_tool_call(
+                        &GovernedBox::assigned("test-box"),
+                        &Principal::agent(),
+                        "issues-mcp",
+                        "Search",
+                        &json!({ "value": value }),
+                    )
+                    .0
+            };
+            let log = tempfile::NamedTempFile::new().expect("frame log");
+            let (mut program, mut output) =
+                exchange(listing_server(log.path(), SEARCH_TOOLS, ":"), &fixture).await;
+            initialize(&program, &mut output).await;
+
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+            )
+            .await;
+            let refused = next_output(&mut output).await;
+            assert_eq!(refused["error"]["code"], -32001, "{refused}");
+            tokio::time::timeout(TEST_WAIT_TIMEOUT, async {
+                while !matches!(
+                    search("secret"),
+                    Decision::Deny {
+                        reason: policy::DenyReason::NoMatch,
+                        ..
+                    }
+                ) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("discovery finishes with the tool held");
+            assert_eq!(
+                fixture.registry.discovery("issues-mcp"),
+                Some(ServerDiscovery::Failed(DiscoveryFailure::ToolsListDenied))
+            );
+            assert!(
+                fixture.registry.admit_open("issues-mcp").is_ok(),
+                "a refused tools/list does not stop the server"
+            );
+
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 3, "method": "prompts/list", "params": {}}),
+            )
+            .await;
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}}),
+            )
+            .await;
+            let listed = next_output(&mut output).await;
+            assert_eq!(listed["id"], 4, "{listed}");
+            assert_eq!(listed["result"]["tools"][0]["name"], "Search", "{listed}");
+            assert_eq!(
+                fixture.registry.discovery("issues-mcp"),
+                Some(ServerDiscovery::Ready)
+            );
+            let forbidden = search("secret");
+            assert!(
+                matches!(
+                    forbidden,
+                    Decision::Deny {
+                        reason: policy::DenyReason::Forbidden,
+                        ..
+                    }
+                ),
+                "the per-tool forbid enforces once the later list stages: {forbidden:?}"
+            );
+            assert!(
+                search("other").is_allow(),
+                "a value the forbid does not name rides the coarse permit"
+            );
+            program.stop_and_wait().await.expect("stop the exchange");
+        }));
+    }
+
     #[test]
     fn a_registry_with_no_stdio_server_reports_done_once() {
         let fixture_policy = Arc::new(crate::test_support::open_policy(Vec::new()));
@@ -1878,6 +2391,7 @@ done"#
 
     fn registry() -> Arc<DiscoveryRegistry> {
         DiscoveryRegistry::testing(&[McpServer {
+            argument_wildcards: false,
             name: "issues-mcp".to_string(),
             command: vec!["issues-mcp".to_string()],
         }])
@@ -1906,6 +2420,7 @@ done"#
         Arc<DecisionRecorder>,
     ) {
         let admitted = McpServer {
+            argument_wildcards: false,
             name: "issues-mcp".to_string(),
             command,
         };
@@ -2053,11 +2568,22 @@ done"#
                     r#"{"jsonrpc":"2.0","id":99,"result":{}}"#,
                     "unknown response id",
                 ),
+                (
+                    "reply-with-method",
+                    r#"{"jsonrpc":"2.0","id":10,"result":{},"method":"notifications/progress"}"#,
+                    "cannot carry both 'method' and 'result' or 'error'",
+                ),
+                (
+                    "error-with-method",
+                    r#"{"jsonrpc":"2.0","id":10,"error":{"code":-1,"message":"x"},"method":"notifications/progress"}"#,
+                    "cannot carry both 'method' and 'result' or 'error'",
+                ),
                 ("batch", r#"[{"jsonrpc":"2.0"}]"#, "must be an object"),
                 ("bare-value", "17", "must be an object"),
                 ("malformed-json", "{not-json", "invalid MCP server frame"),
             ] {
                 let admitted = McpServer {
+                    argument_wildcards: false,
                     name: name.to_string(),
                     command: vec![
                         "/bin/sh".to_string(),
@@ -2115,6 +2641,7 @@ done"#
             registry.list_failed("issues-mcp", "earlier", DiscoveryFailure::CatalogCapture);
 
             let admitted = McpServer {
+                argument_wildcards: false,
                 name: "issues-mcp".to_string(),
                 command: vec![
                     "/bin/sh".to_string(),
@@ -2229,6 +2756,7 @@ when { context.input has value && context.input.value == "secret" };"#;
         Arc<DecisionRecorder>,
     ) {
         let admitted = McpServer {
+            argument_wildcards: false,
             name: "issues-mcp".to_string(),
             command,
         };
@@ -2413,6 +2941,139 @@ when { context.input has value && context.input.value == "secret" };"#;
         }));
     }
 
+    /// A legacy-protocol server whose `tools/call` reply depends on the call's `value`: no
+    /// `result`, a `null` result, a result that also names a method, or a valid result.
+    fn replying_server(log: &Path) -> Vec<String> {
+        let mut command = listing_server(log, SEARCH_TOOLS, ":");
+        command[2] = command[2].replace(
+            "case \"$frame\" in",
+            r#"id=$(printf '%s\n' "$frame" | sed -nE 's/.*"id":("[^"]*"|[0-9]+).*/\1/p')
+case "$frame" in
+  *'"method":"tools/call"'*'"value":"noresult"'*) printf '{"jsonrpc":"2.0","id":%s}\n' "$id"; continue ;;
+  *'"method":"tools/call"'*'"value":"nullresult"'*) printf '{"jsonrpc":"2.0","id":%s,"result":null}\n' "$id"; continue ;;
+  *'"method":"tools/call"'*'"value":"withmethod"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[]},"method":"notifications/progress"}\n' "$id"; continue ;;
+  *'"method":"tools/call"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[]}}\n' "$id"; continue ;;"#,
+        );
+        command
+    }
+
+    #[test]
+    fn a_malformed_legacy_reply_does_not_satisfy_a_result_precondition() {
+        let (runtime, local) = local_runtime();
+        runtime.block_on(local.run_until(async {
+            let fixture = fixture(&format!(
+                r#"{PERMIT_ALL_MCP}
+                forbid (principal, action == issues_mcp::Action::"Search", resource)
+                when {{ context.input has value && context.input.value == "continue" }}
+                unless temporal {{ formerly within 3600s (issues_mcp::Action::"Search"::response{{output.reply: "result"}}) }};"#
+            ));
+            let log = tempfile::NamedTempFile::new().expect("frame log");
+            let (mut program, mut output) = exchange(replying_server(log.path()), &fixture).await;
+            initialize(&program, &mut output).await;
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+            )
+            .await;
+            assert_eq!(next_output(&mut output).await["id"], 2);
+            let search = |id: u64, value: &str| {
+                json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+                    "params": {"name": "Search", "arguments": {"value": value}}})
+            };
+            for (id, value) in [(3, "noresult"), (5, "nullresult")] {
+                send(&program, search(id, value)).await;
+                assert_eq!(next_output(&mut output).await["id"], id);
+                send(&program, search(id + 1, "continue")).await;
+                let refused = next_output(&mut output).await;
+                assert_eq!(
+                    refused["error"]["code"], -32001,
+                    "a {value} reply is not a result: {refused}"
+                );
+            }
+            send(&program, search(7, "valid")).await;
+            assert_eq!(next_output(&mut output).await["id"], 7);
+            send(&program, search(8, "continue")).await;
+            let allowed = next_output(&mut output).await;
+            assert!(
+                allowed.get("error").is_none(),
+                "a valid result satisfies it: {allowed}"
+            );
+            program.stop_and_wait().await.expect("stop the exchange");
+        }));
+    }
+
+    #[test]
+    fn a_reply_that_also_names_a_method_stops_the_exchange_and_never_reaches_the_client() {
+        let (runtime, local) = local_runtime();
+        runtime.block_on(local.run_until(async {
+            let fixture = fixture(&format!(
+                r#"{PERMIT_ALL_MCP}
+                forbid (principal, action == issues_mcp::Action::"Search", resource)
+                when temporal {{ formerly within 3600s (issues_mcp::Action::"Search"::response{{output.reply: _}}) }};"#
+            ));
+            let log = tempfile::NamedTempFile::new().expect("frame log");
+            let (mut program, mut output) = exchange(replying_server(log.path()), &fixture).await;
+            initialize(&program, &mut output).await;
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+            )
+            .await;
+            assert_eq!(next_output(&mut output).await["id"], 2);
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "Search", "arguments": {"value": "withmethod"}}}),
+            )
+            .await;
+
+            let error = tokio::time::timeout(TEST_WAIT_TIMEOUT, program.join())
+                .await
+                .expect("the exchange stops within the test deadline")
+                .expect_err("a reply that also names a method must stop the exchange");
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot carry both 'method' and 'result' or 'error'"),
+                "the wrong refusal: {error}"
+            );
+            while let Some(outbound) = output.recv().await {
+                let crate::run::broker::protocol::Body::Output { data, .. } = outbound.frame.body
+                else {
+                    continue;
+                };
+                let bytes =
+                    crate::run::broker::protocol::decode_payload(&data).expect("output payload");
+                let frame = String::from_utf8_lossy(&bytes);
+                assert!(
+                    !frame.contains("notifications/progress"),
+                    "the frame must not reach the client: {frame}"
+                );
+            }
+
+            let (mut program, mut output) = exchange(replying_server(log.path()), &fixture).await;
+            initialize(&program, &mut output).await;
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+            )
+            .await;
+            assert_eq!(next_output(&mut output).await["id"], 2);
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "Search", "arguments": {"value": "valid"}}}),
+            )
+            .await;
+            let refused = next_output(&mut output).await;
+            assert_eq!(
+                refused["error"]["code"], -32001,
+                "the stopped call still counts toward a response budget: {refused}"
+            );
+            program.stop_and_wait().await.expect("stop the exchange");
+        }));
+    }
+
     #[test]
     fn a_stdio_frame_without_a_duplicate_key_forwards_byte_identical() {
         let (runtime, local) = local_runtime();
@@ -2515,6 +3176,7 @@ when { context.input has value && context.input.value == "secret" };"#;
             let reaped = running.observe_stop_and_wait_completion();
             let (frames, _output) = tokio::sync::mpsc::channel(1);
             let registry = DiscoveryRegistry::testing(&[McpServer {
+                argument_wildcards: false,
                 name: "non-reading-server".to_string(),
                 command: vec!["unused".to_string()],
             }]);
@@ -2601,6 +3263,7 @@ when { context.input has value && context.input.value == "secret" };"#;
 
     async fn non_reading_server() -> (RunningMcpServer, tokio::process::ChildStdout) {
         let admitted = McpServer {
+            argument_wildcards: false,
             name: "non-reading-server".to_string(),
             command: vec![
                 "/bin/sh".to_string(),

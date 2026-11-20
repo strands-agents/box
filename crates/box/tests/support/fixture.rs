@@ -131,6 +131,7 @@ struct AgentTable {
     metadata: Vec<String>,
     exec: Vec<String>,
     deny: Vec<String>,
+    deny_write: Vec<String>,
     env: Vec<(String, String)>,
 }
 
@@ -145,6 +146,8 @@ pub struct Request {
     policy: PathBuf,
     /// Extra tables appended after `[agent]`: `[egress.*]`, `[mcp.*]`, `[tool.*]`, `[telemetry.*]`.
     config_body: Option<String>,
+    /// Raw `box.toml` lines written before `[agent]`, such as `monty = false`.
+    top_level: Vec<String>,
     /// What the creating run should see in its environment.
     ///
     /// Carried rather than set on this process: an `env://` locator dereferences in
@@ -257,6 +260,7 @@ impl Request {
             name: format!("{name}-{}", std::process::id()),
             policy: PathBuf::new(),
             config_body: None,
+            top_level: Vec::new(),
             environment: Vec::new(),
             agent: AgentTable::default(),
             with_agent_home: true,
@@ -294,6 +298,7 @@ impl Request {
             "metadata" => self.agent.metadata.extend(entries),
             "exec" => self.agent.exec.extend(entries),
             "deny" => self.agent.deny.extend(entries),
+            "deny_write" => self.agent.deny_write.extend(entries),
             other => panic!("{other} is not a filesystem list"),
         }
         self
@@ -313,9 +318,21 @@ impl Request {
         self
     }
 
+    /// Add one top-level `box.toml` line, such as `monty = false`. It goes before `[agent]`,
+    /// because a key written after a table header belongs to that table.
+    pub fn top_level(mut self, line: &str) -> Self {
+        self.top_level.push(line.to_string());
+        self
+    }
+
     /// The operator home, so a test can plant a file the run will read.
     pub fn operator_home(&self) -> &Path {
         &self.operator_home
+    }
+
+    /// The workspace's host path, so a test can plant a file before the box exists.
+    pub fn workspace(&self) -> PathBuf {
+        self.operator_home.join("workspace")
     }
 
     /// Set a variable in the environment the creating run runs with.
@@ -334,6 +351,10 @@ impl Request {
         );
         if !self.policy.as_os_str().is_empty() {
             toml.push_str("policy = \"policy.dw\"\n");
+        }
+        for line in &self.top_level {
+            toml.push_str(line);
+            toml.push('\n');
         }
         toml.push_str(&format!(
             "\n[agent]\ncommand = {{command}}\nworkspace = {}\n",
@@ -357,7 +378,7 @@ impl Request {
                 .collect();
             toml.push_str(&format!("env = {{ {} }}\n", pairs.join(", ")));
         }
-        let lists: [(&str, &[String]); 8] = [
+        let lists: [(&str, &[String]); 9] = [
             ("read", &table.read),
             ("write", &table.write),
             ("read_file", &table.read_file),
@@ -366,6 +387,7 @@ impl Request {
             ("metadata", &table.metadata),
             ("exec", &table.exec),
             ("deny", &table.deny),
+            ("deny_write", &table.deny_write),
         ];
         if lists.iter().any(|(_, entries)| !entries.is_empty()) {
             toml.push_str("\n[agent.filesystem]\n");
@@ -608,68 +630,4 @@ pub fn execute_without_read_is_expressible() -> bool {
     true
 }
 
-/// Whether this host can run the Linux namespace launcher. Always `true` off Linux.
-#[cfg(not(target_os = "linux"))]
-pub fn namespace_launcher_is_usable() -> bool {
-    true
-}
-
-/// Whether this host can run the Linux namespace launcher.
-///
-/// A build host can permit user namespaces and still refuse a nested procfs, which failed every
-/// box-spawning test on such a host. A test that cannot construct a box measures nothing, so it
-/// **skips loudly** rather than failing. It probes the exact operation that fails, in a forked
-/// reaper the way the real launcher does.
-#[cfg(target_os = "linux")]
-pub fn namespace_launcher_is_usable() -> bool {
-    // The box selects the namespace backend only on aarch64 and refuses every other Linux
-    // architecture by name, so no box runs on x86_64 whatever the kernel permits.
-    if !cfg!(target_arch = "aarch64") {
-        return false;
-    }
-    use std::sync::OnceLock;
-    static USABLE: OnceLock<bool> = OnceLock::new();
-    *USABLE.get_or_init(|| {
-        // SAFETY: the child only makes syscalls and `_exit`s.
-        let child = unsafe { libc::fork() };
-        if child < 0 {
-            return true; // cannot probe; let the test run and report its own failure
-        }
-        if child == 0 {
-            // SAFETY: syscall-only child.
-            unsafe {
-                let namespaces = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
-                if libc::unshare(namespaces) != 0 {
-                    libc::_exit(10);
-                }
-                let inner = libc::fork();
-                if inner < 0 {
-                    libc::_exit(12);
-                }
-                if inner == 0 {
-                    let fstype = c"proc".as_ptr();
-                    let target = c"/proc".as_ptr();
-                    if libc::mount(fstype, target, fstype, 0, std::ptr::null()) != 0 {
-                        libc::_exit(11);
-                    }
-                    libc::_exit(0);
-                }
-                let mut inner_status = 0;
-                libc::waitpid(inner, &mut inner_status, 0);
-                let ok = libc::WIFEXITED(inner_status) && libc::WEXITSTATUS(inner_status) == 0;
-                libc::_exit(if ok { 0 } else { 11 });
-            }
-        }
-        let mut status = 0;
-        // SAFETY: waiting on this process's own child.
-        unsafe { libc::waitpid(child, &mut status, 0) };
-        let usable = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
-        if !usable {
-            println!(
-                "skipping: this host cannot run the namespace launcher (unshare or a nested \
-                 procfs mount is refused); a box cannot be constructed here"
-            );
-        }
-        usable
-    })
-}
+include!("namespace_launcher.rs");

@@ -119,6 +119,15 @@ fn wait_for_launch(descriptor: i32) -> std::io::Result<()> {
     use std::io::{Read, Write};
     use std::os::fd::FromRawFd;
     use std::os::unix::net::UnixStream;
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+    let descriptor = {
+        // SAFETY: duplicate the live socket; the original serves later native registration.
+        let duplicate = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 3) };
+        if duplicate < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        duplicate
+    };
     // SAFETY: the trusted launcher supplies one owned descriptor, above the standard streams.
     let mut gate = unsafe { UnixStream::from_raw_fd(descriptor) };
     gate.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
@@ -257,17 +266,28 @@ fn apply_containment(args: &Args, setup_status: &SetupStatus) -> Result<(), Exit
 
     // An unsupported platform is a setup error (2); anything else means apply ran and refused, which
     // is incomplete containment (3).
-    // Pass the setup-status writer so the Linux reaper can signal "reached exec" with one byte: a
-    // long-lived leaf (a streaming MCP server) never lets the pipe EOF during its life, so the
-    // supervisor cannot rely on EOF alone to know containment came up.
-    Containment::apply(&config, egress_handoff.as_deref(), args.setup_status_fd).map_err(
-        |error| match error {
-            error @ ContainmentError::PlatformUnsupported { .. } => {
-                setup_status.fail(SetupStage::Apply, 2, error)
-            }
-            error => setup_status.fail(SetupStage::Apply, 3, format_args!("apply failed: {error}")),
-        },
-    )?;
+    // The Linux launcher preserves this writer until all setup processes finish.
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+    let native_filesystem_handoff = args.launch_gate_fd.map(|descriptor| {
+        // SAFETY: the trusted launcher passed this descriptor; it has no other owner here.
+        unsafe {
+            <std::os::unix::net::UnixStream as std::os::fd::FromRawFd>::from_raw_fd(descriptor)
+        }
+    });
+    #[cfg(not(all(target_os = "linux", feature = "native-filesystem-policy")))]
+    let native_filesystem_handoff: Option<std::os::unix::net::UnixStream> = None;
+    Containment::apply(
+        &config,
+        egress_handoff.as_deref(),
+        args.setup_status_fd,
+        native_filesystem_handoff.as_ref(),
+    )
+    .map_err(|error| match error {
+        error @ ContainmentError::PlatformUnsupported { .. } => {
+            setup_status.fail(SetupStage::Apply, 2, error)
+        }
+        error => setup_status.fail(SetupStage::Apply, 3, format_args!("apply failed: {error}")),
+    })?;
     // Enforcement is kernel-side and survives `exec`.
     Ok(())
 }
@@ -338,11 +358,18 @@ fn exec_command(args: &Args, setup_status: &SetupStatus) -> ExitCode {
     if let Some(argv0) = &args.argv0 {
         command.arg0(argv0);
     }
-    let err = command
+    command
         .args(&args.command[1..])
         .env_clear()
-        .envs(target_env)
-        .exec();
+        .envs(target_env);
+    if let Err(error) = setup_status.complete() {
+        return setup_status.fail(
+            SetupStage::Exec,
+            4,
+            format_args!("cannot report setup completion: {error}"),
+        );
+    }
+    let err = command.exec();
     // Only reached when exec failed, so the target never ran.
     setup_status.fail(
         SetupStage::Exec,
@@ -350,6 +377,9 @@ fn exec_command(args: &Args, setup_status: &SetupStatus) -> ExitCode {
         format_args!("exec {program:?} failed: {err}"),
     )
 }
+
+#[cfg(unix)]
+const SETUP_COMPLETE_BYTE: u8 = 128;
 
 /// Stable one-byte setup-failure protocol shared with the supervisor.
 #[cfg(unix)]
@@ -363,8 +393,7 @@ enum SetupStage {
     Exec = 5,
 }
 
-/// The inherited setup-status writer. It is close-on-exec before containment is
-/// applied, so a successful target exec is observed by the parent as EOF.
+/// The close-on-exec writer reports setup completion before the executable launch attempt.
 #[cfg(unix)]
 struct SetupStatus {
     descriptor: Option<libc::c_int>,
@@ -400,25 +429,36 @@ impl SetupStatus {
         ExitCode::from(code)
     }
 
+    fn complete(&self) -> std::io::Result<()> {
+        self.write_byte(SETUP_COMPLETE_BYTE)
+    }
+
     fn report(&self, stage: SetupStage) {
+        let _ = self.write_byte(stage as u8);
+    }
+
+    fn write_byte(&self, byte: u8) -> std::io::Result<()> {
         let Some(descriptor) = self.descriptor else {
-            return;
+            return Ok(());
         };
-        let byte = stage as u8;
         loop {
-            // SAFETY: byte points to one readable byte and descriptor is the inherited status
-            // writer.
-            let written =
-                unsafe { libc::write(descriptor, (&byte as *const u8).cast::<libc::c_void>(), 1) };
+            // SAFETY: byte is readable and descriptor is the inherited status writer.
+            let written = unsafe { libc::write(descriptor, (&byte as *const u8).cast(), 1) };
             if written == 1 {
-                return;
+                return Ok(());
             }
-            if written == -1
-                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
-            {
+            let error = std::io::Error::last_os_error();
+            if written == -1 && error.kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            return;
+            return Err(if written == 0 {
+                std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "setup status writer returned zero",
+                )
+            } else {
+                error
+            });
         }
     }
 }
@@ -661,6 +701,9 @@ mod tests {
             );
             let mut observed = [0];
             reader.read_exact(&mut observed).unwrap();
+            if observed == [super::SETUP_COMPLETE_BYTE] {
+                reader.read_exact(&mut observed).unwrap();
+            }
             assert_eq!(observed, [stage]);
         }
     }

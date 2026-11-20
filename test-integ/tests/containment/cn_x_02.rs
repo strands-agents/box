@@ -16,8 +16,7 @@ use strands_det_harness::det_case;
 //
 //   1. control: `out/` under the agent's own `exec` entry → runs (proves exec works natively
 //      from a granted tree, and that this binary is executable in the box);
-//   2. same file, agent config without that entry (the tool tables' exec on `out/` belong to the
-//      tools' boundaries, not the agent's) → refused;
+//   2. same file, agent config without that entry → refused;
 //   3. a host-placed copy in the writable workspace root, with the `out/` exec entry present →
 //      refused, because the grant covers `out/` and not the root.
 //

@@ -6,7 +6,7 @@ use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::path::Path;
 use std::process::Command;
 
-use containment::{ContainmentConfig, Operation, Scope};
+use containment::{ContainmentConfig, Network, Operation, Scope};
 use sha2::{Digest as _, Sha256};
 
 fn duplicate_at_or_above(source: i32, minimum: i32) -> OwnedFd {
@@ -26,7 +26,23 @@ fn containment_and_reexec_remove_inherited_handles() {
         println!("skipping: this host cannot build a namespace mount view");
         return;
     }
+    assert_no_inherited_handles(None);
+}
 
+/// **The workload does not inherit the Unix socket channel to PID 1** when the box relays callers
+/// to a listen port, though the channel stays open in PID 1.
+#[test]
+fn the_workload_does_not_inherit_the_channel_to_pid_one() {
+    if !the_host_can_build_a_view() {
+        println!("skipping: this host cannot build a namespace mount view");
+        return;
+    }
+    assert_no_inherited_handles(Some(Network::localhost().connect(43_125).listen(43_126)));
+}
+
+/// Run the probe through the real trampoline, and assert that no descriptor above stderr reaches
+/// it. A `network` runs it in its own network namespace, with the channel the box keeps attached.
+fn assert_no_inherited_handles(network: Option<Network>) {
     let sentinel = tempfile::tempfile().expect("sentinel file");
     let ordinary = duplicate_at_or_above(sentinel.as_raw_fd(), 10);
     let high = duplicate_at_or_above(sentinel.as_raw_fd(), 900);
@@ -68,7 +84,7 @@ fn containment_and_reexec_remove_inherited_handles() {
     );
 
     let work_dir = tempfile::tempdir().expect("work directory");
-    let config = ContainmentConfig::new()
+    let mut config = ContainmentConfig::new()
         .allow(probe, Operation::Read, Scope::File)
         .expect("read probe")
         .allow(probe, Operation::Exec, Scope::File)
@@ -77,6 +93,20 @@ fn containment_and_reexec_remove_inherited_handles() {
         .expect("read working directory")
         .allow(work_dir.path(), Operation::Write, Scope::Root)
         .expect("write working directory");
+    let channel = network.map(|network| {
+        config = std::mem::take(&mut config)
+            .set_network(network)
+            .expect("set the network");
+        let (box_side, sandbox_side) =
+            std::os::unix::net::UnixStream::pair().expect("Unix socket channel");
+        // SAFETY: clear close-on-exec on a descriptor that this test owns, as the box does.
+        assert_eq!(
+            unsafe { libc::fcntl(sandbox_side.as_raw_fd(), libc::F_SETFD, 0) },
+            0,
+            "clear FD_CLOEXEC"
+        );
+        (box_side, sandbox_side)
+    });
     let config_json = config.to_json().expect("config json");
     let config_sha256 = Sha256::digest(config_json.as_bytes())
         .iter()
@@ -85,7 +115,13 @@ fn containment_and_reexec_remove_inherited_handles() {
     let config_file = tempfile::NamedTempFile::new().expect("config file");
     std::fs::write(config_file.path(), config_json).expect("write config");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_strands-box-contain-trampoline"))
+    let mut trampoline = Command::new(env!("CARGO_BIN_EXE_strands-box-contain-trampoline"));
+    if let Some((_, sandbox_side)) = &channel {
+        trampoline
+            .arg("--relay-control-fd")
+            .arg(sandbox_side.as_raw_fd().to_string());
+    }
+    let output = trampoline
         .current_dir(work_dir.path())
         .arg("--config")
         .arg(config_file.path())

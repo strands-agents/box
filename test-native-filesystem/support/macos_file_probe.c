@@ -17,7 +17,7 @@ static int operation(const char *name, const char *from, const char *to) {
         if (!child) {
             if (dup2(input[0], STDIN_FILENO) < 0 || dup2(output[1], STDOUT_FILENO) < 0) _exit(95);
             close(input[0]); close(input[1]); close(output[0]); close(output[1]);
-            execlp(from, from, NULL);
+            execlp(from, from, "mcp-server", "protected", "mcp-result", "allow", "self", NULL);
             _exit(96);
         }
         close(input[0]); close(output[1]);
@@ -178,6 +178,16 @@ static int operation(const char *name, const char *from, const char *to) {
         if (result == -1 && error == EBADF && written == -1 && write_error == EBADF) return 0;
         errno = EINVAL;
         return -1;
+    }
+    if (!strcmp(name, "chmod")) return chmod(from, 0500);
+    if (!strcmp(name, "fchmod")) {
+        int fd = open(from, O_RDONLY);
+        if (fd < 0) return -1;
+        int result = fchmod(fd, 0500);
+        int error = errno;
+        close(fd);
+        errno = error;
+        return result;
     }
     if (!strcmp(name, "truncate")) return truncate(from, 0);
     if (!strcmp(name, "unlink")) return unlink(from);

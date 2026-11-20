@@ -138,6 +138,15 @@ fn text(output: &Output) -> String {
     )
 }
 
+// Matching Linux read access lets the fixture reach the protected-directory guard.
+fn linux_read_grant(entry: &Path) -> String {
+    if cfg!(target_os = "linux") {
+        format!("read = [{:?}]\n", entry.display().to_string())
+    } else {
+        String::new()
+    }
+}
+
 /// **A box survives its first use, and a later run recovers from a partial private record.**
 ///
 /// The interrupted shapes are a `private/` left at each mode an earlier build wrote, holding a
@@ -474,6 +483,104 @@ fn a_declared_tool_is_selected_without_naming_it() {
     );
 }
 
+/// **A box starts when a tool's program is not installed**, and names the tool it leaves out. A
+/// file the agent then writes at that tool's path does not run, because no table selects it.
+#[test]
+fn a_tool_whose_program_is_not_installed_is_left_out_and_the_box_starts() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let fixture = ContractFixture::new();
+    let workspace = fixture.workspace_text();
+    let scratch = format!("{workspace}/scratch");
+    std::fs::create_dir(&scratch).expect("a scratch directory");
+    let planted = format!("{scratch}/late");
+    let marker = fixture.workspace.join("scratch/ran");
+    fixture.write_document(
+        Some("permit(principal, action, resource);"),
+        "/bin/bash",
+        &format!("[agent.filesystem]\nread = [{workspace:?}]\nwrite = [{scratch:?}]\n"),
+        &format!(
+            "[tool.tsx]\ncommand = [\"strands_box_absent_tsx\"]\n\
+             [tool.late]\ncommand = [{planted:?}]\n[tool.late.filesystem]\n\
+             read = [{workspace:?}]\nwrite = [{scratch:?}]\n"
+        ),
+    );
+
+    let output = fixture.run(
+        &fixture.config,
+        &[
+            "-c",
+            &format!(
+                "printf '#!/bin/sh\\necho ran > {marker}\\n' > {planted}; chmod +x {planted}; \
+                 zsh -c '{planted}' 2>&1; printf finished",
+                marker = marker.display()
+            ),
+        ],
+    );
+
+    let text = text(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.contains("strands-box: [tool.tsx] left out: strands_box_absent_tsx not found"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "strands-box: [tool.late] left out: {planted} not found"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains("no `[tool.<name>] command` matches"),
+        "{text}"
+    );
+    assert!(text.contains("finished"), "{text}");
+    assert!(!marker.exists(), "the planted file ran: {text}");
+}
+
+/// **A tool whose program is a file that Box writes into the box directory is left out on the
+/// first run of a new box directory alone**: a run chooses its tools before it writes that file,
+/// and each later run refuses the tool, because its program is in the box directory.
+#[test]
+fn a_tool_program_that_box_writes_is_left_out_on_the_first_run_alone() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let fixture = ContractFixture::new();
+    let inside = fixture.box_directory.join("bin/sh").display().to_string();
+    fixture.write_document(
+        None,
+        no_op_program(),
+        "",
+        &format!("[tool.inside]\ncommand = [{inside:?}]\n"),
+    );
+
+    let first = fixture.run(&fixture.config, &[]);
+    let second = fixture.run(&fixture.config, &[]);
+
+    assert!(first.status.success(), "{}", text(&first));
+    assert!(
+        text(&first).contains(&format!(
+            "strands-box: [tool.inside] left out: {inside} not found"
+        )),
+        "{}",
+        text(&first)
+    );
+    assert!(!second.status.success(), "{}", text(&second));
+    assert!(!text(&second).contains("left out"), "{}", text(&second));
+    // The refusal that Linux gives; another check of the program can come first on macOS.
+    if cfg!(target_os = "linux") {
+        assert!(
+            text(&second).contains("Box's own directory"),
+            "{}",
+            text(&second)
+        );
+    }
+}
+
 #[test]
 fn a_tool_grant_cannot_expose_private_state() {
     if !namespace_launcher_is_usable() {
@@ -525,12 +632,13 @@ fn an_agent_entry_naming_a_box_directory_child_is_refused() {
             .join(child)
             .canonicalize()
             .expect("the child resolves");
+        let read = linux_read_grant(&entry);
         fixture.write_document(
             None,
             no_op_program(),
             "",
             &format!(
-                "[agent.filesystem]\nwrite = [{:?}]\n",
+                "[agent.filesystem]\n{read}write = [{:?}]\n",
                 entry.display().to_string()
             ),
         );
@@ -576,12 +684,13 @@ fn a_symlinked_box_directory_still_guards_its_children() {
         .join("bin")
         .canonicalize()
         .expect("the canonical child resolves");
+    let read = linux_read_grant(&entry);
     fixture.write_document(
         None,
         no_op_program(),
         "",
         &format!(
-            "[agent.filesystem]\nwrite = [{:?}]\n",
+            "[agent.filesystem]\n{read}write = [{:?}]\n",
             entry.display().to_string()
         ),
     );

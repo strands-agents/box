@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::sources::AWS_SCHEME;
 use crate::{CredentialError, Result, redact_credential_ref};
 
 /// A parsed credential reference in either config surface form.
@@ -17,10 +18,16 @@ pub enum Locator {
 }
 
 impl Locator {
-    /// Parse a URI-form reference (`op://…`, `env://VAR`, `file:///path`).
+    /// Parse a URI-form reference (`op://…`, `env://VAR`, `file:///path`, `aws://[profile]`).
+    ///
+    /// An empty body is accepted only for the `aws` scheme, where `aws://` names the AWS default
+    /// credential provider chain (docs/design/decisions.md). Every other scheme refuses an empty
+    /// body as a malformed reference.
     pub fn parse_uri(s: &str) -> Result<Self> {
         match s.split_once("://") {
-            Some((scheme, rest)) if !scheme.is_empty() && !rest.is_empty() => {
+            Some((scheme, rest))
+                if !scheme.is_empty() && (!rest.is_empty() || scheme == AWS_SCHEME) =>
+            {
                 Ok(Locator::Uri(s.to_string()))
             }
             _ => Err(CredentialError::Credential(format!(
@@ -111,7 +118,9 @@ mod tests {
             "",                  // empty
             "GITHUB_TOKEN",      // no scheme separator
             "://orphan",         // empty scheme
-            "op://",             // empty locator body
+            "op://",             // empty locator body (only `aws` accepts one)
+            "env://",            // empty locator body
+            "file://",           // empty locator body
             "no-separator-here", // no `://`
         ] {
             assert!(
@@ -119,6 +128,15 @@ mod tests {
                 "expected {bad:?} to be rejected"
             );
         }
+    }
+
+    /// A bare `aws://` parses, and its scheme is `aws`: the one empty-body form, naming the default
+    /// credential provider chain.
+    #[test]
+    fn parse_uri_accepts_bare_aws() {
+        let loc = Locator::parse_uri("aws://").expect("a bare aws:// parses");
+        assert_eq!(loc, Locator::Uri("aws://".to_string()));
+        assert_eq!(loc.scheme(), "aws");
     }
 
     // --- Structured form: the AWS source (source = "aws", profile = ...) -----

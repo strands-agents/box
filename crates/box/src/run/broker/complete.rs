@@ -83,14 +83,14 @@ impl DiscoveryCoordinator {
         };
         if run_verdict {
             match self.policy.finish_mcp_discovery() {
-                // A server whose `tools/list` was denied leaves its per-tool rule unstageable.
-                // The box does not fatal — it degrades that one server (its tools denied fail-closed)
-                // and warns, so a customer's contradictory policy blocks one server, never the box.
+                // A rule still pending degrades the servers it waits for, and the box runs on
+                // (docs/design/decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
                 Ok(degraded) if !degraded.is_empty() => {
                     eprintln!(
-                        "strands-box: warning: discovery denied tools/list for {degraded:?}; each \
-                         server's per-tool rule is inert and its tool calls are denied — permit \
-                         tools/list for it or remove the per-tool rule"
+                        "strands-box: warning: a per-tool rule never loaded for {degraded:?}; the \
+                         calls it decides are refused — check its tool and argument names against \
+                         what the server declares, permit the server's tools/list, or remove the \
+                         rule"
                     );
                     self.control(
                         ControlRecord::completed(ControlOperation::DiscoveryComplete, "policy")

@@ -7,17 +7,24 @@
 //! | `frame_type` | dir | body | per call | what it is |
 //! |---|---|---|---|---|
 //! | `open` | c→d | `mode` ([`Interpreter`]) | 1 | start a program; no path/cwd/env |
-//! | `call` | c→d | `source` | 1 | one command or script, as text |
+//! | `call` | c→d | `source` | 0–1 | one command or script, as text, where the program is |
+//! | `run` | c→d | `command` ([`Command`]), `directory` | 0–1 | one command, in the caller's directory |
 //! | `input` | c→d | `data` (b64) | 0+ | bytes for stdin |
 //! | `input_eof` | c→d | — | 0–1 | no more stdin (≠ empty input, ≠ `close`) |
 //! | `signal` | c→d | `kind` ([`SignalKind`]) | 0+ | end the call, keep the program |
 //! | `close` | c→d | — | 0–1 | discard the program and its state |
+//! | `mcp_ready` | d→c | none | 1 per matched MCP open | server started; begin input relay |
+//! | `mcp_unmatched` | d→c | none | 1, terminal | no matching command; ordinary contained execution |
 //! | `output` | d→c | `stream` ([`Stream`]), `data` (b64) | 0+ | one output chunk, streamed |
 //! | `exit` | d→c | `status` | 1, terminal | the call RAN; the program's own status |
 //! | `denied` | d→c | `kind` ([`DeniedKind`]), `reason` | 1, terminal | boundary REFUSED (transport only) |
 //!
-//! Discriminants (`frame_type`, `mode`, `stream`, `kind`) are closed `deny_unknown_fields` enums;
-//! `reason`/`source`/`data`/`server` are free strings.
+//! A Program takes one `call` or one `run` per submission. Every alias sends `run`, so the daemon
+//! enters the caller's directory with the decision a `cd` gets before the command runs.
+//!
+//! Discriminants (`frame_type`, `mode`, `command`, `stream`, `kind`) are closed `deny_unknown_fields`
+//! enums; `reason`/`source`/`data`/`server`/`directory`/`name` are free strings, and `arguments` is
+//! a list of free strings.
 
 #![allow(dead_code)]
 
@@ -32,7 +39,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// The largest frame either end will read or write.
 pub(crate) const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
-/// The most captured output the daemon's Shell returns per stream.
+/// The most captured output the daemon's Python interpreter returns per stream.
 pub(crate) const MAX_CAPTURE_STREAM_BYTES: usize = MAX_FRAME_BYTES / 16;
 
 /// The status reported when the boundary itself failed, as distinct from a policy refusal (126)
@@ -40,7 +47,7 @@ pub(crate) const MAX_CAPTURE_STREAM_BYTES: usize = MAX_FRAME_BYTES / 16;
 pub(crate) const BOUNDARY_FAILURE_STATUS: i32 = 125;
 
 /// The one protocol version either end speaks.
-pub(crate) const PROTOCOL_VERSION: u8 = 6;
+pub(crate) const PROTOCOL_VERSION: u8 = 9;
 
 /// Every name the box materializes its Shell alias under.
 pub(crate) const BROKER_SOCKET: &str = "box.sock";
@@ -55,14 +62,17 @@ pub(crate) const BROKER_SOCKET_RELATIVE: [&str; 2] = ["run", BROKER_SOCKET];
 
 pub(crate) const SHELL_ALIAS_NAMES: [&str; 3] = ["zsh", "bash", "sh"];
 
-/// The Python names a harness resolves, each an alias of the same broker image.
+/// The Python names a harness resolves. Each alias sends its name and arguments to the Shell.
 pub(crate) const PYTHON_ALIAS_NAMES: [&str; 2] = ["python3", "python"];
 
 /// Names one Program within one connection.
 pub(crate) type ProgramId = u32;
 
-/// The most `Output` payload one frame carries, before base64 expansion.
+/// The most `Output` or `Input` payload one frame carries, before base64 expansion.
 pub(crate) const MAX_CHUNK_BYTES: usize = 48 * 1024;
+
+/// The longest base64 text one `Input` frame may carry.
+pub(crate) const MAX_ENCODED_CHUNK_BYTES: usize = MAX_CHUNK_BYTES.div_ceil(3) * 4;
 
 /// The most output one Call may produce across every `Output` frame.
 pub(crate) const MAX_CALL_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
@@ -90,14 +100,31 @@ pub(crate) enum SignalKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub(crate) enum Interpreter {
-    /// The Strands Shell — what every `zsh`/`bash` alias reaches.
+    /// The Strands Shell — what every `zsh`, `bash`, `sh`, `python3`, and `python` alias reaches.
     Shell,
-    /// Python — what every `python3`/`python` alias reaches.
+    /// Monty without the Shell. Refused since version 9, so Python runs only through the Shell.
     Python,
-    /// One MCP server, named by the alias the agent executed.
+    /// One MCP server, selected by the command the agent executed through its alias.
     Mcp {
-        /// The server name, from the alias's own filename.
+        /// The program, from the alias's own filename.
         server: String,
+        /// The alias's arguments, in order.
+        arguments: Vec<String>,
+    },
+}
+
+/// What a `run` frame runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub(crate) enum Command {
+    /// Shell command text, which the Shell parses.
+    Text(String),
+    /// One program and its arguments, each given to the Shell as one literal word.
+    Words {
+        /// The program, as the caller invoked it.
+        name: String,
+        /// The caller's arguments, in order and unchanged.
+        arguments: Vec<String>,
     },
 }
 
@@ -133,11 +160,19 @@ pub(crate) struct Frame {
 pub(crate) enum Body {
     // ---- client → daemon ----
     /// Open a Program. Carries no path, cwd, or environment: the daemon fixes all three, so
-    /// there is nothing here for a workload to point somewhere else.
+    /// there is nothing here for a workload to point somewhere else. A later `run` names a
+    /// directory, which the daemon enters only after the decision a `cd` gets.
     Open { mode: Interpreter },
     /// Submit one Call to an open Program: a shell command or a script, as program text.
     Call {
         source: String,
+        correlation: Box<telemetry::Correlation>,
+    },
+    /// Submit one Call to an open Shell Program, started in `directory`, the caller's working
+    /// directory. The daemon enters it with the decision a `cd` gets and runs nothing if refused.
+    Run {
+        command: Command,
+        directory: String,
         correlation: Box<telemetry::Correlation>,
     },
     /// Feed bytes to the Program's standard input.
@@ -150,6 +185,10 @@ pub(crate) enum Body {
     Close,
 
     // ---- daemon → client ----
+    /// The matched MCP server has started.
+    McpReady,
+    /// No command matches on this declared MCP program.
+    McpUnmatched,
     /// A chunk of output, as produced.
     Output { stream: Stream, data: String },
     /// The Call finished with this status.
@@ -163,7 +202,11 @@ impl Body {
     pub(crate) fn is_daemon_only(&self) -> bool {
         matches!(
             self,
-            Body::Output { .. } | Body::Exit { .. } | Body::Denied { .. }
+            Body::Output { .. }
+                | Body::Exit { .. }
+                | Body::Denied { .. }
+                | Body::McpReady
+                | Body::McpUnmatched
         )
     }
 
@@ -178,10 +221,24 @@ impl Body {
                 "call",
                 Some(json!({ "source": source, "correlation": correlation })),
             ),
+            Body::Run {
+                command,
+                directory,
+                correlation,
+            } => (
+                "run",
+                Some(json!({
+                    "command": command,
+                    "directory": directory,
+                    "correlation": correlation,
+                })),
+            ),
             Body::Input { data } => ("input", Some(json!({ "data": data }))),
             Body::InputEof => ("input_eof", None),
             Body::Signal { kind } => ("signal", Some(json!({ "kind": kind }))),
             Body::Close => ("close", None),
+            Body::McpReady => ("mcp_ready", None),
+            Body::McpUnmatched => ("mcp_unmatched", None),
             Body::Output { stream, data } => {
                 ("output", Some(json!({ "stream": stream, "data": data })))
             }
@@ -216,6 +273,7 @@ impl<'de> Deserialize<'de> for Frame {
         enum FrameType {
             Open,
             Call,
+            Run,
             Input,
             InputEof,
             Signal,
@@ -223,6 +281,8 @@ impl<'de> Deserialize<'de> for Frame {
             Output,
             Exit,
             Denied,
+            McpReady,
+            McpUnmatched,
         }
 
         #[derive(Deserialize)]
@@ -244,6 +304,14 @@ impl<'de> Deserialize<'de> for Frame {
         #[serde(deny_unknown_fields)]
         struct CallBody {
             source: String,
+            #[serde(default)]
+            correlation: Box<telemetry::Correlation>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RunBody {
+            command: Command,
+            directory: String,
             #[serde(default)]
             correlation: Box<telemetry::Correlation>,
         }
@@ -303,6 +371,18 @@ impl<'de> Deserialize<'de> for Frame {
                     correlation,
                 }
             }
+            FrameType::Run => {
+                let RunBody {
+                    command,
+                    directory,
+                    correlation,
+                } = take(header.body)?;
+                Body::Run {
+                    command,
+                    directory,
+                    correlation,
+                }
+            }
             FrameType::Input => {
                 let InputBody { data } = take(header.body)?;
                 Body::Input { data }
@@ -318,6 +398,14 @@ impl<'de> Deserialize<'de> for Frame {
             FrameType::Close => {
                 none(header.body)?;
                 Body::Close
+            }
+            FrameType::McpReady => {
+                none(header.body)?;
+                Body::McpReady
+            }
+            FrameType::McpUnmatched => {
+                none(header.body)?;
+                Body::McpUnmatched
             }
             FrameType::Output => {
                 let OutputBody { stream, data } = take(header.body)?;
@@ -608,18 +696,36 @@ mod tests {
         assert_eq!(close["frame_type"], "close");
         assert!(close.get("body").is_none(), "a bodyless kind omits body");
 
-        // An MCP `open` carries its server name in `mode`, and round-trips.
+        // An MCP `open` carries the alias's name and its arguments in `mode`, and round-trips.
         let mcp = frame(Body::Open {
             mode: Interpreter::Mcp {
-                server: "agentcore".to_string(),
+                server: "npx".to_string(),
+                arguments: vec!["-y".to_string(), "@playwright/mcp".to_string()],
             },
         });
+        let wire = serde_json::to_value(&mcp).unwrap();
+        assert_eq!(
+            wire["body"]["mode"],
+            json!({ "mcp": { "server": "npx", "arguments": ["-y", "@playwright/mcp"] } })
+        );
         let bytes = serde_json::to_vec(&mcp).unwrap();
         let back: Frame = serde_json::from_slice(&bytes).unwrap();
         assert!(matches!(
             back.body,
-            Body::Open { mode: Interpreter::Mcp { server } } if server == "agentcore"
+            Body::Open { mode: Interpreter::Mcp { server, arguments } }
+                if server == "npx" && arguments == ["-y", "@playwright/mcp"]
         ));
+    }
+
+    /// An MCP `open` without `arguments` is refused.
+    #[test]
+    fn an_mcp_open_without_its_arguments_is_refused() {
+        let payload = format!(
+            r#"{{"version":{PROTOCOL_VERSION},"program":1,"frame_type":"open","body":{{"mode":{{"mcp":{{"server":"npx"}}}}}}}}"#
+        );
+        let error = serde_json::from_str::<Frame>(&payload)
+            .expect_err("an MCP open must carry its arguments");
+        assert!(error.to_string().contains("arguments"), "{error}");
     }
 
     /// The pre-version-4-shape layout — the tag placed *inside* `body` — is refused, because the
@@ -764,10 +870,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mcp_routing_responses_round_trip_without_a_payload() {
+        for body in [Body::McpReady, Body::McpUnmatched] {
+            let wire = serde_json::to_value(frame(body)).unwrap();
+            assert!(wire.get("body").is_none());
+            let decoded: Frame = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+            let mut with_payload = wire;
+            with_payload["body"] = json!({"program": "/bin/sh"});
+            assert!(serde_json::from_value::<Frame>(with_payload).is_err());
+        }
+    }
+
     /// A body only the daemon may send is recognizable, so the dispatcher can refuse it.
     #[test]
     fn daemon_only_bodies_are_identified() {
         for body in [
+            Body::McpReady,
+            Body::McpUnmatched,
             Body::Output {
                 stream: Stream::Stdout,
                 data: encode_payload(b"x"),
@@ -790,6 +911,11 @@ mod tests {
             Body::Call {
                 correlation: Default::default(),
                 source: "true".to_string(),
+            },
+            Body::Run {
+                command: Command::Text("true".to_string()),
+                directory: "/w".to_string(),
+                correlation: Default::default(),
             },
             Body::InputEof,
             Body::Close,
@@ -825,6 +951,93 @@ mod tests {
             "a full chunk must still fit one frame: {} bytes",
             payload.len()
         );
+    }
+
+    /// Version 9 is the first that carries `run`, so an older alias is refused by version rather than
+    /// misread.
+    #[test]
+    fn the_protocol_version_that_carries_run_is_nine() {
+        assert_eq!(PROTOCOL_VERSION, 9);
+    }
+
+    /// A `run` carries its command and the caller's directory, in either command shape, and
+    /// round-trips with every word unchanged.
+    #[tokio::test]
+    async fn a_run_frame_round_trips_in_both_command_shapes() {
+        let words = Command::Words {
+            name: "python3".to_string(),
+            arguments: vec![
+                "-c".to_string(),
+                "print('$(rm x)')\n`id`".to_string(),
+                String::new(),
+                "a b".to_string(),
+            ],
+        };
+        for command in [Command::Text("printf ok".to_string()), words] {
+            let (mut writer, mut reader) = tokio::io::duplex(4096);
+            write_frame(
+                &mut writer,
+                &frame(Body::Run {
+                    command: command.clone(),
+                    directory: "/work/sub dir".to_string(),
+                    correlation: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+            drop(writer);
+
+            let decoded: Frame = read_frame(&mut reader).await.unwrap().unwrap();
+            match decoded.body {
+                Body::Run {
+                    command: back,
+                    directory,
+                    ..
+                } => {
+                    assert_eq!(back, command, "the command must round-trip unchanged");
+                    assert_eq!(directory, "/work/sub dir");
+                }
+                other => panic!("expected a run body, got {other:?}"),
+            }
+        }
+
+        let wire = serde_json::to_value(frame(Body::Run {
+            command: Command::Words {
+                name: "python3".to_string(),
+                arguments: vec!["x.py".to_string()],
+            },
+            directory: "/work".to_string(),
+            correlation: Default::default(),
+        }))
+        .unwrap();
+        assert_eq!(wire["frame_type"], "run");
+        assert_eq!(
+            wire["body"]["command"],
+            json!({ "words": { "name": "python3", "arguments": ["x.py"] } })
+        );
+        assert_eq!(wire["body"]["directory"], "/work");
+    }
+
+    /// A `run` refuses an unknown field in its body and in its command, a command naming both shapes,
+    /// and a missing directory.
+    #[test]
+    fn a_malformed_run_frame_is_refused() {
+        for body in [
+            r#"{"command":{"text":"true"},"directory":"/w","untrusted":"x"}"#,
+            r#"{"command":{"words":{"name":"python3","arguments":[],"untrusted":"x"}},"directory":"/w"}"#,
+            r#"{"command":{"text":"true","words":{"name":"python3","arguments":[]}},"directory":"/w"}"#,
+            r#"{"command":{"argv":["python3"]},"directory":"/w"}"#,
+            r#"{"command":{"words":{"name":"python3"}},"directory":"/w"}"#,
+            r#"{"command":{"text":"true"}}"#,
+        ] {
+            let payload = format!(
+                r#"{{"version":{PROTOCOL_VERSION},"program":1,"frame_type":"run","body":{body}}}"#
+            );
+            assert!(
+                serde_json::from_str::<Frame>(&payload).is_err(),
+                "a malformed run must be refused: {payload}"
+            );
+        }
     }
 
     /// Every Program's ceiling must leave room under the frame bound.

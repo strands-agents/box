@@ -8,10 +8,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use credentials::{
-    Backend, DestinationPattern, InjectMode, Locator, RouteSpec, Vault, VaultConfig,
+    Backend, DestinationPattern, InjectMode, Locator, RouteSpec, SecretSourceCommand, Vault,
+    VaultConfig,
 };
 use egress_gateway::{
-    AuditDecision, CapabilitySet, CredentialCapability, MitmConfig, MitmInterceptor,
+    AuditDecision, CapabilitySet, CredentialCapability, MitmConfig, MitmInterceptor, StubEmitter,
 };
 use harness::{TlsUpstream, WorkloadClient};
 use policy::{EgressPolicyInterceptor, GovernedBox, Policy, PolicyEngine, Principal};
@@ -32,15 +33,19 @@ fn env_locator(secret: &str) -> Locator {
 
 /// One opaque `Authorization: Bearer` route bound to `host:port`, with its minted phantom.
 fn bound_vault(host: &str, port: u16) -> (Arc<Vault>, String) {
+    vault_over(Backend::local(), env_locator(REAL_SECRET), host, port)
+}
+
+/// One opaque `Authorization: Bearer` route bound to `host:port` whose secret `backend` reads
+/// for `locator`, with its minted phantom.
+fn vault_over(backend: Backend, locator: Locator, host: &str, port: u16) -> (Arc<Vault>, String) {
     let pattern =
         DestinationPattern::parse(&format!("{host}:{port}")).expect("a host:port pattern");
-    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(
-        RouteSpec::opaque(
-            pattern,
-            env_locator(REAL_SECRET),
-            InjectMode::header("Bearer {}".to_string(), None).expect("a header placement"),
-        ),
-    ))
+    let opened = Vault::open(VaultConfig::new(backend, "tenant").route(RouteSpec::opaque(
+        pattern,
+        locator,
+        InjectMode::header("Bearer {}".to_string(), None).expect("a header placement"),
+    )))
     .expect("the vault opens");
     let phantom = opened.phantoms()[0].token().to_string();
     (Arc::new(opened.into_vault()), phantom)
@@ -73,19 +78,24 @@ fn a_bound_host_with_a_get_only_permit_refuses_delete_before_the_upstream_and_le
         Principal::agent(),
         GovernedBox::assigned("credential-method-scope"),
     );
-    let capabilities = CapabilitySet::builder()
-        .add_credential(CredentialCapability::new(
-            DestinationPattern::parse(&format!("{HOST}:{port}")).expect("a host:port pattern"),
-            vault,
-        ))
-        .build();
+    let capabilities = CapabilitySet::new(vec![CredentialCapability::new(
+        DestinationPattern::parse(&format!("{HOST}:{port}")).expect("a host:port pattern"),
+        vault,
+    )]);
     let config = MitmConfig {
         upstream_ca_pems: vec![upstream.ca_pem()],
         dns_overrides: vec![(HOST.to_string(), "127.0.0.1".parse().expect("loopback"))],
         ..MitmConfig::default()
     };
-    let handle =
-        MitmInterceptor::start(config, capabilities, interceptor).expect("the gateway starts");
+    let records = StubEmitter::new();
+    let handle = MitmInterceptor::start_with(
+        config,
+        capabilities,
+        interceptor,
+        Box::new(records.clone()),
+        None,
+    )
+    .expect("the gateway starts");
     let proxy_port = handle.port().expect("a TCP gateway has a port");
     let authorization = format!("Bearer {phantom}");
 
@@ -133,14 +143,92 @@ fn a_bound_host_with_a_get_only_permit_refuses_delete_before_the_upstream_and_le
     );
     assert!(!delete_response.contains(REAL_SECRET), "{delete_response}");
 
-    let events = handle.drain_audit_events();
+    let records = records.records();
     assert!(
-        events
+        records
             .iter()
-            .any(|event| event.decision == AuditDecision::Deny),
-        "the DELETE refusal is audited: {events:?}"
+            .any(|record| record.decision == AuditDecision::Deny),
+        "the DELETE refusal is recorded: {records:?}"
     );
-    for event in &events {
-        assert!(!format!("{event:?}").contains(REAL_SECRET), "{event:?}");
+    for record in &records {
+        assert!(!format!("{record:?}").contains(REAL_SECRET), "{record:?}");
     }
+}
+
+/// **The gateway attaches a secret that a declared program read**: a permitted request that
+/// carries the placeholder reaches the origin with the secret, after the backend dropped its copy.
+#[test]
+fn a_secret_that_a_declared_program_read_rides_a_permitted_request() {
+    const DECLARED_SECRET: &str = "sk_live_declared_program_5e2a";
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let script = scratch.path().join("vault.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "echo \"$1\" >> '{}'\nprintf '%s\\n' {DECLARED_SECRET}\n",
+            scratch.path().join("runs").display()
+        ),
+    )
+    .expect("write the stand-in program");
+    let command = ["/bin/sh", script.to_str().expect("a UTF-8 path"), "{ref}"].map(str::to_string);
+    let declaration = SecretSourceCommand::new("vault", SecretSourceCommand::PROTOCOL, &command)
+        .expect("a valid declaration");
+    let checked = std::fs::File::open("/bin/sh").expect("the shell opens");
+    let backend = Backend::declared([(declaration, checked)]).expect("the scheme is free");
+
+    let upstream = TlsUpstream::start(HOST);
+    let port = upstream.port();
+    let locator = Locator::parse_uri("vault://team/api-key").expect("the reference parses");
+    let (vault, phantom) = vault_over(backend.clone(), locator, HOST, port);
+    // The vault holds the secret now, so the run drops the copy of the backend.
+    backend.close_declared();
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("runs")).expect("the program ran"),
+        "team/api-key\n"
+    );
+    assert_ne!(phantom, DECLARED_SECRET);
+
+    let history = tempfile::tempdir().expect("a history directory");
+    let interceptor = EgressPolicyInterceptor::into_handle(
+        Arc::new(get_only_policy(port, history.path())),
+        Principal::agent(),
+        GovernedBox::assigned("credential-method-scope"),
+    );
+    let capabilities = CapabilitySet::new(vec![CredentialCapability::new(
+        DestinationPattern::parse(&format!("{HOST}:{port}")).expect("a host:port pattern"),
+        vault,
+    )]);
+    let config = MitmConfig {
+        upstream_ca_pems: vec![upstream.ca_pem()],
+        dns_overrides: vec![(HOST.to_string(), "127.0.0.1".parse().expect("loopback"))],
+        ..MitmConfig::default()
+    };
+    let handle = MitmInterceptor::start_with(
+        config,
+        capabilities,
+        interceptor,
+        Box::new(StubEmitter::new()),
+        None,
+    )
+    .expect("the gateway starts");
+    let proxy_port = handle.port().expect("a TCP gateway has a port");
+
+    let mut get = WorkloadClient::connect(proxy_port, HOST, port);
+    get.send_request(
+        "GET",
+        "/v1/items",
+        &[("Authorization", &format!("Bearer {phantom}"))],
+        b"",
+    );
+    let response = get.read_response();
+    assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+    let seen = upstream.last_request();
+    assert_eq!(
+        seen.header("authorization").as_deref(),
+        Some(format!("Bearer {DECLARED_SECRET}").as_str()),
+        "the permitted request carries the secret of the program: {}",
+        seen.raw
+    );
+    assert!(!seen.raw.contains(&phantom), "{}", seen.raw);
+    assert!(!response.contains(DECLARED_SECRET), "{response}");
 }

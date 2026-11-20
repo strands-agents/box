@@ -12,10 +12,6 @@ Audience: an operator who has run [getting started](../getting-started.md) and
 [`examples/claude-code`](../../../examples/claude-code/) in the repository,
 and this page walks through them.
 
-> **Status.** The action vocabulary and the context fields can change before 1.0.0. Pin the Box
-> build you install (`./box-core/box --version`), and read [troubleshooting load
-> failures](../policy.md#troubleshooting-load-failures) after an upgrade.
-
 ## Before you start
 
 - The box from [getting started](../getting-started.md) under `~/box-tutorial`: Box in

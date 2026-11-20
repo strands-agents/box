@@ -6,7 +6,7 @@ det_case! {
     id: "CN-T-01",
     desc: "A named tool reads its own grant and cannot inherit the agent's file grant",
     run: |b| {
-        let probe = support::compile(b);
+        let probe = b.install_tool(&support::compile(b));
         let root = b.workspace().parent().unwrap();
         let agent = root.join("agent-only.txt");
         let tool = root.join("tool-only.txt");
