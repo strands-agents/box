@@ -186,7 +186,13 @@ mod tests {
                 }
             })
         };
-        MitmHandle::new(BoundTransport::Tcp(port), None, connections, accept_thread, None)
+        MitmHandle::new(
+            BoundTransport::Tcp(port),
+            None,
+            connections,
+            accept_thread,
+            None,
+        )
     }
 
     /// `port()`/`unix_socket_path()` each report the transport actually bound.
