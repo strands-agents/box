@@ -2470,8 +2470,10 @@ workload's values could cover a value that isn't sent. `X-Amzn-Trace-Id`, `trace
 `tracestate`, `baggage`, `User-Agent`, and `Expect` can change between the box and AWS. For example,
 X-Ray rewrites `X-Amzn-Trace-Id` in transit, so a signature over it fails at an AgentCore Gateway.
 These six are among the 14 headers that botocore doesn't sign. The rest of the 14 are hop-by-hop
-headers, which the gateway removes before it signs. An `env://` backend token still attaches before
-the rewrite, because a static token doesn't depend on the `Host`.
+headers, which the gateway removes before it signs. `Connection` is in both groups: the gateway
+removes the workload's value before it signs and writes its own when it forwards. An `env://`
+backend token still attaches before the rewrite, because a static token doesn't depend on the
+`Host`.
 
 **Rejected.** The earlier design signed every header that leaves except `Content-Length` and
 `Connection`, and an AgentCore Gateway refused each call that carried a trace header. Signing before
