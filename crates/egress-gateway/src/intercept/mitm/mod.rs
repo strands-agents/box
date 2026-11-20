@@ -26,6 +26,7 @@ use crate::error::{ProxyError, Result};
 use crate::seams::Emitter;
 
 pub use handle::MitmHandle;
+pub use tls::HostRoots;
 
 /// Size limits for captured requests and MCP catalog responses.
 #[derive(Debug, Clone)]
@@ -65,6 +66,9 @@ pub struct MitmConfig {
     /// deployment's private CA, or a corporate root the box must trust for the upstream leg. Added on
     /// top of the system roots; never replaces them.
     pub upstream_ca_pems: Vec<String>,
+    /// Add the host's own trusted roots (the macOS keychain, or the Linux bundle) to the upstream
+    /// trust bundle, on top of the built-in roots.
+    pub upstream_host_roots: bool,
     /// Static host→IP overrides applied at resolve time (a supervisor-provided pinned endpoint map —
     /// split-horizon DNS, or a fixed upstream address). When a host is present here it resolves to the
     /// mapped IP with no DNS lookup; the DNS-rebind pin still holds since the connect uses only
@@ -136,6 +140,7 @@ impl Default for MitmConfig {
             response_limits: ResponseLimits::default(),
             expected_token: None,
             upstream_ca_pems: Vec::new(),
+            upstream_host_roots: false,
             dns_overrides: Vec::new(),
             upstream_read_deadline: std::time::Duration::from_secs(300),
             max_connections: 256,
@@ -254,9 +259,11 @@ impl MitmInterceptor {
         let ca = EphemeralCa::generate(config.intercept_ca_dir.as_deref(), ca_file)?;
         let ca_path = ca.ca_path().map(|p| p.to_path_buf());
 
-        // Upstream additive trust bundle: system roots + any configured extra CA PEMs
-        // (a deployment's private CA / corporate root).
-        let upstream_config = Arc::new(tls::upstream_client_config(&config.upstream_ca_pems)?);
+        // Upstream additive trust bundle: the built-in roots, the host's roots when asked, and
+        // any configured extra CA PEMs (a fixture's CA).
+        let (upstream_config, host_roots) =
+            tls::upstream_client_config(&config.upstream_ca_pems, config.upstream_host_roots)?;
+        let upstream_config = Arc::new(upstream_config);
 
         let state = Arc::new(SharedState {
             controls,
@@ -330,6 +337,7 @@ impl MitmInterceptor {
             ca_path,
             connections,
             accept_thread,
+            host_roots,
         ))
     }
 }

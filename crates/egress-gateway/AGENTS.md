@@ -11,13 +11,14 @@ not rename during the freeze.
 
 ## Public Contract
 
-The façade exports 37 names (`src/lib.rs`): 32 unconditional, and 5 behind the default-on
-`tls-intercept` feature — `BackendDial`, `MitmConfig`, `MitmHandle`, `MitmInterceptor`,
-`ResponseLimits` — which stay behind it. `BackendDial` is a `MitmConfig.backends` entry, consumed by
-`strands-box`'s `run/hosted.rs`. `ReplyObserver` is exported for `policy`'s egress adapter, which
+The façade exports 37 names (`src/lib.rs`): 31 unconditional, and 6 behind the default-on
+`tls-intercept` feature — `BackendDial`, `HostRoots`, `MitmConfig`, `MitmHandle`, `MitmInterceptor`,
+`ResponseLimits` — which stay behind it. `BackendDial` is a `MitmConfig.backends` entry, and
+`HostRoots` what `MitmHandle::upstream_host_roots` reports, both consumed by `strands-box`'s
+`run/hosted.rs`. `ReplyObserver` is exported for `policy`'s egress adapter, which
 records how an HTTP MCP tool call ended. `audit::Decision` exits as `AuditDecision`. `normalize_host`
 and `is_bindable_host` are the one host spelling, exported for `policy::spelling`, which refuses a
-host literal no bound host can equal. A 37th name needs a named external caller.
+host literal no bound host can equal. A 38th name needs a named external caller.
 
 - Keep implementation modules private, re-export the supported surface from `src/lib.rs`, and keep
   `#![warn(missing_docs, unreachable_pub)]` enabled.
