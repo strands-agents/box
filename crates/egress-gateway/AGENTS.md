@@ -119,7 +119,7 @@ Conventions: `docs/conventions.md`.
   join: a path parameter (`..;`), trailing dots or spaces (`...`, `..%20`), a second decode
   (`%252e%252e`, `%252F`), an overlong UTF-8 slash (`%C0%AF`), or an escaped delimiter (`%3B`). A
   wider decode does not close this class, because each fold is the backend's. Benign escapes such as
-  `%3A` in a Bedrock model ID still pass.
+  `%3A` in a Bedrock model ID, and `%20` inside a name, still pass.
 - Keep `estimate_head_capacity` a correctness bound; `headers + 64` under-counted a plain
   `POST /v1/messages` by 6 bytes in 500 of 500 runs.
 - Allocate `head.len() + body.len()` up front in the coalesce path; reuse relocated in 300 of 300

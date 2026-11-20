@@ -724,13 +724,13 @@ fn escapes_backend_prefix(path: &str) -> Option<&'static str> {
              path parameter and escape the prefix",
         );
     }
-    if path
-        .split('/')
-        .any(|segment| segment.len() >= 3 && segment.bytes().all(|byte| byte == b'.'))
-    {
+    if path.split('/').any(|segment| {
+        let dots = segment.replace("%20", "");
+        dots.len() >= 2 && dots.bytes().all(|byte| byte == b'.')
+    }) {
         return Some(
-            "a re-routed path under a backend prefix may not carry a segment of only dots: the \
-             backend could fold it to `..` and escape the prefix",
+            "a re-routed path under a backend prefix may not carry a segment of only dots and \
+             spaces: the backend could fold it to `..` and escape the prefix",
         );
     }
     let bytes = path.as_bytes();
@@ -743,13 +743,13 @@ fn escapes_backend_prefix(path: &str) -> Option<&'static str> {
             if octet.is_none_or(|octet| {
                 matches!(
                     octet,
-                    b'/' | b'\\' | b'%' | b';' | b'?' | b'#' | 0x00..=0x20 | 0x7f | 0x80..=0xff
+                    b'/' | b'\\' | b'%' | b';' | b'?' | b'#' | 0x00..=0x1f | 0x7f | 0x80..=0xff
                 )
             }) {
                 return Some(
                     "a re-routed path under a backend prefix may not carry an encoded separator, \
-                     delimiter, percent sign, space, control, or non-ASCII octet: the backend \
-                     could decode it and escape the prefix",
+                     delimiter, percent sign, control, or non-ASCII octet: the backend could \
+                     decode it and escape the prefix",
                 );
             }
             index += 3;
@@ -921,6 +921,9 @@ mod tests {
             "/..../admin",
             "/a/...",
             "/..%20/admin",
+            "/.%20./admin",
+            "/...%20/admin",
+            "/%20../admin",
             "/%252e%252e/admin",
             "/a%252Fb",
             "/a%255Cb",
@@ -950,6 +953,9 @@ mod tests {
             "/v1.2/x",
             "/.hidden/x",
             "/a/..b/c",
+            "/repos/o/r/contents/docs/My%20File.md",
+            "/v1.0/me/drive/root:/My%20Documents/a.docx:/content",
+            "/.%20/x",
             "/",
         ] {
             let canonical = canonicalize_request_path(path);
