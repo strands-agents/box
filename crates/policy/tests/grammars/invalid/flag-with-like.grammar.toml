@@ -1,4 +1,4 @@
-# expect: `<grammar>.shell.push.options.force`: takes no value, so it cannot carry `like` or `when`
+# expect: `<grammar>.shell.push.options.force`: takes no value, so it cannot carry `like`, `not_like`, `case`, or `when`
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"
