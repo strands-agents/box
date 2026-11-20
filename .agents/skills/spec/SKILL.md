@@ -65,7 +65,7 @@ Then decide scope, and say it to the user:
 
 ---
 
-## Writing Style: ASD-STE100 Simplified Technical English
+## Writing Style: plain English
 
 Write every sentence of both artifacts in it: the `.spec.md` prose and the `.requirements.md`
 prose.

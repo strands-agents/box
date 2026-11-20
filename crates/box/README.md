@@ -388,8 +388,8 @@ The entry carries no credential-type key, so a `secret.type` on any scheme is an
 refuses.
 
 **A `[secret-source.<scheme>]` table declares the host program that reads a secret for a scheme.**
-It is experimental: it needs `[experimental-features] secret-sources = true`, and it loads on macOS
-only. The `secret.env` key needs the same switch, on each operating system. The table takes `protocol`, `command`, `output`, `pass-env`, `pass-secret-env`, `reads`, and
+It is experimental: it needs `[experimental-features] secret-sources = true`. The `secret.env` key
+needs the same switch. The table takes `protocol`, `command`, `output`, `pass-env`, `pass-secret-env`, `reads`, and
 `deny`, and `credentials::SecretSourceCommand` checks the first five. A reference in that scheme is
 then valid on an egress route and a remote MCP server (with `secret.env`), and on a backend
 `auth.ref` and a telemetry `secret.ref` (with no placeholder variable). An `env://NAME` or

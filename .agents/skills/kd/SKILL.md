@@ -159,4 +159,4 @@ wrong.
 - **No status line, no date, no "Updated" banner, no test name, and no "Proposed" in the entry.**
   An entry in `decisions.md` is decided by being there. The log can lag the code, and the code is
   the authority where the two disagree.
-- **Write in ASD-STE100 Simplified Technical English**, with no em-dashes and no en-dashes.
+- **Write in plain English**, with no em-dashes and no en-dashes.

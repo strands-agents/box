@@ -317,8 +317,8 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   key. The permit is therefore taken **before** the decode, and
   `a_body_naming_too_many_resources_is_refused_on_every_route` pins the bound. Do not move the permit
   back below the decode, and do not raise the limit without re-measuring.
-- **`RELAY_CAPACITY` is 1, and 64 was wrong.** A file target's `Mutex<tokio::fs::File>` is held across
-  `write_all` and `sync_all`, and the same `Arc<TargetExporter>` serves the SDK lane and the relay
+- **`RELAY_CAPACITY` is 1, and 64 was wrong.** A file target's
+  `tokio::sync::Mutex<std::fs::File>` is held across `write_all` and `sync_all`, and the same `Arc<TargetExporter>` serves the SDK lane and the relay
   list. So 64 concurrent relays each doing a write and an `fsync` stalled the box's own export worker,
   and the SDK's queue overflow is not counted anywhere — which reopens exactly the audit-suppression
   hole that
@@ -402,9 +402,24 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   per signal even for a relayed one. A relayed signal never reaches `TargetLane::emit`, so the value
   is unobservable in production — which is exactly why it is easy to give two of them the same
   severity and pass every behavioural test. `no_two_signals_share_a_severity` is the guard.
-- **A file target's line must be one write.** `tokio::fs::File` caps a write syscall, so a very long
-  line becomes several appends. One writer is safe; two boxes sharing one destination can tear a
-  line. Prefer one target per box.
+- **A file target's write must outlive the future that started it.** The write was a
+  `tokio::fs::File::write_all` awaited inside the receiver's request, and tokio splits a file write
+  into 2 MiB chunks. A client reset or the request deadline dropped the future between chunks, so a
+  relayed line over 2 MiB was cut, and the box's next decision record was appended onto the fragment.
+  Measured: a 2,097,172-byte unparseable line, which is one 2 MiB chunk plus the next record.
+  The write now runs in `spawn_blocking`, which runs to its end when its caller is dropped.
+  **The lock is still async, and the guard moves into the blocking task.** A first version locked a
+  `std::sync::Mutex` inside the blocking task, so each relay cancelled while it waited left a
+  blocking thread behind with its line. The one relay permit did not bound those threads, and each
+  wrote its line later. Measured: 20 cancelled relays behind a stalled pipe wrote 21 lines, not 1.
+  `a_cancelled_relay_never_tears_the_file` and
+  `a_relay_cancelled_while_waiting_leaves_no_write_behind` are the pins.
+  **A failed append is cut back too.** `write_all` that stops on `ENOSPC`, `EDQUOT`, or `EFBIG`
+  left its fragment, and the next record joined it the same way. `append` now counts what it wrote
+  and `cut_back` restores the length from before the write, but only when the file grew by exactly
+  that count, so it never removes a line another writer appended. `a_failed_append_leaves_no_fragment`
+  is the pin; it lowers `RLIMIT_FSIZE` in a child process, because the limit is per process.
+  Two boxes sharing one destination can still tear a line. Prefer one target per box.
 - **A telemetry secret must resolve through `credentials`.** `box`'s `telemetry_config` once read the
   variable with `std::env::var`, which bypassed the `env://` denylist — so
   `secret.ref = "secret://AWS_SECRET_ACCESS_KEY"` shipped the operator's AWS key to a vendor.

@@ -411,9 +411,8 @@ fn telemetry_secret_uri(reference: &str, sources: &DeclaredSources) -> Result<St
         return Err(format!(
             "`secret.ref` names no scheme this box reads; write `{ENV_SCHEME}NAME`, \
              `{TELEMETRY_ALIAS_SCHEME}NAME`, `aws://profile`, `credsd://environment`, or a \
-             reference in a scheme that a `[secret-source.<scheme>]` table declares (macOS \
-             only), never the value itself. The value is deliberately not echoed here, in case \
-             it is one"
+             reference in a scheme that a `[secret-source.<scheme>]` table declares, never the \
+             value itself. The value is deliberately not echoed here, in case it is one"
         ));
     };
     if let Some(name) = uri.strip_prefix(ENV_SCHEME)
@@ -1172,8 +1171,8 @@ mod tests {
                 refusal,
                 "`secret.ref` names no scheme this box reads; write `env://NAME`, \
                  `secret://NAME`, `aws://profile`, `credsd://environment`, or a reference in a \
-                 scheme that a `[secret-source.<scheme>]` table declares (macOS only), never \
-                 the value itself. The value is deliberately not echoed here, in case it is one"
+                 scheme that a `[secret-source.<scheme>]` table declares, never the value \
+                 itself. The value is deliberately not echoed here, in case it is one"
             );
         }
         assert!(

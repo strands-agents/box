@@ -140,12 +140,10 @@ async fn open(egress: &EgressRouting, authority: &str) -> io::Result<hyper::upgr
             .await
             .map_err(refused_connection);
     }
-    let refused = response
-        .headers()
-        .contains_key(egress_gateway::PROXY_ORIGIN_HEADER);
+    let kind = super::gateway_error_kind(response.headers());
     let status = response.status();
-    if refused {
-        return Err(super::read_refusal(response.into_body()).await);
+    if let Some(kind) = kind {
+        return Err(super::read_gateway_error(kind, response.into_body()).await);
     }
     Err(io::Error::new(
         io::ErrorKind::ConnectionRefused,

@@ -92,7 +92,10 @@ The Shell implements these, each in place of a program of the same name on the `
   `xargs`, and others.
 - Text: `cat`, `grep`, `sed`, `head`, `tail`, `sort`, `uniq`, `cut`, `tr`, `wc`, `tee`.
 - Files: `ls`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `ln`, `chmod`, `touch`, `mktemp`, `readlink`.
-- Data and network: `jq`, `curl`.
+- Data and network: `jq`, `base64`, `curl`.
+- System: `uname`, which prints the host's values, except that `-p` and `-i` print `unknown`;
+  `whoami`, which prints `$USER`; and `id`, which prints `$USER` with the Shell's own IDs. A program
+  path such as `/usr/bin/uname -p` runs the host program instead, as a `shell:spawn`.
 - Interpreters: `sh` and `lash`, which run a script in the Shell; `lua`; and `python` and
   `python3`, which run in Monty, Box's Python interpreter. With
   [`monty = false`](./config.md#monty), `python` and `python3` are external programs instead.
@@ -353,7 +356,9 @@ action permit when a tool grammar binds the file, and `program` is still the nam
 
 `curl` sends each request through the egress gateway, which decides `net:connect` and
 `http:request` ([how Box controls outbound traffic](../design/egress.md)). A request the gateway
-refuses makes `curl` exit non-zero.
+refuses makes `curl` exit `1` and print the reason, even with `-s`. A request the gateway doesn't
+refuse but can't complete makes `curl` exit `6` and print `curl: (6)` and the reason, unless `-s`
+hides errors.
 
 A response body is at most [`limits.shell.max_output`](config.md#limits) bytes, 1 MiB by default.
 Past it, `curl` exits with status `6`, writes none of the body, and prints

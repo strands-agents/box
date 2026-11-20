@@ -145,6 +145,13 @@ fn configured(kind: &str) -> fixture::Configured {
     request.env("PATH", &path).expect()
 }
 
+fn publish_release(directory: &std::path::Path, name: &str, value: &str) {
+    // The probe parses any readable release file. Keep the incomplete value under another name.
+    let staged = directory.join(format!("{name}.next"));
+    std::fs::write(&staged, value).unwrap();
+    std::fs::rename(&staged, directory.join(name)).unwrap();
+}
+
 fn cleanup_case(kind: &str, trigger: &str) {
     if !fixture::namespace_launcher_is_usable() {
         return;
@@ -187,15 +194,15 @@ fn cleanup_case(kind: &str, trigger: &str) {
     match trigger {
         "exit" | "failure" => {
             let code = if trigger == "failure" { "17" } else { "0" };
-            std::fs::write(
-                directory.join(if kind == "agent" {
+            publish_release(
+                &directory,
+                if kind == "agent" {
                     "release"
                 } else {
                     "agent-release"
-                }),
+                },
                 code,
-            )
-            .unwrap();
+            );
         }
         "cancel" => {
             // SAFETY: the handle still owns the live Box process.
@@ -300,7 +307,7 @@ fn captured_tool_case(release: Option<i32>) {
     running.observe();
     let agent_tree = running.descendants.clone();
     if let Some(code) = release {
-        std::fs::write(directory.join("release"), code.to_string()).unwrap();
+        publish_release(&directory, "release", &code.to_string());
     }
     let deadline = Instant::now() + Duration::from_secs(40);
     while std::fs::read_to_string(directory.join("after"))
@@ -344,7 +351,7 @@ fn captured_tool_case(release: Option<i32>) {
     running.descendants = stopped;
     running.assert_stopped();
     running.descendants = active;
-    std::fs::write(directory.join("agent-release"), b"0").unwrap();
+    publish_release(&directory, "agent-release", "0");
     assert!(running.finish().success());
 }
 

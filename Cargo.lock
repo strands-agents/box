@@ -4346,6 +4346,7 @@ dependencies = [
  "rcgen",
  "ring",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -4432,9 +4433,10 @@ dependencies = [
 [[package]]
 name = "strands-shell"
 version = "0.0.0"
-source = "git+https://github.com/strands-agents/shell?rev=39daa83d7f155d5b164f794f783e35598f49064e#39daa83d7f155d5b164f794f783e35598f49064e"
+source = "git+https://github.com/strands-agents/shell?rev=754a534e49f54c9a02e76331280a10fd545fa2c3#754a534e49f54c9a02e76331280a10fd545fa2c3"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "bytes",
  "inventory",
  "jaq-core",
@@ -4457,7 +4459,7 @@ dependencies = [
 [[package]]
 name = "strands-shell-macros"
 version = "0.1.0"
-source = "git+https://github.com/strands-agents/shell?rev=39daa83d7f155d5b164f794f783e35598f49064e#39daa83d7f155d5b164f794f783e35598f49064e"
+source = "git+https://github.com/strands-agents/shell?rev=754a534e49f54c9a02e76331280a10fd545fa2c3#754a534e49f54c9a02e76331280a10fd545fa2c3"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -43,11 +43,12 @@ Rules:
 
 ## Before you start
 
-Box supports macOS on Apple silicon and Linux ARM64 (64-bit Arm). Linux x86-64 builds require no environment opt-in.
+Box supports macOS on Apple silicon, Linux ARM64 (64-bit Arm), and Linux x86-64.
+Linux x86-64 builds require no environment opt-in.
 Check the [macOS requirements](./macos-requirements.md) for the release package, workload dependencies, and startup checks.
 Linux release executables are built on Amazon Linux 2023. Check the [Linux requirements](./linux-requirements.md) for required libraries, permissions to create the sandbox, and tested configurations.
 [Step 1](#step-1-download-box) installs Box on either platform.
-The Strands CLI walkthrough in steps 2–8 uses macOS. For that walkthrough, you need:
+The Strands CLI walkthrough in steps 2 to 8 uses macOS. For that walkthrough, you need:
 
 - A Mac with Apple silicon and macOS 15 or later.
 - Node.js 22.21 or later from Homebrew: `brew install node`.
@@ -96,7 +97,7 @@ Box has no runtime environment opt-in for ARM64 or x86-64.
 
 After installation, run the [native Linux example](./linux-requirements.md#run-a-native-linux-example) to check sandbox startup and file access without model credentials.
 For a cloud workload, continue with the [Amazon EKS coding example](tutorials/eks.md) or the [AgentCore Runtime shipment example](tutorials/agentcore-runtime.md).
-Steps 2–8 below follow the macOS Strands CLI example.
+Steps 2 to 8 below follow the macOS Strands CLI example.
 
 Check the [Linux requirements](./linux-requirements.md) before running a workload; a successful `box --version` does not test sandbox startup.
 Use the [platform comparison](../design/platform-differences.md) when adapting a macOS configuration.
@@ -366,7 +367,7 @@ Example output:
 
 ```text
 deny    net:connect   telemetry.strandsagents.com
-deny    shell:spawn   /usr/bin/uname -s
+permit  shell:exec    uname -s
 permit  shell:exec    pwd
 permit  net:connect   bedrock-runtime.us-west-2.amazonaws.com
 permit  http:request  bedrock-runtime.us-west-2.amazonaws.com
@@ -383,11 +384,11 @@ deny    fs:write      ~/box-tutorial/my-project/README.md
 Notice that each model call results in a `net:connect` and an `http:request`, and each command
 results in a `shell:exec`, plus an `fs:` decision for every file it touches.
 
-The box's shell has `cat`, `printf`, `ls`, and about thirty other commands built in. Running any
-other program is a `shell:spawn`, and this policy allows none, so the box refused the `uname` that
-the CLI runs when it starts. The box also refused the CLI's own version ping, because the policy
-names no host but Bedrock. Nothing you typed asked for either one, which is the point: the log holds
-what the agent did on its own as well as what you asked for.
+The box's shell has `cat`, `printf`, `ls`, `uname`, and about thirty other commands built in, so
+the `uname` that the CLI runs when it starts is a `shell:exec`. Running any other program is a
+`shell:spawn`, and this policy allows none. The box refused the CLI's own version ping, because the
+policy names no host but Bedrock. Nothing you typed asked for the `uname` or the ping, which is the
+point: the log holds what the agent did on its own as well as what you asked for.
 
 ## Step 8. Allow the write
 

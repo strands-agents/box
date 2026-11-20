@@ -11,13 +11,14 @@ not rename during the freeze.
 
 ## Public Contract
 
-The façade exports 36 names (`src/lib.rs`): 31 unconditional, and 5 behind the default-on
-`tls-intercept` feature — `BackendDial`, `MitmConfig`, `MitmHandle`, `MitmInterceptor`,
-`ResponseLimits` — which stay behind it. `BackendDial` is a `MitmConfig.backends` entry, consumed by
-`strands-box`'s `run/hosted.rs`. `ReplyObserver` is exported for `policy`'s egress adapter, which
+The façade exports 37 names (`src/lib.rs`): 31 unconditional, and 6 behind the default-on
+`tls-intercept` feature — `BackendDial`, `HostRoots`, `MitmConfig`, `MitmHandle`, `MitmInterceptor`,
+`ResponseLimits` — which stay behind it. `BackendDial` is a `MitmConfig.backends` entry, and
+`HostRoots` what `MitmHandle::upstream_host_roots` reports, both consumed by `strands-box`'s
+`run/hosted.rs`. `ReplyObserver` is exported for `policy`'s egress adapter, which
 records how an HTTP MCP tool call ended. `audit::Decision` exits as `AuditDecision`. `normalize_host`
 and `is_bindable_host` are the one host spelling, exported for `policy::spelling`, which refuses a
-host literal no bound host can equal. A 37th name needs a named external caller.
+host literal no bound host can equal. A 38th name needs a named external caller.
 
 - Keep implementation modules private, re-export the supported surface from `src/lib.rs`, and keep
   `#![warn(missing_docs, unreachable_pub)]` enabled.
@@ -46,6 +47,12 @@ The gateway holds no destination deny list. A metadata or link-local address is 
 `forbid` on `context.input.ip4` or `context.input.ip6`, decided on the pinned address
 ([metadata protection is policy](../../docs/design/decisions.md#the-ssrf-and-metadata-floor-is-compiled-beneath-policy)).
 
+- **`host.box.internal` adds two exact, approved rules.** `is_own_listener` refuses a dial to the
+  gateway's own address before policy (deny-only; do not grow it into a list), and the plaintext
+  floor admits a credential only for `HOST_LOOPBACK_NAME` mapped to loopback, with no backend and
+  every matching route naming it exactly. Keep this spelling equal to `strands-box`'s
+  ([own listener](../../docs/design/decisions.md#the-gateway-never-dials-its-own-listener),
+  [credentials require TLS](../../docs/design/decisions.md#a-secret-rides-only-tls)).
 - **`CapabilitySet` holds the credential mutators, not a second authority.** A capability returns
   its mutations or a fault, and it has **no allow**. The fold applies the mutations only in the
   *absence* of a fault.
@@ -84,7 +91,7 @@ The capability modules carry no authority.
 
 Three divergences from `docs/conventions.md` are live, and none is license to rename:
 
-- No root noun: 36 exports, no single type reached by one verb, `Interceptor` a one-method port, and
+- No root noun: 37 exports, no single type reached by one verb, `Interceptor` a one-method port, and
   `MitmInterceptor::start` taking three arguments and returning `MitmHandle`.
 - A bare `Emitter` export; `credentials` demoted its same-named trait to `pub(crate)`.
 - `Mitm*` states the mechanism, and `ProxyError`'s "proxy" strings diverge from the crate name.
