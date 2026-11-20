@@ -31,7 +31,7 @@ pub use tls::HostRoots;
 /// Size limits for captured requests and MCP catalog responses.
 #[derive(Debug, Clone)]
 pub struct ResponseLimits {
-    /// Maximum captured request or processed `tools/list` body bytes before a `ResponseLimit` error.
+    /// Maximum captured request or processed `tools/list` body bytes.
     pub max_body_bytes: usize,
 }
 
