@@ -96,6 +96,11 @@ host_case!(
     "e=; rm -rf \"$e\"; unset u; rm -rf \"$u\"",
     |folder, ran| {
         assert_eq!(ran.out.status, 0, "{}", ran.out.stderr);
+        assert_eq!(
+            ran.paths,
+            Vec::<String>::new(),
+            "an empty path reaches no effect"
+        );
         assert!(folder.exists("dir/inner.txt"), "the cwd is kept");
         assert!(
             folder.outside.join("host.txt").exists(),
