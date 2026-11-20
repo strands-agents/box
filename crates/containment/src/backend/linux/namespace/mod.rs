@@ -1686,6 +1686,56 @@ mod tests {
     }
 
     #[test]
+    fn a_file_lists_its_attribute_names_but_reads_no_value_under_the_filters() {
+        let directory = tempfile::tempdir().expect("create the xattr fixture");
+        let file = directory.path().join("wheel.whl");
+        std::fs::write(&file, "wheel").expect("write the xattr fixture");
+        let path = std::ffi::CString::new(file.as_os_str().as_encoded_bytes()).unwrap();
+        let held = std::fs::File::open(&file).expect("open the xattr fixture");
+        let descriptor = std::os::fd::AsRawFd::as_raw_fd(&held);
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        let outcome = in_filtered_child(&filters, || {
+            let answer = |result: libc::ssize_t| {
+                if result >= 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error().raw_os_error())
+                }
+            };
+            // SAFETY: the path stays live, and a null buffer of size 0 asks only for the length.
+            if answer(unsafe { libc::listxattr(path.as_ptr(), std::ptr::null_mut(), 0) }).is_err() {
+                return 10;
+            }
+            // SAFETY: as above.
+            if answer(unsafe { libc::llistxattr(path.as_ptr(), std::ptr::null_mut(), 0) }).is_err()
+            {
+                return 11;
+            }
+            // SAFETY: the descriptor is the parent's open file, inherited by this child.
+            if answer(unsafe { libc::flistxattr(descriptor, std::ptr::null_mut(), 0) }).is_err() {
+                return 12;
+            }
+            let name = c"user.box";
+            // SAFETY: both strings stay live, and a null buffer of size 0 asks only for the length.
+            let value =
+                unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+            if answer(value) != Err(Some(libc::EPERM)) {
+                return 13;
+            }
+            0
+        });
+        drop(held);
+        assert_eq!(
+            outcome, 0,
+            "10/11/12 = listxattr, llistxattr or flistxattr was refused (EPERM fails Python's \
+             shutil.copy2, which treats only ENOTSUP, ENODATA and EINVAL as no attributes), \
+             13 = getxattr was not refused with EPERM"
+        );
+    }
+
+    #[test]
     fn select_waits_on_held_descriptors_under_the_filters() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
