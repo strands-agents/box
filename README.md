@@ -46,7 +46,7 @@ Box's interpreters and gateways share an event history, so rules can use earlier
 actions and elapsed time to decide what is allowed next. For example, a file read
 through Shell or Python can cause the gateway to deny a later outbound HTTP request.
 
-**Preview:** Box supports local execution on Linux ARM64 and macOS with Apple silicon.
+**Preview:** Box supports local execution on Linux ARM64, Linux x86-64, and macOS with Apple silicon.
 Linux x86-64 builds start without an environment opt-in. See the [Linux download instructions](docs/user/getting-started.md#linux)
 for release selection and the [Linux requirements](docs/user/linux-requirements.md) for tested configurations.
 We welcome feedback through [GitHub issues](https://github.com/strands-agents/box/issues).
