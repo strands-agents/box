@@ -384,7 +384,7 @@ A request inside a `CONNECT` that the gateway can't read gets an HTTP 400 with t
 body says why, such as `response limit exceeded: body length exceeds limit 16777216` for a body over
 the request limit, or `intercept error: malformed Connection header`. Nothing reaches the server.
 
-A request the gateway doesn't refuse, but can't complete, gets an HTTP 502 with the header
+A request the gateway doesn't refuse but can't complete gets an HTTP 502 with the header
 `x-strands-box-egress: failed`. The body says why, for example:
 
 | Body | Cause |

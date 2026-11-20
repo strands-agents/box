@@ -104,7 +104,7 @@ where
     B: hyper::body::Body<Data = bytes::Bytes>,
     B::Error: std::fmt::Display,
 {
-    if let Some(kind) = gateway_origin(response.headers()) {
+    if let Some(kind) = gateway_error_kind(response.headers()) {
         return Err(read_gateway_error(kind, response.into_body()).await);
     }
     let status = response.status();
@@ -130,7 +130,7 @@ where
 
 /// The error kind of a response the gateway wrote, or `None` for one it relayed: `PermissionDenied`
 /// for a refusal, so `curl` exits 1, and `Other` for a failure, so `curl` exits 6.
-fn gateway_origin(headers: &hyper::HeaderMap) -> Option<io::ErrorKind> {
+fn gateway_error_kind(headers: &hyper::HeaderMap) -> Option<io::ErrorKind> {
     let origin = headers.get(egress_gateway::PROXY_ORIGIN_HEADER)?;
     Some(if origin == egress_gateway::PROXY_ORIGIN_VALUE {
         io::ErrorKind::PermissionDenied

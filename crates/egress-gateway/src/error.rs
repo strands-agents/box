@@ -45,11 +45,11 @@ pub enum ProxyError {
 /// never renders it.
 pub const PROXY_ORIGIN_HEADER: &str = "x-strands-box-egress";
 
-/// The [`PROXY_ORIGIN_HEADER`] value on a request the gateway refused.
+/// The [`PROXY_ORIGIN_HEADER`] value on a refusal the gateway writes.
 pub const PROXY_ORIGIN_VALUE: &str = "refused";
 
-/// The [`PROXY_ORIGIN_HEADER`] value on a request the gateway did not refuse, but could not
-/// complete.
+/// The [`PROXY_ORIGIN_HEADER`] value on a failure the gateway writes, for a request it did not
+/// refuse but could not complete.
 pub(crate) const PROXY_FAILURE_VALUE: &str = "failed";
 
 impl ProxyError {

@@ -176,7 +176,7 @@ that says why. A `net:connect` refusal of a `CONNECT` arrives before the `200`, 
 starts TLS. A policy refusal of a request to an HTTP MCP server gets a JSON-RPC error body. A
 request inside a `CONNECT` that the gateway can't read gets a 400 with the same header.
 
-A request the gateway doesn't refuse, but can't complete, gets a 502 with the header
+A request the gateway doesn't refuse but can't complete gets a 502 with the header
 `x-strands-box-egress: failed`, and a body that says why. The header says that the gateway wrote
 the response. It doesn't say whether the request reached the server.
 
