@@ -327,9 +327,6 @@ by reading `src/` belongs in `src/` — the README describes the shape.
       the release gap, and it is not architecture-dependent. **Re-run that sweep on any release the box
       has not seen**; `sandbox_init` reports one unbound name at a time, so iterating on box launches
       costs one host cycle per name.
-    - **The four `ipc-posix-shm-*` names came after that sweep and are not in it.** Boxes carrying
-      them start on GitHub's `macos-26-arm64` runner, and Apple's own profiles on macOS 26.7 use all
-      four. macOS 14 and 15 are unmeasured, so re-run the sweep there.
     - **The defect and the fix are measured end to end on all four hosts.** With the guard reverted,
       `strands-box run` exits 1 with
       `unbound variable: file-graft at <input string>, line 289, column 7` and
@@ -411,24 +408,6 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     refusal are both non-zero and a retired service would make the assertion vacuous. Guard:
     `privileged_mach_services_remain_denied`, and `containment-test-probe --uncontained` is the
     control mode.
-- **The macOS agent also reaches one POSIX shared-memory name, libomp's
-  `__KMP_REGISTERED_LIB_<pid>`, added for issue 379.** `ipc-posix-shm-write-create`, `-read-data`,
-  `-write-data` and `-write-unlink` match it with the regex `^/?__KMP_REGISTERED_LIB_[0-9]+$`.
-  libomp 15 and older abort at load without it, so torch does. The cost is wider than the box:
-  - **The name matches for every PID**, including PIDs no process holds yet, and an object lasts
-    until something unlinks it or the host restarts. So a workload can write a host-global object
-    that no filesystem list grants, and it outlives the box.
-  - **A workload can make a later host process abort.** It leaves an object holding text libomp
-    can't parse at a PID not yet in use. A host process that later gets that PID and loads libomp
-    finds the object, fails to parse it, and stops with `OMP: Error #15` (duplicate library) unless
-    `KMP_DUPLICATE_LIB_OK` is set. Read from LLVM's `kmp_runtime.cpp` in releases 15 and 19, which
-    both open the object before anything else. An object a killed box leaves behind is harmless:
-    its address check fails, and libomp unlinks it and retries.
-  - **Reading another process's object** reveals one address in that process and its libomp's file
-    name, and nothing else.
-  - **It can't be narrower.** SBPL has no per-PID filter, and libomp has no switch to skip the
-    object. Guards: `the_profile_reaches_only_openmp_registration_shared_memory`, and CN-P-03 in
-    `test-integ`, which also shows that another name and a suffixed name stay refused.
 - **`link(2)` on `/private/etc/passwd` never returns on macOS 26.6.2**, inside a box and outside one.
   The file carries `UF_COMPRESSED`. This is a host quirk rather than a containment result, and it
   cost an hour: use `/private/etc/hosts` as the ungranted hard-link source instead.
