@@ -125,9 +125,13 @@ It uses a five-second deadline for descendant cleanup and callback draining.
 Startup checks subscriptions and removes path mutes that would suppress required events.
 It refuses startup if required events remain muted or any process mute exists.
 
-The signed tests cover detached-child cleanup and durable history across mode changes.
-They do not establish enforcement after the trusted Box process crashes or validate every shutdown failure.
-Production use still requires further review and tests for those failures.
+Native policy requires the trusted Box process to remain alive. On macOS, an uncatchable
+termination such as `SIGKILL` can leave a descendant running. That descendant can perform new
+file operations within its filesystem grants without Dogwood checks, even when policy denied
+those operations before Box stopped. Normal shutdown cleanup does not protect this case.
+
+The signed tests cover normal detached-child cleanup and durable history across mode changes.
+Standard-release support still requires the remaining failure review and tests.
 
 ### Linux ARM64
 
@@ -151,6 +155,31 @@ Ordinary symbolic links and parent components (`..`) resolve inside the captured
 Policy checks use the resolved object, and effects use its pinned descriptor or parent directory.
 `O_NOFOLLOW` preserves the final-link restriction. Kernel magic links remain restricted.
 Other unsupported open flags and file kinds receive a refusal.
+
+Hard links are different names for the same file contents. Box checks the requested name against
+filesystem grants and policy. Denying one name does not deny every link to that file. An allowed
+write through another name changes the shared contents, including contents visible through a denied
+name or a name outside the workload grants. Those other names do not become accessible.
+
+Native entry handling has these limits in addition to baseline containment:
+
+- `renameat2` is supported only with zero flags. Box refuses nonzero flags, including
+  `RENAME_NOREPLACE` (refuse an existing destination), even when ordinary containment permits them.
+  GNU `mv` can request `RENAME_NOREPLACE` even for a plain move to a new name. With native
+  filesystem policy enabled, Box refuses that request with a permission error even when
+  filesystem grants and policy would permit the move.
+- A rename cannot replace an existing directory, including an empty directory. Moving a directory
+  to a new name is supported.
+- File and directory creation accept only the ordinary permission bits (`0000` through `0777`).
+  Native checks refuse creation with the sticky bit. Baseline containment already refuses
+  the set-group-ID and set-user-ID bits, whether native checks are enabled or disabled.
+
+These operations are refused before a Dogwood decision or file effect.
+The workload receives an operating-system permission error; the source and destination entries remain unchanged.
+
+For native rename cases, the [comparison suite](../dev/linux-native-tests.md#compare-shell-and-native-policy-events)
+uses a test program that calls `renameat` directly; it does not execute GNU `mv`.
+Its permitted rename cases do not establish that GNU `mv` works with native filesystem policy.
 
 An existing descriptor can carry later reads, writes, or directory listings without another Dogwood check.
 Linux permission changes remain subject to filesystem grants, without a fresh Dogwood permission-change check.
@@ -295,7 +324,8 @@ Read the recorded operation and outcome instead of treating every allow as a com
 
 The shutdown path terminates tracked descendants, including detached children, before interception stops.
 On macOS, descendant cleanup and callback draining share a five-second deadline.
-Tests cover normal detached-child cleanup, but not every shutdown failure or enforcement after the trusted process crashes.
+This describes normal shutdown. On macOS, an uncatchable termination such as `SIGKILL` can leave
+a descendant running without native policy checks; its filesystem grants still apply.
 
 ### Can I immediately return to an older binary?
 
