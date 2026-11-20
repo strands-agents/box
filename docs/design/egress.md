@@ -195,8 +195,9 @@ Monty `fetch()` don't refuse the name, so policy decides their requests too. See
 [`host.box.internal` names the surrounding OS's
 loopback](decisions.md#host-box-internal-names-the-surrounding-oss-loopback).
 
-Only `http://` works in practice: on `https://` the gateway checks the local service's certificate
-against public roots. Under a containerized Box, the name is the container's loopback.
+Only `http://` works in practice: on `https://` the gateway checks the local service's
+certificate for `host.box.internal` against its trusted roots, which a local service seldom passes.
+Under a containerized Box, the name is the container's loopback.
 
 The gateway also refuses, before policy, a dial to its own listening address in any local spelling,
 because it would connect to itself. See [the gateway never dials its own

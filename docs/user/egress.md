@@ -259,7 +259,7 @@ secret goes to whatever process holds that port: start the service before the ag
 can't use an `[[agent.ingress]]` port, because that port leads back to the agent.
 
 - Use `http://`. An `https://` request fails the gateway's certificate check, because a local
-  service seldom has a public certificate for `host.box.internal`.
+  service seldom has a trusted certificate for `host.box.internal`.
 - The name is IPv4 `127.0.0.1` only, so a service on `::1` alone is out of reach.
 - When Box runs in a container, the name reaches the container's loopback.
 
