@@ -1332,15 +1332,12 @@ async fn history_failed(snapshot: impl Fn() -> policy::HistoryFlushSnapshot) -> 
     }
 }
 
-/// The reserved name a box process uses for a service on the surrounding OS's loopback.
-const HOST_LOOPBACK_NAME: &str = "host.box.internal";
-
 /// The gateway's fixed address map, which sends the reserved loopback name to `127.0.0.1` alone.
 fn host_loopback_overrides() -> Vec<(String, std::net::IpAddr)> {
     // Policy decides the name before the map applies, and `127.0.0.1` after it
     // (docs/design/decisions.md#host-box-internal-names-the-surrounding-oss-loopback).
     vec![(
-        HOST_LOOPBACK_NAME.to_string(),
+        crate::record::config::egress::HOST_LOOPBACK_NAME.to_string(),
         std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
     )]
 }

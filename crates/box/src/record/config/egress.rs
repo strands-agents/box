@@ -165,8 +165,8 @@ pub(super) fn validate_egress_and_remote(
     validate_pairs(&union_pairs(egress, remote_mcp), sources)
 }
 
-/// The reserved name of the surrounding OS's loopback, the one host a plaintext secret may reach.
-const HOST_LOOPBACK_NAME: &str = "host.box.internal";
+/// The reserved name of the surrounding OS's loopback, which Box maps for the gateway and guards here.
+pub(crate) const HOST_LOOPBACK_NAME: &str = "host.box.internal";
 
 /// Refuse a secret on `host.box.internal` that names no port, or names a port that leads back to
 /// the agent: an `[[agent.ingress]]` `listen` port or `workload_port`.

@@ -57,8 +57,9 @@ The gateway holds no destination deny list. A metadata or link-local address is 
   credential on plain HTTP only for `HOST_LOOPBACK_NAME`, mapped by a `dns_overrides` entry to a
   loopback address, with no backend, and with every matching pattern naming the host exactly
   ([credentials require TLS](../../docs/design/decisions.md#a-secret-rides-only-tls)). A wildcard
-  route, a literal loopback address, and a re-route each still refuse. Box's `run/hosted.rs` sets
-  the mapping and spells the name a second time; keep the two spellings equal.
+  route, a literal loopback address, and a re-route each still refuse. The name is spelled once
+  here and once in `strands-box` (`record::config::egress::HOST_LOOPBACK_NAME`), which sets the
+  mapping and refuses a secret with no port or on an ingress port; keep the two spellings equal.
 - **`CapabilitySet` holds the credential mutators, not a second authority.** A capability returns
   its mutations or a fault, and it has **no allow**. The fold applies the mutations only in the
   *absence* of a fault.
