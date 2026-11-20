@@ -59,7 +59,11 @@ async fn connect_loopback(
     port: u16,
 ) -> Result<tokio::net::TcpStream, ConnectError> {
     match tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(loopback(port))).await {
-        Ok(Ok(stream)) => Ok(stream),
+        Ok(Ok(stream)) => {
+            // Best-effort: Nagle's algorithm off. The root `AGENTS.md` records why.
+            let _ = stream.set_nodelay(true);
+            Ok(stream)
+        }
         Ok(Err(_)) | Err(_) => Err(ConnectError::NotReady),
     }
 }
