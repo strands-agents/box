@@ -192,8 +192,11 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
     let completion = &completion;
     serve(client, completion, |request, head| async move {
         let max_body = state.config.response_limits.max_body_bytes;
-        let Ok(parsed) = http1::read_request(&head, request.into_body(), max_body).await else {
-            return Ok(WorkloadResponse::bare(400));
+        let parsed = match http1::read_request(&head, request.into_body(), max_body).await {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return Ok(WorkloadResponse::refusal(400, error.to_string().as_bytes()));
+            }
         };
         let forwarded = l7::forward_tls(
             parsed,

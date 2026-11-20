@@ -621,8 +621,8 @@ fn request_outcome_sink_failure_on_an_empty_reply_hides_the_interceptor_error() 
     assert!(!response.contains("test outcome sink failed"), "{response}");
 }
 
-/// A request in the tunnel that the gateway can't parse is the workload's own fault: it gets a
-/// 400, as a plain request does, and reaches no upstream.
+/// A request in the tunnel that the gateway can't parse is the workload's own fault: it gets the
+/// gateway's own 400, which says why, and reaches no upstream.
 #[test]
 fn a_malformed_request_in_the_tunnel_gets_a_400() {
     let host = "malformed.test";
@@ -638,6 +638,15 @@ fn a_malformed_request_in_the_tunnel_gets_a_400() {
     client.send_request("GET", "/", &[("Connection", "not a token")], b"");
     let response = client.read_response();
     assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
+    assert_eq!(
+        harness::header_value(&response, PROXY_ORIGIN_HEADER),
+        Some("refused"),
+        "{response}"
+    );
+    assert!(
+        response.contains("malformed Connection header"),
+        "{response}"
+    );
     assert_eq!(upstream.request_count(), 0, "nothing reaches the upstream");
 }
 

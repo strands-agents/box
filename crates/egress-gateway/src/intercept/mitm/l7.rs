@@ -591,7 +591,7 @@ pub(crate) struct WorkloadResponse {
 
 impl WorkloadResponse {
     /// A refusal the gateway originates.
-    fn refusal(status: u16, body: &[u8]) -> Self {
+    pub(crate) fn refusal(status: u16, body: &[u8]) -> Self {
         Self::originated(status, crate::PROXY_ORIGIN_VALUE, body)
     }
 
