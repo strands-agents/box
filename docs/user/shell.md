@@ -93,9 +93,9 @@ The Shell implements these, each in place of a program of the same name on the `
 - Text: `cat`, `grep`, `sed`, `head`, `tail`, `sort`, `uniq`, `cut`, `tr`, `wc`, `tee`.
 - Files: `ls`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `ln`, `chmod`, `touch`, `mktemp`, `readlink`.
 - Data and network: `jq`, `base64`, `curl`.
-- System: `uname`, which prints the host's values, except that `-p` and `-i` print `unknown`; and
-  `id`, which prints `$USER` with the Shell's own IDs. A program path such as `/usr/bin/uname -p`
-  runs the host program instead, as a `shell:spawn`.
+- System: `uname`, which prints the host's values, except that `-p` and `-i` print `unknown`;
+  `whoami`, which prints `$USER`; and `id`, which prints `$USER` with the Shell's own IDs. A program
+  path such as `/usr/bin/uname -p` runs the host program instead, as a `shell:spawn`.
 - Interpreters: `sh` and `lash`, which run a script in the Shell; `lua`; and `python` and
   `python3`, which run in Monty, Box's Python interpreter. With
   [`monty = false`](./config.md#monty), `python` and `python3` are external programs instead.

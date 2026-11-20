@@ -427,8 +427,8 @@ permit	fs:write	~/box-tutorial/my-project/NOTES.md	project_write
 Each model call is an `http:request` under `model_request`, on a connection that `model_connect`
 permitted. pi runs `ls -la` in the shell on its own ahead of most commands. That is one `shell:exec`
 under `shell_commands` and one `fs:read` per entry under `project_read`, the metadata of `.env`
-included. A command that names a program outside the shell's own commands, such as the `stat` and
-`whoami` pi ran once, is a `shell:spawn` that the policy's default refuses, and pi carries on.
+included. A command that names a program outside the shell's own commands, such as the `stat` pi
+ran once, is a `shell:spawn` that the policy's default refuses, and pi carries on.
 
 The log has no line for the files the `read`, `edit`, and `write` tools tried to open: the
 operating system refused those opens inside pi's own process, and the policy was never asked.
