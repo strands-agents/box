@@ -235,7 +235,33 @@ deployment that must pin the identity writes `aws://PROFILE` rather than a bare 
 > can write there is trusted**. That is the box's only mitigation for either form.
 
 The gateway adds a credential only over HTTPS. A plain `http://` request to a destination a route
-names is refused.
+names is refused. The one exception is a service on your own machine, at `host.box.internal`; see
+[a service on your machine](#a-service-on-your-machine).
+
+## A service on your machine
+
+Inside a box, `localhost` is the box itself. To reach a service on your machine's loopback, such as
+a local LLM gateway on `127.0.0.1:4259`, point the agent at `http://host.box.internal:4259`. The
+gateway sends the request to `127.0.0.1:4259`. No starter policy permits the name;
+[reach a service on your machine](policy.md#reach-a-service-on-your-machine) shows the rules.
+
+A route can add the service's key, also over plain `http://`:
+
+```toml
+[egress.local_llm]
+destinations = ["host.box.internal:4259"]
+secret.ref   = "env://LOCAL_LLM_KEY"
+```
+
+A secret rides a plain request only when every route that matches names `host.box.internal`
+exactly, with a port, and no backend re-routes it. Plain HTTP doesn't check who answers, so the
+secret goes to whatever process holds that port: start the service before the agent. The route
+can't use an `[[agent.ingress]]` port, because that port leads back to the agent.
+
+- Use `http://`. An `https://` request fails the gateway's certificate check, because a local
+  service seldom has a trusted certificate for `host.box.internal`.
+- The name is IPv4 `127.0.0.1` only, so a service on `::1` alone is out of reach.
+- When Box runs in a container, the name reaches the container's loopback.
 
 ## Networks that re-sign TLS
 
@@ -340,6 +366,7 @@ not upgrade `rust-lang.org`.
 | Two routes hold a placeholder in one variable with a different `phantom_prefix` | Set the same `phantom_prefix` on both. One variable holds one placeholder. |
 | A `[gateway] upgrade_http` entry names a scheme, a port, a path, a `*` wildcard, or an IP address, or holds another character | Write the host name alone, such as `static.rust-lang.org`. |
 | A `write` or `write_file` entry reaches a path that `SSL_CERT_FILE` or `SSL_CERT_DIR` names | Remove the write, subtract the path with a `deny` entry, or run `box run` without that variable. See [networks that re-sign TLS](#networks-that-re-sign-tls). |
+| A secret on `host.box.internal` names no port, or an `[[agent.ingress]]` port | Name the service's own port, such as `host.box.internal:4259`. |
 
 A request the gateway refuses while the box runs gets an HTTP 403 with the header
 `x-strands-box-egress: refused`. The body says why:
@@ -349,6 +376,7 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 | The policy decision, naming the rule | `net:connect` or `http:request` refused the request. |
 | `blocked by egress control` | A request to a route's destinations lacks the placeholder, carries a different value, or can't be signed. A bare `aws://` chain that resolved at startup but later stops (a rotated-away credential, a `credential_process` that begins to fail) can't be signed and refuses here; one that is already broken at startup stops `box run` instead. |
 | `credential not permitted on a plaintext request` | A plain `http://` request went to a route's destination, including one the gateway [upgrades to HTTPS](#upgrade-plain-http-to-https). |
+| `... the gateway's own listener ...` | The request named the gateway's own port. |
 | `request authority rejected` | The request inside a `CONNECT` named a different host. |
 | `response blocked by egress control` | The server sent a compressed response to a credentialed request. |
 

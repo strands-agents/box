@@ -190,8 +190,9 @@ flowchart TD
 ```
 
 1. The gateway adds a secret only to a request inside a `CONNECT` tunnel. It refuses a plain
-   `http://` request to a bound destination before it adds anything. See [credentials require
-   TLS](./decisions.md#a-secret-rides-only-tls).
+   `http://` request to a bound destination before it adds anything, except for a route that
+   names `host.box.internal` exactly. See [credentials
+   require TLS](./decisions.md#a-secret-rides-only-tls).
 2. The gateway gives the request to each route whose destination matches it. A request that matches
    no route goes on with nothing added.
 3. An `env://` route replaces the placeholder. A signed route signs the request. Either way, the
@@ -342,7 +343,7 @@ instead. With `always`, a plain `git ls-remote` works.
 |---|---|
 | No process in a box can read a real `env://` or `aws://` secret | A secret an operator writes into an `env` table |
 | A secret goes only to its route's destinations | A credential file a filesystem grant exposes, such as `~/.aws/credentials`. See [containment](./containment.md) |
-| A secret goes only over TLS | Keeping one route from one process in the box. Every process gets every route. |
+| A secret goes only over TLS, except to `host.box.internal` | Keeping one route from one process in the box. Every process gets every route. |
 | A copy of an `env://` secret in a response is redacted | A server that returns the secret in a form the scrub can't match, for example re-encoded |
 | A request goes out only if policy permits it | What a permitted request does with the credential at the server |
 

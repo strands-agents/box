@@ -2085,6 +2085,120 @@ fn a_credential_binding_does_not_grant_reachability() {
     assert!(!out.contains(REAL_SECRET));
 }
 
+/// A plain-HTTP service on the surrounding OS's loopback that records the `Authorization` header
+/// of each request.
+struct LoopbackService {
+    port: u16,
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl LoopbackService {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback service");
+        let port = listener.local_addr().expect("service addr").port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&head).into_owned();
+                let authorization = head
+                    .lines()
+                    .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+                    .and_then(|line| line.split_once(':'))
+                    .map(|(_, value)| value.trim().to_string())
+                    .unwrap_or_else(|| "<absent>".to_string());
+                recorded.lock().expect("service lock").push(authorization);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+            }
+        });
+        Self { port, seen }
+    }
+
+    fn authorizations(&self) -> Vec<String> {
+        self.seen.lock().expect("service lock").clone()
+    }
+}
+
+/// A workload script that sends one plain `GET` for `http://host.box.internal:<port>/` to the
+/// gateway with Bash's own socket, carrying the phantom, and prints the status line.
+fn plain_get_to_host_loopback(port: u16) -> String {
+    format!(
+        r#"proxy=${{HTTP_PROXY#http://}}; proxy=${{proxy%/}}
+exec 3<>"/dev/tcp/${{proxy%:*}}/${{proxy##*:}}"
+printf 'GET http://host.box.internal:{port}/v1/models HTTP/1.1\r\nHost: host.box.internal:{port}\r\nAuthorization: Bearer %s\r\nConnection: close\r\n\r\n' "${SECRET_VARIABLE}" >&3
+IFS= read -r status <&3; printf 'status=%s\n' "${{status%$'\r'}}""#
+    )
+}
+
+/// `host.box.internal` reaches the operator's loopback only on the port a policy permits, and a
+/// route that names it exactly adds its secret over plain HTTP.
+#[test]
+fn reserved_name_reaches_permitted_port_with_secret() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let permitted = LoopbackService::start();
+    let refused = LoopbackService::start();
+    let box_ = box_with_credentials(
+        "host-loopback",
+        &permit_egress_to("host.box.internal", permitted.port),
+        &format!(
+            "[egress.a]\ndestinations = [\"host.box.internal:{}\", \"host.box.internal:{}\"]\n\
+             secret.ref = \"env://{SECRET_VARIABLE}\"\n",
+            permitted.port, refused.port
+        ),
+    );
+
+    let output = workload(
+        &box_,
+        &format!(
+            "{}\n{}",
+            plain_get_to_host_loopback(permitted.port),
+            plain_get_to_host_loopback(refused.port)
+        ),
+    );
+    assert_ran(&output);
+    assert_eq!(
+        stdout(&output),
+        "status=HTTP/1.1 200 OK\nstatus=HTTP/1.1 403 Forbidden",
+        "the permitted port answers, and another port is refused: {output:?}"
+    );
+    assert_eq!(
+        permitted.authorizations(),
+        vec![format!("Bearer {REAL_SECRET}")],
+        "the service on the operator's loopback receives the real secret"
+    );
+    assert!(
+        refused.authorizations().is_empty(),
+        "a port no permit names is never dialed: {:?}",
+        refused.authorizations()
+    );
+    assert!(
+        !format!("{output:?}").contains(REAL_SECRET),
+        "the real secret never enters the box: {output:?}"
+    );
+}
+
+/// A secret on `host.box.internal` with no port is refused before the box starts, because the
+/// plain request would carry the real secret to whatever process holds the port.
+#[test]
+fn reserved_name_secret_needs_a_port() {
+    let (box_, output) = attempt_configure(
+        "host-loopback-no-port",
+        &permit_egress_to("host.box.internal", 80),
+        &target("host.box.internal"),
+    );
+    assert_refused(&box_, &output, &["host.box.internal", "with no port"]);
+}
+
 #[test]
 fn policy_explanations_reach_the_contained_http_and_remote_mcp_workload() {
     if !fixture::namespace_launcher_is_usable() {

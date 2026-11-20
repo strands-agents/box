@@ -82,6 +82,7 @@ impl Gateway {
             emitter: Box::new(StubEmitter::new()),
             effect_interceptor: policy,
             reply_copies: Arc::new(body::CopyBudget::for_limit(1024)),
+            listening: None,
         });
         let connections = Arc::new(Connections::new(max));
         let worker_connections = connections.clone();
