@@ -7,7 +7,7 @@ cells are in [`test-corpus/corpus.toml`](../../../test-corpus/corpus.toml). The 
 ## What the runner must do
 
 One command runs the corpus. Each cell reports pass, or the list of denials with their
-rule names. Results carry the `box` and Box Core versions, so a regression is attributable.
+rule names. Results should carry the `box` and Box Core versions, so a regression is attributable (see the gaps below).
 Making a red cell green is strands-agents/box#563, not the runner's job.
 
 ## Two layers
@@ -29,7 +29,7 @@ grader is not a model call.
 
 ## The grid
 
-`test-corpus/corpus.toml` holds the 67 cells as data, one `[[cell]]` per test. Each cell
+`test-corpus/corpus.toml` holds the cells as data, one `[[cell]]` per test. Each cell
 carries its id, section, gate, and machine state, the prompt a developer would type, the
 fixture the project starts as, the toolchains the cell needs, the hosts it legitimately
 reaches, and the pass check. The grid is data, which is what lets a runner read the corpus
@@ -55,7 +55,7 @@ script that stays inside it records no decision, and a clean scripted run with n
 GREEN. It is SKIP when the host cannot run it. The journal
 verdict (zero asks, zero blocks) is the one bar every cell in the corpus shares, and the
 denial list with rule names is what each cell reports. The per-cell
-task-outcome checks (each cell's `pass_check`) are specific to each of the 67 cells; encoding them as
+task-outcome checks (each cell's `pass_check`) are specific to each cell; encoding them as
 executable checks is listed under gaps.
 
 A cell is skipped, not failed, when its toolchain is absent, when it needs the lived-in
@@ -146,7 +146,7 @@ are a small set, not one per cell.
   `sqlite3`, `python3`, `poetry`, and `pixi` are those
   ([decision](decisions.md#the-scripted-layer-gates-pack-coverage)). go and gh have shipped
   packs, `@box/go` and `@box/gh`, which no default profile adds. The corpus profile loads `@box/go`. Only the
-  `corpus-github` profile loads it, so the other cells cannot reach its hosts. The GitHub cells run
+  `corpus-github` profile loads `@box/gh`, so the other cells cannot reach its hosts. The GitHub cells run
   under that profile, with the bench's read-only job token, which
   can read and never write, so a cell proves reach and never opens a real PR. Its `github` route puts
   `GH_TOKEN` on gh's calls to `api.github.com`, as `@box/gh`'s README shows. git gets no stand-in
@@ -191,7 +191,7 @@ Runner and corpus gaps, this task's own follow-ups.
   the lived-in image, a harness MCP table (TS-13), or docker (EV-08), which GitHub's macOS
   runners do not have. A new pack adds its cells' scripts, and `bench-toolchains.sh` installs its
   tool when the runner lacks it.
-- The 67 task-outcome checks are prose, and only 3 cells add an executable `check`, so GREEN
+- Most task-outcome checks are prose, and only a few cells add an executable `check`, so GREEN
   means "zero blocks", not yet "task done and zero blocks". A script that ends with its outcome check, as RS-02 and TS-07
   do, closes that gap for its cell.
 - Most fixtures are not built. The runner builds `empty`, `any-repo`, and EV-07's

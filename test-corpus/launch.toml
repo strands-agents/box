@@ -1,5 +1,6 @@
 # Launch checks: each starts one profile's agent in a box, with no model call, and records what
-# happens. CI runs them on every pull request with `run_corpus.py --layer launch`. Fields:
+# happens. CI runs them with `run_corpus.py --layer launch` on every pull request that changes the
+# CLI and is not a draft, and on every push to main. Fields:
 #
 #   id       The name --ids takes.
 #   profile  The profile it runs. A folder under test-corpus/profiles/ holds it, or `with` makes it.

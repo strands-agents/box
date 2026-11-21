@@ -1270,7 +1270,7 @@ fixture = "node-repo"
 needs = ["brew"]
 net = ["formulae.brew.sh", "ghcr.io"]
 pass_check = "jq installed by the run, then the correct list printed"
-note = "There is no brew tool pack (post-#136 a tool is a pack). The pass check must assert the run installed jq, not that the host already had it."
+note = "There is no brew tool pack, and a tool is a pack. The pass check must assert the run installed jq, not that the host already had it."
 
 [[cell]]
 id = "EV-06"

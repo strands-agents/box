@@ -12,7 +12,7 @@ runner reads that file, so the grid has no other copy.
 `corpus.toml` holds one `[[cell]]` per test. Each cell carries:
 
 - `id`, `section`, `gate`, `machine`: the cell's identity and when it runs. Sections 1 to
-  3 (36 cells) gate launch. Nine cells need the lived-in machine image.
+  3 gate launch. The cells marked `machine = "lived-in"` need the lived-in machine image.
 - `prompt`: the agent-layer prompt, as a developer would type it.
 - `script`: the bash the scripted layer runs as the agent (see [Write a script](#write-a-script)).
   A cell with no script is SKIP `no-scripted-commands` on that layer. A SKIP row names every
@@ -51,14 +51,14 @@ The corpus runs in two layers.
   shell run. Its other policy file, `downloads.dw`, also lets the box reach the Playwright and Prisma
   download sites, and the profile turns off Prisma's report to checkpoint.prisma.io.
 - The agent layer runs the real harness (Claude Code, Codex) against the prompt in its
-  headless mode. It is meant to run nightly on the Mac pool, where it catches the paths a model
-  takes. Nothing runs it on a schedule yet.
+  headless mode. `.github/workflows/workloads.yml` runs it each night on GitHub's macOS runners,
+  where it catches the paths a model takes ([`workloads-notes.md`](workloads-notes.md)).
 
 Launch checks, in `launch.toml`, sit beside the two layers. Each starts one profile's agent in a
 box with no model call. For Claude Code and Codex, `--version` shows that the agent's program runs
 in the box, and `mcp list` shows that it also reads the settings its profile gives it: settings it
 cannot read or parse fail the check. Neither shows that an MCP server works or that the agent can
-reach its model. They run with the scripted layer.
+reach its model. They run in the `macos` job of `cli-test.yml`, not on the bench.
 
 Feature checks, in `features.toml`, test that an agent in a box gets the setup you made on the
 host. [The feature checks](#the-feature-checks) describes them.
@@ -106,7 +106,7 @@ python3 test-corpus/run_corpus.py --layer launch --ids probe --install-profiles
 ```
 
 The engine suite in `crates/cli/app/tests/engine.rs` loads the same `probe` file as its `PROBE`
-profile. In CI, on every pull request that is not a draft and not docs-only, and every push to `main`, the `macos`
+profile. In CI, on every pull request that changes the CLI and is not a draft, and every push to `main`, the `macos`
 job of `cli-test.yml` runs the `probe` check and every launch check. The cells run in the corpus bench, below. None
 needs a model key.
 
@@ -163,7 +163,7 @@ and writes the table, and `test-corpus/bench-cells.sh` runs one job's cells.
 # one cell, by id
 python3 test-corpus/run_corpus.py --layer agent --profile claude --ids EV-07
 
-# a whole gate (the 36 launch cells)
+# a whole gate (the launch cells)
 python3 test-corpus/run_corpus.py --layer agent --profile claude --gate launch
 
 # the whole grid
@@ -239,7 +239,7 @@ python3 test-corpus/run_corpus.py --layer agent --profile claude --ids EV-07
 
 With no key, the agent layer stops before it runs anything and names the variable and the
 key path it checked. A nightly whose secret is missing or renamed then fails rather than
-reporting 67 green skips. Pass `--allow-no-credentials` to SKIP the agent cells instead.
+reporting a green skip for every cell. Pass `--allow-no-credentials` to SKIP the agent cells instead.
 The scripted layer needs no model and runs with a placeholder credential.
 
 ### Codex needs its native binary
@@ -284,7 +284,7 @@ Codex have no such profile, so their GitHub cells are SKIP `scripted-only-profil
 ### Filters
 
 `--ids A B C` runs named cells, or named launch checks with `--layer launch`. `--gate
-launch|first-update|follows` runs a gate, and `--section Python` runs one section. With neither, the runner runs all 67. A cell
+launch|first-update|follows` runs a gate, and `--section Python` runs one section. With neither, the runner runs every cell. A cell
 whose toolchain is absent, or that needs the lived-in image, an unpinned clone, or a fixture
 the runner does not build yet, is SKIP with the reason, so a bare laptop reports a small set
 of real results and skips the rest rather than failing them. On the scripted layer, a cell

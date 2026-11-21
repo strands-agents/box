@@ -51,7 +51,7 @@ Each cell gets two words. The first is about the box; the second is about the ag
    `gate`, or ticks `all` for every cell. A plan job (`bench.py plan --agent`) splits the cells into groups of 4, each
    group is its own macOS job that installs only the toolchains its cells need (the same steps as
    `corpus.yml`), and a report job (`bench.py workloads-report`) puts every cell in one table. One
-   job for all 63 would take hours and pass the job's time limit. A cell this runner cannot run is
+   job for all of them would take hours and pass the job's time limit. A cell this runner cannot run is
    SKIP with its reason, so `all` still lists every cell.
 6. **The agent profile has the corpus profile's packs.** `run_corpus.py --install-profiles` makes
    the `claude` profile with `claude,bedrock` plus every pack in
@@ -94,7 +94,7 @@ Each cell gets two words. The first is about the box; the second is about the ag
    `~/Library/Preferences`) is not caught on the box axis; the task grade shows it instead. This
    applies to the agent layer only: the scripted and launch layers compare with recorded results,
    and moving them to this rule is a separate change made with a fresh bench run.
-11. **A judge grades the cells that have no check.** Only 3 of the 63 cells have a `check`, and
+11. **A judge grades the cells that have no check.** Only a few cells have a `check`, and
    about half the rest cannot have one on a hosted runner (a live dev server, a private registry).
    Every cell has a `pass_check` sentence, so `--judge` hands it to a second model
    (`test-corpus/judge.py`, `BOX_JUDGE_MODEL`, Sonnet 5.5 on the US route) with the record of the
