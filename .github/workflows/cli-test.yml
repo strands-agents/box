@@ -1,8 +1,9 @@
 name: "CLI: Test"
 
-# The CLI's test jobs: build, test, and lint on Linux, and every macOS check in one job, including
-# the corpus's launch checks. A reusable workflow (`workflow_call`) that ci.yml calls. Every job
-# tests the commit that triggered the caller (`github.sha`).
+# The CLI's test jobs: build, test, and lint on Linux, every macOS check in one job (the corpus's
+# launch checks included), and the macOS package. A reusable workflow (`workflow_call`): ci.yml calls
+# it, and the release workflow calls it to gate a release. Every job tests `ref`, or the commit that
+# triggered the caller (`github.sha`) when `ref` is empty.
 #
 # `suite` picks what runs:
 #   all     every job below.
@@ -21,6 +22,16 @@ on:
         required: false
         type: boolean
         default: true
+      package:
+        description: "Build the macOS package and run it on each supported macOS."
+        required: false
+        type: boolean
+        default: false
+      ref:
+        description: "The commit to test. Empty tests github.sha."
+        required: false
+        type: string
+        default: ''
 
 env:
   CARGO_TERM_COLOR: always
@@ -58,7 +69,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
       # Ubuntu 24.04's AppArmor default refuses the user namespaces a box needs.
@@ -74,7 +85,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Format
         run: cargo fmt --all --check
@@ -120,7 +131,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
       - name: Install Rust
@@ -129,7 +140,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Build Box and helpers
         id: build
@@ -235,6 +246,16 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Install fish for installer tests
+        if: ${{ !cancelled() && inputs.suite == 'all' }}
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install fish
+
+      - name: Distribution scripts
+        if: ${{ !cancelled() && inputs.suite == 'all' }}
+        run: |
+          sh -n install.sh scripts/package_macos.sh
+          python3 scripts/test_distribution.py
+
       # Lint runs after the checks, so a lint failure does not skip them. Format runs on Linux only.
       - name: Clippy
         if: ${{ !cancelled() && inputs.suite == 'all' }}
@@ -275,3 +296,126 @@ jobs:
           else
             cargo test -p strands-box-cli -p strands-box-cli-pack-tests -p strands-box-cli-profile -p strands-box-cli-telemetry --all-features
           fi
+
+  # The macOS package, built as the release builds it, then run on each supported macOS.
+  package:
+    name: Build macOS package
+    needs: check-suite
+    if: inputs.macos && inputs.package && inputs.suite == 'all'
+    permissions:
+      contents: read
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Check build host
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 15
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Build archive
+        run: |
+          set -o pipefail
+          sh scripts/package_macos.sh "$RUNNER_TEMP/distribution" 2>&1 | tee "$RUNNER_TEMP/package-build.log"
+
+      - name: Save build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-package-build-log
+          path: ${{ runner.temp }}/package-build.log
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Save unsigned package
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-package
+          path: ${{ runner.temp }}/distribution/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Save package test and expected source inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-package-test
+          path: |
+            scripts/test_macos_package.py
+            scripts/smoke_telemetry.py
+            install.sh
+            crates/cli/app/Cargo.toml
+            Cargo.lock
+            resources/config.toml
+            resources/editing-box-profile.md
+            resources/packs/
+            resources/plugins/
+            resources/policies/
+            resources/starters/
+          if-no-files-found: error
+          retention-days: 7
+
+  verify-package:
+    name: Run macOS package (${{ matrix.os }})
+    needs: package
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download unsigned package
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-package
+          path: ${{ runner.temp }}/distribution
+
+      - name: Download package test and expected source inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-package-test
+          path: ${{ runner.temp }}/package-test
+
+      - name: Verify and run package
+        working-directory: ${{ runner.temp }}
+        env:
+          BOX_TEST_INSTALLATION_ID: ${{ vars.BOX_TEST_INSTALLATION_ID }}
+          # The package job checks out this commit, so release.json records it.
+          SOURCE_SHA: ${{ inputs.ref || github.sha }}
+        run: |
+          set -o pipefail
+          caller_home="$RUNNER_TEMP/package-test-home"
+          mkdir -p "$caller_home/.strands/box"
+          python3 -c 'import json, os; print("installation_id = " + json.dumps(os.environ.get("BOX_TEST_INSTALLATION_ID", "")))' \
+            > "$caller_home/.strands/box/installation.toml"
+          HOME="$caller_home" python3 "$RUNNER_TEMP/package-test/scripts/test_macos_package.py" \
+            "$RUNNER_TEMP/distribution/"*.tar.gz "$SOURCE_SHA" 2>&1 | tee "$RUNNER_TEMP/package-verification.log"
+
+      - name: Save verification log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-package-verification-${{ matrix.os }}
+          path: ${{ runner.temp }}/package-verification.log
+          if-no-files-found: error
+          retention-days: 7

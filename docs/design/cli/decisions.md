@@ -181,9 +181,9 @@ saved telemetry choices under the former home are not loaded.
 `crates/cli/app/Info.plist` gives `box` the identifier `com.amazon.strands.box-cli`, and the two
 helpers keep Box Core's `com.amazon.strands.box`. For ordinary packages,
 `scripts/macos-release-cli.py` signs all three in one request for Box Core's application, with
-Box Core's AWS role and notarization credential. No workflow in this repository runs it yet, so
-no workflow here releases `box`. The signing service signs each program with the identifier in its
-plist. macOS does not treat the CLI and Box Core's `box` as one program, for example in the
+Box Core's AWS role and notarization credential. The reusable `CLI release` workflow runs it, and
+`Release Box` calls that workflow, so one release publishes both Box Core and `box`. The signing
+service signs each program with the identifier in its plist. macOS does not treat the CLI and Box Core's `box` as one program, for example in the
 access list of a keychain item.
 
 A signed experimental native package keeps that identity separation and shared service setup.
@@ -208,8 +208,8 @@ CLI distribution profile. Local script tests do not establish that this permissi
 ### `box` supports macOS and Linux
 
 `box` runs on macOS on Apple silicon, and on Linux on aarch64 and x86_64. Box Core's Linux
-containment runs on both, with no opt-in. No release has an x86_64 archive yet, so on x86_64 you
-build `box` from source, and CI runs the engine suite only on macOS. Box
+containment runs on both, with no opt-in. A release publishes an x86_64 archive of `box` when
+`publish_linux_x86` is set, which it is by default, and CI runs the engine suite only on macOS. Box
 Core on Linux refuses a deny of an absent path, so on Linux `box run` creates an empty
 `<workspace>/.box` before the run, and the run denies it as on macOS.
 
