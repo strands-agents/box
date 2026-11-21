@@ -161,9 +161,10 @@ rule, a path in your home directory starts with `~/`, such as `~/src/shared-lib`
 `box` keeps the agent away from the files a later run or your own programs trust, but it does that
 by checking filesystem grants, not your rules. It refuses a profile or pack whose `write` entry
 reaches `~/.strands/box`, `~/.local/bin`, the folders `box` and its packs are installed in, or a
-program the box runs. The rules it writes forbid the shell to change `~/.strands/box`, the
-profile's files, and each `deny_write` folder, but nothing else in your home. `box` doesn't read the
-rules you write, so a broad write rule opens the rest, and the run starts with no warning:
+program the box runs. The rules it writes forbid the shell to change `~/.strands/box`,
+`~/.local/bin`, the profile's files, and each `deny_write` folder, but nothing else in your home.
+`box` doesn't read the rules you write, so a broad write rule opens the rest, and the run starts
+with no warning:
 
 ```text
 // policy-home.dw
@@ -172,17 +173,17 @@ permit (principal, action == Box::Action::"fs:write", resource)
 when { context.input.path like "~/*" };
 ```
 
-With this rule, the box's shell can change `~/.local/bin`, a folder on your `PATH`, or an agent's
-settings in your home, such as `~/.claude.json`, and a program you run later outside the box then
-runs what it wrote. Permit the folders the agent needs by name instead, as
+With this rule, the box's shell can change another folder on your `PATH`, such as `~/bin`, or an
+agent's settings in your home, such as `~/.claude.json`, and a program you run later outside the
+box then runs what it wrote. Permit the folders the agent needs by name instead, as
 [Give the agent another directory](profiles.md#give-the-agent-another-directory) shows. If a rule
 must stay broad, add a `forbid` for each place it must not reach, because a `forbid` wins over
 every `permit`:
 
 ```text
-@id("no_local_bin")
+@id("no_home_bin")
 forbid (principal, action in [Box::Action::"fs:write", Box::Action::"fs:delete", Box::Action::"fs:move"], resource)
-when { context.input.path like "~/.local/bin/*" };
+when { context.input.path like "~/bin/*" };
 ```
 
 ### Block a host
