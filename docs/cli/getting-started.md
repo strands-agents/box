@@ -14,8 +14,6 @@ listen only on localhost.
 
 - An Apple Silicon Mac with macOS 15 or later, or Linux on ARM64 or x86_64.
   [Install Box](install.md#requirements) lists what Linux needs.
-- The [GitHub CLI](https://cli.github.com/) (`gh`), signed in with `gh auth login`. The installer
-  downloads Box with it.
 - The [AWS CLI](https://aws.amazon.com/cli/), to look up a model ID and check your sign-in.
 - Claude Code from its native installer. The box starts the native executable, and the `npm`
   package is a Node script, so if you installed Claude Code with `npm`, reinstall it:

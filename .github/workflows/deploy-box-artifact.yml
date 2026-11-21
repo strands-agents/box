@@ -996,7 +996,7 @@ jobs:
             BOX_GITHUB_REPO=${GITHUB_REPOSITORY} BOX_VERSION=${NEW_TAG#v} sh
           \`\`\`
 
-          The installer verifies the \`box-cli-\` archive for your platform against \`SHA256SUMS.txt\`, and on macOS its Apple signature, then puts \`box\` on your \`PATH\`. It downloads through an authenticated [GitHub CLI](https://cli.github.com/), so run \`gh auth login\` first.
+          The installer verifies the \`box-cli-\` archive for your platform against \`SHA256SUMS.txt\`, and on macOS its Apple signature, then puts \`box\` on your \`PATH\`.
 
           ## Download Box Core
 

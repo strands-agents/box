@@ -201,10 +201,12 @@ add_path() {
     box_path_notice="${box_path_notice}${box_path_notice:+
 }Added box to \$PATH in $1"
 }
+# Releases download over HTTPS from public GitHub, so the installer needs no GitHub sign-in.
+fetch() { curl -fsSL --proto '=https' --tlsv1.2 "$@"; }
+release_url() { printf 'https://github.com/%s/releases/download/v%s/%s\n' "$box_repo" "$box_version" "$1"; }
 download() {
     if [ "$box_pretty" -eq 1 ] && [ "$1" = "$box_asset" ]; then
-        gh release download "v$box_version" --repo "$box_repo" --pattern "$1" --output "$2" \
-            > "$box_work/download.log" 2>&1 &
+        fetch -o "$2" "$(release_url "$1")" > "$box_work/download.log" 2>&1 &
         box_download_pid=$!
         progress 0 Downloading
         while kill -0 "$box_download_pid" 2>/dev/null; do
@@ -229,10 +231,10 @@ download() {
         box_download_pid=
         clear_progress
         cat "$box_work/download.log" >&2
-        die "cannot download $1 from $box_repo; check gh authentication and repository access"
+        die "cannot download $1 from release v$box_version of $box_repo"
     fi
-    gh release download "v$box_version" --repo "$box_repo" --pattern "$1" --output "$2" ||
-        die "cannot download $1 from $box_repo; check gh authentication and repository access"
+    fetch -o "$2" "$(release_url "$1")" ||
+        die "cannot download $1 from release v$box_version of $box_repo"
 }
 native_alias() {
     case "$1" in
@@ -355,7 +357,7 @@ case "$box_no_path" in 0|1) ;; *) die "BOX_NO_MODIFY_PATH must be 0 or 1" ;; esa
 # BOX_VERSION takes the release tag too (v0.3.0), as download.sh does.
 if [ "${BOX_VERSION+x}" = x ]; then BOX_VERSION=${BOX_VERSION#v}; version "$BOX_VERSION"; fi
 for box_tool in uname awk tar mktemp mkdir rmdir mv ln rm readlink find \
-    sort cmp stat chmod sed grep cat cp gh dirname wc sleep; do
+    sort cmp stat chmod sed grep cat cp curl dirname wc sleep; do
     need "$box_tool"
 done
 box_system=$(uname -s)
@@ -466,8 +468,11 @@ fi
 if [ "${BOX_VERSION+x}" = x ]; then
     box_version=$BOX_VERSION
 else
-    box_tag=$(gh release view --repo "$box_repo" --json tagName --jq .tagName) ||
-        die "cannot find the latest release in $box_repo; check gh authentication and repository access"
+    # GitHub redirects releases/latest to the latest release's tag page, never to a pre-release.
+    box_latest=$(fetch -I -o /dev/null -w '%{url_effective}' "https://github.com/$box_repo/releases/latest") ||
+        die "cannot find the latest release in $box_repo"
+    box_tag=${box_latest#"https://github.com/$box_repo/releases/tag/"}
+    [ "$box_tag" != "$box_latest" ] || die "cannot find the latest release in $box_repo"
     case "$box_tag" in v*) box_version=${box_tag#v} ;; *) die "expected a release tag such as v0.1.0" ;; esac
     version "$box_version"
 fi
@@ -517,8 +522,9 @@ if [ -t 2 ] && [ -z "${NO_COLOR-}" ] && [ -n "${TERM-}" ] && [ "$TERM" != dumb ]
     fi
 fi
 if [ "$box_pretty" -eq 1 ]; then
-    box_total=$(gh release view "v$box_version" --repo "$box_repo" --json assets \
-        --jq ".assets[] | select(.name == \"$box_asset\") | .size" 2>/dev/null) || box_total=0
+    box_total=$(fetch -I "$(release_url "$box_asset")" 2>/dev/null |
+        awk 'tolower($1) == "content-length:" { size = $2 } END { sub(/\r$/, "", size); print size }') ||
+        box_total=0
     case "$box_total" in ''|0*|*[!0-9]*) box_total=0 ;; esac
     [ "${#box_total}" -le 12 ] || box_total=0
     printf '\n%sInstalling%s box %sversion:%s %s\n' "$box_dim" "$box_reset" \

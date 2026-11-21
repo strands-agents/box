@@ -46,21 +46,23 @@ def install(archive, package, receipt, source_sha, evidence):
         prepare_installation(home)
         checksum = work / "SHA256SUMS.txt"
         checksum.write_text(f"{signed['output_sha256']}  {archive.name}\n")
-        gh = tools / "gh"
-        gh.write_text(f"""#!{sys.executable}
+        curl = tools / "curl"
+        curl.write_text(f"""#!{sys.executable}
 import json, pathlib, shutil, sys
 args = sys.argv[1:]
-if (len(args) != 9 or args[:5] != {["release", "download", "v" + version, "--repo", "strands-agents/box"]!r}
-        or args[5] != "--pattern" or args[7] != "--output"):
+prefix = {"https://github.com/strands-agents/box/releases/download/v" + version + "/"!r}
+if (len(args) != 7 or args[:4] != ["-fsSL", "--proto", "=https", "--tlsv1.2"] or args[4] != "-o"
+        or not args[6].startswith(prefix)):
     sys.exit("Unexpected installer download request")
+asset = args[6][len(prefix):]
 assets = {{{archive.name!r}: {str(archive)!r}, "SHA256SUMS.txt": {str(checksum)!r}}}
-if args[6] not in assets:
+if asset not in assets:
     sys.exit("Unexpected installer asset")
-shutil.copyfile(assets[args[6]], args[8])
+shutil.copyfile(assets[asset], args[5])
 with pathlib.Path({str(evidence / 'downloads.jsonl')!r}).open("a") as output:
-    print(json.dumps(dict(asset=args[6], source=assets[args[6]], destination=args[8])), file=output)
+    print(json.dumps(dict(asset=asset, source=assets[asset], destination=args[5])), file=output)
 """)
-        gh.chmod(0o755)
+        curl.chmod(0o755)
         environment = installer_environment(home, tools, temporary, version)
         record["environment"] = environment
         command = ["/bin/sh", str(ROOT / "install.sh")]

@@ -86,16 +86,16 @@ def install(archive, root, home, version):
     shutil.copyfile(archive.parent / "SHA256SUMS.txt", feed / "releases" / version / "SHA256SUMS.txt")
     tools = root / "tools"
     tools.mkdir()
-    gh = tools / "gh"
-    gh.write_text(f"""#!{sys.executable}
-import pathlib, shutil, sys
+    curl = tools / "curl"
+    curl.write_text(f"""#!{sys.executable}
+import pathlib, re, shutil, sys
 args = sys.argv[1:]
-assert args[:2] == ["release", "download"]
-asset = args[args.index("--pattern") + 1]
-source = pathlib.Path({str(feed)!r}) / "releases" / args[2].removeprefix("v") / asset
-shutil.copyfile(source, args[args.index("--output") + 1])
+match = re.fullmatch(r"https://github.com/[^/]+/[^/]+/releases/download/v([^/]+)/([^/]+)", args[-1])
+assert match and "-o" in args, args
+source = pathlib.Path({str(feed)!r}) / "releases" / match[1] / match[2]
+shutil.copyfile(source, args[args.index("-o") + 1])
 """)
-    gh.chmod(0o755)
+    curl.chmod(0o755)
     script = root / "install.sh"
     shutil.copyfile(ROOT / "install.sh", script)
     env = dict(HOME=str(home), SHELL="/bin/zsh", BOX_NO_MODIFY_PATH="1",

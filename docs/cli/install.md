@@ -11,14 +11,14 @@ The installer downloads a Box release from `strands-agents/box` on GitHub, check
 
 ## Requirements
 
-An Apple Silicon Mac with macOS 15 or later, and the [GitHub CLI](https://cli.github.com/).
-On Linux, ARM64 or x86_64, you need glibc 2.34 or later, `libgcc`, Python 3, the GitHub CLI,
-and GNU utilities (`coreutils`, `diffutils`, `findutils`, `tar`, `gzip`, `awk`, `sed`, and `grep`).
+An Apple Silicon Mac with macOS 15 or later. On Linux, ARM64 or x86_64, you need glibc 2.34 or
+later, `libgcc`, Python 3, `curl`, and GNU utilities (`coreutils`, `diffutils`, `findutils`, `tar`,
+`gzip`, `awk`, `sed`, and `grep`).
 See [How Linux differs](limitations.md#how-linux-differs) for what is different from a Mac.
 The installer refuses Intel Macs, older macOS versions, and other Linux architectures.
 
-The installer downloads through `gh`, so run `gh auth login` first. You don't need sudo, Rust, or
-a checkout of the source.
+The installer downloads releases from GitHub with `curl`, so you don't need a GitHub account. You
+don't need sudo, Rust, or a checkout of the source either.
 
 Install your agent, such as Claude Code, and set up its credentials first. The installer does
 neither.
@@ -119,7 +119,7 @@ one `current` points to.
 
 ## Install from a fork or an unsigned build
 
-To install from another repository, such as your own fork, name it in `BOX_GITHUB_REPO`. On
+To install from another public repository, such as your own fork, name it in `BOX_GITHUB_REPO`. On
 macOS, a release that isn't signed by the Box publisher, such as a fork's own build, also needs
 `BOX_ALLOW_UNSIGNED=1`:
 
@@ -181,6 +181,6 @@ from `# >>> Box PATH >>>` to `# <<< Box PATH <<<`. For fish, delete
 | Variable | What it does |
 | --- | --- |
 | `BOX_VERSION` | The release to install, such as `0.3.0-preview.1` or its tag `v0.3.0-preview.1`. Without it, the latest stable release. |
-| `BOX_GITHUB_REPO` | The GitHub repository that supplies releases, as `owner/repo`. Without it, `strands-agents/box`. |
+| `BOX_GITHUB_REPO` | The public GitHub repository that supplies releases, as `owner/repo`. Without it, `strands-agents/box`. |
 | `BOX_ALLOW_UNSIGNED` | `1` skips Apple's signature and Gatekeeper checks on macOS. It has no effect on Linux. |
 | `BOX_NO_MODIFY_PATH` | `1` leaves your shell's startup files alone. |

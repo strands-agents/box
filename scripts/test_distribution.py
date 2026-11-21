@@ -357,23 +357,35 @@ esac
         executable(self.tools / "getconf", """#!/bin/sh
 if [ "${TEST_GLIBC+x}" = x ]; then printf '%s\\n' "$TEST_GLIBC"; else exec /usr/bin/getconf "$@"; fi
 """)
-        executable(self.tools / "gh", f"""#!{sys.executable}
-import hashlib, json, os, pathlib, shutil, sys
+        executable(self.tools / "curl", f"""#!{sys.executable}
+import hashlib, json, os, pathlib, re, shutil, sys
 args = sys.argv[1:]
 root = pathlib.Path(os.environ["TEST_FEED"])
-with root.parent.joinpath("gh-calls").open("a") as log:
-    log.write(json.dumps(args) + "\\n")
-if os.environ.get("TEST_GH_FAILURE"): sys.exit(1)
-if args[:2] == ["release", "view"]:
-    print(os.environ.get("TEST_RELEASE_TAG", "v" + (root / "releases/latest").read_text().strip()))
+urls = [arg for arg in args if arg.startswith("https://")]
+assert len(urls) == 1 and "--proto" in args and args[args.index("--proto") + 1] == "=https", args
+url = urls[0]
+match = re.fullmatch(r"https://github.com/([^/]+/[^/]+)/releases/(latest|download/([^/]+)/([^/]+))", url)
+assert match, url
+repo, _, tag, asset = match.groups()
+head = "-I" in args
+call = (["latest", repo] if tag is None else
+        ["size" if head else "download", repo, tag, asset])
+destination = None if head else pathlib.Path(args[args.index("-o") + 1])
+if destination is not None:
+    call.append(str(destination))
+with root.parent.joinpath("github-calls").open("a") as log:
+    log.write(json.dumps(call) + "\\n")
+if os.environ.get("TEST_GITHUB_FAILURE"): sys.exit(22)
+if tag is None:
+    latest = os.environ.get("TEST_RELEASE_TAG", "v" + (root / "releases/latest").read_text().strip())
+    sys.stdout.write(f"https://github.com/{{repo}}/releases/tag/{{latest}}")
     sys.exit(0)
-assert args[:2] == ["release", "download"], args
-if os.environ.get("TEST_GH_DOWNLOAD_FAILURE"): sys.exit(1)
-asset = args[args.index("--pattern") + 1]
-source = root / "releases" / args[2].removeprefix("v") / asset
-destination = pathlib.Path(args[args.index("--output") + 1])
-repo = args[args.index("--repo") + 1]
-url = f"https://github.com/{{repo}}/releases/download/{{args[2]}}/{{asset}}"
+if os.environ.get("TEST_DOWNLOAD_FAILURE"): sys.exit(22)
+source = root / "releases" / tag.removeprefix("v") / asset
+if not source.is_file(): sys.exit(22)
+if head:
+    print(f"HTTP/2 200\\r\\ncontent-length: {{source.stat().st_size}}\\r\\n\\r")
+    sys.exit(0)
 shutil.copyfile(source, destination)
 captured = pathlib.Path(os.environ["TEST_DOWNLOADS"])
 captured.mkdir(exist_ok=True)
@@ -706,7 +718,7 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
                 result = self.run_install(success=False, TEST_OS=host, TEST_ARCH=architecture)
                 self.assertIn(message, result.stderr)
                 self.untouched()
-                self.assertFalse((self.root / "gh-calls").exists())
+                self.assertFalse((self.root / "github-calls").exists())
 
     @unittest.skipUnless(platform.system() == "Darwin", "macOS prerequisites")
     @category("Verification")
@@ -722,7 +734,7 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
                 result = self.run_install(success=False, TEST_MACOS=os_version, TEST_ARCH=architecture)
                 self.assertIn(message, result.stderr)
                 self.untouched()
-                self.assertFalse((self.root / "gh-calls").exists())
+                self.assertFalse((self.root / "github-calls").exists())
 
     @unittest.skipUnless(platform.system() == "Darwin", "Rosetta")
     def test_rosetta_selects_the_arm64_package(self):
@@ -741,7 +753,7 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
                 result = self.run_install(success=False, TEST_ARCH=architecture, TEST_GLIBC=libc)
                 self.assertIn("glibc 2.34 or later", result.stderr)
                 self.untouched()
-                self.assertFalse((self.root / "gh-calls").exists())
+                self.assertFalse((self.root / "github-calls").exists())
 
     @unittest.skipUnless(platform.system() == "Linux", "Linux installation")
     def test_linux_installs_without_apple_tools_or_unsigned_opt_in(self):
@@ -763,11 +775,11 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
         self.release("0.1.0")
         for architecture in ("x86_64", "amd64"):
             with self.subTest(architecture=architecture):
-                (self.root / "gh-calls").unlink(missing_ok=True)
+                (self.root / "github-calls").unlink(missing_ok=True)
                 self.run_install(TEST_ARCH=architecture, TEST_GLIBC="glibc 2.34")
                 self.assertEqual(self.current(), "0.1.0-x86_64-unknown-linux-gnu")
-                downloads = [json.loads(line) for line in (self.root / "gh-calls").read_text().splitlines()][1:]
-                self.assertEqual([call[call.index("--pattern") + 1] for call in downloads],
+                downloads = [json.loads(line) for line in (self.root / "github-calls").read_text().splitlines()][1:]
+                self.assertEqual([call[3] for call in downloads],
                                  ["SHA256SUMS.txt", "box-cli-v0.1.0-x86_64-unknown-linux-gnu.tar.gz"])
 
     @unittest.skipUnless(platform.system() == "Linux", "Linux shell default")
@@ -788,7 +800,7 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
         self.script.write_text(self.script.read_text().replace(f"BOX_TEAM_ID='{TEAM}'", "BOX_TEAM_ID=''"))
         self.run_install(success=False)
         self.untouched()
-        self.assertFalse((self.root / "gh-calls").exists())
+        self.assertFalse((self.root / "github-calls").exists())
 
     @category("Verification")
     @unittest.skipUnless(platform.system() == "Darwin", "Apple verification")
@@ -809,19 +821,16 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
                 self.run_install(success=True, BOX_GITHUB_REPO="someone/private-box",
                                  BOX_ALLOW_UNSIGNED="1", **selected)
                 self.assertEqual(self.current(), f"{expected}-{self.target}")
-        self.assertTrue((self.root / "gh-calls").is_file(), "the installer must call GitHub")
-        calls = [json.loads(line) for line in (self.root / "gh-calls").read_text().splitlines()]
-        self.assertEqual(calls[0], ["release", "view", "--repo", "someone/private-box",
-                                   "--json", "tagName", "--jq", ".tagName"])
+        self.assertTrue((self.root / "github-calls").is_file(), "the installer must call GitHub")
+        calls = [json.loads(line) for line in (self.root / "github-calls").read_text().splitlines()]
+        self.assertEqual(calls[0], ["latest", "someone/private-box"])
         downloads = calls[1:]
         self.assertEqual(len(downloads), 4)
         for call, selected, asset in zip(downloads, ("0.2.0", "0.2.0", "0.1.0", "0.1.0"),
                                        ("SHA256SUMS.txt", f"box-cli-v0.2.0-{self.target}.tar.gz",
                                         "SHA256SUMS.txt", f"box-v0.1.0-{self.target}.tar.gz")):
-            self.assertEqual(call[:7], ["release", "download", f"v{selected}", "--repo",
-                                       "someone/private-box", "--pattern", asset])
-            self.assertEqual(call[7], "--output")
-            self.assertIn(Path(call[8]).name, ("archive", "checksums"))
+            self.assertEqual(call[:4], ["download", "someone/private-box", f"v{selected}", asset])
+            self.assertIn(Path(call[4]).name, ("archive", "checksums"))
 
     def test_pinned_preview_installs_and_upgrades_to_stable(self):
         """A pinned preview uses the full version and can be replaced by a stable release"""
@@ -842,8 +851,8 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
         (self.feed / "releases/latest").write_text("0.1.0\n")
         self.run_install()
         self.assertEqual(self.current(), f"0.1.0-{self.target}")
-        calls = [json.loads(line) for line in (self.root / "gh-calls").read_text().splitlines()]
-        self.assertEqual(calls[0][:2], ["release", "view"])
+        calls = [json.loads(line) for line in (self.root / "github-calls").read_text().splitlines()]
+        self.assertEqual(calls[0][0], "latest")
         self.assertEqual({call[2] for call in calls[1:]}, {"v0.1.0"})
         self.run_install(BOX_VERSION="0.3.0-preview.1")
         self.assertEqual(self.current(), f"0.3.0-preview.1-{self.target}")
@@ -874,12 +883,12 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
             ({"BOX_VERSION": "0.1.0"}, f"SHA256SUMS.txt in release v0.1.0 lists no {asset}"),
         ):
             with self.subTest(selected=selected):
-                (self.root / "gh-calls").unlink()
+                (self.root / "github-calls").unlink()
                 result = self.run_install(success=False, **selected)
                 self.assertIn(message, result.stderr)
-                downloads = [json.loads(line) for line in (self.root / "gh-calls").read_text().splitlines()
-                             if json.loads(line)[:2] == ["release", "download"]]
-                self.assertEqual([call[call.index("--pattern") + 1] for call in downloads], ["SHA256SUMS.txt"])
+                downloads = [json.loads(line) for line in (self.root / "github-calls").read_text().splitlines()
+                             if json.loads(line)[0] == "download"]
+                self.assertEqual([call[3] for call in downloads], ["SHA256SUMS.txt"])
                 self.untouched()
 
     def test_a_release_with_both_archive_names_installs_box_cli(self):
@@ -888,10 +897,10 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
         self.release("0.1.0")
         checksums = self.feed / "releases/0.1.0/SHA256SUMS.txt"
         checksums.write_text(f"{'0' * 64}  box-v0.1.0-{self.target}.tar.gz\n" + checksums.read_text())
-        (self.root / "gh-calls").unlink(missing_ok=True)
+        (self.root / "github-calls").unlink(missing_ok=True)
         self.run_install(BOX_GITHUB_REPO="someone/private-box", BOX_ALLOW_UNSIGNED="1")
-        downloads = [json.loads(line) for line in (self.root / "gh-calls").read_text().splitlines()][1:]
-        self.assertEqual([call[call.index("--pattern") + 1] for call in downloads],
+        downloads = [json.loads(line) for line in (self.root / "github-calls").read_text().splitlines()][1:]
+        self.assertEqual([call[3] for call in downloads],
                          ["SHA256SUMS.txt", f"box-cli-v0.1.0-{self.target}.tar.gz"])
 
     def test_box_core_archives_are_never_the_older_name_fallback(self):
@@ -904,13 +913,13 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
             ("strands-agents/box", {"BOX_VERSION": "0.1.0"}, f"lists no box-cli-v0.1.0-{self.target}.tar.gz"),
         ):
             with self.subTest(repository=repository, selected=selected):
-                (self.root / "gh-calls").unlink(missing_ok=True)
+                (self.root / "github-calls").unlink(missing_ok=True)
                 result = self.run_install(success=False, BOX_GITHUB_REPO=repository,
                                           BOX_ALLOW_UNSIGNED="1", **selected)
                 self.assertIn(message, result.stderr)
-                downloads = [json.loads(line) for line in (self.root / "gh-calls").read_text().splitlines()
-                             if json.loads(line)[:2] == ["release", "download"]]
-                self.assertEqual([call[call.index("--pattern") + 1] for call in downloads], ["SHA256SUMS.txt"])
+                downloads = [json.loads(line) for line in (self.root / "github-calls").read_text().splitlines()
+                             if json.loads(line)[0] == "download"]
+                self.assertEqual([call[3] for call in downloads], ["SHA256SUMS.txt"])
                 self.untouched()
         self.run_install(BOX_GITHUB_REPO="someone/private-box", BOX_ALLOW_UNSIGNED="1")
         self.assertEqual(self.current(), f"0.1.0-{self.target}")
@@ -938,7 +947,7 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
         changes += [{"BOX_ALLOW_UNSIGNED": value} for value in ("", "true", "2")]
         changes += [{"TEST_RELEASE_TAG": value} for value in
                     ("0.1.0", "v01.0.0", "v0.1.0-rc.1", "v0.1.0\nother", "v../0.1.0")]
-        changes += [{"TEST_GH_FAILURE": "1"}, {"TEST_GH_DOWNLOAD_FAILURE": "1", "BOX_VERSION": "0.1.0"}]
+        changes += [{"TEST_GITHUB_FAILURE": "1"}, {"TEST_DOWNLOAD_FAILURE": "1", "BOX_VERSION": "0.1.0"}]
         for changed in changes:
             with self.subTest(changed=changed):
                 result = self.run_install(success=False, **(valid | changed))
@@ -948,7 +957,7 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
                     self.assertIn("BOX_ALLOW_UNSIGNED must be 0 or 1", result.stderr)
                 elif "TEST_RELEASE_TAG" in changed:
                     self.assertIn("expected a ", result.stderr)
-                elif "TEST_GH_FAILURE" in changed:
+                elif "TEST_GITHUB_FAILURE" in changed:
                     self.assertIn("cannot find the latest release", result.stderr)
                 else:
                     self.assertIn("cannot download", result.stderr)
@@ -1069,9 +1078,8 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
         transfers = [json.loads(line) for line in (downloads / "transfers.jsonl").read_text().splitlines()]
         asset = f"box-cli-v0.1.0-{self.target}.tar.gz"
         self.assertEqual([Path(t["url"]).name for t in transfers], ["SHA256SUMS.txt", asset])
-        calls = [json.loads(line) for line in (self.root / "gh-calls").read_text().splitlines()]
-        self.assertEqual(calls[0], ["release", "view", "--repo", "strands-agents/box",
-                                   "--json", "tagName", "--jq", ".tagName"])
+        calls = [json.loads(line) for line in (self.root / "github-calls").read_text().splitlines()]
+        self.assertEqual(calls[0], ["latest", "strands-agents/box"])
         self.assertTrue(all(t["url"].startswith(
             "https://github.com/strands-agents/box/releases/download/v0.1.0/") for t in transfers))
         staging = Path(transfers[0]["destination"]).parent
@@ -1248,7 +1256,7 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
             with self.subTest(version=version):
                 result = self.run_install(success=False, BOX_VERSION=version)
                 self.assertIn("expected a version such as 0.3.0 or 0.3.0-preview.1", result.stderr)
-                self.assertFalse((self.root / "gh-calls").exists())
+                self.assertFalse((self.root / "github-calls").exists())
                 self.untouched()
         foreign = self.home / ".local/bin/box"
         foreign.parent.mkdir(parents=True)
