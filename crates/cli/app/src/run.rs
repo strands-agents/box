@@ -952,7 +952,7 @@ impl Launcher {
                 continue;
             }
             for profile in profiles {
-                if is_run_id(&id) && minted_by(&root.join(&id), profile)? {
+                if owned_by(&root, &id, profile)? {
                     owned.push(id);
                     break;
                 }
@@ -974,7 +974,7 @@ impl Launcher {
                 root,
             });
         }
-        if !minted_by(&root.join(id), profile)? {
+        if !owned_by(&root, id, profile)? {
             return Err(Error::CleanBoxNotOwned {
                 id: id.to_string(),
                 profile: profile.to_string(),
@@ -2134,7 +2134,7 @@ fn reusable_run(runs: &Path, profile: &str, id: &str) -> Result<Instance, Error>
             root: runs.to_path_buf(),
         });
     }
-    if !is_run_id(id) || !minted_by(&directory, profile)? {
+    if !minted_by(&directory, id, profile)? {
         return Err(Error::BoxIdProfile {
             id: id.to_string(),
             profile: profile.to_string(),
@@ -2166,8 +2166,32 @@ fn recorded_workspace(config: &Path) -> Result<Option<PathBuf>, Error> {
     }))
 }
 
-/// Whether the run in `directory` was minted for `profile`: its profile record names it exactly.
-fn minted_by(directory: &Path, profile: &str) -> Result<bool, Error> {
+/// Whether the saved box `id` in `runs` belongs to `profile`: `id` is a run ID, and the box's
+/// `profile-name` record holds exactly `profile`. `box profile clean <name>`,
+/// `box profile clean <name> --box-id <id>`, and `box runs list <name>` decide ownership with it.
+pub(crate) fn owned_by(runs: &Path, id: &str, profile: &str) -> Result<bool, Error> {
+    minted_by(&runs.join(id), id, profile)
+}
+
+/// The profile name in a `profile-name` `record`: a nonempty name followed by one newline, as
+/// `box` writes it. `box runs list` shows this name.
+pub(crate) fn profile_of(record: &str) -> Option<&str> {
+    record
+        .strip_suffix('\n')
+        .filter(|profile| !profile.is_empty())
+}
+
+/// Whether a saved box `id` whose record holds `recorded` belongs to `profile`: `id` is a run ID
+/// and [`profile_of`] the record is exactly `profile`. Every ownership check uses this rule.
+pub(crate) fn owns(id: &str, recorded: Option<&str>, profile: &str) -> bool {
+    is_run_id(id) && recorded == Some(profile)
+}
+
+/// Whether the run `id` in `directory` was minted for `profile`, by [`owns`].
+fn minted_by(directory: &Path, id: &str, profile: &str) -> Result<bool, Error> {
+    if !is_run_id(id) {
+        return Ok(false);
+    }
     let record = directory.join(PROFILE_RECORD);
     let mut file = match std::fs::OpenOptions::new()
         .read(true)
@@ -2195,7 +2219,7 @@ fn minted_by(directory: &Path, profile: &str) -> Result<bool, Error> {
     let mut text = String::new();
     std::io::Read::read_to_string(&mut file, &mut text)
         .map_err(|source| io_error("read", &record, source))?;
-    Ok(text.strip_suffix('\n') == Some(profile))
+    Ok(owns(id, profile_of(&text), profile))
 }
 
 /// Hold the run folder `name` in `runs` with the lock that `claim` takes, so a box that is still

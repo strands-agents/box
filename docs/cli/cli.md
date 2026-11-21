@@ -412,7 +412,7 @@ box runs list [<profile>] [--format json]
 
 | Flag | What it does |
 | --- | --- |
-| `<profile>` | Show only this profile's runs. For a profile file, give the name in its `[profile]` table. |
+| `<profile>` | Show only this profile's runs: the same boxes that [`box profile clean`](#box-profile-clean) removes for it. For a profile file, give the name in its `[profile]` table. |
 | `--format json` | Print one JSON array, for a script. Each object has `profile`, `updated`, and `id`. |
 
 ```text
