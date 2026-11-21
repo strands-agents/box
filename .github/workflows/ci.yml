@@ -110,6 +110,7 @@ jobs:
               - 'docs/site-manifest.json'
               - 'docs/site-manifest-retirements.json'
               - 'docs/user/**/*.md'
+              - 'docs/cli/**/*.md'
               - 'crates/box/tests/site_manifest.rs'
               - '.github/workflows/ci.yml'
             containment:

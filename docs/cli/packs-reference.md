@@ -1,8 +1,3 @@
----
-reader: Someone who writes or reads a pack, knows the key or table they want, and needs what it does and which kind of pack may hold it.
-belongs: A key or table that a pack writes, and the rules for it. A rarer task goes here too, under the key it uses. A key that a profile writes, and the rules that both share, such as placeholders, when, and the merge, go to profiles-reference.md. A task that most authors need for their first pack goes to packs.md, and a fix after an error goes to troubleshooting.md.
----
-
 # Pack reference
 
 This page lists every key that only a pack writes, and `[storage]`, which a profile can also write,

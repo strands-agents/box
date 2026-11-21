@@ -1,8 +1,3 @@
----
-reader: Someone who makes a profile with box profile create, or who writes a starter or a policy starter so a team gets one standard setup.
-belongs: A section belongs here only if most readers need it to make a profile, to pick the policy it starts from, or to write their first starter or policy starter. Every key of starter.toml and policy.toml goes to starters-reference.md, the keys of [starters] and [policy-starters] go to config.md, writing a profile's rules goes to policies.md, a fix after an error goes to troubleshooting.md, and what one agent's starter asks goes to that agent's README.
----
-
 # Starters
 
 A starter is the set of questions `box profile create` asks to make a profile, such as which model

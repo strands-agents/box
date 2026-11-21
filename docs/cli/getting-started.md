@@ -1,8 +1,3 @@
----
-reader: Someone new to Box who wants Claude Code running in a box in one of their own projects, and who follows the steps in order.
-belongs: Only the steps of that first run, Claude Code on Amazon Bedrock, and each Claude Code fact needed to finish it. Install options go to install.md, files under ~/.strands/box to files.md, other agents and providers to profiles.md, the other policies to starters.md, Claude Code's other behavior to resources/packs/claude/README.md, and fixes after the first run to troubleshooting.md.
----
-
 # Get started with Box
 
 On this page, you install Box and run Claude Code in a box in one of your own projects. The agent
@@ -23,12 +18,8 @@ listen only on localhost.
   ```
 
 - An AWS account that can call Claude models on Amazon Bedrock, and an AWS profile for it on this
-  machine. For an Anthropic model, the first call in an account can need an AWS Marketplace
-  subscription, so the account needs a valid payment method, and the identity that makes the first
-  call needs the IAM actions `aws-marketplace:ViewSubscriptions` and `aws-marketplace:Subscribe`.
-  An Anthropic model earlier than Claude Opus 4.7 also needs the account's first-time use case form.
-  If you're not sure, carry on: step 5 shows what a refusal looks like, and [Every model request fails with 403](../../resources/packs/bedrock/README.md#every-model-request-fails-with-403)
-  tells an AWS refusal from a box denial.
+  machine. If the model refuses you, [Every model request fails with 403](../../resources/packs/bedrock/README.md#every-model-request-fails-with-403)
+  lists what an account needs.
 
 ## 1. Install Box
 
@@ -82,7 +73,7 @@ first run:
 
 Your list may differ. A skipped tool is one that `box` didn't find on your machine. Install it
 whenever you like, and the next run picks it up. The second line says how the box signs in to
-Bedrock (step 4). Choose **Exit**, not **Run**, because Claude Code still needs a model.
+Bedrock (step 3). Choose **Exit**, not **Run**, because Claude Code still needs a model.
 
 The profile is in `~/.strands/box/profiles/claude/profile.toml`, and its first lines look like this:
 
@@ -99,93 +90,60 @@ reaching Amazon Bedrock, and using each tool, so your own file stays short. `pol
 it, is your copy of the policy you picked. [Profiles](profiles.md) shows how to change either
 file.
 
-## 3. Choose the model
+## 3. Connect to Bedrock
 
-Steps 3 and 4 call AWS from this terminal. Set `REGION` to the profile's region (`us-west-2`
-unless you picked another), set `AWS_PROFILE_NAME` to your AWS profile, and sign in if that
-profile uses SSO or `aws login`:
+The box signs each request to Bedrock with your AWS credentials, outside the box, so the agent
+never sees them. It uses the AWS identity that the AWS CLI uses in the terminal where you run
+`box run`. Point this terminal at your AWS profile and check it:
 
 ```sh
-REGION=us-west-2
-AWS_PROFILE_NAME=your-profile
-aws sso login --profile "$AWS_PROFILE_NAME"   # only if it uses SSO (for `aws login`, run `aws login --profile "$AWS_PROFILE_NAME"`)
+export AWS_PROFILE=your-profile
+aws sts get-caller-identity
 ```
+
+`your-profile` is a profile in `~/.aws/config` or `~/.aws/credentials`, not the Box profile from
+step 2.
+
+If that AWS profile signs in with AWS IAM Identity Center (SSO) or `aws login`, the box can't read
+it yet. Sign in, and export its temporary keys in this terminal:
+
+```sh
+aws sso login   # or: aws login
+eval "$(aws configure export-credentials --format env)"
+```
+
+The keys end with the sign-in session, so run this again in each new terminal and after you sign
+in again. [Which AWS profiles work](profiles-reference.md#aws-credentials) is in the reference. To
+sign in with a Bedrock API key instead, see
+[Sign in with a Bedrock API key](../../resources/packs/bedrock/README.md#sign-in-with-a-bedrock-api-key).
+
+A run that has already started keeps its old sign-in, so start a new run after you change it.
+
+### Choose the model
 
 If Claude Code on your machine already uses a Bedrock model ID that your account can call in this
 region (`model` or `ANTHROPIC_MODEL` in `~/.claude/settings.json`, or `ANTHROPIC_MODEL` in your
 shell), the box uses it, so skip to step 4. Otherwise Claude Code uses its default model, and if
 your account can't call that one, Claude Code keeps retrying and the run looks stuck.
 
-List the Claude models on Bedrock in your region:
+List the Claude models on Bedrock in the profile's region (`us-west-2` unless you picked another):
 
 ```sh
-aws bedrock list-inference-profiles --region "$REGION" --profile "$AWS_PROFILE_NAME" \
+aws bedrock list-inference-profiles --region us-west-2 \
   --query "inferenceProfileSummaries[?contains(inferenceProfileId, 'anthropic')].inferenceProfileId" \
   --output text
 ```
 
 Pick one your account is allowed to call (if you don't know, ask whoever runs the account) and copy
 its full ID as the command prints it, such as `global.anthropic.claude-opus-5-5`. A short name such
-as `opus` won't work. Then
-add it to the end of `~/.strands/box/profiles/claude/profile.toml`:
+as `opus` won't work. Then add it to the end of `~/.strands/box/profiles/claude/profile.toml`:
 
 ```toml
 [agent.env]
 ANTHROPIC_MODEL = "global.anthropic.claude-opus-5-5"
 ```
 
-## 4. Sign in to Bedrock
-
-The box signs each request to Bedrock with your AWS credentials, outside the box, so the agent
-never sees them. It uses the AWS identity that the AWS CLI uses in the terminal where you run
-`box run`. Point it at your AWS profile and check it:
-
-```sh
-export AWS_PROFILE="$AWS_PROFILE_NAME"
-aws sts get-caller-identity
-```
-
-Two different things are called a profile here. `claude` is the Box profile you made in step 2.
-`AWS_PROFILE_NAME` is a profile in `~/.aws/config` or `~/.aws/credentials`.
-
-If that AWS profile signs in with AWS IAM Identity Center (SSO) or `aws login`, the box can't read
-it yet, so export its temporary keys in this terminal instead:
-
-```sh
-eval "$(aws configure export-credentials --profile "$AWS_PROFILE_NAME" --format env)"
-```
-
-The exported keys end with the sign-in session, so run this again in each new terminal and after
-you sign in again. [Which AWS profiles work](profiles-reference.md#aws-credentials) is listed in the
-reference.
-
-### Use a Bedrock API key instead
-
-To sign in with a Bedrock API key, pick `api-key` when `box profile create` asks how the box signs
-in, or set it in the `[options]` table of `~/.strands/box/profiles/claude/profile.toml`:
-
-```toml
-[options]
-bedrock.sign-in = "api-key"
-```
-
-A key needs the account to allow Bedrock API keys (the IAM action `bedrock:CallWithBearerToken`),
-and [`uv`](https://docs.astral.sh/uv/) to run the tool that makes it. This command makes a key and
-puts it in `AWS_BEARER_TOKEN_BEDROCK`, the variable the box reads it from:
-
-```sh
-export AWS_BEARER_TOKEN_BEDROCK="$(AWS_PROFILE="$AWS_PROFILE_NAME" uv run --quiet --no-project --with aws-bedrock-token-generator --with 'botocore[crt]' python -c 'import sys; from aws_bedrock_token_generator import provide_token; print(provide_token(region=sys.argv[1]))' "$REGION")"
-```
-
-A key only works in the region it was made for, so `REGION` has to match the profile's. To check
-the key, run `echo "${#AWS_BEARER_TOKEN_BEDROCK}"`. You want a number in the hundreds or more. A
-`0` means the command failed: read the error it printed and check the AWS profile name. The key
-lasts up to 12 hours, and once it runs out, the model answers with `403` until you run the same
-`export` again.
-
-A run that has already started keeps its old sign-in, so start a new run after you change it.
-
-## 5. Run Claude Code in a project
+## 4. Run Claude Code in a project
 
 The agent can read and change the files in the directory where you start it, and nothing outside
 it unless the profile adds it. Start it in the project you want it to work on, not in a folder that
@@ -230,16 +188,16 @@ box run claude -- --continue
 
 | What you see | What to do |
 | --- | --- |
-| `AWS default credential chain resolved no credentials` | Set `AWS_PROFILE`, or export the SSO keys, in this terminal (step 4). |
-| `credential variable AWS_BEARER_TOKEN_BEDROCK is not set` | The profile signs in with a key. Make the key in this terminal ([Use a Bedrock API key instead](#use-a-bedrock-api-key-instead)). |
+| `AWS default credential chain resolved no credentials` | Set `AWS_PROFILE`, or export the SSO keys, in this terminal (step 3). |
+| `credential variable AWS_BEARER_TOKEN_BEDROCK is not set` | The profile signs in with a key. Make the key in this terminal ([Sign in with a Bedrock API key](../../resources/packs/bedrock/README.md#sign-in-with-a-bedrock-api-key)). |
 | Claude Code starts, but after you give it a task it says `API error` and keeps retrying | Check the model ID from step 3. |
-| A `403` error from the model | Check the sign-in from step 4. With a key, make a new one, with `REGION` set to the profile's region. If that doesn't help, work through [Every model request fails with 403](../../resources/packs/bedrock/README.md#every-model-request-fails-with-403). |
+| A `403` error from the model | Check the sign-in from step 3. With a key, make a new one for the profile's region. If that doesn't help, work through [Every model request fails with 403](../../resources/packs/bedrock/README.md#every-model-request-fails-with-403). |
 
 ## What's set up
 
 You have a `claude` profile, and `box run claude` uses it in any project. Every new terminal finds
 `box`. `AWS_PROFILE`, exported keys, and a Bedrock API key last only in the terminal that set them,
-so run step 4 again in each new one.
+so run step 3 again in each new one.
 To get a newer release, see [Upgrade or choose a version](install.md#upgrade-or-choose-a-version).
 
 `box` keeps the profile, Claude Code's settings and history, and a record of each run in `~/.strands/box`.
@@ -248,25 +206,9 @@ into your project.
 
 ## Clean up
 
-Each run leaves a folder in `~/.strands/box/r`, and they pile up. To remove them:
-
-```sh
-box clean --all
-```
-
-```text
-box: Remove 4 boxes and their records? A box that is still running is kept.
-
-> [1] Keep (default)
-    Cancel without changes.
-
-  [2] Remove
-    Delete the items listed above.
-```
-
-Choose **Remove**. The profile, and Claude Code's settings and history, stay. To start over, run
-`box profile delete --all`: it asks first, then deletes every profile with its boxes and storage,
-and you'll need to redo steps 2 and 3.
+Each run leaves a folder in `~/.strands/box/r`, and they pile up. `box clean --all` asks, then
+removes them. It keeps the profile, and Claude Code's settings and history. To start over, run
+`box profile delete --all`, which also asks first, and redo steps 2 and 3.
 
 ## Where to go next
 

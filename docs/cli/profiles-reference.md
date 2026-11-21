@@ -1,8 +1,3 @@
----
-reader: Someone who writes or reads a profile, knows the key or table they want, and needs what it does and which file may hold it.
-belongs: A key or table that a profile writes, and the rules that profiles and packs share, such as placeholders, when, and the merge. A rarer task goes here too, under the key it uses. A key that only a pack writes goes to packs-reference.md, a task that most users need in their first month goes to profiles.md, and a fix after an error goes to troubleshooting.md.
----
-
 # Profile reference
 
 This page lists every key that a `profile.toml` can hold, and what each one does. Packs write many
