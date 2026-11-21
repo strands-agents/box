@@ -111,6 +111,14 @@ pub(crate) enum GrammarRefusal {
         "{place}: pattern {pattern:?} starts with `+`, but a `[+<name>]` word is matched without its `+`"
     )]
     ToolchainPattern { place: Place, pattern: String },
+    #[error(
+        "{place}: has the name of the `anywhere` option {other}, so it must have the same `flag`, `value`, and `repeated`"
+    )]
+    BadOverride { place: Place, other: Box<Place> },
+    #[error(
+        "{place}: sets `overrides`, but the usage has no `[global options]` with an `anywhere` option of this name"
+    )]
+    NothingToOverride { place: Place },
     #[error("{place}: two fields have the name {field:?}")]
     FieldTaken { place: Place, field: String },
     #[error("{place}: the name is reserved for a command that no action matches")]
@@ -134,6 +142,8 @@ pub(crate) enum OptionFault {
     RepeatedWithoutValue,
     #[error("only a `global` option can set `anywhere`")]
     AnywhereOnAction,
+    #[error("only an action option can set `overrides`")]
+    OverridesOnGlobal,
 }
 
 /// One key in a tool grammar, as a dotted path below the grammar's own table.
@@ -225,7 +235,8 @@ impl GrammarRefusal {
         match &mut self {
             Self::FlagTaken { place, other, .. }
             | Self::SpellingTaken { place, other, .. }
-            | Self::PlusBesideToolchain { place, other, .. } => {
+            | Self::PlusBesideToolchain { place, other, .. }
+            | Self::BadOverride { place, other } => {
                 place.under(table);
                 other.under(table);
             }
@@ -242,6 +253,7 @@ impl GrammarRefusal {
             | Self::BadAlias { place, .. }
             | Self::BadUsage { place, .. }
             | Self::OptionsNotInUsage { place }
+            | Self::NothingToOverride { place }
             | Self::OperandNotInUsage { place }
             | Self::BadRest { place }
             | Self::ToolchainPattern { place, .. }
