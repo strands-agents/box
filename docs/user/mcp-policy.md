@@ -148,6 +148,15 @@ when { context.input has "zone-id" && context.input["zone-id"] == "private-zone"
 A `when temporal` or `unless temporal` clause can't name an argument like this: it reads only
 arguments with plain names.
 
+An argument can take its type from a definition in the server's `$defs`. A rule reads its fields
+the same way whatever the definition is called, including a name such as `zone-record`, and also
+when the definition is an array of objects. A definition that refers to itself, directly or through
+other definitions, has a type only down to the point where it repeats. A rule that reads a field
+above that point loads. A rule that reads below it either doesn't load (see
+[When a rule cannot load](#when-a-rule-cannot-load)) or never matches. Box refuses a call whose
+argument has an object below that point. `policy generate-schema` can spell a definition's type
+name differently, such as `zone_record`; a rule never names these types.
+
 `policy generate-schema` starts each declared server, reads its `tools/list`, and writes the
 per-tool actions and their argument types:
 
@@ -259,8 +268,9 @@ Key it on `::response`, and require `output.reply` to be `result`:
 - A `result` shows that the server answered without an error, not that the verification passed.
   `output.structured` is what the tool answered. It holds the reply's `structuredContent`, keeping
   only the fields the tool's `outputSchema` declares, so a misspelled field fails at load. An
-  `outputSchema` that Box can't turn into a policy type, such as one with a field named `if` or a
-  `$ref` it can't resolve, declares no `output.structured`, so a rule that reads it fails at load.
+  `outputSchema` that Box can't turn into a policy type, such as one with a field named `if`, a
+  `$ref` it can't resolve, or a `$defs` name that isn't a plain name, declares no
+  `output.structured`, so a rule that reads it fails at load.
   The server's other tools keep their outputs, unless the problem only appears when the outputs
   are read together; then no tool on that server declares one.
 - Box records no `output.structured` when the tool declares no `outputSchema`, when the reply isn't
@@ -358,6 +368,7 @@ The startup warning is `a per-tool rule never loaded for ["<server>"]`. Check th
 | A rule refuses `tools/list`, so Box cannot discover the server's tools. | Permit `tools/list` for that server. |
 | The server's catalog does not offer the named tool. | Correct the tool name, or update the rule if the server removed the tool. |
 | The rule reads an argument with a different name or compares it against the wrong type. | Match the argument name and type in the server's catalog. |
+| The rule reads a field below the point where a definition that refers to itself repeats. | Read only the fields above that point. A rule that guards such a field with `has` loads but never matches. |
 | The server's first tool list timed out or Box could not read it. | Keep the per-tool rule. For an http server, request the list again. For a stdio server with no accepted catalog, restart the box. |
 
 Remove a per-tool rule only when you intend to remove its restriction. Keep a valid rule after a temporary discovery failure.

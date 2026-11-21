@@ -196,6 +196,27 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `mcp_schema::tests::a_union_argument_accepts_each_member_and_refuses_a_non_member` and
   `tests/runtime_mcp_policy_staging.rs::a_union_argument_is_decided_by_the_policy` and
   `a_datetime_union_member_is_placed_and_its_rule_cannot_be_bypassed`.
+- An MCP `$defs` definition that refers to itself, directly or through other definitions, is cut
+  where it repeats: `make_definition_cycles_opaque` makes the reference that closes the cycle an
+  opaque `Unknown`. A rule that reads below it does not validate, unless a `has` guard makes it an
+  impossible policy that loads and never matches; Dogwood evaluates the raw input, so a `forbid`
+  there still fires on a value of that shape. A plain object below the cut fails the request gate.
+  Renamed definitions and array elements change only generated type names. `outputSchema` `$defs`
+  stay as the server wrote them, so a server that generated before generates the same schema and an
+  output that needs a fix is dropped as before. A server definition named `Action` is still
+  refused, and so is one named `Unknown` or `Null` beside a field the generator types that way. When
+  a cut or a moved array element leaves any definition deeper than `MAXIMUM_DEFINITION_DEPTH` schema
+  steps (about 32 object definitions), the list stays unchanged and is refused as before: Cedar
+  resolves the types by recursion, and on a 2 MiB debug test thread a chain of about 130 levels
+  overflowed the stack, which a long chain of plain definitions does on `main` too. A rename alone
+  never deepens a list, so it is not bounded. Pinned by
+  `mcp_schema::tests::fields_above_a_cut_reference_keep_their_types`,
+  `::an_output_schema_definition_is_left_for_the_generator_to_read_or_drop`,
+  `::a_definition_list_that_would_nest_too_deep_is_left_unchanged`,
+  `::a_reference_the_parser_does_not_follow_into_a_common_type_stays_typed`,
+  `::a_generated_type_cannot_collide_with_the_server_action_type`, and
+  `tests/runtime_mcp_policy_staging.rs::a_recursive_argument_is_decided_and_a_forbid_above_the_cut_denies`
+  and `::a_rule_that_reads_below_the_cut_does_not_load_and_the_tool_is_refused`.
 - A per-tool rule keeps its history across a restart only when its head names per-tool actions
   alone. `commit_discovering` keeps it installed under the server fragments that
   `mcp_schema::mcp_schemas_in` recovers from the stored action schema. The tools it decides stay

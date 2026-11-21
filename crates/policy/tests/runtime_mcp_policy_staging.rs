@@ -1782,6 +1782,278 @@ permit(principal, action == zones::Action::"list_records", resource);
     );
 }
 
+/// An engine with `policy` staged and the schema of `tools` accepted for `server`.
+fn staged_with_tools(
+    policy: &str,
+    server: &str,
+    tools: &serde_json::Value,
+    history: &Path,
+) -> PolicyEngine {
+    let authority = staged(vec![source("staged.dw", policy)], history);
+    assert_eq!(
+        authority
+            .stage_mcp_schema(
+                server,
+                generate_mcp_schema(server, &tools.to_string()).expect("the schema generates"),
+            )
+            .expect("the schema stages"),
+        SchemaStage::Accepted {
+            authority_ready: true,
+        }
+    );
+    assert!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes")
+            .is_empty()
+    );
+    authority
+}
+
+#[test]
+fn an_argument_typed_by_a_definition_whose_name_is_not_a_cedar_identifier_is_decided_by_the_policy()
+{
+    let history = tempfile::tempdir().expect("history directory");
+    let tools = json!({"result": {
+        "tools": [{"name": "create-record", "inputSchema": {
+            "type": "object",
+            "properties": {"record": {"$ref": "#/$defs/zone-record"}},
+            "required": ["record"]
+        }}],
+        "$defs": {"zone-record": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"]
+        }}
+    }});
+    let authority = staged_with_tools(
+        r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "zones" };
+forbid(principal, action == zones::Action::"create-record", resource)
+when { context.input.record.name == "private" };
+permit(principal, action == zones::Action::"create-record", resource);
+"#,
+        "zones",
+        &tools,
+        &history.path().join("dogwood.redb"),
+    );
+    let decide = |arguments: serde_json::Value| {
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "zones",
+                "create-record",
+                &arguments,
+            )
+            .0
+    };
+    assert!(
+        decide(json!({"record": {"name": "public"}})).is_allow(),
+        "the permit decides another value"
+    );
+    assert!(
+        matches!(
+            decide(json!({"record": {"name": "private"}})),
+            Decision::Deny {
+                reason: DenyReason::Forbidden,
+                ..
+            }
+        ),
+        "the forbid reads a field of the renamed definition"
+    );
+}
+
+#[test]
+fn a_rule_on_an_element_of_an_array_definition_decides_as_written() {
+    let history = tempfile::tempdir().expect("history directory");
+    let tools = json!({"result": {
+        "tools": [{"name": "bulk_write", "inputSchema": {
+            "type": "object",
+            "properties": {"rows": {"$ref": "#/$defs/rows"}},
+            "required": ["rows"]
+        }}],
+        "$defs": {"rows": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"key": {"type": "string"}},
+            "required": ["key"]
+        }}}
+    }});
+    let authority = staged_with_tools(
+        r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "store" };
+forbid(principal, action == store::Action::"bulk_write", resource)
+when { context.input.rows.contains({key: "secret"}) };
+forbid(principal, action == store::Action::"bulk_write", resource)
+unless { context.input.rows.contains({key: "public"}) };
+"#,
+        "store",
+        &tools,
+        &history.path().join("dogwood.redb"),
+    );
+    let decide = |arguments: serde_json::Value| {
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "store",
+                "bulk_write",
+                &arguments,
+            )
+            .0
+    };
+    assert!(decide(json!({"rows": [{"key": "public"}]})).is_allow());
+    assert!(
+        matches!(
+            decide(json!({"rows": [{"key": "public"}, {"key": "secret"}]})),
+            Decision::Deny {
+                reason: DenyReason::Forbidden,
+                ..
+            }
+        ),
+        "the forbid reads an element of the array"
+    );
+    assert!(
+        matches!(
+            decide(json!({"rows": [{"key": "other"}]})),
+            Decision::Deny {
+                reason: DenyReason::Forbidden,
+                ..
+            }
+        ),
+        "the forbid that requires a public element reads the array too"
+    );
+}
+
+#[test]
+fn a_recursive_argument_is_decided_and_a_forbid_above_the_cut_denies() {
+    let history = tempfile::tempdir().expect("history directory");
+    let tools = json!({"result": {
+        "tools": [{"name": "validate_rule", "inputSchema": {
+            "type": "object",
+            "properties": {"rule": {"$ref": "#/$defs/Group"}},
+            "required": ["rule"]
+        }}],
+        "$defs": {
+            "Group": {"type": "object", "properties": {
+                "name": {"type": "string"},
+                "conditions": {"type": "array", "items": {"$ref": "#/$defs/Condition"}}
+            }, "required": ["name"]},
+            "Condition": {"anyOf": [{"$ref": "#/$defs/Group"}, {"type": "string"}]}
+        }
+    }});
+    let authority = staged_with_tools(
+        r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "rules" };
+forbid(principal, action == rules::Action::"validate_rule", resource)
+when { context.input.rule.name == "blocked" };
+permit(principal, action == rules::Action::"validate_rule", resource);
+"#,
+        "rules",
+        &tools,
+        &history.path().join("dogwood.redb"),
+    );
+    let decide = |arguments: serde_json::Value| {
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "rules",
+                "validate_rule",
+                &arguments,
+            )
+            .0
+    };
+    assert!(
+        decide(json!({"rule": {"name": "open", "conditions": ["a", "b"]}})).is_allow(),
+        "a value of the recursive type is decided by the policy"
+    );
+    assert!(
+        matches!(
+            decide(json!({"rule": {"name": "blocked", "conditions": ["a"]}})),
+            Decision::Deny {
+                reason: DenyReason::Forbidden,
+                ..
+            }
+        ),
+        "the forbid reads a field above the cut"
+    );
+    for name in ["open", "blocked"] {
+        assert!(
+            matches!(
+                decide(json!({"rule": {"name": name, "conditions": [{"name": "inner"}]}})),
+                Decision::Deny {
+                    reason: DenyReason::InternalFault,
+                    ..
+                }
+            ),
+            "a value below the cut has no type, so the call is denied"
+        );
+    }
+}
+
+#[test]
+fn a_rule_that_reads_below_the_cut_does_not_load_and_the_tool_is_refused() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "staged.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "rules" };
+forbid(principal, action == rules::Action::"validate_rule", resource)
+when { context.input.rule has parent && context.input.rule.parent.name == "blocked" };
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+    let tools = json!({"result": {
+        "tools": [{"name": "validate_rule", "inputSchema": {
+            "type": "object",
+            "properties": {"rule": {"$ref": "#/$defs/Group"}},
+            "required": ["rule"]
+        }}],
+        "$defs": {"Group": {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "parent": {"$ref": "#/$defs/Group"}
+        }, "required": ["name"]}}
+    }});
+    let stage = authority.stage_mcp_schema(
+        "rules",
+        generate_mcp_schema("rules", &tools.to_string()).expect("the schema generates"),
+    );
+    assert_eq!(
+        stage.expect("staging answers"),
+        SchemaStage::Accepted {
+            authority_ready: false,
+        },
+        "the rule does not validate against the opaque field, so the bundle is not installed"
+    );
+    assert!(
+        !authority
+            .finish_mcp_discovery()
+            .expect("discovery completes")
+            .is_empty(),
+        "discovery names the server the rule never loaded for"
+    );
+    assert!(
+        !authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "rules",
+                "validate_rule",
+                &json!({"rule": {"name": "open"}}),
+            )
+            .0
+            .is_allow(),
+        "the tool the rule decides is refused while the rule cannot load"
+    );
+}
+
 #[test]
 fn a_union_argument_is_decided_by_the_policy() {
     let history = tempfile::tempdir().expect("history directory");
