@@ -97,8 +97,10 @@ To install another release, run the installer again with its number in `BOX_VERS
 curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | BOX_VERSION=0.3.0-preview.2 sh
 ```
 
-It switches `current` to that release and prints `Updated box 0.3.0-preview.1 to 0.3.0-preview.2.`,
-or `box 0.3.0-preview.2 is already installed.` when you have it already. If you installed with any
+It switches `current` to that release, prints `Updated box 0.3.0-preview.1 to 0.3.0-preview.2.`,
+and then shows the same welcome as a first install, including the telemetry lines while telemetry is
+on. When you have that release already, it prints only `box 0.3.0-preview.2 is already installed.`
+and changes nothing. If you installed with any
 of the other [installer variables](#installer-variables), set them again.
 
 Without `BOX_VERSION`, the installer takes the latest stable release. A pre-release, such as

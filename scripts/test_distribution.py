@@ -1078,7 +1078,11 @@ exec /bin/sh "$script"
         self.assertEqual((self.home / ".zshrc").read_text().count("# >>> Box PATH >>>"), 1)
         self.release("0.2.0")
         upgraded = self.run_install()
-        self.assertEqual(upgraded.stderr, "Updated box 0.1.0 to 0.2.0.\n")
+        # An update welcomes again, so someone updating learns the commands and the telemetry notice.
+        self.assertTrue(upgraded.stderr.startswith("Updated box 0.1.0 to 0.2.0.\n\nbox run <profile>"),
+                        upgraded.stderr)
+        self.assertIn("Example next steps", upgraded.stderr)
+        self.assertIn("To opt out, run: box telemetry off\n", upgraded.stderr)
         self.assertEqual(self.current(), f"0.2.0-{self.target}")
         self.run_install(BOX_VERSION="0.1.0")
         self.assertEqual(self.current(), f"0.1.0-{self.target}")
