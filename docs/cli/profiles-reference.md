@@ -576,7 +576,7 @@ With native filesystem policy, your policy also decides the file operations that
 tools, and its local MCP servers make directly, on top of their filesystem grants. Released ARM64
 packages include this support, but your profile must enable it. Before enabling it, check these platform requirements:
 
-- On macOS: the [supported macOS version](install.md#requirements), a valid package signature,
+- On macOS: the [native-policy macOS requirements](../user/native-filesystem-policy.md#macos-requirements), a valid package signature,
   and Apple's Endpoint Security entitlement. The signed release supplies the signature and entitlement.
 - On Linux: an ARM64 machine with the required kernel support, and the `CAP_BPF` and
   `CAP_PERFMON` capabilities for `box`, which a normal install does not give it. Linux x86-64
