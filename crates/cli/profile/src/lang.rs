@@ -4442,18 +4442,12 @@ impl<S: Sources> Resolver<'_, S> {
     /// Refuse a filesystem entry that resolves through a link inside a place a box can write: the
     /// workspace, the run's storage, `~/.strands/box`, or a write grant of `table`.
     fn refuse_planted_links(&self, table: &toml::Table) -> Result<(), String> {
-        let roots: Vec<PathBuf> = [
-            self.inputs.workspace.to_path_buf(),
-            self.inputs.storage.to_path_buf(),
-        ]
-        .into_iter()
-        .chain(crate::host::box_homes(
-            self.inputs.home,
-            self.inputs.box_home,
-        ))
-        .chain(write_grants(table, self.inputs.home))
-        .map(|root| resolved(&root))
-        .collect();
+        let roots: Vec<PathBuf> = self
+            .refusals(table)
+            .roots
+            .iter()
+            .map(|(root, _)| resolved(root))
+            .collect();
         for (at, written, path) in &self.entries {
             for (holder, target) in links(path) {
                 if let Some(root) = roots.iter().find(|root| holder.starts_with(root)) {
