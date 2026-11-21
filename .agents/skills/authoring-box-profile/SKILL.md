@@ -35,8 +35,9 @@ workflow and the rules that an agent breaks most often.
    the import name: `@box/<folder>` for a shipped pack, the folder name for an operator pack.
    `kind` is `"agent"`, `"tool"`, or `"support"`, as
    [What a pack holds](../../../docs/cli/packs-reference.md#what-a-pack-holds) states. Add
-   `engine = ">=X.Y.Z"` when the pack needs a key that an older `box` does not read. See
-   [`[pack]`](../../../docs/cli/packs-reference.md#pack).
+   `[requires]` with `box = ">=X.Y.Z"` when the pack needs a key that an older `box` does not
+   read. See [`[pack]`](../../../docs/cli/packs-reference.md#pack) and
+   [`[requires]`](../../../docs/cli/profiles-reference.md#requires).
 3. **Pair the agent with a provider.** A provider pack is a `support` pack that holds the route
    to a model host and its `secret.ref`, and declares nothing else. An agent pack (a pack that
    declares `[agent] command`, or extends an agent pack) declares nothing for it either: a

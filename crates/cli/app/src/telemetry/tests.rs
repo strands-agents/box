@@ -57,7 +57,7 @@ fn policy_presence_agrees_with_profile_validation() {
         "policies = [{ path = 'rules.dw' }]",
     ] {
         let text = format!("{policies}\n[agent]\ncommand = ['/usr/bin/true']\n");
-        let expected = Profile::parse(&text, Path::new("profile.toml"))
+        let expected = Profile::parse(&text, Path::new("profile.toml"), crate::VERSION)
             .map(|profile| !profile.policies().is_empty())
             .ok();
         let mut observations = Observations::default();
@@ -376,6 +376,7 @@ fn contributing_packs_keep_each_accepted_launcher_once() {
     let profile = Profile::parse(
         "packs = ['@box/node']\n[agent]\ncommand = []",
         Path::new("profile.toml"),
+        crate::VERSION,
     )
     .unwrap();
     let layers = profile.layers(None, &lookup).unwrap();

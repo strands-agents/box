@@ -340,11 +340,11 @@ fn profile(text: &str) -> Profile {
 
 /// The profile `text` as it is.
 fn bare_profile(text: &str) -> Profile {
-    Profile::parse(text, Path::new("test.toml")).expect("a profile")
+    Profile::parse(text, Path::new("test.toml"), crate::VERSION).expect("a profile")
 }
 
 fn refusal(text: &str) -> String {
-    match Profile::parse(text, Path::new("test.toml")) {
+    match Profile::parse(text, Path::new("test.toml"), crate::VERSION) {
         Err(Error::Profile { reason, .. }) => reason,
         other => panic!("a refusal, not {other:?}"),
     }
@@ -582,7 +582,7 @@ fn a_key_of_one_run_names_its_line() {
         ("[agent]\ncommand = [\"/bin/x\"]\nworkspace = \"/x\"", 3),
         ("\n\npolicy = \"p\"\n[agent]\ncommand = [\"/bin/x\"]", 3),
     ] {
-        match Profile::parse(text, Path::new("test.toml")) {
+        match Profile::parse(text, Path::new("test.toml"), crate::VERSION) {
             Err(Error::Profile { line: at, .. }) => assert_eq!(at, Some(line), "{text}"),
             other => panic!("a refusal, not {other:?}"),
         }
@@ -671,7 +671,7 @@ fn the_name_box_is_reserved() {
 fn the_name_base_is_reserved() {
     let error = validate_name("base").expect_err("a reserved name");
     assert!(error.to_string().contains("`base` is reserved"), "{error}");
-    let profiles = Profiles::at("/nonexistent");
+    let profiles = Profiles::at("/nonexistent", crate::VERSION);
     assert!(matches!(
         profiles.load("base"),
         Err(Error::ProfileName { .. })
@@ -709,7 +709,7 @@ fn policy_references_are_nonempty_literal_paths() {
         ("policies = [\"${{ profile }}/policy.dw\"]", "`policies[0]`"),
     ] {
         let path = Path::new("profiles/test/profile.toml");
-        match Profile::parse(text, path) {
+        match Profile::parse(text, path, crate::VERSION) {
             Err(Error::Profile {
                 path: found,
                 line,
@@ -727,7 +727,7 @@ fn policy_references_are_nonempty_literal_paths() {
 #[test]
 fn policy_references_load_relative_absolute_and_linked_files() {
     let scene = Scene::new();
-    let profiles = Profiles::at(scene.root.join("profiles"));
+    let profiles = Profiles::at(scene.root.join("profiles"), crate::VERSION);
     let folder = profiles.folder("test");
     std::fs::create_dir_all(folder.join("policies")).expect("policy folder");
     let first = "  // service policy\r\n@id(\"service\") permit (principal, action, resource);  ";
@@ -768,7 +768,7 @@ fn policy_references_load_relative_absolute_and_linked_files() {
 #[test]
 fn policy_references_refuse_paths_outside_the_profile() {
     let scene = Scene::new();
-    let profiles = Profiles::at(scene.root.join("profiles"));
+    let profiles = Profiles::at(scene.root.join("profiles"), crate::VERSION);
     let folder = profiles.folder("test");
     let sibling = profiles.folder("test-other");
     std::fs::create_dir_all(&folder).expect("profile folder");
@@ -816,7 +816,7 @@ fn policy_references_refuse_paths_outside_the_profile() {
 #[test]
 fn policy_references_refuse_hard_linked_files() {
     let scene = Scene::new();
-    let profiles = Profiles::at(scene.root.join("profiles"));
+    let profiles = Profiles::at(scene.root.join("profiles"), crate::VERSION);
     let folder = profiles.folder("test");
     std::fs::create_dir_all(&folder).expect("profile folder");
     std::fs::write(folder.join("ok.dw"), "// local").expect("local policy");
@@ -854,7 +854,7 @@ fn policy_references_refuse_hard_linked_files() {
 fn policy_references_refuse_redirected_profile_directories() {
     for redirect_root in [false, true] {
         let scene = Scene::new();
-        let profiles = Profiles::at(scene.root.join("profiles"));
+        let profiles = Profiles::at(scene.root.join("profiles"), crate::VERSION);
         let folder = profiles.folder("test");
         std::fs::create_dir_all(&folder).expect("profile folder");
         std::fs::write(
@@ -892,7 +892,7 @@ fn policy_references_allow_aliases_above_the_profiles_root() {
     let scene = Scene::new();
     let alias = scene.root.join("home-link");
     std::os::unix::fs::symlink(scene.home(), &alias).expect("home alias");
-    let profiles = Profiles::at(alias.join(".strands/box/profiles"));
+    let profiles = Profiles::at(alias.join(".strands/box/profiles"), crate::VERSION);
     let folder = profiles.folder("test");
     std::fs::create_dir_all(&folder).expect("profile folder");
     let file = folder.join("policy.dw");
@@ -916,7 +916,7 @@ fn policy_references_allow_aliases_above_the_profiles_root() {
 #[test]
 fn policy_references_ignore_unlisted_adjacent_files() {
     let scene = Scene::new();
-    let profiles = Profiles::at(scene.root.join("profiles"));
+    let profiles = Profiles::at(scene.root.join("profiles"), crate::VERSION);
     std::fs::create_dir_all(profiles.folder("test").join("policy.dw"))
         .expect("an unreadable adjacent policy directory");
     std::fs::write(profiles.folder("test").join("listed.dw"), "// listed").expect("policy");
@@ -934,7 +934,7 @@ fn policy_references_ignore_unlisted_adjacent_files() {
 #[test]
 fn policy_references_report_the_unreadable_entry() {
     let scene = Scene::new();
-    let profiles = Profiles::at(scene.root.join("profiles"));
+    let profiles = Profiles::at(scene.root.join("profiles"), crate::VERSION);
     let folder = profiles.folder("test");
     std::fs::create_dir_all(folder.join("directory.dw")).expect("folder");
     std::fs::write(folder.join("ok.dw"), "// a valid file").expect("policy");
@@ -961,7 +961,7 @@ fn policy_references_report_the_unreadable_entry() {
 #[test]
 fn policy_references_refuse_repeated_files_and_symlink_aliases() {
     let scene = Scene::new();
-    let profiles = Profiles::at(scene.root.join("profiles"));
+    let profiles = Profiles::at(scene.root.join("profiles"), crate::VERSION);
     let folder = profiles.folder("test");
     std::fs::create_dir_all(folder.join("policies")).expect("folder");
     std::os::unix::fs::symlink("policy.dw", folder.join("alias.dw")).expect("policy link");
@@ -2013,7 +2013,7 @@ fn a_profile_refuses_a_banner_table_it_cannot_read() {
             .lines()
             .position(|line| line.starts_with(at))
             .map(|index| index + 1);
-        match Profile::parse(&text, Path::new("test.toml")) {
+        match Profile::parse(&text, Path::new("test.toml"), crate::VERSION) {
             Err(Error::Profile {
                 reason: found,
                 line: found_line,
@@ -3320,7 +3320,7 @@ fn a_saved_run_with_a_malformed_id_is_refused() {
 #[test]
 fn a_profile_is_removed_by_name_and_only_by_a_name_box_accepts() {
     let root = tempfile::tempdir().expect("a temporary root");
-    let profiles = Profiles::at(root.path().join("profiles"));
+    let profiles = Profiles::at(root.path().join("profiles"), crate::VERSION);
     assert!(!profiles.contains("claude").expect("a look"));
     assert!(!profiles.remove("claude").expect("a removal of nothing"));
     for name in ["claude", "codex"] {
@@ -3353,7 +3353,7 @@ fn a_profile_is_removed_by_name_and_only_by_a_name_box_accepts() {
 #[test]
 fn a_reset_with_no_name_takes_the_whole_profiles_folder() {
     let root = tempfile::tempdir().expect("a temporary root");
-    let profiles = Profiles::at(root.path().join("profiles"));
+    let profiles = Profiles::at(root.path().join("profiles"), crate::VERSION);
     assert!(!profiles.reset().expect("a reset of nothing"));
     for name in ["claude", "codex"] {
         std::fs::create_dir_all(profiles.folder(name)).expect("a folder");
@@ -3374,7 +3374,7 @@ fn a_removal_takes_a_link_and_not_its_target() {
     let target = root.path().join("elsewhere");
     std::fs::create_dir_all(&target).expect("a target");
     std::fs::write(target.join("keep"), "").expect("a file");
-    let profiles = Profiles::at(root.path().join("profiles"));
+    let profiles = Profiles::at(root.path().join("profiles"), crate::VERSION);
     std::fs::create_dir_all(profiles.root()).expect("a root");
     std::os::unix::fs::symlink(&target, profiles.folder("linked")).expect("a link");
 
@@ -5547,7 +5547,7 @@ mod on_the_host {
                     .starts_with("# Written by `box profile create`")
             );
             assert_eq!(
-                Profile::parse(created.text(), &created.path()).expect("a profile"),
+                Profile::parse(created.text(), &created.path(), crate::VERSION).expect("a profile"),
                 *created.profile()
             );
             assert_eq!(
@@ -5797,7 +5797,7 @@ mod on_the_host {
             std::fs::read_to_string(&path).expect("a profile"),
             created.text()
         );
-        let profiles = Profiles::at(host.home().join(".strands/box/profiles"));
+        let profiles = Profiles::at(host.home().join(".strands/box/profiles"), crate::VERSION);
         let (profile, policy) = profiles.load("claude").expect("a load").expect("a profile");
         assert_eq!(profile, *created.profile());
         assert_eq!(policy, None, "an empty policy is not written");
@@ -5830,7 +5830,7 @@ mod on_the_host {
             "{text}"
         );
         assert_eq!(
-            Profile::parse(&text, &created.path()).expect("a profile"),
+            Profile::parse(&text, &created.path(), crate::VERSION).expect("a profile"),
             *created.profile()
         );
         std::fs::write(&copy, "an old copy\n").expect("a copy from an older box");
@@ -6420,7 +6420,7 @@ mod on_the_host {
             .expect("a profile")
             .write(false)
             .expect("a write");
-        let profiles = Profiles::at(host.home().join(".strands/box/profiles"));
+        let profiles = Profiles::at(host.home().join(".strands/box/profiles"), crate::VERSION);
         std::fs::create_dir_all(profiles.folder("broken")).expect("a folder");
         std::fs::write(profiles.path("broken"), "name = \"x\"\n").expect("a file");
         let listed = profiles.list().expect("a list");
@@ -6436,7 +6436,7 @@ mod on_the_host {
     #[test]
     fn policy_references_refuse_workspace_files_in_preview_and_run() {
         let host = FakeHost::new();
-        let profiles = Profiles::at(host.home().join(".strands/box/profiles"));
+        let profiles = Profiles::at(host.home().join(".strands/box/profiles"), crate::VERSION);
         let folder = profiles.folder("claude");
         std::fs::create_dir_all(&folder).expect("profile folder");
         let outside = host.project().join("rules.dw");
@@ -6481,7 +6481,7 @@ mod on_the_host {
     #[test]
     fn policy_references_join_files_cleanly_in_preview_and_run() {
         let host = FakeHost::new();
-        let profiles = Profiles::at(host.home().join(".strands/box/profiles"));
+        let profiles = Profiles::at(host.home().join(".strands/box/profiles"), crate::VERSION);
         let folder = profiles.folder("test");
         std::fs::create_dir_all(&folder).expect("profile folder");
         let first = "\t// literal ${{ workspace }}\r\n@id(\"one\") permit (principal, action, resource);  \r\n\r\n\t// final comment";
@@ -6539,7 +6539,7 @@ mod on_the_host {
     #[test]
     fn policy_references_refuse_duplicate_ids_across_files_before_a_run() {
         let host = FakeHost::new();
-        let profiles = Profiles::at(host.home().join(".strands/box/profiles"));
+        let profiles = Profiles::at(host.home().join(".strands/box/profiles"), crate::VERSION);
         let folder = profiles.folder("test");
         std::fs::create_dir_all(&folder).expect("profile folder");
         std::fs::write(
@@ -6855,7 +6855,7 @@ mod on_the_host {
     #[test]
     fn an_error_in_a_second_policy_file_names_its_line_in_the_combined_program() {
         let host = FakeHost::new();
-        let profiles = Profiles::at(host.home().join(".strands/box/profiles"));
+        let profiles = Profiles::at(host.home().join(".strands/box/profiles"), crate::VERSION);
         let folder = profiles.folder("claude");
         std::fs::create_dir_all(&folder).expect("profile folder");
         std::fs::write(
@@ -9171,12 +9171,16 @@ fn a_pack_needs_a_header_with_a_name_and_a_version() {
             "`[pack]` holds the unknown key `license`",
         ),
         (
-            format!("{name}\nversion = 1\nengine = \">=99.0\""),
+            format!("{name}\nversion = 1\n[requires]\nbox = \">=99.0\""),
             "this pack needs box >=99.0, and this is box",
         ),
         (
-            format!("{name}\nversion = 1\nengine = \"0.1\""),
+            format!("{name}\nversion = 1\n[requires]\nbox = \"0.1\""),
             "is not `>=X.Y.Z`",
+        ),
+        (
+            format!("{name}\nversion = 1\nengine = \">=0.1.0\""),
+            "`[pack]` holds the unknown key `engine`",
         ),
     ] {
         scene.share_raw("p", &text);
@@ -9196,7 +9200,7 @@ fn a_pack_needs_a_header_with_a_name_and_a_version() {
     scene.share_raw(
         "p",
         &format!(
-            "{name}\nversion = 1\nengine = \">={major}.{minor}.{}\"",
+            "{name}\nversion = 1\n[requires]\nbox = \">={major}.{minor}.{}\"",
             patch + 1
         ),
     );
@@ -9208,7 +9212,7 @@ fn a_pack_needs_a_header_with_a_name_and_a_version() {
     scene.share_raw(
         "p",
         &format!(
-            "{name}\nversion = 1\nengine = \">={}\"",
+            "{name}\nversion = 1\n[requires]\nbox = \">={}\"",
             env!("CARGO_PKG_VERSION")
         ),
     );
@@ -9221,11 +9225,11 @@ fn a_pack_needs_a_header_with_a_name_and_a_version() {
 }
 
 #[test]
-fn a_pack_that_another_pack_extends_is_checked_for_its_engine() {
+fn a_pack_that_another_pack_extends_is_checked_for_its_requires() {
     let scene = Scene::new();
     scene.share_raw(
         "newer",
-        "[pack]\nname = \"@box/newer\"\nversion = 1\nkind = \"support\"\nengine = \">=99.0\"",
+        "[pack]\nname = \"@box/newer\"\nversion = 1\nkind = \"support\"\n[requires]\nbox = \">=99.0\"",
     );
     scene.share("base", "extend = [\"@box/newer\"]");
     let reason = scene.refusal("packs = [\"@box/base\"]\n[agent]\ncommand = [\"/bin/x\"]");
@@ -15677,3 +15681,18 @@ fn a_profile_header_holds_only_a_name() {
 }
 
 mod plugins;
+
+#[test]
+fn a_profile_requires_box_before_the_keys_that_parse_checks() {
+    // A later box added `style` to `[banner]`; this box names the version, not the key.
+    let reason = refusal("[requires]\nbox = \">=99.0.0\"\n[banner]\nstyle = \"compact\"\n");
+    assert!(
+        reason.contains("this profile needs box >=99.0.0, and this is box"),
+        "{reason}"
+    );
+    let reason = refusal("[requires]\nbox = \">=0.0.1\"\n[banner]\nstyle = \"compact\"\n");
+    assert!(
+        reason.contains("`[banner]` holds the unknown key `style`"),
+        "{reason}"
+    );
+}

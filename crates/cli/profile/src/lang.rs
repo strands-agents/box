@@ -209,7 +209,15 @@ const NETWORK_KEYS: &[&str] = &["contain_egress"];
 const STORAGE_KEYS: &[&str] = &["directories", "files", "hooks"];
 
 /// The keys of `[pack]`.
-const HEADER_KEYS: &[&str] = &["name", "version", "kind", "engine"];
+const HEADER_KEYS: &[&str] = &["name", "version", "kind"];
+
+/// The table of a pack, a plugin, or a profile that names what the file needs of the `box` that
+/// reads it. `box` checks it and refuses the file when it does not hold. It loads nothing.
+pub(crate) const REQUIRES: &str = "requires";
+
+/// The requirements that `[requires]` can name. `box` is checked first, so a file written for a
+/// later `box` names the version it needs, not a requirement that the later `box` added.
+const REQUIREMENTS: &[&str] = &["box"];
 
 /// The name of the profile's own layer.
 pub(crate) const THE_PROFILE: &str = "the profile";
@@ -453,7 +461,7 @@ pub struct Lookup {
     pub operator: PathBuf,
     /// The collections in the box home's `external/`, in folder-name order.
     pub collections: Vec<Collection>,
-    /// The version of `box` that a pack's `engine` floor is checked against.
+    /// The version of `box` that each file's `[requires] box` is checked against.
     pub version: &'static str,
 }
 
@@ -661,8 +669,10 @@ impl Lookup {
         let path = self.folder(name)?.join(PACK_FILE);
         let text = crate::files::read_regular(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        let table =
+        let mut table =
             toml::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+        take_requires(&mut table, "pack", self.version)
+            .map_err(|refusal| refusal.in_file(&path, &text).to_string())?;
         pack_layout(table, &text)
             .map(|(table, _)| table)
             .map_err(|refusal| refusal.in_file(&path, &text).to_string())
@@ -826,8 +836,10 @@ fn visit(
         })?;
         let path = folder.join(PACK_FILE);
         let (text, location) = read_pack(&path, &base, lookup)?;
-        let table: toml::Table =
+        let mut table: toml::Table =
             toml::from_str(&text).map_err(|error| invalid(&path, error.to_string()))?;
+        take_requires(&mut table, "pack", lookup.version)
+            .map_err(|refusal| refusal.in_file(&path, &text))?;
         let (table, program_input) =
             pack_layout(table, &text).map_err(|refusal| refusal.in_file(&path, &text))?;
         let policy = None;
@@ -1215,6 +1227,9 @@ fn take_grammars(layer: &mut Layer, tool_pack: bool) -> Result<(), Error> {
 /// Refuse a key that belongs to the other kind of file or to neither, write a tool pack as its tool
 /// table, and check a pack's header against the `box` version `version`.
 fn check_kind(layer: &mut Layer, version: &str) -> Result<(), Refusal> {
+    if !layer.shared {
+        take_requires(&mut layer.table, "profile", version)?;
+    }
     let refused: &[&str] = if layer.shared {
         &[
             "packs",
@@ -1398,17 +1413,81 @@ fn check_kind(layer: &mut Layer, version: &str) -> Result<(), Refusal> {
         .get("pack")
         .and_then(toml::Value::as_table)
         .ok_or("a pack needs a `[pack]` header with `name` and `version`")?;
-    check_header(header, "pack", &layer.name, version)
+    check_header(header, "pack", &layer.name)
+}
+
+/// Check the `[requires]` table of `table`, a `file` ("pack", "plugin", or "profile"), against
+/// the running `box`, `version`, and take the table out, so that nothing after this reads it.
+///
+/// `box` is checked first. A requirement that this `box` does not know is refused after that,
+/// because a later `box` added it, and this one cannot check it.
+pub(crate) fn take_requires(
+    table: &mut toml::Table,
+    file: &str,
+    version: &str,
+) -> Result<(), Refusal> {
+    check_requires(table, file, version)?;
+    table.remove(REQUIRES);
+    Ok(())
+}
+
+/// Check the `[requires]` table of `table`, a `file`, against `box` `version`, as
+/// [`take_requires`] does, and leave the table where it is.
+pub(crate) fn check_requires(
+    table: &toml::Table,
+    file: &str,
+    version: &str,
+) -> Result<(), Refusal> {
+    let Some(value) = table.get(REQUIRES) else {
+        return Ok(());
+    };
+    let toml::Value::Table(requires) = value else {
+        return Err(Refusal::at(
+            format!("`{REQUIRES}` is a table, such as `[{REQUIRES}]` with `box = \">=0.3.0\"`"),
+            &[REQUIRES],
+        ));
+    };
+    if let Some(requirement) = string_field(requires, "box", &format!("[{REQUIRES}]"))
+        .map_err(|reason| Refusal::at(reason, &[REQUIRES, "box"]))?
+    {
+        let needed =
+            floor(&requirement).map_err(|reason| Refusal::at(reason, &[REQUIRES, "box"]))?;
+        let this = parse_version(version).unwrap_or_default();
+        if this < needed {
+            return Err(Refusal::at(
+                format!("this {file} needs box {requirement}, and this is box {version}"),
+                &[REQUIRES, "box"],
+            ));
+        }
+    }
+    if let Some(key) = requires
+        .keys()
+        .find(|key| !REQUIREMENTS.contains(&key.as_str()))
+    {
+        // A misspelled requirement is a typo, not one that a later `box` added.
+        if locate::closest(key, REQUIREMENTS.iter().copied()).is_some() {
+            return Err(Refusal::at(
+                unknown_key(&format!("`[{REQUIRES}]`"), key, REQUIREMENTS),
+                &[REQUIRES, key],
+            ));
+        }
+        return Err(Refusal::at(
+            format!(
+                "this {file} requires `{key}`, which box {version} cannot check; a later box \
+                 may, so update box or remove the requirement"
+            ),
+            &[REQUIRES, key],
+        ));
+    }
+    Ok(())
 }
 
 /// Refuse a `[pack]` or `[plugin]` header `header`, named `section`, that holds an unknown key,
-/// lacks `name` or `version`, names another file than `imported_as`, or needs a later `box` than
-/// `version`.
+/// lacks `name` or `version`, or names another file than `imported_as`.
 pub(crate) fn check_header(
     header: &toml::Table,
     section: &str,
     imported_as: &str,
-    version: &str,
 ) -> Result<(), Refusal> {
     let known = if section == plugin::HEADER {
         plugin::HEADER_KEYS
@@ -1449,16 +1528,6 @@ pub(crate) fn check_header(
             ),
             &[section, "name"],
         ));
-    }
-    if let Some(requirement) = string_field(header, "engine", &owner)? {
-        let needed = floor(&requirement)?;
-        let this = parse_version(version).unwrap_or_default();
-        if this < needed {
-            return Err(Refusal::at(
-                format!("this {section} needs box {requirement}, and this is box {version}"),
-                &[section, "engine"],
-            ));
-        }
     }
     Ok(())
 }
@@ -7494,41 +7563,70 @@ mod tests {
     }
 
     #[test]
-    fn an_engine_floor_is_checked_against_the_version_of_the_lookup() {
+    fn requires_is_checked_against_the_version_of_the_lookup_box_first() {
         let shelf = Shelf::new();
-        let text = "packs = [\"@box/p\"]";
-        for (floor, refused) in [(">=7.2.0", false), (">=7.2.1", true)] {
-            shelf.share_raw(
-                "p",
-                &format!(
-                    "[pack]\nname = \"@box/p\"\nversion = 1\nkind = \"support\"\nengine = \"{floor}\"\n"
-                ),
-            );
-            let lookup = Lookup {
-                vendored: Some(shelf.root.join("packs")),
-                operator: shelf.root.join("operator"),
-                collections: Vec::new(),
-                version: "7.2.0",
-            };
-            let chained = chain(
-                &toml::from_str(text).expect("TOML"),
-                text,
+        let lookup = Lookup {
+            vendored: Some(shelf.root.join("packs")),
+            operator: shelf.root.join("operator"),
+            collections: Vec::new(),
+            version: "7.2.0",
+        };
+        let chained = |profile: &str| {
+            chain(
+                &toml::from_str(profile).expect("TOML"),
+                profile,
                 &shelf.root.join("mine/profile.toml"),
                 None,
                 &lookup,
-            );
-            match chained {
-                Ok(_) => assert!(!refused, "{floor} is refused for box 7.2.0"),
-                Err(error) => {
-                    let reason = reason(error);
-                    assert!(refused, "{floor}: {reason}");
-                    assert!(
-                        reason.contains("and this is box 7.2.0"),
-                        "{floor}: {reason}"
-                    );
+            )
+            .map(|_| ())
+            .map_err(reason)
+        };
+        let header = "[pack]\nname = \"@box/p\"\nversion = 1\nkind = \"support\"\n";
+        let profile = "packs = [\"@box/p\"]";
+        for (requires, wanted) in [
+            ("box = \">=7.2.0\"", None),
+            (
+                "box = \">=7.2.1\"",
+                Some("this pack needs box >=7.2.1, and this is box 7.2.0"),
+            ),
+            ("box = \"7.2\"", Some("is not `>=X.Y.Z`")),
+            // A requirement that a later box added comes after the floor.
+            (
+                "box = \">=8.0.0\"\nlater = true",
+                Some("this pack needs box >=8.0.0, and this is box 7.2.0"),
+            ),
+            (
+                "box = \">=7.0.0\"\nlater = true",
+                Some("this pack requires `later`, which box 7.2.0 cannot check"),
+            ),
+            // A misspelled `box` is a typo, not a requirement that a later box added.
+            ("bx = \">=7.0.0\"", Some("did you mean `box`?")),
+        ] {
+            shelf.share_raw("p", &format!("{header}[requires]\n{requires}\n"));
+            match (chained(profile), wanted) {
+                (Ok(()), None) => {}
+                (Err(reason), Some(wanted)) => {
+                    assert!(reason.contains(wanted), "{requires}: {reason}")
                 }
+                (got, wanted) => panic!("{requires}: got {got:?}, wanted {wanted:?}"),
             }
         }
+        shelf.share_raw("p", &format!("{header}engine = \">=7.0.0\"\n"));
+        let reason = chained(profile).expect_err("the old key is refused");
+        assert!(
+            reason.contains("`[pack]` holds the unknown key `engine`"),
+            "{reason}"
+        );
+        shelf.share_raw("p", header);
+        let reason = chained("packs = [\"@box/p\"]\n[requires]\nbox = \">=9.0.0\"\nlater = 1\n")
+            .expect_err("a profile is checked too");
+        assert!(
+            reason.contains("this profile needs box >=9.0.0, and this is box 7.2.0"),
+            "{reason}"
+        );
+        chained("packs = [\"@box/p\"]\n[requires]\nbox = \">=7.2.0\"\n")
+            .expect("a profile within its floor loads");
     }
 
     #[test]
