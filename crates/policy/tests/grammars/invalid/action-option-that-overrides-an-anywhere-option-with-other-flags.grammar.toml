@@ -1,0 +1,19 @@
+# expect: `<grammar>.shell.publish.options.offline`: has the name of the `anywhere` option `<grammar>.global.options.offline`, so it must have the same `flag`, `value`, and `repeated`
+# An action option that takes the place of an `anywhere` global option is read with the global
+# option's spellings, so it must spell and read the same.
+
+name    = "uv"
+program = "uv"
+format  = 1
+version = 1
+
+[effects]
+network = "uv may contact a package index"
+
+[global]
+options.offline = { flag = ["--offline"], removes = ["network"], anywhere = true }
+
+[shell.publish]
+usage = "uv [global options] publish [options]"
+adds  = ["network"]
+options.offline = { flag = ["--offline", "--no-network"], overrides = true }

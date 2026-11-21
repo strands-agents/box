@@ -253,6 +253,18 @@ class MacOSReleaseTests(unittest.TestCase):
         entitlement = plistlib.loads((app.parent / "SIGNING_METADATA/Box.entitlements").read_bytes())
         self.assertEqual(entitlement, {release.ENTITLEMENT: True})
 
+    def test_bundle_accepts_a_preview_and_carries_its_release_version(self):
+        binaries = self.root / "bin"
+        release.unpack_build(self.build(), binaries)
+        app = release.prepare_bundle(binaries, self.root / "artifact", "0.3.0-preview.1")
+        info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+        self.assertEqual(info["CFBundleVersion"], "0.3.0")
+        self.assertEqual(info["CFBundleShortVersionString"], "0.3.0")
+        for version in ("0.3.0-preview.0", "0.3.0-preview.01", "0.3.0-rc.1"):
+            with self.subTest(version=version):
+                with self.assertRaisesRegex(Exception, "Invalid release version"):
+                    release.prepare_bundle(binaries, self.root / version, version)
+
     def test_profile_selection_enables_profile_fetching_and_helpers_use_developer_id(self):
         self.assertEqual(release.manifest("ABCDEFGHIJ", "profile"), {
             "type": "app", "os": "osx", "name": "Box",
