@@ -491,13 +491,6 @@ pub enum Error {
         ids: String,
     },
 
-    /// A box that `box` would lock is still running.
-    #[error("box {id} is still running; wait for it to exit")]
-    BoxRunning {
-        /// The box ID.
-        id: String,
-    },
-
     /// The operator did not answer yes to a removal.
     #[error("nothing was removed")]
     Kept,

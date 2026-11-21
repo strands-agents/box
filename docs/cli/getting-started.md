@@ -255,7 +255,7 @@ box profile clean --all
 ```
 
 ```text
-box: Remove all 4 boxes, of every profile, and their records?
+box: Remove all 4 boxes, and their records?
 
 > [1] Keep (default)
     Cancel without changes.

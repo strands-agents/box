@@ -935,10 +935,9 @@ impl Launcher {
         let mut held = Vec::new();
         let mut running = Vec::new();
         for id in ids {
-            match hold(&root, id) {
-                Ok(lock) => held.push((root.join(id), lock)),
-                Err(Error::BoxRunning { id }) => running.push(id),
-                Err(error) => return Err(error),
+            match hold(&root, id)? {
+                Hold::Free(lock) => held.push((root.join(id), lock)),
+                Hold::Running => running.push(id.clone()),
             }
         }
         match running.as_slice() {
@@ -2143,7 +2142,7 @@ fn minted_by(directory: &Path, profile: &str) -> Result<bool, Error> {
 
 /// Hold the run folder `name` in `runs` with the lock that `claim` takes, so a box that is still
 /// running is refused. A link holds no box that `claim` accepts, so it needs no lock.
-fn hold(runs: &Path, name: &str) -> Result<Option<std::fs::File>, Error> {
+fn hold(runs: &Path, name: &str) -> Result<Hold, Error> {
     let directory = runs.join(name);
     let file = match std::fs::OpenOptions::new()
         .read(true)
@@ -2157,14 +2156,23 @@ fn hold(runs: &Path, name: &str) -> Result<Option<std::fs::File>, Error> {
                 Some(nix::libc::ELOOP | nix::libc::ENOTDIR)
             ) || error.kind() == std::io::ErrorKind::NotFound =>
         {
-            return Ok(None);
+            return Ok(Hold::Free(None));
         }
         Err(source) => return Err(io_error("open", &directory, source)),
     };
-    lock_run(file, &directory, || Error::BoxRunning {
-        id: name.to_string(),
-    })
-    .map(Some)
+    match file.try_lock() {
+        Ok(()) => Ok(Hold::Free(Some(file))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(Hold::Running),
+        Err(std::fs::TryLockError::Error(source)) => Err(io_error("lock", &directory, source)),
+    }
+}
+
+/// What [`hold`] found at a run folder.
+enum Hold {
+    /// No box runs there. It holds the folder's lock, or nothing for a link or a missing folder.
+    Free(Option<std::fs::File>),
+    /// A box holds the lock.
+    Running,
 }
 
 /// Remove the run folder `path` while `_held` holds its lock, so no box starts in it meanwhile.
