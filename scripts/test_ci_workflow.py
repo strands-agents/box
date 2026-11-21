@@ -115,13 +115,13 @@ class MovedCommandTests(unittest.TestCase):
 
 
 class SuiteStepTests(unittest.TestCase):
-    """Each step of the macOS job runs only for the suites that need it."""
+    """Each step of the Linux and macOS jobs runs only for the suites that need it."""
 
     ALL = "${{ !cancelled() && inputs.suite == 'all' }}"
     TESTS = "${{ !cancelled() }}"
 
-    def step_if(self, name, occurrence=0):
-        lines = job(CLI_TEST, "macos").splitlines()
+    def step_if(self, name, occurrence=0, job_name="macos"):
+        lines = job(CLI_TEST, job_name).splitlines()
         starts = [index for index, line in enumerate(lines) if line == f"      - name: {name}"]
         start = starts[occurrence]
         for line in lines[start + 1:]:
@@ -133,6 +133,16 @@ class SuiteStepTests(unittest.TestCase):
 
     def test_lint_runs_only_for_all(self):
         self.assertEqual(self.step_if("Clippy"), self.ALL)
+
+    def test_linux_lint_runs_only_for_all(self):
+        # rust-test-lint.yml already lints the workspace for a Core change.
+        for name in ["Format", "Clippy"]:
+            with self.subTest(step=name):
+                self.assertEqual(self.step_if(name, job_name="build-test-lint"),
+                                 "inputs.suite == 'all'")
+        for name in ["Build", "Test"]:
+            with self.subTest(step=name):
+                self.assertIsNone(self.step_if(name, job_name="build-test-lint"))
 
     def test_test_steps_run_for_all_and_core(self):
         for name in ["Install launcher test prerequisites", "Test"]:

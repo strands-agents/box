@@ -6,7 +6,7 @@ name: "CLI: Test"
 #
 # `suite` picks what runs:
 #   all     every job below.
-#   core    for a Box Core change: the Linux build, test, and lint, whose tests call Box Core's
+#   core    for a Box Core change: the Linux build and tests, whose tests call Box Core's
 #           library, and the engine suite (crates/cli/app/tests/engine.rs) on macOS.
 
 on:
@@ -76,10 +76,13 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # rust-test-lint.yml lints the workspace for a Core change, so `core` skips the lint here.
       - name: Format
+        if: inputs.suite == 'all'
         run: cargo fmt --all --check
 
       - name: Clippy
+        if: inputs.suite == 'all'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Build
