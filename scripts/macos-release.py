@@ -118,7 +118,7 @@ def unpack_signed(archive, destination, root):
 
 
 def prepare_bundle(binaries, destination, version):
-    require(re.fullmatch(r"\d+\.\d+\.\d+(?:-linux-preview\.[1-9]\d*)?", version),
+    require(re.fullmatch(r"\d+\.\d+\.\d+(?:-(?:linux-)?preview\.[1-9]\d*)?", version),
             "Invalid release version")
     app = destination / "Box.app"
     executables = app / "Contents/MacOS"

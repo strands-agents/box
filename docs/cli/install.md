@@ -5,46 +5,40 @@ belongs: Installing, upgrading, pinning, and removing box, what the installer pu
 
 # Install Box
 
-Until a release of `box` is published from this repository, build it from source, as
-[Install](#install) shows. The rest of this page describes the installer that comes with that
-release: it downloads a Box release from GitHub, checks it, and puts `box` on your `PATH`. On
-macOS, the checks include Apple's signing and notarization.
+The installer downloads a Box release from `strands-agents/box` on GitHub, checks it, and puts
+`box` on your `PATH`. On macOS, the checks include Apple's signing and notarization. To build
+`box` yourself instead, see [Build from source](#build-from-source).
 
 ## Requirements
 
 An Apple Silicon Mac with macOS 15 or later, and the [GitHub CLI](https://cli.github.com/).
-On ARM64 Linux, you need glibc 2.34 or later, `libgcc`, Python 3, the GitHub CLI,
+On Linux, ARM64 or x86_64, you need glibc 2.34 or later, `libgcc`, Python 3, the GitHub CLI,
 and GNU utilities (`coreutils`, `diffutils`, `findutils`, `tar`, `gzip`, `awk`, `sed`, and `grep`).
 See [How Linux differs](limitations.md#how-linux-differs) for what is different from a Mac.
 The installer refuses Intel Macs, older macOS versions, and other Linux architectures.
 
-To build from source, you also need [Rust](https://rustup.rs/) and
-[`just`](https://github.com/casey/just). You don't need sudo.
+The installer downloads through `gh`, so run `gh auth login` first. You don't need sudo, Rust, or
+a checkout of the source.
 
 Install your agent, such as Claude Code, and set up its credentials first. The installer does
 neither.
 
 ## Install
 
-Build `box` and the Box Core helpers it runs, and put them on your `PATH`:
+The first release of `box` is a pre-release, so name it in `BOX_VERSION`:
 
 ```sh
-git clone https://github.com/strands-agents/box.git
-cd box
-just build-cli
-export PATH="$PWD/target/debug:$PATH"
+gh api 'repos/strands-agents/box/contents/install.sh?ref=main' \
+  -H 'Accept: application/vnd.github.raw' > install.sh &&
+BOX_VERSION=0.3.0-preview.1 sh ./install.sh
 ```
 
-The build is in `target/debug`, and it uses the packs and starters in the checkout's `resources/`.
-The `export` lasts only in this terminal, so add `target/debug` to your `PATH` in your shell's
-startup file to keep it. [CONTRIBUTING.md](../../CONTRIBUTING.md) has more on building from source.
-
-Once releases are published here, the installer replaces these steps. Example output on a Mac:
+Example output on a Mac:
 
 ```text
-Downloading box-cli-v0.2.0-aarch64-apple-darwin.tar.gz...
+Downloading box-cli-v0.3.0-preview.1-aarch64-apple-darwin.tar.gz...
 Verified checksum, archive, and Apple signature
-Installed box 0.2.0.
+Installed box 0.3.0-preview.1.
 Added box to $PATH in /Users/you/.zshrc
 Open a new terminal, or run: export PATH="$HOME/.local/bin:$PATH"
 
@@ -70,7 +64,7 @@ Open a new terminal as it says, and check that `box` runs:
 
 ```console
 $ box --version
-box 0.2.0
+box 0.3.0-preview.1
 ```
 
 The installer checks the download before it changes your installed release. If a check fails,
@@ -99,20 +93,24 @@ on Linux.
 
 ## Upgrade or choose a version
 
-To upgrade, run the install command again. It installs the latest release, switches `current` to
-it, and prints `Updated box 0.1.11 to 0.2.0.`, or `box 0.2.0 is already installed.` when there's
-nothing new. If you installed with any of the [installer variables](#installer-variables), set
-them again, except `BOX_VERSION`.
-
-To install a specific release instead, set `BOX_VERSION` to its number without a leading `v`:
+To install another release, run the installer again with its number in `BOX_VERSION`, without a
+leading `v`:
 
 ```sh
-BOX_VERSION=0.1.11 sh ./install.sh
+BOX_VERSION=0.3.0-preview.2 sh ./install.sh
 ```
 
-A Linux preview release, such as `0.1.3-linux-preview.1`, is never the latest, so the installer
-picks one only when `BOX_VERSION` names it. An older release may have no ARM64 Linux archive, and
-then the installer stops on Linux and names the archive it couldn't download.
+It switches `current` to that release and prints `Updated box 0.3.0-preview.1 to 0.3.0-preview.2.`,
+or `box 0.3.0-preview.2 is already installed.` when you have it already. If you installed with any
+of the other [installer variables](#installer-variables), set them again.
+
+Without `BOX_VERSION`, the installer takes the latest stable release. A pre-release, such as
+`0.3.0-preview.1` or `0.3.0-linux-preview.1`, is never the latest, so the installer picks one only
+when `BOX_VERSION` names it. Until a stable release includes `box`, the installer can't find one on
+its own, and it stops and tells you to set `BOX_VERSION`.
+
+A release with no `box` archive for your computer stops the installer, which names the archive it
+couldn't find. Releases before `0.3.0-preview.1` have no `box` archive at all.
 
 Old releases stay in `~/.strands/box/packages/`. Installing one you already have switches `current` back
 to it without touching its folder. To free the space, delete an old release's folder, but not the
@@ -127,6 +125,7 @@ macOS, a release that isn't signed by the Box publisher, such as a fork's own bu
 ```sh
 BOX_GITHUB_REPO=your-account/box \
 BOX_ALLOW_UNSIGNED=1 \
+BOX_VERSION=0.3.0-preview.1 \
 sh ./install.sh
 ```
 
@@ -138,11 +137,28 @@ binary version.
 ## Manage PATH without the installer
 
 ```sh
-BOX_NO_MODIFY_PATH=1 sh ./install.sh
+BOX_NO_MODIFY_PATH=1 BOX_VERSION=0.3.0-preview.1 sh ./install.sh
 ```
 
 This leaves your shell's startup files alone, so put `~/.local/bin` on your `PATH` in your own
 setup.
+
+## Build from source
+
+To run your own build, you need [Rust](https://rustup.rs/) and
+[`just`](https://github.com/casey/just) as well. Build `box` and the Box Core helpers it runs, and
+put them on your `PATH`:
+
+```sh
+git clone https://github.com/strands-agents/box.git
+cd box
+just build-cli
+export PATH="$PWD/target/debug:$PATH"
+```
+
+The build uses the packs and starters in the checkout's `resources/`. The `export` lasts only in
+this terminal, so add `target/debug` to your `PATH` in your shell's startup file to keep it.
+[CONTRIBUTING.md](../../CONTRIBUTING.md) has more on building from source.
 
 ## Uninstall
 
@@ -164,7 +180,7 @@ from `# >>> Box PATH >>>` to `# <<< Box PATH <<<`. For fish, delete
 
 | Variable | What it does |
 | --- | --- |
-| `BOX_VERSION` | The release to install, such as `0.2.0` or `0.1.3-linux-preview.1`, without a leading `v`. Without it, the latest release. |
+| `BOX_VERSION` | The release to install, such as `0.3.0-preview.1`, without a leading `v`. Without it, the latest stable release. |
 | `BOX_GITHUB_REPO` | The GitHub repository that supplies releases, as `owner/repo`. Without it, `strands-agents/box`. |
 | `BOX_ALLOW_UNSIGNED` | `1` skips Apple's signature and Gatekeeper checks on macOS. It has no effect on Linux. |
 | `BOX_NO_MODIFY_PATH` | `1` leaves your shell's startup files alone. |

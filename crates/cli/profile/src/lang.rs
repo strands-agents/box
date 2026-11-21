@@ -1452,7 +1452,10 @@ pub(crate) fn check_header(
     }
     if let Some(requirement) = string_field(header, "engine", &owner)? {
         let needed = floor(&requirement)?;
-        let this = parse_version(version).unwrap_or_default();
+        let release = version
+            .split_once('-')
+            .map_or(version, |(release, _)| release);
+        let this = parse_version(release).unwrap_or_default();
         if this < needed {
             return Err(Refusal::at(
                 format!("this {section} needs box {requirement}, and this is box {version}"),
@@ -7490,6 +7493,34 @@ mod tests {
                 reason.contains("which imports this pack"),
                 "{text}: {reason}"
             );
+        }
+    }
+
+    #[test]
+    fn a_pre_release_meets_the_engine_floor_of_its_release() {
+        let shelf = Shelf::new();
+        let text = "packs = [\"@box/p\"]";
+        for (floor, refused) in [(">=7.2.0", false), (">=7.2.1", true)] {
+            shelf.share_raw(
+                "p",
+                &format!(
+                    "[pack]\nname = \"@box/p\"\nversion = 1\nkind = \"support\"\nengine = \"{floor}\"\n"
+                ),
+            );
+            let lookup = Lookup {
+                vendored: Some(shelf.root.join("packs")),
+                operator: shelf.root.join("operator"),
+                collections: Vec::new(),
+                version: "7.2.0-preview.1",
+            };
+            let chained = chain(
+                &toml::from_str(text).expect("TOML"),
+                text,
+                &shelf.root.join("mine/profile.toml"),
+                None,
+                &lookup,
+            );
+            assert_eq!(chained.is_err(), refused, "{floor} for box 7.2.0-preview.1");
         }
     }
 
