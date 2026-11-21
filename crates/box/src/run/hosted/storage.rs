@@ -392,6 +392,7 @@ impl Cancellation {
         Ok(id)
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn untrack(&self, id: u64) {
         self.sockets
             .lock()
