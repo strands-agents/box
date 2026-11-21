@@ -409,6 +409,49 @@ fn exercise(failure: bool) {
     }
 }
 
+fn descendant_exited_after_scan(pid: u32, error: &std::io::Error) -> bool {
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => true,
+        Some(libc::EINVAL) => {
+            // Linux can retain the PID reference after its task has been reaped. Require an
+            // independent absence check so an invalid call never hides a live descendant.
+            // SAFETY: signal zero checks existence without delivering a signal.
+            let absent = unsafe { libc::kill(pid as libc::pid_t, 0) } == -1;
+            absent && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        }
+        _ => false,
+    }
+}
+
+#[test]
+fn descendant_exit_race_accepts_a_reaped_child_but_never_a_live_child() {
+    let mut child = Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .expect("start a child that remains alive until killed");
+    let pid = child.id();
+    let invalid = std::io::Error::from_raw_os_error(libc::EINVAL);
+    let accepted_live_child = descendant_exited_after_scan(pid, &invalid);
+    child.kill().expect("stop the test-owned child");
+    child.wait().expect("reap the test-owned child");
+    assert!(
+        !accepted_live_child,
+        "an invalid call must not hide a live child"
+    );
+    assert!(
+        descendant_exited_after_scan(pid, &invalid),
+        "the kernel can return EINVAL when its referenced PID has lost its task"
+    );
+    assert!(descendant_exited_after_scan(
+        pid,
+        &std::io::Error::from_raw_os_error(libc::ESRCH)
+    ));
+    assert!(!descendant_exited_after_scan(
+        pid,
+        &std::io::Error::from_raw_os_error(libc::EPERM)
+    ));
+}
+
 fn descendants(parent: u32) -> Vec<OwnedFd> {
     let mut known = BTreeSet::from([parent]);
     loop {
@@ -443,9 +486,8 @@ fn descendants(parent: u32) -> Vec<OwnedFd> {
             let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
             if descriptor < 0 {
                 let error = std::io::Error::last_os_error();
-                assert_eq!(
-                    error.raw_os_error(),
-                    Some(libc::ESRCH),
+                assert!(
+                    descendant_exited_after_scan(pid, &error),
                     "pin Box descendant {pid}: {error}"
                 );
                 // A completed staging child can be reaped between the process scan and pidfd_open.

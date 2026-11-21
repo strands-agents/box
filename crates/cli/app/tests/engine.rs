@@ -1,5 +1,11 @@
 //! `box run` against a real engine.
-#![cfg(any(target_os = "macos", all(target_os = "linux", target_arch = "aarch64")))]
+#![cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )
+))]
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -5088,11 +5094,13 @@ fn each_part_of_a_run_folder_is_checked_before_a_box_id_is_reused() {
         &workspace,
         &["box", "box.toml"],
     );
-    std::fs::rename(
+    std::fs::copy(
         runs.join("b-0000000000000010/box.toml"),
         scene.outside().join("box.toml"),
     )
-    .expect("move box.toml");
+    .expect("copy box.toml outside the run folder");
+    std::fs::remove_file(runs.join("b-0000000000000010/box.toml"))
+        .expect("remove box.toml before replacing it with a link");
     std::os::unix::fs::symlink(
         scene.outside().join("box.toml"),
         runs.join("b-0000000000000010/box.toml"),
