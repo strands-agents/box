@@ -11,13 +11,11 @@ The installer downloads a Box release from `strands-agents/box` on GitHub, check
 
 ## Requirements
 
-An Apple Silicon Mac with macOS 27 or later. On Linux, ARM64 or x86_64, you need glibc 2.34 or
+An Apple Silicon Mac with macOS 15 or later. On Linux, ARM64 or x86_64, you need glibc 2.34 or
 later, `libgcc`, Python 3, `curl`, and GNU utilities (`coreutils`, `diffutils`, `findutils`, `tar`,
 `gzip`, `awk`, `sed`, and `grep`).
 See [How Linux differs](limitations.md#how-linux-differs) for what is different from a Mac.
-The installer refuses Intel Macs, macOS versions below the selected package requirement, and
-other Linux architectures. Users on macOS 15–26 can still
-[select an older compatible release](#upgrade-or-choose-a-version). New CLI packages require macOS 27.
+The installer refuses Intel Macs, older macOS versions, and other Linux architectures.
 
 The installer downloads releases from GitHub with `curl`, so you don't need a GitHub account. You
 don't need sudo, Rust, or a checkout of the source either.

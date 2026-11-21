@@ -35,9 +35,7 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 pub struct RunOptions<'a> {
     /// The workload's controlling terminal; `None` inherits the process's standard streams.
     pub terminal: Option<std::fs::File>,
-    /// Called after hardening and signal registration, before workload setup; an error aborts the run,
-    /// and Linux native builds refuse a callback that enables native policy in a configuration that
-    /// previously disabled it.
+    /// Called after hardening and signal registration, before workload setup; an error aborts the run.
     pub on_ready: Option<Box<dyn FnOnce() -> std::io::Result<()> + 'a>>,
     /// The box ID a new box takes; `None` generates one, a configured box refuses any other ID, and a
     /// malformed ID is refused before `run` uses the process's one attempt.

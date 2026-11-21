@@ -193,26 +193,7 @@ protected macOS validation run.
 <a id="box-supports-macos-only"></a>
 ### `box` supports macOS and Linux
 
-`box` runs on Apple silicon with the [supported macOS version](../../cli/install.md#requirements),
-and on Linux on aarch64 and x86_64. New CLI packages require macOS 27 even when native
-filesystem policy is not selected. Native enforcement depends on the macOS 27 descendant-scoped
-Endpoint Security client (`es_new_descendants_client`), event synchronization (`es_sync_client`),
-and deadline failure controls (`es_set_deadline_miss_mode`). The older system-wide Endpoint
-Security client is not this dependency.
-
-The CLI uses one supported macOS baseline for packages with and without native support. This
-lets its release qualification cover the OS facilities required by native policy. The cost is
-that users on macOS 15–26 must select an older compatible CLI release or upgrade their OS.
-The installer's `release.json` field `macos_minimum_version` states each new package's minimum;
-archives without that field retain the historical macOS 15 floor.
-
-**Rejected.** Keep the macOS 15 deployment target and add a macOS 15 launch check with native
-policy disabled. That could preserve ordinary CLI use on older systems, but would retain a
-second support and validation baseline where native enforcement is unavailable. We choose the
-macOS 27 baseline because native enforcement is a key CLI capability; this is a product support
-decision, not a claim that ordinary CLI operations technically require the new client.
-
-Box Core's Linux
+`box` runs on macOS on Apple silicon, and on Linux on aarch64 and x86_64. Box Core's Linux
 containment runs on both, with no opt-in. A release publishes an x86_64 archive of `box` when
 `publish_linux_x86` is set, which it is by default, and CI runs the engine suite only on macOS. Box
 Core on Linux refuses a deny of an absent path, so on Linux `box run` creates an empty
@@ -1510,11 +1491,13 @@ holds only for the Shell and Monty.
 filesystem entry from an `fs:*` rule. Without native checks, an `fs:*` rule decides only the Shell
 and Monty: the agent's own file tools, each tool, and each local MCP server reach their grants
 with no decision and add no history. `[filesystem] deny` keeps a path from every process, and
-`[filesystem] deny_write` keeps a folder read-only for every process that writes it. Compiling
-native support into a release does not select it for a profile.
+`[filesystem] deny_write` keeps a folder read-only for every process that writes it. Revisit this
+when every macOS release that `box` supports has native checks and the signed release carries the
+Endpoint Security entitlement.
 
-**Rejected.** Native checks for every run: existing policies may not permit the additional file
-operations, and Linux needs privileges that a normal install does not supply. Filesystem entries derived
+**Rejected.** Native checks for every run: they extend file rules to the supported operations of
+each process that selects them, but they need macOS 27 and an entitled build, so runs on macOS 26
+and earlier fail. Filesystem entries derived
 from `forbid` rules: they cover literal paths, but they need a Dogwood scanner
 ([no parser](#box-never-parses-the-policy-language)), and no list states a delete-only, a
 pattern, or a history rule.

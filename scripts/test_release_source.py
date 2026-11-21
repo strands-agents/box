@@ -573,7 +573,7 @@ class ReleaseBundleTests(unittest.TestCase):
                 self.assertEqual("BOX_GITHUB_REPO=example/box sh" in body, not preview)
                 self.assertIn(f"BOX_GITHUB_REPO=example/box BOX_VERSION={tag[1:]} sh", body)
                 self.assertLess(body.index("## Install box"), body.index("## Download Box Core"))
-                support = "macOS 27 or later on Apple silicon"
+                support = "macOS 15 or later on Apple silicon"
                 self.assertIn(support + (", ARM64 Linux, and x86-64 Linux" if publish_x86
                                          else " and ARM64 Linux"), body)
                 self.assertNotIn("experimental", body.lower())

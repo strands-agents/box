@@ -540,71 +540,13 @@ try:
     else:
         value = json.loads(path.read_text())
         for key in args[1].split("."): value = value[key]
-        if args[0] == "-type":
-            print(type(value).__name__)
-        else:
-            if not isinstance(value, str): raise ValueError("expected string")
-            print(value)
+        if not isinstance(value, str): raise ValueError("expected string")
+        print(value)
 except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
 """)
             text = (self.tools / "mv").read_text().replace('exec /bin/mv "$@"',
                 '[ "$1" != -fh ] || {{ shift; set -- -fT "$@"; }}\nexec /bin/mv "$@"'.replace("{{", "{").replace("}}", "}"))
             (self.tools / "mv").write_text(text)
-
-    def test_macos_legacy_release_keeps_pinned_and_latest_installation(self):
-        """An older compatible release still installs on macOS 15 and 26"""
-        self.native_platform()
-        executable(self.tools / "sw_vers", '#!/bin/sh\nprintf "%s\n" "$TEST_MACOS"\n')
-        self.release("0.2.4")
-        for host in ("15.0", "26.1"):
-            for pinned in (False, True):
-                with self.subTest(host=host, pinned=pinned):
-                    options = {"BOX_VERSION": "0.2.4"} if pinned else {}
-                    self.run_install(TEST_MACOS=host, **options)
-                    self.assertEqual(self.current(), f"0.2.4-{self.target}")
-
-    def test_macos_package_minimum_refuses_before_execution_and_preserves_installation(self):
-        """The selected package minimum controls both layouts and preserves an older install"""
-        self.native_platform()
-        executable(self.tools / "sw_vers", '#!/bin/sh\nprintf "%s\n" "$TEST_MACOS"\n')
-        self.release("0.2.4")
-        self.run_install(TEST_MACOS="26.1")
-        for native in (False, True):
-            with self.subTest(native=native):
-                self.release("0.3.0", native=native, metadata={"macos_minimum_version": "27.0"})
-                before = self.log.read_bytes()
-                result = self.run_install(success=False, TEST_MACOS="26.1", BOX_VERSION="0.3.0")
-                self.assertIn("release v0.3.0 requires macOS 27.0 or later", result.stderr)
-                self.assertEqual(self.log.read_bytes(), before)
-                self.assertEqual(self.current(), f"0.2.4-{self.target}")
-
-    def test_macos_package_minimum_accepts_compatible_host(self):
-        """Both package layouts start only on a compatible major and minor version"""
-        self.native_platform()
-        executable(self.tools / "sw_vers", '#!/bin/sh\nprintf "%s\n" "$TEST_MACOS"\n')
-        for index, (host, minimum, native) in enumerate((
-            ("27.0", "27.0", False), ("27.0", "27.0", True),
-            ("27.2", "27.1.3", False), ("28.0", "27.1", True),
-        )):
-            version = f"0.3.{index}"
-            with self.subTest(host=host, minimum=minimum, native=native):
-                self.release(version, native=native, metadata={"macos_minimum_version": minimum})
-                self.run_install(TEST_MACOS=host, BOX_VERSION=version)
-                self.assertEqual(self.current(), f"{version}-{self.target}")
-
-    def test_macos_package_minimum_rejects_invalid_and_newer_metadata(self):
-        """Malformed or newer requirements never execute the downloaded program"""
-        self.native_platform()
-        executable(self.tools / "sw_vers", '#!/bin/sh\nprintf "%s\n" "$TEST_MACOS"\n')
-        for minimum in (27, [], {}, "", "27", "27.0junk", "27.01", "14.0", r"27\0560", r"\0615.0", "27.1", "27.0.1"):
-            with self.subTest(minimum=minimum):
-                self.release("0.3.0", metadata={"macos_minimum_version": minimum})
-                before = self.log.read_bytes() if self.log.exists() else b""
-                result = self.run_install(success=False, TEST_MACOS="27.0")
-                expected = "requires macOS" if minimum in ("27.1", "27.0.1") else "invalid macos_minimum_version"
-                self.assertIn(expected, result.stderr)
-                self.assertEqual(self.log.read_bytes() if self.log.exists() else b"", before)
-                self.untouched()
 
     def assert_macos_identity_upgrade_and_rollback(self, native):
         self.native_platform()
@@ -836,7 +778,7 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
         executable(self.tools / "sysctl", '#!/bin/sh\nprintf "%s\\n" 0\n')
         for os_version, architecture, message in (
             ("14.7", "arm64", "macOS 15 or later"),
-            ("27.0", "x86_64", "Intel Macs are unsupported"),
+            ("15.0", "x86_64", "Intel Macs are unsupported"),
         ):
             with self.subTest(os_version=os_version, architecture=architecture):
                 result = self.run_install(success=False, TEST_MACOS=os_version, TEST_ARCH=architecture)
@@ -1642,7 +1584,7 @@ if "metadata" in sys.argv:
 else:
     (root / "build-started").touch()
     assert "--locked" in sys.argv and "--release" in sys.argv
-    assert os.environ["MACOSX_DEPLOYMENT_TARGET"] == "27.0"
+    assert os.environ["MACOSX_DEPLOYMENT_TARGET"] == "15.0"
     for name in {BINARIES!r}:
         assert name in sys.argv
         path = root / "target/{TARGET}/release" / name
@@ -1687,7 +1629,6 @@ else:
             self.assertEqual(record["box_commit"], subprocess.check_output(
                 ["git", "-C", str(self.root), "rev-parse", "HEAD"], text=True).strip())
             self.assertEqual(record["target"], TARGET)
-            self.assertEqual(record["macos_minimum_version"], "27.0")
             for name in BINARIES:
                 self.assertEqual(files[name].mode, 0o755)
         expected = hashlib.sha256(archive.read_bytes()).hexdigest()

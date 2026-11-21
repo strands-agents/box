@@ -960,9 +960,9 @@ jobs:
           PUBLISH_LINUX_X86: ${{ needs.scan.outputs.publish_linux_x86 }}
         run: |
           set -euo pipefail
-          platforms="macOS 27 or later on Apple silicon and ARM64 Linux"
+          platforms="macOS 15 or later on Apple silicon and ARM64 Linux"
           if [ "$PUBLISH_LINUX_X86" = "true" ]; then
-            platforms="macOS 27 or later on Apple silicon, ARM64 Linux, and x86-64 Linux"
+            platforms="macOS 15 or later on Apple silicon, ARM64 Linux, and x86-64 Linux"
           fi
           installer="curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh |"
           cat > body.md <<EOF

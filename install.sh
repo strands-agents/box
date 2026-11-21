@@ -677,24 +677,6 @@ if [ "$box_system" = Darwin ]; then
     box_metadata="$box_work/metadata.plist"
     plutil -create xml1 "$box_metadata"
     plutil -insert release -json "$(cat "$box_payload/release.json")" "$box_metadata" || die "invalid release.json"
-    # Older archives omit this field and retain their original macOS 15 minimum.
-    # Inspect only the checksum-verified package, before running any bundled program.
-    box_minimum=15.0
-    if plutil -type release.macos_minimum_version "$box_metadata" >/dev/null 2>&1; then
-        box_minimum=$(metadata macos_minimum_version) || die "invalid macos_minimum_version"
-    fi
-    case "$box_minimum" in ''|*[!0-9.]*) die "invalid macos_minimum_version" ;; esac
-    awk -v minimum="$box_minimum" 'BEGIN {
-        exit !(minimum ~ /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?$/ &&
-               split(minimum, parts, ".") >= 2 && parts[1] >= 15)
-    }' || die "invalid macos_minimum_version"
-    awk -v installed="$box_os" -v minimum="$box_minimum" 'BEGIN {
-        split(installed, host, "."); split(minimum, required, ".")
-        for (i = 1; i <= 3; i++) {
-            if (host[i] + 0 > required[i] + 0) exit 0
-            if (host[i] + 0 < required[i] + 0) exit 1
-        }
-    }' || die "release v$box_version requires macOS $box_minimum or later; this Mac runs $box_os"
 fi
 [ "$(metadata box_version)" = "$box_version" ] ||
     die "metadata version does not match $box_version"

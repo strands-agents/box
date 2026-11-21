@@ -50,14 +50,8 @@ Use the restricted capability set below to avoid retaining `CAP_SYS_ADMIN` after
 Missing capabilities or kernel support stop launch.
 For a command-line run, Box does not load these checks if every workload opts out.
 A library caller can create its configuration in `RunOptions::on_ready`.
-Before runtime startup, Box reads an existing configuration to determine whether it needs these checks.
-An existing configuration that disables native policy avoids loading them.
-If the configuration is missing or cannot be parsed, Box prepares available checks so the callback can create or repair it.
-Box reads and validates the configuration again after the callback; the earlier read does not authorize the workload.
-If the callback changes an existing configuration from native policy off to on, Box refuses startup.
-Enable native policy before calling `run` in that case, because Box cannot load checks after dropping its loader capabilities.
+For that callback path, Box prepares available checks before runtime startup and reads configuration after the callback.
 It discards unused checks when the resulting configuration opts out.
-Box still drops inherited loader capabilities when native policy is off.
 An opted-out run does not require these capabilities.
 These requirements apply to native interception; they do not change the prerequisites for ordinary Linux containment.
 
