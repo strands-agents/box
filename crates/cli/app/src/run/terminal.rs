@@ -454,8 +454,12 @@ fn relay(
             }
         }
         if failed {
+            if let Some(policy) = policy {
+                policy.restore()?;
+            }
             worker = None;
             panel = None;
+            input.banner_shown = false;
             input.controls = None;
             input.files.clear();
             pending_files = None;
@@ -545,6 +549,7 @@ fn relay(
                     output.extend_from_slice(b"\x1b[?1049h\x1b[0m\x1b[r\x1b[2J\x1b[H\x1b[?2004h\x1b[?9;1000;1002;1003;1005;1006;1015;1016l\x1b[?1006h\x1b[?1003h");
                 }
                 visible = true;
+                input.enabled = worker.is_some();
             } else if !master_closed {
                 let frame =
                     (started.elapsed().as_millis() / startup::INTERVAL.as_millis()) as usize;
@@ -613,6 +618,7 @@ fn relay(
             screen.render(&mut output)?;
             if let Some(panel) = &panel {
                 output.write_all(&panel.bytes)?;
+                input.banner_shown = true;
                 drawn = Some(panel.bytes.clone());
                 pending_files = Some(panel.files.clone());
             } else {
@@ -1468,6 +1474,18 @@ mod tests {
         banner_ready: Option<&str>,
         native: bool,
     ) -> Vec<u8> {
+        exercise(start, child_rows, banner_ready, native, 1).0
+    }
+
+    /// Run the relay as `exercise_worker` does, and keep the agent running until the policy worker
+    /// has installed `installs` policies. Return the diagnostics and each installed policy.
+    fn exercise(
+        start: impl FnOnce(BannerRequest) -> io::Result<BannerWorker> + Send + 'static,
+        child_rows: u16,
+        banner_ready: Option<&str>,
+        native: bool,
+        installs: usize,
+    ) -> (Vec<u8>, Vec<String>) {
         let (mut terminal, mut host, mut master, mut child) = relay_terminal(native);
         let workload_terminal = child.try_clone().unwrap();
         let size = terminal.size;
@@ -1477,11 +1495,21 @@ mod tests {
         let _host_lifetime = terminal.output.try_clone().unwrap();
         let (ready, readiness) = mpsc::channel();
         let (toggled, toggles) = mpsc::channel();
+        let (installed, all_installed) = mpsc::channel();
         let scene = super::super::policy::tests::Scene::new();
+        let mut count = 0;
         let policy = scene.start(move |policy| {
             toggled.send(policy.text.clone()).unwrap();
+            count += 1;
+            if count == installs {
+                let _ = installed.send(());
+            }
             Ok(())
         });
+        // A banner frame is on screen when the test presses Ctrl+\, so the key turns policy off;
+        // without one it reaches the agent.
+        let banner_up = !native && banner_ready.is_some();
+        let expected: &'static [u8] = if banner_up { b"ping\r" } else { b"\x1cping\r" };
         let relay_thread = std::thread::spawn(move || {
             relay(
                 &mut terminal,
@@ -1537,14 +1565,14 @@ mod tests {
                 unsafe { libc::poll(fds.as_mut_ptr(), 1, 5000) } > 0,
                 "relay stopped forwarding keys"
             );
-            let expected = if native {
-                b"\x1cping\r".as_slice()
-            } else {
-                b"ping\r"
-            };
             let mut keys = vec![0; expected.len()];
             child.read_exact(&mut keys).unwrap();
             assert_eq!(&keys, expected);
+            if banner_up {
+                all_installed
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the policy worker installed each policy");
+            }
             core_output.write_all(&b"\nCORE_LIVE\n".repeat(16)).unwrap();
             child
                 .write_all(b"\x1b[?1049hTRANSIENT\x1b[?1049l\x1b[?2026h\x1b[999;1HDONE\r\n")
@@ -1648,10 +1676,17 @@ mod tests {
         }
         child_thread.join().unwrap();
         assert!(loading_seen, "no startup indicator before the agent drew");
-        if !native {
+        let mut policies = Vec::new();
+        if banner_up {
             assert_eq!(
                 toggles.recv_timeout(Duration::from_secs(2)).unwrap(),
-                super::super::policy::OFF
+                scene.profile.off()
+            );
+            policies.extend(toggles.try_iter());
+        } else {
+            assert!(
+                toggles.recv_timeout(Duration::from_millis(200)).is_err(),
+                "Ctrl+\\ changed policy without a banner"
             );
         }
         assert!(!screen.screen().alternate_screen());
@@ -1669,7 +1704,7 @@ mod tests {
             contents.contains("DONE"),
             "synchronized output lost at EOF: {contents}"
         );
-        result
+        (result, policies)
     }
 
     #[test]
@@ -1866,6 +1901,38 @@ mod tests {
                 .unwrap()
                 .contains("banner draw failed")
         );
+    }
+
+    /// **A banner that fails while policy is off turns policy back on**, so policy is never off
+    /// without a banner that says so.
+    #[test]
+    fn a_banner_that_fails_while_policy_is_off_turns_policy_back_on() {
+        let (diagnostics, installed) = exercise(
+            |initial| {
+                BannerWorker::spawn(initial, |request| {
+                    if !request.policy.enabled {
+                        return Err(io::Error::other("banner draw failed"));
+                    }
+                    Ok(BannerFrame {
+                        request,
+                        bytes: b"\x1b[12;1HREADY".to_vec(),
+                        controls: None,
+                        files: Vec::new(),
+                    })
+                })
+            },
+            10,
+            Some("READY"),
+            false,
+            2,
+        );
+        assert!(
+            String::from_utf8(diagnostics)
+                .unwrap()
+                .contains("banner draw failed")
+        );
+        assert_eq!(installed.len(), 1, "{installed:?}");
+        assert!(!installed[0].contains("policy_off"), "{installed:?}");
     }
 
     #[test]

@@ -458,8 +458,8 @@ The `RULE` column names the rule that decided, by its `@id`
 
 The history also has a `policy` row each time the box installs a policy or refuses one, such as when
 you turn policy off or on, or apply a policy edit. Its `RESULT` is `installed` or `refused`, and its
-`RESOURCE` is `policy.dw`, or `policy off` while policy is off. While policy is off, every operation
-is a `permit` by rule `policy_off`.
+`RESOURCE` is `policy.dw`, or `policy off` while policy is off. While policy is off, the forbids
+`box` writes still apply, and every other operation is a `permit` by rule `policy_off`.
 
 ```text
 TIME (UTC)	RESULT	ACTION	RESOURCE	RULE	REASON

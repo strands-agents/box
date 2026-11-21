@@ -15,22 +15,27 @@ const DEFAULT_TOOL_HOST_PORT: u16 = 443;
 pub struct Rules {
     lines: Vec<String>,
     pub(crate) ids: Vec<String>,
+    forbids: Vec<String>,
 }
 
 impl Rules {
     /// Add the rule `rule` with the `@id` `id`.
     pub(crate) fn add(&mut self, id: &str, rule: &str) {
-        self.lines.push(format!("@id({id:?}) {rule}"));
-        self.ids.push(id.to_string());
+        self.push(format!("@id({id:?}) {rule}"), id, rule);
     }
 
     /// Add the rule `rule` with the `@id` `id` and the `@description` `description`, which a denial
     /// prints after the rule's id.
     pub(crate) fn add_described(&mut self, id: &str, description: &str, rule: &str) {
-        self.lines.push(format!(
-            "@id({id:?}) @description({}) {rule}",
-            literal(description)
-        ));
+        let line = format!("@id({id:?}) @description({}) {rule}", literal(description));
+        self.push(line, id, rule);
+    }
+
+    fn push(&mut self, line: String, id: &str, rule: &str) {
+        if rule.starts_with("forbid") {
+            self.forbids.push(line.clone());
+        }
+        self.lines.push(line);
         self.ids.push(id.to_string());
     }
 
@@ -45,6 +50,11 @@ impl Rules {
             return String::new();
         }
         self.lines.join("\n") + "\n"
+    }
+
+    /// The forbids among the rules, one per line.
+    pub(crate) fn forbids(&self) -> impl Iterator<Item = &str> {
+        self.forbids.iter().map(String::as_str)
     }
 }
 

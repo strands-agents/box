@@ -48,6 +48,8 @@ pub struct Compiled {
     pub policy: String,
     /// The `@id` of each rule that `box` writes into `policy`.
     pub generated_ids: Vec<String>,
+    /// The forbids that `box` writes into `policy`, one per line.
+    pub generated_forbids: String,
     pub journal: PathBuf,
     pub storage: Storage,
     /// Each stdio MCP server that gets no permit to start, with the reason.
@@ -378,16 +380,27 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
     };
     let tool_text = run.tool_rules.text();
     let generated_text = generated.text();
-    let joined = [
-        run.policy.unwrap_or_default(),
-        tool_text.trim_end(),
-        generated_text.trim_end(),
-    ]
-    .into_iter()
-    .filter(|part| !part.is_empty())
-    .collect::<Vec<_>>()
-    .join("\n\n");
-    let rendered = policy(Some(&joined), &around.text());
+    let join = |parts: &[&str]| {
+        parts
+            .iter()
+            .copied()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    let rendered = policy(
+        Some(&join(&[
+            run.policy.unwrap_or_default(),
+            tool_text.trim_end(),
+            generated_text.trim_end(),
+        ])),
+        &around.text(),
+    );
+    let generated_forbids = [run.tool_rules, &generated, &around]
+        .into_iter()
+        .flat_map(Rules::forbids)
+        .map(|line| format!("{line}\n"))
+        .collect();
     let mut generated_ids = run.tool_rules.ids.clone();
     generated_ids.extend(generated.ids);
     generated_ids.extend(around.ids);
@@ -399,6 +412,7 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
         ),
         policy: rendered,
         generated_ids,
+        generated_forbids,
         journal,
         storage: profile.storage.clone(),
         unstarted,

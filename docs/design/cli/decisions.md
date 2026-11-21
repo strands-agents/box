@@ -78,6 +78,7 @@ pull request that changes what an entry says fixes that entry.
   - [Telemetry sends from a thread in the CLI](#telemetry-sends-from-a-thread-in-the-cli)
   - [The telemetry choice lives with the installation ID](#the-telemetry-choice-lives-with-the-installation-id)
   - [A banner failure keeps the agent running](#banner-failure-keeps-the-agent-running)
+  - [Policy off drops the operator's rules and keeps the forbids `box` writes](#policy-off-keeps-the-forbids-box-writes)
   - [A run's grants and rules are what the profile says, so `box run` sets no input](#box-run-takes-no-option-values)
   - [The workspace is the current directory, and `[project] access` decides the grants `box` adds there](#the-workspace-is-the-current-directory)
   - [The profile's project access is one level that sets the project grants and permits `box` adds](#project-access-is-one-profile-level)
@@ -1423,6 +1424,26 @@ A stuck update can leave the banner frozen. `box` shows saved messages after it 
 terminal and keeps only the first 32 KiB. Temporary output delays do not stop the agent.
 Final output waits are limited so a blocked terminal cannot hold up normal shutdown indefinitely.
 A disconnected terminal still stops the run.
+
+<a id="policy-off-keeps-the-forbids-box-writes"></a>
+### Policy off drops the operator's rules and keeps the forbids `box` writes
+
+Turning policy off installs one permit for every operation and each forbid that `box` generates
+for the run, and none of the operator's rules. The generated forbids are what keep the Shell and
+Monty, which run outside the cage, from changing what a later run trusts
+([trusted directories](#a-run-cannot-write-what-a-later-run-trusts)) or a folder the profile closes.
+Policy off works only while the banner shows it, and a banner failure turns policy back on.
+
+**Rejected.** One permit in place of the whole policy, which lifts every rule: a box with policy
+off could then append to the profile's rule files, and the next run would load them.
+
+**Rejected.** Keeping the operator's forbids too, which would keep the operator's own safeguards:
+`box` [does not parse the policy language](#box-never-parses-the-policy-language), so it cannot
+pick a forbid out of a rule file.
+
+**Cost.** Policy off drops every forbid the operator wrote, so the box allows every operation that
+no generated forbid refuses. It cannot lift a generated forbid: a folder that the profile closes
+opens only after a profile change and a new run, and no profile change opens a protected root.
 
 <a id="box-run-takes-no-option-values"></a>
 ### A run's grants and rules are what the profile says, so `box run` sets no input
