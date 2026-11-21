@@ -144,9 +144,9 @@ binary. `box` does not download Box Core. For development, `just build` builds t
 pack names through `${{ pack }}`. The agent packs (`claude` and `codex`), the model providers,
 and `base` are there. `box` finds `resources/` at
 `$BOX_RESOURCES`, else from its installed package, else, in a debug build, from the source tree.
-An ordinary package puts `resources/` beside the binary. A signed experimental native macOS
-package puts it in `Box.app/Contents/Resources`, outside the executable directory that Apple
-checks for nested code. `resources::root` recognizes that app layout. The helpers remain beside
+Linux packages and macOS builds without native support put `resources/` beside the binary. The
+default signed macOS package puts it in `Box.app/Contents/Resources`, outside the executable
+directory that Apple checks for nested code. `resources::root` recognizes that app layout. The helpers remain beside
 the real binary in `Contents/MacOS`.
 
 **Rejected.** Embed them in the binary: an operator then cannot read one, and an agent cannot load
@@ -193,7 +193,8 @@ protected macOS validation run.
 <a id="box-supports-macos-only"></a>
 ### `box` supports macOS and Linux
 
-`box` runs on macOS on Apple silicon, and on Linux on aarch64 and x86_64. Box Core's Linux
+`box` runs on Apple silicon with the [supported macOS version](../../cli/install.md#requirements),
+and on Linux on aarch64 and x86_64. Box Core's Linux
 containment runs on both, with no opt-in. A release publishes an x86_64 archive of `box` when
 `publish_linux_x86` is set, which it is by default, and CI runs the engine suite only on macOS. Box
 Core on Linux refuses a deny of an absent path, so on Linux `box run` creates an empty
@@ -1491,13 +1492,11 @@ holds only for the Shell and Monty.
 filesystem entry from an `fs:*` rule. Without native checks, an `fs:*` rule decides only the Shell
 and Monty: the agent's own file tools, each tool, and each local MCP server reach their grants
 with no decision and add no history. `[filesystem] deny` keeps a path from every process, and
-`[filesystem] deny_write` keeps a folder read-only for every process that writes it. Revisit this
-when every macOS release that `box` supports has native checks and the signed release carries the
-Endpoint Security entitlement.
+`[filesystem] deny_write` keeps a folder read-only for every process that writes it. Compiling
+native support into a release does not select it for a profile.
 
-**Rejected.** Native checks for every run: they extend file rules to the supported operations of
-each process that selects them, but they need macOS 27 and an entitled build, so runs on macOS 26
-and earlier fail. Filesystem entries derived
+**Rejected.** Native checks for every run: existing policies may not permit the additional file
+operations, and Linux needs privileges that a normal install does not supply. Filesystem entries derived
 from `forbid` rules: they cover literal paths, but they need a Dogwood scanner
 ([no parser](#box-never-parses-the-policy-language)), and no list states a delete-only, a
 pattern, or a history rule.

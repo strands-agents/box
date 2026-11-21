@@ -81,6 +81,7 @@ fn write_credential_stores(
 #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
 pub(crate) struct NativeSetup {
     contract: Option<RunContract>,
+    prepared_native: bool,
     guard: std::io::Result<Option<Arc<crate::run::native_enforcement::EntryGuard>>>,
 }
 
@@ -91,9 +92,12 @@ pub(super) fn prepare_native(config: &Path, has_callback: bool) -> Result<Native
     } else {
         Some(read_contract(config)?)
     };
-    let enabled = contract
-        .as_ref()
-        .is_none_or(RunContract::uses_native_filesystem);
+    // A callback may create or repair the configuration. Keep errors deferred until it runs,
+    // and read the authoritative contract afterward. A known opt-out needs no BPF programs.
+    let enabled = match &contract {
+        Some(contract) => contract.uses_native_filesystem(),
+        None => RunContract::native_selection(config).unwrap_or(true),
+    };
     let guard = crate::run::native_enforcement::EntryGuard::prepare(enabled);
     if guard.is_err() {
         crate::run::native_enforcement::EntryGuard::prepare(false).map_err(|source| {
@@ -102,7 +106,11 @@ pub(super) fn prepare_native(config: &Path, has_callback: bool) -> Result<Native
             }
         })?;
     }
-    Ok(NativeSetup { contract, guard })
+    Ok(NativeSetup {
+        contract,
+        prepared_native: enabled,
+        guard,
+    })
 }
 
 /// The program that each `[tool]` grammar in `record` decides.
@@ -275,12 +283,22 @@ pub(crate) async fn execute(
 ) -> Result<ExitCode, BoxError> {
     #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     let ((locked, secrets), entry_guard) = {
-        let NativeSetup { contract, guard } = native_setup;
+        let NativeSetup {
+            contract,
+            prepared_native,
+            guard,
+        } = native_setup;
         let contract = match contract {
             Some(contract) => contract,
             None => read_contract(config)?,
         };
         let guard = if contract.uses_native_filesystem() {
+            if !prepared_native {
+                return Err(crate::error::SuperviseError::Control {
+                    reason: "native filesystem selection changed after capability preparation; restart with native filesystem policy already enabled".to_string(),
+                }
+                .into());
+            }
             Some(
                 guard
                     .map_err(|source| crate::error::SuperviseError::Control {

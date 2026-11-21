@@ -83,7 +83,7 @@ mod root {
             LOADER | SETFCAP
         );
         if let Some(argument) = std::env::args().find(|arg| arg.starts_with("--callback-")) {
-            callback(argument == "--callback-permitted-only");
+            callback(&argument);
             return;
         }
         for global in [false, true] {
@@ -110,7 +110,14 @@ mod root {
         let binary = binary();
         let companions = binary.parent().unwrap();
         let installed = install_bundle(root.path(), &executable, companions);
-        for argument in ["--callback-full", "--callback-permitted-only"] {
+        for argument in [
+            "--callback-full",
+            "--callback-permitted-only",
+            "--callback-existing-off",
+            "--callback-existing-absent",
+            "--callback-enables-native",
+            "--callback-creates-native",
+        ] {
             let mut command = Command::new(&installed);
             command
                 .arg(argument)
@@ -122,13 +129,29 @@ mod root {
                 "{argument}: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            if argument == "--callback-enables-native" {
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains(
+                        "native filesystem selection changed after capability preparation; restart with native filesystem policy already enabled"
+                    ),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
         }
         println!(
-            "root native regression: global-off, workload-off, full-capability callback, and permitted-only callback passed"
+            "root native regression: ordinary startup, callback capability cleanup, opted-out callbacks, and callback native selection passed"
         );
     }
 
-    fn callback(permitted_only: bool) {
+    fn callback(argument: &str) {
+        let permitted_only = argument == "--callback-permitted-only";
+        let existing = matches!(
+            argument,
+            "--callback-existing-off" | "--callback-existing-absent" | "--callback-enables-native"
+        );
+        let enables_native = argument == "--callback-enables-native";
+        let native = enables_native || argument == "--callback-creates-native";
         #[repr(C)]
         struct Header {
             version: u32,
@@ -176,12 +199,58 @@ mod root {
         }
         let root = fixture();
         let path = root.path().join("created-by-callback.toml");
-        let body = config(root.path(), false);
+        let without_native_flags = |body: String| {
+            body.replace(
+                "[experimental-features]\nnative-filesystem-policy = false\n",
+                "",
+            )
+            .replace("native-filesystem-policy = false\n", "")
+        };
+        if existing {
+            let body = config(root.path(), false);
+            let body = if argument == "--callback-existing-absent" {
+                without_native_flags(body)
+            } else {
+                body
+            };
+            std::fs::write(&path, body).unwrap();
+        }
+        let marker = root.path().join("workspace/workload-ran");
+        let command = toml::Value::Array(
+            ["/usr/bin/touch".into(), marker.display().to_string()]
+                .into_iter()
+                .map(toml::Value::String)
+                .collect(),
+        );
+        let mut body =
+            config(root.path(), native).replace("[\"/usr/bin/true\"]", &command.to_string());
+        if native {
+            body = body.replace("native-filesystem-policy = false\n", "");
+        } else if argument == "--callback-existing-absent" {
+            body = without_native_flags(body);
+        }
+        body.push_str(&format!(
+            "[agent.filesystem]\nread = [{0}]\nwrite = [{0}]\n",
+            toml::Value::String(root.path().join("workspace").display().to_string())
+        ));
         let code = strands_box::run(
             path.clone(),
             Vec::new(),
             strands_box::RunOptions {
                 on_ready: Some(Box::new(|| {
+                    assert!(
+                        !root.path().join("state").exists(),
+                        "native selection must not create box_dir before the callback"
+                    );
+                    let guard_descriptors: Vec<_> = std::fs::read_dir("/proc/self/fd")?
+                        .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+                        .filter(|target| target.to_string_lossy().contains("bpf"))
+                        .collect();
+                    assert_eq!(
+                        !guard_descriptors.is_empty(),
+                        !existing && !permitted_only,
+                        "{argument}: native guard descriptors: {guard_descriptors:?}"
+                    );
                     for entry in std::fs::read_dir("/proc/self/task")? {
                         let status = std::fs::read_to_string(entry?.path().join("status"))?;
                         for field in ["CapEff:", "CapPrm:", "CapInh:", "CapAmb:"] {
@@ -199,7 +268,19 @@ mod root {
                 ..Default::default()
             },
         );
-        assert_eq!(code, ExitCode::SUCCESS);
+        if enables_native {
+            assert_ne!(code, ExitCode::SUCCESS);
+            assert!(
+                !marker.exists(),
+                "refused native selection ran the workload"
+            );
+        } else {
+            assert_eq!(code, ExitCode::SUCCESS);
+            assert!(
+                marker.exists(),
+                "the callback's final configuration was ignored"
+            );
+        }
         assert!(path.exists());
     }
 }

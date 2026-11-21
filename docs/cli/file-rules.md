@@ -7,7 +7,7 @@ belongs: What a file rule decides and what it doesn't, how to keep a file from e
 
 A file rule in your policy, such as one that forbids reading `.env`, applies only to the box's
 shell and to Python in the box. This page shows what that means, what to write when a rule has to
-hold for everything in the box, and how it will change.
+hold for everything in the box, and how to enable native filesystem policy.
 
 ## What a file rule checks
 
@@ -101,10 +101,10 @@ these rules still hold only for the shell and Python:
 
 Box's experimental native filesystem policy lets your policy decide the file operations that the
 agent, its tools, and its local MCP servers make directly. Your file rules then hold for all of
-them, and each of their reads goes into the run history. It needs macOS 27 or later, or Linux on
-ARM64 with extra capabilities, and a `box` built for it. The `box` you install isn't built that way.
-[Experimental native filesystem policy](profiles-reference.md#experimental-native-filesystem-policy)
-says what each system needs, how to build such a `box`, and what the checks don't cover.
+them, and each of their reads goes into the run history. Released ARM64 packages include this
+support. Your profile still has to enable it, and the surrounding OS must meet the
+[prerequisites](profiles-reference.md#experimental-native-filesystem-policy). That reference also
+explains the prerequisites and limitations.
 
 To try it, turn it on in `profile.toml`:
 
@@ -117,11 +117,5 @@ With it on, the policy decides every file that the agent and each tool open, the
 included, and it refuses what no rule permits. The shipped policies permit none of those paths, so
 the agent can fail to start until you add rules that permit them.
 
-## What changes later
-
-Once macOS 27 is common enough, the plan is to make native filesystem policy the baseline: `box`
-will turn it on for every run where the system supports it, and the rules you write in your policy
-will then hold for the agent's file tools, each tool, and each MCP server. Until then it stays off
-unless you turn it on, because a run with it on fails on macOS 26 and earlier, and on Linux it needs
-capabilities that a normal install doesn't have. The lists on this page are the way to keep a file
-from every process today, and they keep working after the change.
+The filesystem grants described on this page still apply when you enable native policy. The
+policy adds checks within those grants; it cannot give a process access outside them.

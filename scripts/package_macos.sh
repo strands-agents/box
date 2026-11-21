@@ -102,7 +102,7 @@ set --
 if [ "$box_native" = true ]; then
     set -- --features strands-box-cli/native-filesystem-policy
 fi
-MACOSX_DEPLOYMENT_TARGET=15.0 cargo build --release --locked --target aarch64-apple-darwin \
+MACOSX_DEPLOYMENT_TARGET=27.0 cargo build --release --locked --target aarch64-apple-darwin \
     -p strands-box-cli -p strands-box -p strands-box-containment \
     --bin box --bin strands-box-sock-alias --bin strands-box-contain-trampoline "$@"
 for box_binary in box strands-box-sock-alias strands-box-contain-trampoline; do

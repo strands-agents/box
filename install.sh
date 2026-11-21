@@ -373,7 +373,7 @@ case "$box_system" in
         need sw_vers
         box_os=$(sw_vers -productVersion)
         case "$box_os" in ''|*[!0-9.]*) die "cannot read the macOS version" ;; esac
-        [ "${box_os%%.*}" -ge 15 ] || die "macOS 15 or later is required"
+        [ "${box_os%%.*}" -ge 27 ] || die "macOS 27 or later is required"
         case "$(uname -m)" in
             arm64|aarch64) ;;
             x86_64)

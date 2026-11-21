@@ -38,13 +38,16 @@ prereleases, and stable releases compile native filesystem policy support into t
 macOS and ARM64 Linux packages. Set the build input to `false` to produce packages without that
 support. The x86_64 Linux job keeps its baseline build and does not include native policy support.
 
-The native macOS build uses the `xcode-27` runner. Both the workflow and the local package script
-require macOS software development kit (SDK) version 27 or later before they build. They resolve
+macOS packages require macOS 27 or later, including when native enforcement is off. Builds and
+package checks use the `xcode-27` runner, and release binaries target macOS 27. The installer refuses
+older versions before downloading. When native support is selected, both the workflow and the
+local package script require macOS software development kit (SDK) version 27 or later before they build. They resolve
 the SDK named by `SDKROOT`, if set,
 or `macosx` from the selected developer tools otherwise. They reject a missing SDK or an invalid
 or older version, then export the resolved absolute `SDKROOT` for Cargo. This keeps the SDK check
 and Core's C compilation on the same SDK, including when the caller sets `DEVELOPER_DIR`.
-Builds with `native_filesystem_policy=false` keep their existing runner and SDK selection.
+The same minimum applies when `native_filesystem_policy=false`. That input omits native support;
+it does not select an older macOS baseline.
 
 The option selects the CLI's `strands-box-cli/native-filesystem-policy` Cargo feature. It does
 not enable policy enforcement for every run. Each `profile.toml` must still select

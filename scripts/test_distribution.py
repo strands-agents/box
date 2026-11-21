@@ -777,8 +777,9 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
         executable(self.tools / "sw_vers", '#!/bin/sh\nprintf "%s\\n" "$TEST_MACOS"\n')
         executable(self.tools / "sysctl", '#!/bin/sh\nprintf "%s\\n" 0\n')
         for os_version, architecture, message in (
-            ("14.7", "arm64", "macOS 15 or later"),
-            ("15.0", "x86_64", "Intel Macs are unsupported"),
+            ("15.0", "arm64", "macOS 27 or later"),
+            ("26.6", "arm64", "macOS 27 or later"),
+            ("27.0", "x86_64", "Intel Macs are unsupported"),
         ):
             with self.subTest(os_version=os_version, architecture=architecture):
                 result = self.run_install(success=False, TEST_MACOS=os_version, TEST_ARCH=architecture)
@@ -1584,7 +1585,7 @@ if "metadata" in sys.argv:
 else:
     (root / "build-started").touch()
     assert "--locked" in sys.argv and "--release" in sys.argv
-    assert os.environ["MACOSX_DEPLOYMENT_TARGET"] == "15.0"
+    assert os.environ["MACOSX_DEPLOYMENT_TARGET"] == "27.0"
     for name in {BINARIES!r}:
         assert name in sys.argv
         path = root / "target/{TARGET}/release" / name
