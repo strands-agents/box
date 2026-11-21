@@ -63,7 +63,7 @@ it.
 | Adds or removes an environment name that the box reserves or composes | `docs/user/config.md` for the refusal the operator meets, and `docs/design/egress.md` for a proxy or a certificate name. |
 | Changes how a part works: the order a run comes up, which process decides, what a sandbox grants, what reaches the gateway | The `docs/design/` page for that part. `docs/design/README.md` maps each page to the question it answers. |
 | Changes a step in getting started, or a command a tutorial runs | `docs/user/getting-started.md`, and each page under `docs/user/tutorials/` that runs that step. |
-| Changes a build, test, or debug command, or a gate | `README.md`, the [verification rules](../../AGENTS.md#verify-before-commit), and `docs/dev/` when the step needs a guide. |
+| Changes a build, test, or debug command, or a gate | `CONTRIBUTING.md`, the build command in `README.md`, the [verification rules](../../AGENTS.md#verify-before-commit), and `docs/dev/` when the step needs a guide. |
 | Adds a crate, or changes a crate's `pub use` facade | That crate's `README.md`, and `docs/conventions.md` when the change sets a new house rule. Recount the names from `src/lib.rs` and correct every count in the `README.md` and in the crate's `AGENTS.md`, because each states one. |
 | Changes the policy load, the policy grammar, or what a rule may spell | Each committed policy under `examples/` must still load, and each one a page shows must still match that page. |
 | Settles a choice that passes the `kd` skill's test | No page in this commit. Offer `/kd` to the user, because an entry enters `docs/design/decisions.md` only after the user decides it. Every other choice is a sentence in the pull request. |
