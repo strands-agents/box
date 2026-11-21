@@ -61,8 +61,22 @@ fn spawn_self(flags: libc::c_int) -> serde_json::Value {
         }
         let mut status = 0;
         assert_eq!(libc::waitpid(child, &mut status, 0), child);
+        if !libc::WIFEXITED(status) {
+            return serde_json::json!({ "signal": libc::WTERMSIG(status) });
+        }
         serde_json::json!({ "exit_status": libc::WEXITSTATUS(status) })
     }
+}
+
+/// The `Uid:` and `Gid:` lines of `/proc/self/status`: the real, effective, saved, and filesystem
+/// ids. The filter refuses `getresuid`, so this is how a workload reads its saved ids.
+fn status_ids() -> Vec<String> {
+    std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("Uid:") || line.starts_with("Gid:"))
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
 }
 
 /// The id values a probe passes: the workload's own `0`, `-1` for "leave it", and `1`, which the
@@ -112,6 +126,7 @@ fn reset_ids_probe() {
             "spawn": spawn_self(0),
             "spawn_resetting_ids": spawn_self(libc::POSIX_SPAWN_RESETIDS),
             "identity_calls": identity_calls(),
+            "ids_after": status_ids(),
         })
     };
     println!("{MARKER}{report}");
@@ -194,4 +209,9 @@ fn a_workload_resets_its_own_ids_and_cannot_change_them() {
         };
         assert_eq!(call[4], expected, "{call}");
     }
+    assert_eq!(
+        report["ids_after"],
+        serde_json::json!(["Uid: 0 0 0 0", "Gid: 0 0 0 0"]),
+        "every id, the saved ones included, is unchanged after the admitted calls: {report}"
+    );
 }
