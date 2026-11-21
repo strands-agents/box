@@ -1,0 +1,16 @@
+# expect: `<grammar>.shell.config`: `options_first` cannot go with `[global options]` that hold an `anywhere` option
+# An `anywhere` option is read at each place on the line, and `options_first` reads each word after
+# the first operand as an operand, so the two disagree. This fixture models no git behaviour.
+
+name    = "git_anywhere_config"
+program = "git"
+format  = 1
+version = 1
+
+[global]
+options.quiet = { flag = "-q", anywhere = true }
+
+[shell.config]
+usage         = "git [global options] config [options] [<name>] [<value>]"
+options_first = true
+options.global = { flag = ["--global"] }

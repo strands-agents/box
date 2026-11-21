@@ -57,6 +57,7 @@ pub(super) struct ActionGrammar {
     pub(super) after: OptionTable,
     pub(super) operands: Vec<OperandSlot>,
     pub(super) separator: Separator,
+    pub(super) options_first: bool,
     pub(super) fields: Vec<Field>,
 }
 
@@ -202,6 +203,12 @@ impl ActionGrammar {
         }
         if !action.options.is_empty() && !usage.options {
             return Err(GrammarRefusal::OptionsNotInUsage { place });
+        }
+        if action.options_first && usage.separator != Separator::None {
+            return Err(GrammarRefusal::OptionsFirstWithSeparator { place });
+        }
+        if action.options_first && usage.globals && !anywhere.flags.is_empty() {
+            return Err(GrammarRefusal::OptionsFirstWithAnywhere { place });
         }
         let overrides = |option: &String| {
             usage.globals
@@ -372,6 +379,7 @@ impl ActionGrammar {
             after,
             operands,
             separator: usage.separator,
+            options_first: action.options_first,
             fields,
         })
     }

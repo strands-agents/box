@@ -1,4 +1,4 @@
-# expect: `<grammar>.shell.status`: unknown field `program`, expected one of `usage`, `aliases`, `adds`, `options`, `operands`
+# expect: `<grammar>.shell.status`: unknown field `program`, expected one of `usage`, `aliases`, `adds`, `options`, `operands`, `options_first`
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

@@ -1,0 +1,25 @@
+# A tool grammar for the older `git config` form, which stops reading options at its first
+# operand. A `<value>` writes, and a `<name>` alone reads.
+
+name    = "git_config"
+program = "git"
+format  = 1
+version = 1
+
+[effects]
+write_config = "Writes git configuration"
+
+[global]
+options.config_override = { flag = ["-c"], value = "required", repeated = true }
+
+[shell.config]
+usage         = "git [global options] config [options] [<name>] [<value>]"
+options_first = true
+options.global = { flag = ["--global"] }
+options.file   = { flag = ["-f", "--file"], value = "required" }
+operands.value = { adds = ["write_config"] }
+
+[shell.config_set]
+usage = "git config set [options] <name> <value>"
+adds  = ["write_config"]
+options.global = { flag = ["--global"] }

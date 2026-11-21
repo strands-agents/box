@@ -1,0 +1,13 @@
+# expect: `<grammar>.shell.stash`: `options_first` cannot go with a `--` in the usage
+# `options_first` makes each word after the first operand an operand, so a `--` in the usage has
+# no one place. This fixture models no git behaviour.
+
+name    = "git_stash"
+program = "git"
+format  = 1
+version = 1
+
+[shell.stash]
+usage         = "git stash push [options] [--] [<pathspec>...]"
+options_first = true
+options.message = { flag = ["-m", "--message"], value = "required" }
