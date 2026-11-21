@@ -147,15 +147,20 @@ fn parse_record(line: &[u8]) -> Result<MountRecord, &'static str> {
         return Err("NUL byte");
     }
     let fields: Vec<_> = line.split(|byte| *byte == b' ').collect();
-    if fields.iter().any(|field| field.is_empty()) {
-        return Err("empty field");
-    }
     let separator = fields
         .iter()
         .position(|field| *field == b"-")
         .ok_or("missing field separator")?;
     if separator < 6 || fields.len() != separator + 4 {
         return Err("wrong field count");
+    }
+    // The kernel can emit an empty mount source; every other field must be present.
+    if fields
+        .iter()
+        .enumerate()
+        .any(|(index, field)| field.is_empty() && index != separator + 2)
+    {
+        return Err("empty field");
     }
     let mount_id = number(fields[0])
         .filter(|value| *value != 0)
@@ -289,6 +294,57 @@ mod tests {
         };
         assert_eq!(mount.filesystem, "fuse");
         assert_eq!((mount.device_major, mount.device_minor), (0, 47));
+    }
+
+    #[test]
+    fn an_empty_mount_source_does_not_hide_another_storage_mount() {
+        let tmpfs = "114 28 0:54 / /tmp/emptysrc rw,relatime shared:129 - tmpfs  rw,inode64\n";
+        for source in ["mountpoint-s3", ""] {
+            let fuse =
+                format!("22 1 0:47 / /mnt/data rw,nosuid,nodev - fuse {source} rw,user_id=0\n");
+            for rows in [format!("{tmpfs}{fuse}"), format!("{fuse}{tmpfs}")] {
+                let table = MountTable::parse(rows.as_bytes()).expect("valid empty source field");
+                assert!(table.records[&114].source.is_empty());
+                assert_eq!(
+                    table.classify(Path::new("/tmp/emptysrc"), 114),
+                    SourceObservation::Pending(PendingReason::NonStorageFilesystem)
+                );
+                let SourceObservation::Candidate(record) =
+                    table.classify(Path::new("/mnt/data"), 22)
+                else {
+                    panic!("the FUSE attachment must remain observable")
+                };
+                assert_eq!(record.filesystem, "fuse");
+                assert_eq!(record.source, source);
+                assert_eq!(record.super_options, b"rw,user_id=0");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_fields_other_than_the_mount_source_still_refuse_the_snapshot() {
+        let fields = [
+            "10",
+            "1",
+            "0:1",
+            "/",
+            "/mnt/data",
+            "rw",
+            "shared:7",
+            "-",
+            "fuse",
+            "source",
+            "rw",
+        ];
+        for index in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10] {
+            let mut malformed = fields;
+            malformed[index] = "";
+            let row = malformed.join(" ");
+            assert!(
+                MountTable::parse(row.as_bytes()).is_err(),
+                "empty field {index} was accepted: {row:?}"
+            );
+        }
     }
 
     #[test]
