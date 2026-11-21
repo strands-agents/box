@@ -540,18 +540,23 @@ class WorkflowGateTests(unittest.TestCase):
             subprocess.run(["git", "update-ref", "refs/remotes/origin/main", main], cwd=root, check=True)
             subprocess.run(["git", "commit", "--allow-empty", "-qm", "candidate"], cwd=root, env=env, check=True)
             candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
-            for repo, ref, sha, success in [
-                ("strands-agents/box", "refs/heads/main", main, True),
-                ("strands-agents/box", "refs/heads/feature/test", main, False),
-                ("someone/box", "refs/heads/main", main, False),
-                ("strands-agents/box", "refs/heads/main", candidate, False),
+            for repo, ref, sha, error in [
+                ("strands-agents/box", "refs/heads/main", main, ""),
+                ("strands-agents/box", "refs/heads/feature/test", main,
+                 "a release or a signed dry run runs only from main, not refs/heads/feature/test."),
+                ("someone/box", "refs/heads/main", main,
+                 "a release or a signed dry run runs only in strands-agents/box. "
+                 "Use dry_run without sign_macos in someone/box."),
+                ("strands-agents/box", "refs/heads/main", candidate,
+                 f"source {candidate} is not in main history."),
             ]:
                 with self.subTest(repo=repo, ref=ref, sha=sha):
                     result = subprocess.run(["bash", "-c", command], cwd=root, env={
                         **env, "REPOSITORY": repo, "WORKFLOW_REF": ref, "RELEASE_SHA": sha,
                         "PREMERGE_TEST": "false", "DRY_RUN": "true", "SIGN_MACOS": "true",
-                    }, capture_output=True)
-                    self.assertEqual(result.returncode == 0, success)
+                    }, capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, not error)
+                    self.assertEqual(result.stdout, f"::error::{error}\n" if error else "")
 
     def test_premerge_mode_requires_dry_run_branch_upstream_and_main_source(self):
         import os
@@ -567,40 +572,25 @@ class WorkflowGateTests(unittest.TestCase):
             "WORKFLOW_REF": "refs/heads/feature/macos-release-notarization",
             "RELEASE_SHA": fixture.main,
         }
+        not_branch = ("premerge_signing_test runs only from feature/macos-release-notarization, "
+                      "not {}. Leave it unchecked for a release or a signed dry run from main.")
         changes = [
-            ({}, True),
-            ({"DRY_RUN": "false"}, False),
-            ({"SIGN_MACOS": "false"}, False),
-            ({"REPOSITORY": "someone/box"}, False),
-            ({"WORKFLOW_REF": "refs/heads/main"}, False),
-            ({"WORKFLOW_REF": "refs/heads/feature/other"}, False),
-            ({"RELEASE_SHA": fixture.candidate}, False),
-            ({"PREMERGE_TEST": "false"}, False),
+            ({}, ""),
+            ({"DRY_RUN": "false"}, "premerge_signing_test requires dry_run."),
+            ({"SIGN_MACOS": "false"}, "premerge_signing_test requires sign_macos."),
+            ({"REPOSITORY": "someone/box"}, "premerge_signing_test runs only in strands-agents/box."),
+            ({"WORKFLOW_REF": "refs/heads/main"}, not_branch.format("refs/heads/main")),
+            ({"WORKFLOW_REF": "refs/heads/feature/other"}, not_branch.format("refs/heads/feature/other")),
+            ({"RELEASE_SHA": fixture.candidate}, f"source {fixture.candidate} is not in main history."),
+            ({"PREMERGE_TEST": "false"}, "a release or a signed dry run runs only from main, "
+                                         "not refs/heads/feature/macos-release-notarization."),
         ]
-        for change, success in changes:
+        for change, error in changes:
             with self.subTest(change=change):
                 result = subprocess.run(["bash", "-c", command], cwd=fixture.root,
-                                        env={**valid, **change}, capture_output=True)
-                self.assertEqual(result.returncode == 0, success)
-
-    def test_premerge_mode_from_main_says_to_leave_it_unchecked(self):
-        """A signed dry run from main with the premerge box ticked names the fix"""
-        import os
-        from test_release_source import ReleaseSourceTests, workflow_command
-
-        fixture = ReleaseSourceTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        result = subprocess.run(["bash", "-c", workflow_command("Validate signing mode and source")],
-                                cwd=fixture.root, capture_output=True, text=True, env={
-            **os.environ, "PREMERGE_TEST": "true", "DRY_RUN": "true", "SIGN_MACOS": "true",
-            "REPOSITORY": "strands-agents/box", "WORKFLOW_REF": "refs/heads/main",
-            "RELEASE_SHA": fixture.main,
-        })
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("::error::premerge_signing_test runs only from "
-                      "feature/macos-release-notarization, not refs/heads/main.", result.stdout)
-        self.assertIn("Leave it unchecked", result.stdout)
+                                        env={**valid, **change}, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, not error)
+                self.assertEqual(result.stdout, f"::error::{error}\n" if error else "")
 
     def test_test_commit_pins_refuse_missing_malformed_and_different_commits(self):
         import os
