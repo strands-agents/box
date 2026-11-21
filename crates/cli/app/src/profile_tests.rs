@@ -11,7 +11,7 @@ use crate::host::resolved;
 use crate::lang::{Inputs, Lookup, storage_root};
 use crate::profile::{Profile, Resolved, validate_name};
 use crate::reference::Sources;
-use crate::run::{Cleaned, Launcher, confirm, existing, mint, mint_claimed};
+use crate::run::{Launcher, confirm, existing, mint, mint_claimed};
 use crate::test_support::script;
 
 /// A home, a workspace below it, an instance beside neither, and a folder of packs.
@@ -3116,18 +3116,16 @@ fn the_records_go_to_the_runs_own_file() {
 }
 
 #[test]
-fn a_clean_of_every_box_keeps_a_box_that_is_starting() {
+fn a_profile_clean_refuses_a_box_that_is_starting() {
     let scene = Scene::new();
     let launcher = Launcher::from_host().home(scene.home());
     let (instance, _claim) =
         mint_claimed(&launcher.runs_root(), "claude", &scene.home()).expect("an instance");
 
-    assert_eq!(
-        cleaned(&launcher),
-        Cleaned {
-            removed: 0,
-            running: vec![instance.name.clone()]
-        }
+    let held = launcher.hold_boxes(std::slice::from_ref(&instance.name), "clean");
+    assert!(
+        matches!(&held, Err(Error::CleanBoxRunning { id, .. }) if *id == instance.name),
+        "{held:?}"
     );
     assert!(instance.box_directory.is_dir(), "the starting box stays");
 }
@@ -3434,106 +3432,6 @@ fn a_removal_needs_a_yes_on_a_terminal() {
 }
 
 #[test]
-fn a_clean_removes_each_run_and_keeps_a_linked_target() {
-    let root = tempfile::tempdir().expect("a temporary root");
-    let launcher = Launcher::from_host().home(root.path().join("home"));
-    assert_eq!(launcher.runs().expect("no runs"), Vec::<String>::new());
-    assert_eq!(cleaned(&launcher), Cleaned::default());
-    let runs = launcher.runs_root();
-    for name in ["claude-00000001", "codex-00000002"] {
-        std::fs::create_dir_all(runs.join(name).join("box")).expect("a run");
-        std::fs::write(runs.join(name).join("records.jsonl"), "").expect("records");
-    }
-    let target = root.path().join("elsewhere");
-    std::fs::create_dir_all(&target).expect("a target");
-    std::fs::write(target.join("keep"), "").expect("a file");
-    std::os::unix::fs::symlink(&target, runs.join("linked")).expect("a link");
-    std::fs::write(runs.join("note"), "").expect("a file beside the runs");
-
-    assert_eq!(
-        launcher.runs().expect("the runs"),
-        ["claude-00000001", "codex-00000002", "linked"]
-    );
-    assert_eq!(
-        cleaned(&launcher),
-        Cleaned {
-            removed: 3,
-            running: Vec::new()
-        }
-    );
-    assert_eq!(launcher.runs().expect("no runs"), Vec::<String>::new());
-    assert!(target.join("keep").exists(), "the target stays");
-    assert!(runs.join("note").exists(), "a file is no run");
-}
-
-#[test]
-fn a_clean_with_a_box_id_removes_only_that_run() {
-    let root = tempfile::tempdir().expect("a temporary root");
-    let launcher = Launcher::from_host().home(root.path().join("home"));
-    let runs = launcher.runs_root();
-    for name in ["claude-00000001", "codex-00000002"] {
-        std::fs::create_dir_all(runs.join(name).join("box")).expect("a run");
-    }
-    let target = root.path().join("elsewhere");
-    std::fs::create_dir_all(&target).expect("a target");
-    std::fs::write(target.join("keep"), "").expect("a file");
-    std::os::unix::fs::symlink(&target, runs.join("linked")).expect("a link");
-
-    launcher.remove_run("claude-00000001").expect("one run");
-    assert_eq!(
-        launcher.runs().expect("the runs"),
-        ["codex-00000002", "linked"]
-    );
-    for refused in [
-        "claude-00000001",
-        "../home",
-        "codex-00000002/box",
-        "",
-        ".",
-        "linked/",
-        "linked/.",
-        "codex-00000002/",
-    ] {
-        assert!(
-            matches!(launcher.remove_run(refused), Err(Error::BoxUnknown { .. })),
-            "{refused:?} names no run"
-        );
-    }
-    assert!(target.join("keep").exists(), "a link's target stays");
-    assert!(
-        runs.join("codex-00000002").exists(),
-        "a run named with a trailing slash stays"
-    );
-    launcher.remove_run("linked").expect("a link");
-    assert!(target.join("keep").exists(), "the target stays");
-    assert_eq!(launcher.runs().expect("the runs"), ["codex-00000002"]);
-}
-
-/// What `box clean --all` removes and keeps in `launcher`'s runs.
-fn cleaned(launcher: &Launcher) -> Cleaned {
-    let mut cleaned = Cleaned::default();
-    launcher.remove_runs(&mut cleaned).expect("a clean");
-    cleaned
-}
-
-/// A run folder held as `box run` holds it while its box runs.
-struct RunningBox(std::fs::File);
-
-impl Drop for RunningBox {
-    /// Unlock the run folder, even while a forked child shares the file.
-    fn drop(&mut self) {
-        let _ = self.0.unlock();
-    }
-}
-
-/// Hold the run folder `name` as `box run` does while its box runs.
-fn running(runs: &Path, name: &str) -> RunningBox {
-    let file = std::fs::File::open(runs.join(name)).expect("a run folder");
-    file.try_lock().expect("the run lock");
-    RunningBox(file)
-}
-
-#[test]
 fn a_profile_clean_holds_each_box_until_it_removes_it() {
     let root = tempfile::tempdir().expect("a temporary root");
     let launcher = Launcher::from_host().home(root.path().join("home"));
@@ -3559,63 +3457,6 @@ fn a_profile_clean_holds_each_box_until_it_removes_it() {
     held.remove(&mut removed).expect("the boxes are removed");
     assert_eq!(removed, 2);
     assert!(launcher.runs().expect("the runs").is_empty());
-}
-
-#[test]
-fn a_clean_refuses_a_box_that_is_still_running() {
-    let root = tempfile::tempdir().expect("a temporary root");
-    let launcher = Launcher::from_host().home(root.path().join("home"));
-    let runs = launcher.runs_root();
-    std::fs::create_dir_all(runs.join("claude-00000001").join("box")).expect("a run");
-    let held = running(&runs, "claude-00000001");
-    let child = held.0.try_clone().expect("a forked child's copy");
-
-    for result in [
-        launcher.find_run("claude-00000001"),
-        launcher.remove_run("claude-00000001"),
-    ] {
-        assert!(
-            matches!(&result, Err(Error::BoxRunning { id }) if id == "claude-00000001"),
-            "{result:?}"
-        );
-    }
-    assert!(runs.join("claude-00000001").exists(), "a running box stays");
-
-    drop(held);
-    launcher
-        .remove_run("claude-00000001")
-        .expect("a stopped box");
-    assert!(launcher.runs().expect("no runs").is_empty());
-    drop(child);
-}
-
-#[test]
-fn a_clean_of_every_box_keeps_each_box_that_is_still_running() {
-    let root = tempfile::tempdir().expect("a temporary root");
-    let launcher = Launcher::from_host().home(root.path().join("home"));
-    let runs = launcher.runs_root();
-    for name in [
-        "claude-00000001",
-        "codex-00000002",
-        "kiro-00000003",
-        "pi-00000004",
-    ] {
-        std::fs::create_dir_all(runs.join(name).join("box")).expect("a run");
-    }
-    let _codex = running(&runs, "codex-00000002");
-    let _pi = running(&runs, "pi-00000004");
-
-    assert_eq!(
-        cleaned(&launcher),
-        Cleaned {
-            removed: 2,
-            running: vec!["codex-00000002".to_string(), "pi-00000004".to_string()]
-        }
-    );
-    assert_eq!(
-        launcher.runs().expect("the runs"),
-        ["codex-00000002", "pi-00000004"]
-    );
 }
 
 #[test]

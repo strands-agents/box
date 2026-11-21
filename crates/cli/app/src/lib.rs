@@ -51,8 +51,7 @@ pub use profile::{Listed, Profile, Profiles, Project, ProjectAccess, validate_na
 pub use records::RecordsOptions;
 pub use report::Report;
 pub use run::{
-    Cleaned, HeldBoxes, Launch, Launcher, ListedStarter, Preparation, Preview, confirm,
-    is_profile_path,
+    HeldBoxes, Launch, Launcher, ListedStarter, Preparation, Preview, confirm, is_profile_path,
 };
 pub use starter::Terminal;
 pub use telemetry::{InstallationId, RunContext};

@@ -430,7 +430,7 @@ the profiles.
   for it, and a choice and `--option` each replace a `[starter] options` value.
 - Without a terminal: a default fills an `ask` input, and each unanswered case returns
   `StarterUnanswered` with a `--with` line for each choice, or the `--option` of the input.
-- The prompts read from `&mut impl BufRead` and write to `&mut impl Write`, as the `box clean`
+- The prompts read from `&mut impl BufRead` and write to `&mut impl Write`, as the `box profile clean`
   confirmation does, so a test drives them with a byte string.
 - Shipped starters: for each entry in `resources/config.toml`, the test reads its file in
   `resources/starters/`, walks each path through its
