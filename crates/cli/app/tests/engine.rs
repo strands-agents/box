@@ -1374,6 +1374,40 @@ fn a_profile_deny_write_folder_runs_and_stays_read_only() {
     assert!(!scene.workspace().join(".venv/new").exists());
 }
 
+/// A run stops when an entry beneath a write grant became a link after the run before it.
+#[test]
+fn a_run_refuses_an_entry_that_became_a_link_beneath_a_write_grant() {
+    let scene = Scene::new();
+    let out = scene.home().join("notes/out");
+    let unnamed = scene.home().join("unnamed");
+    std::fs::create_dir_all(&out).expect("a folder beneath the grant");
+    std::fs::create_dir_all(&unnamed).expect("a folder that no entry names");
+    scene.profile(
+        "notes",
+        &format!(
+            "{PROBE}filesystem.read = [\"${{{{ home }}}}/notes/out\"]\n\
+             filesystem.write = [\"${{{{ home }}}}/notes\"]\n"
+        ),
+        PROBE_POLICY,
+    );
+    let write = |folder: &Path| format!("echo ok > {}/written.txt", folder.display());
+    let first = scene
+        .command(&scene.workspace(), "notes", &["-c", &write(&out)])
+        .output()
+        .expect("box runs");
+    succeeded(&first);
+    assert!(out.join("written.txt").is_file());
+
+    std::fs::remove_dir_all(&out).expect("remove the folder");
+    std::os::unix::fs::symlink(&unnamed, &out).expect("a link where the folder was");
+    let second = scene
+        .command(&scene.workspace(), "notes", &["-c", &write(&unnamed)])
+        .output()
+        .expect("box runs");
+    failed_with(&second, "resolves through a link");
+    assert!(!unnamed.join("written.txt").exists());
+}
+
 /// **A resources directory outside the box home is forbidden to the Shell and Monty**, even under
 /// an operator permit on every write, and Box Core accepts the rules.
 #[test]
@@ -1732,6 +1766,7 @@ fn show_format_json_prints_one_document_with_what_the_text_and_full_print() {
             "unstarted",
             "servers",
             "dropped",
+            "unchecked",
             "path_dropped",
             "skipped",
             "unread"
@@ -4697,7 +4732,7 @@ fn an_absolute_mcp_command_imports_its_filename_and_starts_the_selected_server()
     let server = KEYED_SERVER
         .replacen(
             "while IFS=",
-            "printf '%s\\n' \"$0\" > \"$CAPTURE\"\nchecked=no\n\
+            "printf '%s\\n' \"$0\" > invoked-program\nchecked=no\n\
              [ \"$BOX_LOCAL_KEY\" = private-token ] && [ \"$1\" = selected-argument ] && checked=yes\n\
              while IFS=",
             1,
@@ -4723,7 +4758,7 @@ fn an_absolute_mcp_command_imports_its_filename_and_starts_the_selected_server()
         "mcpServers": {"selected": {
             "command": program,
             "args": ["selected-argument"],
-            "env": {"BOX_LOCAL_KEY": "private-token", "CAPTURE": capture}
+            "env": {"BOX_LOCAL_KEY": "private-token"}
         }}
     })
     .to_string();

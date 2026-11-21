@@ -515,6 +515,7 @@ pub struct Launch {
     mcp_servers: Vec<(String, String, String)>,
     mcp_imports: Vec<String>,
     mcp_dropped: Vec<(String, String, String, String)>,
+    mcp_unchecked: Vec<(String, String, String)>,
     mcp_path_dropped: Vec<String>,
     mcp_skipped: Vec<(String, String, String)>,
     mcp_unread: Vec<(String, String)>,
@@ -1355,6 +1356,7 @@ impl Launcher {
                 mcp_servers: resolved.servers.detected_lines(home),
                 mcp_imports,
                 mcp_dropped: resolved.servers.dropped_lines(home),
+                mcp_unchecked: resolved.servers.option_lines(home),
                 mcp_path_dropped: compiled.path_dropped,
                 mcp_skipped: resolved.servers.skipped_lines(home),
                 mcp_unread: resolved.servers.unread_lines(home),
@@ -1371,6 +1373,15 @@ impl Launcher {
         }
         prepared
     }
+}
+
+/// The report line for `variable` of the declared MCP server `server`, whose value holds options.
+fn unchecked_options(variable: &str, server: &str, file: &str) -> String {
+    format!(
+        "did not check {variable} of MCP server {server} (from {file}): it opens as options do, \
+         and box reads no option. A file or a folder that an option names with no path in \
+         front is loaded from the workspace, where the agent can write, with the server's keys"
+    )
 }
 
 /// The line `box run` prints when the profile `name`, in the file `path`, gives less than read
@@ -1679,6 +1690,9 @@ pub struct Preview {
     pub mcp_servers: Vec<(String, String, String)>,
     /// Each variable a declared MCP server goes without, as `(variable, server, file, reason)`.
     pub mcp_dropped: Vec<(String, String, String, String)>,
+    /// Each variable of a declared MCP server that holds options, which `box` does not read, as
+    /// `(variable, server, file)`.
+    pub mcp_unchecked: Vec<(String, String, String)>,
     /// Each entry of the operator's `PATH` that is not a full path, which `box` drops from each MCP
     /// server that inherits that `PATH`, as the end of its `dropped` line.
     pub mcp_path_dropped: Vec<String>,
@@ -1693,6 +1707,14 @@ pub struct Preview {
 }
 
 impl Preview {
+    /// The report line for each variable of a declared MCP server that holds options.
+    pub fn mcp_unchecked_lines(&self) -> Vec<String> {
+        self.mcp_unchecked
+            .iter()
+            .map(|(variable, server, file)| unchecked_options(variable, server, file))
+            .collect()
+    }
+
     /// The project access, as the `project` row of `box profile show` prints it.
     pub fn project_row(&self) -> &'static str {
         match self.project.map(|project| project.access) {
@@ -1766,6 +1788,9 @@ impl Preview {
                 }),
                 "dropped": rows(&self.mcp_dropped, |(variable, server, file, reason)| {
                     json!({"variable": variable, "server": server, "file": file, "reason": reason})
+                }),
+                "unchecked": rows(&self.mcp_unchecked, |(variable, server, file)| {
+                    json!({"variable": variable, "server": server, "file": file})
                 }),
                 "path_dropped": self.mcp_path_dropped,
                 "skipped": rows(&self.mcp_skipped, |(server, file, reason)| {
@@ -1923,6 +1948,7 @@ impl Launcher {
             parts,
             mcp_servers: resolved.servers.detected_lines(home),
             mcp_dropped: resolved.servers.dropped_lines(home),
+            mcp_unchecked: resolved.servers.option_lines(home),
             mcp_path_dropped: compiled.path_dropped.clone(),
             mcp_skipped: resolved.servers.skipped_lines(home),
             mcp_unread: resolved.servers.unread_lines(home),
@@ -2438,6 +2464,11 @@ impl Launch {
         &self.mcp_dropped
     }
 
+    /// Each variable of a declared MCP server that holds options, as `(variable, name, source file)`.
+    pub fn mcp_unchecked(&self) -> &[(String, String, String)] {
+        &self.mcp_unchecked
+    }
+
     /// Each entry of the operator's `PATH` that is not a full path, which `box` drops from each MCP
     /// server that inherits that `PATH`, as the end of its `dropped` line.
     pub fn mcp_path_dropped(&self) -> &[String] {
@@ -2494,6 +2525,9 @@ impl Launch {
         }
         for (variable, server, file, why) in self.mcp_dropped() {
             eprintln!("box: dropped {variable} from MCP server {server} (from {file}): {why}");
+        }
+        for (variable, server, file) in self.mcp_unchecked() {
+            eprintln!("box: {}", unchecked_options(variable, server, file));
         }
         for line in self.mcp_path_dropped() {
             eprintln!("box: dropped {line}");
@@ -2868,6 +2902,11 @@ mod tests {
                 text("~/.claude.json"),
                 text(", with the key in GITHUB_TOKEN"),
             )],
+            mcp_unchecked: vec![(
+                text("JDK_JAVA_OPTIONS"),
+                text("issues"),
+                text("~/.codex/config.toml"),
+            )],
             mcp_dropped: vec![(
                 text("HOME"),
                 text("issues"),
@@ -2887,6 +2926,19 @@ mod tests {
                 vec![text("login.example.com"), text("auth.example.com:8443")],
             )],
         }
+    }
+
+    #[test]
+    fn the_preview_names_each_variable_that_holds_options() {
+        assert_eq!(
+            preview("name = \"probe-preview\"\n").mcp_unchecked_lines(),
+            vec![
+                "did not check JDK_JAVA_OPTIONS of MCP server issues (from ~/.codex/config.toml): \
+                 it opens as options do, and box reads no option. A file or a folder that an \
+                 option names with no path in front is loaded from the workspace, where the \
+                 agent can write, with the server's keys"
+            ]
+        );
     }
 
     #[test]
@@ -2935,6 +2987,11 @@ mod tests {
                     "server": "issues",
                     "file": "~/.codex/config.toml",
                     "reason": "the box sets it",
+                }],
+                "unchecked": [{
+                    "variable": "JDK_JAVA_OPTIONS",
+                    "server": "issues",
+                    "file": "~/.codex/config.toml",
                 }],
                 "path_dropped": ["\"bin\" from the PATH of each MCP server"],
                 "skipped": [{

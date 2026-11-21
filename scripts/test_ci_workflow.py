@@ -29,12 +29,17 @@ def step_command(path, name):
 
 
 class CliTestWorkflowTests(unittest.TestCase):
-    def test_it_is_reusable_with_the_two_inputs(self):
+    def test_it_is_reusable_with_its_inputs(self):
         text = CLI_TEST.read_text()
         triggers = text.split("\non:\n", 1)[1].split("\n\n", 1)[0]
         self.assertEqual(re.findall(r"(?m)^  ([a-z_]+):", triggers), ["workflow_call"])
         self.assertEqual(re.findall(r"(?m)^      ([a-z_]+):", triggers),
-                         ["suite", "macos"])
+                         ["suite", "macos", "package", "ref"])
+        # The package jobs are off unless a caller asks for them.
+        package = triggers.split("      package:\n", 1)[1].split("\n      ref:", 1)[0]
+        self.assertIn("        default: false", package)
+        self.assertIn("    if: inputs.macos && inputs.package && inputs.suite == 'all'\n",
+                      job(CLI_TEST, "package"))
 
     def test_it_keeps_the_job_names(self):
         for name, title in [
@@ -45,26 +50,34 @@ class CliTestWorkflowTests(unittest.TestCase):
                 self.assertIn(f"    name: {title}\n", job(CLI_TEST, name))
 
     def test_each_suite_selects_its_jobs(self):
-        self.assertIn("    if: inputs.suite == 'all'\n", job(CLI_TEST, "build-test-lint"))
+        # Both suites run the Linux job, so a Core change runs the CLI's tests of Core's API.
+        self.assertNotIn("\n    if: ", job(CLI_TEST, "build-test-lint"))
         self.assertIn("    if: inputs.macos\n", job(CLI_TEST, "macos"))
 
     def test_an_unknown_suite_is_refused(self):
         command = step_command(CLI_TEST, "Refuse an unknown suite")
-        for suite, success in [("all", True), ("engine", True), ("launch", False),
+        for suite, success in [("all", True), ("core", True), ("engine", False), ("launch", False),
                                ("", False), ("ALL", False), ("corpus", False)]:
             with self.subTest(suite=suite):
                 result = subprocess.run(["bash", "-c", command], env={**os.environ, "SUITE": suite},
                                         capture_output=True, text=True)
                 self.assertEqual(result.returncode == 0, success, result.stdout)
 
-    def test_every_checkout_tests_the_callers_commit(self):
-        # The caller's commit, not an input: CodeQL treats a checkout of an input ref in a job
-        # that saves the Rust cache as cache poisoning.
+    def test_every_checkout_tests_the_requested_commit_and_only_main_pushes_save_the_cache(self):
+        # The release passes the commit it releases as `ref`. A checkout of an input ref in a job
+        # that saves the Rust cache is cache poisoning, so, as in rust-test-lint.yml, only a push
+        # to main saves it, and that run checks out github.sha.
         text = CLI_TEST.read_text()
         checkouts = text.count("uses: actions/checkout@")
-        self.assertEqual(checkouts, 2)
-        self.assertEqual(text.count("          ref: ${{ github.sha }}\n"), checkouts)
-        self.assertNotIn("inputs.ref", text)
+        self.assertEqual(checkouts, 3)
+        self.assertEqual(text.count("          ref: ${{ inputs.ref || github.sha }}\n"), checkouts)
+        caches = text.count("uses: Swatinem/rust-cache@")
+        self.assertEqual(caches, 3)
+        self.assertEqual(text.count(
+            "          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n"),
+            caches)
+        # CI tests the commit that triggered it.
+        self.assertNotIn("      ref:", job(CLI_TEST.with_name("ci.yml"), "cli"))
 
 
 def step_run(path, job_name, step_name):
@@ -109,18 +122,18 @@ class MovedCommandTests(unittest.TestCase):
         test = step_run(CLI_TEST, "macos", "Test")
         self.assertIn('  *) echo "::error::full Xcode is not selected: $developer_dir"; exit 1 ;;\n',
                       test)
-        self.assertIn("  cargo test -p strands-box-cli --all-features --test engine\n", test)
+        self.assertIn('if [ "$SUITE" = core ]; then\n  cargo test -p strands-box-cli --all-features --test engine\n', test)
         self.assertIn("else\n  cargo test -p strands-box-cli -p strands-box-cli-pack-tests -p strands-box-cli-profile -p strands-box-cli-telemetry --all-features\nfi", test)
 
 
 class SuiteStepTests(unittest.TestCase):
-    """Each step of the macOS job runs only for the suites that need it."""
+    """Each step of the Linux and macOS jobs runs only for the suites that need it."""
 
     ALL = "${{ !cancelled() && inputs.suite == 'all' }}"
     TESTS = "${{ !cancelled() }}"
 
-    def step_if(self, name, occurrence=0):
-        lines = job(CLI_TEST, "macos").splitlines()
+    def step_if(self, name, occurrence=0, job_name="macos"):
+        lines = job(CLI_TEST, job_name).splitlines()
         starts = [index for index, line in enumerate(lines) if line == f"      - name: {name}"]
         start = starts[occurrence]
         for line in lines[start + 1:]:
@@ -133,7 +146,17 @@ class SuiteStepTests(unittest.TestCase):
     def test_lint_runs_only_for_all(self):
         self.assertEqual(self.step_if("Clippy"), self.ALL)
 
-    def test_test_steps_run_for_all_and_engine(self):
+    def test_linux_lint_runs_only_for_all(self):
+        # rust-test-lint.yml already lints the workspace for a Core change.
+        for name in ["Format", "Clippy"]:
+            with self.subTest(step=name):
+                self.assertEqual(self.step_if(name, job_name="build-test-lint"),
+                                 "inputs.suite == 'all'")
+        for name in ["Build", "Test"]:
+            with self.subTest(step=name):
+                self.assertIsNone(self.step_if(name, job_name="build-test-lint"))
+
+    def test_test_steps_run_for_all_and_core(self):
         for name in ["Install launcher test prerequisites", "Test"]:
             with self.subTest(step=name):
                 self.assertEqual(self.step_if(name), self.TESTS)
@@ -145,7 +168,7 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("    uses: ./.github/workflows/cli-test.yml\n", cli)
         self.assertIn("    if: needs.detect-changes.outputs.cli == 'true' || "
                       "needs.detect-changes.outputs.core == 'true'\n", cli)
-        self.assertIn("      suite: ${{ needs.detect-changes.outputs.cli == 'true' && 'all' || 'engine' }}\n", cli)
+        self.assertIn("      suite: ${{ needs.detect-changes.outputs.cli == 'true' && 'all' || 'core' }}\n", cli)
         self.assertIn("      macos: ${{ github.event_name != 'pull_request' || "
                       "github.event.pull_request.draft == false }}\n", cli)
 

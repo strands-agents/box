@@ -10,7 +10,13 @@ fn main() {
     }
     let source = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("set by cargo"))
         .join("Info.plist");
-    let version = std::env::var("CARGO_PKG_VERSION").expect("set by cargo");
+    // Apple's bundle versions are numbers only, so a pre-release carries its release version.
+    let version = format!(
+        "{}.{}.{}",
+        std::env::var("CARGO_PKG_VERSION_MAJOR").expect("set by cargo"),
+        std::env::var("CARGO_PKG_VERSION_MINOR").expect("set by cargo"),
+        std::env::var("CARGO_PKG_VERSION_PATCH").expect("set by cargo"),
+    );
     let body = std::fs::read_to_string(&source)
         .unwrap_or_else(|error| panic!("read {}: {error}", source.display()))
         .replace("__VERSION__", &version);

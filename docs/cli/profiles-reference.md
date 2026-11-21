@@ -246,8 +246,10 @@ element) or that starts with a path name, such as `${{ home }}` or a `program` i
 3. The result is an absolute path, or a path that starts with `~/` for your home directory, and it
    holds no `..`.
 
-`box` refuses a path that goes through a link inside your project or the run's storage, because
-the agent could change that link. An entry whose path does not exist stops the run, so mark an
+`box` refuses a path that goes through a link inside a folder the box can write, because the agent
+could change that link. Those folders are your project, the run's storage, `~/.strands/box`, and
+each folder that a `write` entry names. Name the real path instead. A link above such a folder is
+fine, such as `/tmp` on macOS. An entry whose path does not exist stops the run, so mark an
 entry that some machines lack `optional = true`.
 [Values](../design/cli/profile-language.md#values) says how `box` writes each value safely into
 the run's files.

@@ -643,7 +643,7 @@ fn a_claude_run_declares_the_operators_and_the_projects_mcp_servers() {
                  "github": {{"type": "http", "url": "https://api.githubcopilot.com/mcp/", "headers": {{"Authorization": "Bearer x"}}}},
                  "keyed": {{"url": "https://keyed.example.com/mcp", "headers": {{"Authorization": "Bearer ${{BOX_TEST_UNSET}}"}}}}}},
                 "projects": {{"{}": {{"mcpServers": {{"docs": {{"type": "http", "url": "https://docs.example.com/mcp"}},
-                    "tracker": {{"command": "mcp-tracker", "env": {{"TRACKER_TOKEN": "${{BOX_TEST_TOKEN}}"}}}}}}}}}}}}"#,
+                    "tracker": {{"command": "mcp-tracker", "env": {{"TRACKER_TOKEN": "${{BOX_TEST_TOKEN}}", "TRACKER_FLAGS": "--verbose"}}}}}}}}}}}}"#,
             host.project().display()
         ),
     )
@@ -689,9 +689,17 @@ fn a_claude_run_declares_the_operators_and_the_projects_mcp_servers() {
             (
                 "tracker".to_string(),
                 "~/.claude.json".to_string(),
-                ", with TRACKER_TOKEN".to_string()
+                ", with TRACKER_FLAGS, TRACKER_TOKEN".to_string()
             ),
         ]
+    );
+    assert_eq!(
+        preview.mcp_unchecked,
+        vec![(
+            "TRACKER_FLAGS".to_string(),
+            "tracker".to_string(),
+            "~/.claude.json".to_string()
+        )]
     );
     assert_eq!(
         preview.mcp_dropped,
@@ -759,6 +767,7 @@ fn a_claude_run_declares_the_operators_and_the_projects_mcp_servers() {
         .expect("a launch");
     assert_eq!(launch.mcp_servers(), preview.mcp_servers.as_slice());
     assert_eq!(launch.mcp_dropped(), preview.mcp_dropped.as_slice());
+    assert_eq!(launch.mcp_unchecked(), preview.mcp_unchecked.as_slice());
     assert_eq!(launch.mcp_skipped(), preview.mcp_skipped.as_slice());
     host.profile()
         .with("claude")

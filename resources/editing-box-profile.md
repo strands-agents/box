@@ -653,8 +653,9 @@ A filesystem entry is a path. So are copy sources, the program in a command, and
 - Every later placeholder fills one component, with no `/`, `.` or `..` value.
 - The result is absolute and contains no `..` component.
 
-Existing filesystem paths are resolved through links. A path through a link in the project or
-run storage fails because the workload can change it. A missing required path can resolve but
+Existing filesystem paths are resolved through links. A path through a link in the project,
+run storage, `~/.strands/box`, or a folder that a `write` entry names fails because the workload
+can change it; name the real path. A missing required path can resolve but
 Box Core refuses it when the run starts. Use an entry table for a path that is optional or
 conditional:
 

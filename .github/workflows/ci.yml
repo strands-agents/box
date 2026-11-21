@@ -5,10 +5,13 @@ name: CI
 #
 #   core    Box Core: everything under crates/ outside crates/cli/, and its test harnesses.
 #           Runs Core's unit tests and lint (rust-test-lint.yml), containment, and the CLI's
-#           engine suite (cli-test.yml, suite `engine`), because the CLI builds on Core.
-#   cli     The box CLI: crates/cli/, resources/, the test-corpus files its tests read, and its
-#           scripts. Runs cli-test.yml (all). A CLI-only change skips Core's unit tests and the
-#           containment suite.
+#           Linux tests and macOS engine suite (cli-test.yml, suite `core`), because the CLI
+#           builds on Core.
+#   cli     The box CLI: crates/cli/, resources/, the test-corpus files its tests read, its
+#           installer, and its scripts. Runs cli-test.yml (all). A CLI-only change skips Core's
+#           unit tests and the containment suite.
+#   release The files that build, sign, or install the release packages. A pull request runs the
+#           macOS package jobs only when it changes one of them; a push to main always does.
 #   shared  The workspace files both parts build from. Runs everything.
 #   other   A path that no filter and no skip-list entry names. Runs everything.
 #
@@ -47,6 +50,7 @@ jobs:
         ${{ github.event_name != 'pull_request' || steps.filter.outputs.containment == 'true' ||
         steps.every.outputs.core_crates == 'true' || steps.every.outputs.other == 'true' }}
       verdict: ${{ github.event_name != 'pull_request' || steps.filter.outputs.verdict == 'true' }}
+      release: ${{ github.event_name != 'pull_request' || steps.filter.outputs.release == 'true' }}
     steps:
       - uses: actions/checkout@v7
         if: github.event_name == 'pull_request'
@@ -76,6 +80,26 @@ jobs:
               - 'scripts/try-build.sh'
               - 'scripts/test_ci_workflow.py'
               - 'scripts/test_try_build.py'
+              - 'install.sh'
+              - 'scripts/package_macos.sh'
+              - 'scripts/smoke_telemetry.py'
+              - 'scripts/test_distribution.py'
+              - 'scripts/test_macos_package.py'
+              # A release change runs the CLI jobs, so the release filter can add the package.
+              - '.github/workflows/cli-release.yml'
+              - '.github/workflows/deploy-box-artifact.yml'
+            release:
+              - 'install.sh'
+              - 'crates/cli/app/Info.plist'
+              - 'crates/cli/app/build.rs'
+              - '.github/workflows/cli-release.yml'
+              - '.github/workflows/cli-test.yml'
+              - '.github/workflows/deploy-box-artifact.yml'
+              - 'scripts/package_macos.sh'
+              - 'scripts/macos-release-cli.py'
+              - 'scripts/smoke_telemetry.py'
+              - 'scripts/test_distribution.py'
+              - 'scripts/test_macos_package.py'
             shared:
               - '.cargo/**'
               - 'Cargo.toml'
@@ -129,6 +153,7 @@ jobs:
               - '!.claude/**'
               - '!.github/**'
               - '!.gitignore'
+              - '!install.sh'
               - '!crates/**'
               - '!docs/**'
               - '!examples/**'
@@ -206,7 +231,7 @@ jobs:
       containment_macos: ${{ github.event.pull_request.draft != true && needs.detect-changes.outputs.containment == 'true' }}
 
   # The CLI's build, test, and lint on Linux, and the macOS checks (cli-test.yml). A Core-only
-  # change runs the engine suite, and a draft skips the macOS jobs.
+  # change runs the Linux job and only the engine suite on macOS, and a draft skips the macOS jobs.
   cli:
     name: CLI
     needs: detect-changes
@@ -215,8 +240,9 @@ jobs:
       contents: read
     uses: ./.github/workflows/cli-test.yml
     with:
-      suite: ${{ needs.detect-changes.outputs.cli == 'true' && 'all' || 'engine' }}
+      suite: ${{ needs.detect-changes.outputs.cli == 'true' && 'all' || 'core' }}
       macos: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+      package: ${{ needs.detect-changes.outputs.release == 'true' }}
 
   site-manifest:
     name: Site manifest

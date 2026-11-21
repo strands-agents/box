@@ -735,7 +735,7 @@ pub(crate) fn copy_files_waiting(
                 }
             }
             State::Absent => {
-                storage_files::create(file, &run.join(format!("copy-{index}")), home)?;
+                storage_files::create(file, &run.join(format!("copy-{index}")), base)?;
             }
         }
     }

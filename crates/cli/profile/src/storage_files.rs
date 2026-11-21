@@ -1,6 +1,7 @@
 //! The host files and directories that `[[storage.files]]` copies into storage once.
 
 use std::io::{Read as _, Write as _};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{
     DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
 };
@@ -10,8 +11,8 @@ use nix::libc;
 
 use crate::error::Error;
 use crate::files::{
-    create_real_directory, io_error, make_directory_at, open_at, open_directory, remove_if_present,
-    rename_at, unlink_at,
+    io_error, make_directory_at, move_new_at, open_at, open_directory, open_real_directory,
+    remove_if_present, rename_at, unlink_at,
 };
 use crate::host::{canonical, resolved, tilde, within};
 use crate::storage_edit::{Edit, Failure, Kept, shown};
@@ -131,6 +132,11 @@ impl Refusals {
     /// How `path` is, holds, or lies in a refused root, as written or real, if it does.
     pub fn reach(&self, path: &Path) -> Option<String> {
         self.refusal(path, true)
+    }
+
+    /// How `path` is or lies in a refused root, as written or real, if it does.
+    pub(crate) fn inside(&self, path: &Path) -> Option<String> {
+        self.refusal(path, false)
     }
 
     fn refusal(&self, path: &Path, include_contents: bool) -> Option<String> {
@@ -627,11 +633,12 @@ fn add(
     stack.pop();
 }
 
-/// Copy `file` as `plan` states. `box` builds the copy in `staging`, a fresh directory that no box
-/// can reach, then renames it into place beside nothing: a target that exists by then is kept.
-/// A host file that changed or went between the plan and the end of the whole copy fails it with
-/// [`Error::Changed`], and nothing reaches storage.
-/// For a `sync` row, return what each file of the copy holds, or nothing if the copy was kept.
+/// Copy `file` as `plan` states. `box` opens each directory from `home` down to the target's
+/// folder without following a link, builds the copy in `staging`, a fresh directory that no box
+/// can reach, then moves it into the folder it holds open, replacing nothing: a target that exists
+/// by then is kept. A host file that changed or went between the plan and the end of the whole
+/// copy fails it with [`Error::Changed`], and nothing reaches storage. For a `sync` row, return
+/// what each file of the copy holds, or nothing if the copy was kept.
 pub(crate) fn copy(
     file: &StorageFile,
     plan: &Plan,
@@ -639,7 +646,7 @@ pub(crate) fn copy(
     home: &Path,
 ) -> Result<Vec<(PathBuf, Entry)>, Error> {
     let parent = file.target.parent().unwrap_or(&file.target);
-    create_real_directory(parent, home)?;
+    let directory = open_real_directory(parent, home)?;
     remove_if_present(staging)?;
     let made = make(staging, plan, file).and_then(|made| match plan.changed() {
         Some(path) => Err(Error::Changed {
@@ -647,12 +654,7 @@ pub(crate) fn copy(
         }),
         None => Ok(made),
     });
-    if made.is_ok() && std::fs::symlink_metadata(&file.target).is_err() {
-        create_real_directory(parent, home)?;
-        if let Err(source) = std::fs::rename(staging, &file.target) {
-            remove_if_present(staging)?;
-            return Err(io_error("copy", &file.target, source));
-        }
+    if made.is_ok() && place(staging, &directory, &file.target)? {
         return made;
     }
     remove_if_present(staging)?;
@@ -660,8 +662,8 @@ pub(crate) fn copy(
 }
 
 /// Write a new copy of a row whose host file is absent, holding only its `set` values. `box`
-/// writes it in `staging` and renames it into place beside nothing, as [`copy`] does. A row that
-/// sets nothing writes nothing.
+/// writes it in `staging` and moves it into the target's open folder, as [`copy`] does. A row
+/// that sets nothing writes nothing.
 pub(crate) fn create(file: &StorageFile, staging: &Path, home: &Path) -> Result<(), Error> {
     let Some(edit) = &file.edit else {
         return Ok(());
@@ -674,7 +676,7 @@ pub(crate) fn create(file: &StorageFile, staging: &Path, home: &Path) -> Result<
         return Ok(());
     };
     let parent = file.target.parent().unwrap_or(&file.target);
-    create_real_directory(parent, home)?;
+    let directory = open_real_directory(parent, home)?;
     remove_if_present(staging)?;
     let written = std::fs::OpenOptions::new()
         .write(true)
@@ -683,16 +685,29 @@ pub(crate) fn create(file: &StorageFile, staging: &Path, home: &Path) -> Result<
         .open(staging)
         .and_then(|mut output| output.write_all(text.as_bytes()))
         .map_err(|source| io_error("write", staging, source));
-    if written.is_ok() && std::fs::symlink_metadata(&file.target).is_err() {
-        create_real_directory(parent, home)?;
-        if let Err(source) = std::fs::rename(staging, &file.target) {
-            remove_if_present(staging)?;
-            return Err(io_error("copy", &file.target, source));
-        }
+    if written.is_ok() && place(staging, &directory, &file.target)? {
         return Ok(());
     }
     remove_if_present(staging)?;
     written
+}
+
+/// Move the copy at `staging` to the name of `target` in `directory`, its open folder, and return
+/// whether it moved. A target that exists is kept, and the copy at `staging` is removed.
+fn place(staging: &Path, directory: &OwnedFd, target: &Path) -> Result<bool, Error> {
+    let copied = |source| io_error("copy", target, source);
+    let moved = match (staging.parent(), staging.file_name(), target.file_name()) {
+        (Some(run), Some(from), Some(to)) => open_directory(run)
+            .and_then(|run| move_new_at(&run, from, directory, to))
+            .map_err(copied),
+        _ => Err(copied(std::io::Error::from(
+            std::io::ErrorKind::InvalidInput,
+        ))),
+    };
+    if !matches!(moved, Ok(true)) {
+        remove_if_present(staging)?;
+    }
+    moved
 }
 
 /// Make each item of `plan` under `staging`, and refuse a file that changed since the plan.
@@ -967,12 +982,7 @@ pub fn edit_in_storage(
 }
 
 /// Write `text` to a new file beside `name` in `directory`, then rename it over `name`.
-fn write_beside(
-    directory: &std::os::fd::OwnedFd,
-    name: &str,
-    mode: u32,
-    text: &str,
-) -> std::io::Result<()> {
+fn write_beside(directory: &OwnedFd, name: &str, mode: u32, text: &str) -> std::io::Result<()> {
     let staged = format!(".{name}.box-{}", std::process::id());
     let written = open_at(
         directory,
@@ -1433,6 +1443,102 @@ mod tests {
             "host, changed",
             "a deleted copy is copied again"
         );
+    }
+
+    #[test]
+    fn a_copy_moves_into_the_folder_that_box_opened() {
+        let fixture = Fixture::new();
+        let file = fixture.row(".claude/CLAUDE.md", "config/CLAUDE.md");
+        let config = file.target.parent().expect("a folder");
+        let directory = open_real_directory(config, &fixture.home).expect("the open folder");
+        let staging = fixture.staging();
+        std::fs::write(&staging, "host").expect("a staged copy");
+        let outside = fixture.home.join("outside");
+        std::fs::create_dir_all(&outside).expect("a folder outside storage");
+        let aside = config.with_file_name("aside");
+        std::fs::rename(config, &aside).expect("move the folder aside");
+        symlink(&outside, config).expect("a link where the folder was");
+
+        assert!(place(&staging, &directory, &file.target).expect("a move"));
+        assert_eq!(std::fs::read_dir(&outside).expect("list").count(), 0);
+        assert_eq!(
+            std::fs::read_to_string(aside.join("CLAUDE.md")).expect("read"),
+            "host"
+        );
+    }
+
+    #[test]
+    fn a_copy_stays_in_storage_while_its_folder_is_swapped_for_a_link() {
+        let fixture = Fixture::new();
+        fixture.write(".claude/CLAUDE.md", "host");
+        let file = fixture.row(".claude/CLAUDE.md", "config/CLAUDE.md");
+        let plan = fixture.plan(&file);
+        let staging = fixture.staging();
+        let config = file.target.parent().expect("a folder").to_path_buf();
+        let aside = config.with_file_name("aside");
+        let outside = fixture.home.join("outside");
+        std::fs::create_dir_all(&config).expect("the folder");
+        std::fs::create_dir_all(&outside).expect("a folder outside storage");
+        let landed = || std::fs::read_dir(&outside).expect("list").count();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::fs::rename(&config, &aside);
+                    let _ = std::fs::remove_file(aside.join("CLAUDE.md"));
+                    let _ = symlink(&outside, &config);
+                    let _ = std::fs::remove_file(&config);
+                    let _ = std::fs::rename(&aside, &config);
+                }
+            });
+            for _ in 0..2000 {
+                let _ = copy(&file, &plan, &staging, &fixture.home);
+                if landed() != 0 {
+                    break;
+                }
+            }
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        assert_eq!(landed(), 0, "a copy landed outside storage");
+    }
+
+    #[test]
+    fn a_copy_replaces_nothing_at_its_target() {
+        let fixture = Fixture::new();
+        fixture.write(".claude/skills/a/SKILL.md", "a");
+        let file = fixture.row(".claude/skills", "config/skills");
+        let plan = fixture.plan(&file);
+        let config = file.target.parent().expect("a folder");
+        let directory = open_real_directory(config, &fixture.home).expect("the open folder");
+        let staging = fixture.staging();
+        let outside = fixture.home.join("outside");
+        std::fs::create_dir_all(&outside).expect("a folder outside storage");
+        type Put = fn(&Path, &Path);
+        let at_target: [(&str, Put); 3] = [
+            ("an empty folder", |target, _| {
+                std::fs::create_dir(target).expect("a folder");
+            }),
+            ("a file", |target, _| {
+                std::fs::write(target, "the box wrote this").expect("a file");
+            }),
+            ("a link", |target, outside| {
+                symlink(outside, target).expect("a link");
+            }),
+        ];
+        for (what, put) in at_target {
+            make(&staging, &plan, &file).expect("a staged copy");
+            put(&file.target, &outside);
+            let before = std::fs::symlink_metadata(&file.target).expect("the target");
+            assert!(
+                !place(&staging, &directory, &file.target).expect("a kept target"),
+                "{what}"
+            );
+            let after = std::fs::symlink_metadata(&file.target).expect("the target");
+            assert_eq!((before.ino(), before.len()), (after.ino(), after.len()));
+            assert!(std::fs::symlink_metadata(&staging).is_err(), "{what}");
+            assert_eq!(std::fs::read_dir(&outside).expect("list").count(), 0);
+            remove_if_present(&file.target).expect("remove");
+        }
     }
 
     #[test]

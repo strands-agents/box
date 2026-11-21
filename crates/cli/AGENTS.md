@@ -139,7 +139,7 @@ not a draft, and each night. A pull request merges only when the `CI Gate` job p
 every other CI job, and it fails on a draft. On a pull request, the `detect-changes` job's path
 filters skip the jobs that its files cannot affect: a docs-only pull request runs only Prose,
 Packaging tests, and the gate, a CLI-only pull request skips Box Core's unit tests and containment
-suite, and a Box Core change also runs the CLI's engine suite. When a CLI check starts to read a
+suite, and a Box Core change also runs the CLI's Linux tests and its engine suite. When a CLI check starts to read a
 new file, add the file to the `cli` filter. A path that no filter and no entry in the `other` skip
 list matches runs every check.
 
@@ -151,8 +151,9 @@ interactive change works. When the operator asks how to try a change by hand, po
 changes. `scripts/try-build.sh <pr|main>` runs the build that CI made for a pull request or for
 `main`, so a reviewer can try a change without building it.
 
-`scripts/macos-release-cli.py` signs and notarizes the macOS build of `box`. No workflow calls it
-yet. Its `NATIVE_LAUNCHER` is the launcher that a test in `resources.rs` installs.
+`scripts/macos-release-cli.py` signs and notarizes the macOS build of `box`. The reusable
+`.github/workflows/cli-release.yml` calls it, and `Release Box` calls that workflow. Its
+`NATIVE_LAUNCHER` is the launcher that a test in `resources.rs` installs.
 
 ## Working principles
 

@@ -1452,7 +1452,7 @@ pub(crate) fn check_header(
     }
     if let Some(requirement) = string_field(header, "engine", &owner)? {
         let needed = floor(&requirement)?;
-        let this = parse_version(version).unwrap_or_default();
+        let this = release_of(version).unwrap_or_default();
         if this < needed {
             return Err(Refusal::at(
                 format!("this {section} needs box {requirement}, and this is box {version}"),
@@ -3756,6 +3756,14 @@ fn parse_version(text: &str) -> Option<Vec<u64>> {
     parts.filter(|parts| !parts.is_empty())
 }
 
+/// The release a `box` build counts as: a preview build such as `0.3.0-linux-preview.1` is `0.3.0`.
+fn release_of(version: &str) -> Option<Vec<u64>> {
+    let release = version
+        .split_once('-')
+        .map_or(version, |(release, _)| release);
+    parse_version(release)
+}
+
 /// The namespace of a profile's storage that every run uses.
 pub(crate) const DEFAULT_NAMESPACE: &str = "default";
 
@@ -3986,6 +3994,8 @@ struct Resolver<'a, S> {
     /// The folder of the agent's program, once a `root` in `[agent]` asks for it.
     agent_root: Option<PathBuf>,
     skipped: BTreeMap<PathBuf, (PathBuf, String)>,
+    /// Each filesystem entry that the walk kept: its key, its text, and its path as written.
+    entries: Vec<(String, String, PathBuf)>,
 }
 
 /// The character that stands for a pack's literal `*` in a path until it is matched.
@@ -4106,6 +4116,7 @@ pub(crate) fn expand(
             .map(str::to_string),
         agent_root: None,
         skipped: BTreeMap::new(),
+        entries: Vec::new(),
     };
     let mut table = resolver.fill(table).map_err(|reason| Unresolved {
         reason,
@@ -4297,6 +4308,43 @@ pub fn write_grants(table: &toml::Table, home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Each link that the resolution of `path` goes through, as the real folder that holds it and the
+/// path it leads to. A part of `path` that does not exist ends the list.
+fn links(path: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let mut found = Vec::new();
+    let mut remaining = path.to_path_buf();
+    let mut current = PathBuf::new();
+    while found.len() <= 40 {
+        let mut components = remaining.components();
+        let Some(component) = components.next() else {
+            break;
+        };
+        let rest = components.as_path().to_path_buf();
+        match component {
+            Component::Prefix(_) | Component::RootDir => current.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                current.pop();
+            }
+            Component::Normal(name) => {
+                let next = current.join(name);
+                match std::fs::read_link(&next) {
+                    Ok(target) => {
+                        remaining = target.join(rest);
+                        let holder = canonical(&current).unwrap_or_else(|| current.clone());
+                        found.push((holder, current.join(target)));
+                        continue;
+                    }
+                    Err(_) if std::fs::symlink_metadata(&next).is_err() => break,
+                    Err(_) => current = next,
+                }
+            }
+        }
+        remaining = rest;
+    }
+    found
+}
+
 /// Whether `path`, as written or through its links, lies in `root` or in the real `root`.
 pub(crate) fn lies_under(path: &Path, root: &Path) -> bool {
     let real = resolved(path);
@@ -4425,8 +4473,33 @@ impl<S: Sources> Resolver<'_, S> {
             unreachable!("a table stays a table");
         };
         self.refuse_under_grants(&table)?;
+        self.refuse_planted_links(&table)?;
         self.refuse_node_agent(&table)?;
         Ok(table)
+    }
+
+    /// Refuse a filesystem entry that resolves through a link inside a place a box can write: the
+    /// workspace, the run's storage, `~/.strands/box`, or a write grant of `table`.
+    fn refuse_planted_links(&self, table: &toml::Table) -> Result<(), String> {
+        let roots: Vec<PathBuf> = self
+            .refusals(table)
+            .roots
+            .iter()
+            .map(|(root, _)| resolved(root))
+            .collect();
+        for (at, written, path) in &self.entries {
+            for (holder, target) in links(path) {
+                if let Some(root) = roots.iter().find(|root| holder.starts_with(root)) {
+                    return Err(format!(
+                        "`{at}` = {written:?} resolves through a link to {}, inside {}, which \
+                         the box can write; name a path with no link in it",
+                        canonical(path).unwrap_or(target).display(),
+                        root.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Refuse a `program` input at `[agent] command` element 0 that is a node script, because
@@ -5822,6 +5895,8 @@ impl<S: Sources> Resolver<'_, S> {
             if optional && std::fs::metadata(&expanded).is_err() {
                 return Ok(Vec::new());
             }
+            self.entries
+                .push((at.to_string(), path.clone(), expanded.clone()));
             if std::fs::symlink_metadata(&expanded).is_err() {
                 return Ok(vec![path]);
             }
@@ -5837,9 +5912,15 @@ impl<S: Sources> Resolver<'_, S> {
             self.dropped
                 .push((tool.to_string(), path.replace(WILDCARD, "*")));
         }
+        let path = path.replace(WILDCARD, "*");
+        self.entries.extend(
+            matches
+                .iter()
+                .map(|found| (at.to_string(), path.clone(), found.clone())),
+        );
         matches
             .iter()
-            .map(|found| self.grant(&path.replace(WILDCARD, "*"), found, at, read_file))
+            .map(|found| self.grant(&path, found, at, read_file))
             .collect()
     }
 
@@ -7577,6 +7658,94 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    fn engine_outcome(version: &str, floor: &str) -> Result<(), String> {
+        let shelf = Shelf::new();
+        let text = "packs = [\"@box/p\"]";
+        shelf.share_raw(
+            "p",
+            &format!(
+                "[pack]\nname = \"@box/p\"\nversion = 1\nkind = \"support\"\nengine = \"{floor}\"\n"
+            ),
+        );
+        let lookup = Lookup {
+            vendored: Some(shelf.root.join("packs")),
+            operator: shelf.root.join("operator"),
+            collections: Vec::new(),
+            version: Box::leak(version.to_owned().into_boxed_str()),
+        };
+        chain(
+            &toml::from_str(text).expect("TOML"),
+            text,
+            &shelf.root.join("mine/profile.toml"),
+            None,
+            &lookup,
+        )
+        .map(|_| ())
+        .map_err(reason)
+    }
+
+    #[test]
+    fn a_preview_version_counts_as_its_release_for_an_engine_floor() {
+        for (version, floor, refused) in [
+            ("0.3.0-linux-preview.1", ">=0.1.0", false),
+            ("0.3.0-linux-preview.1", ">=0.3.0", false),
+            ("0.3.0-linux-preview.1", ">=0.3.1", true),
+            ("0.3.0-linux-preview.1", ">=0.4.0", true),
+            ("7.2.0-linux-preview.1", ">=7.2.0", false),
+            ("7.2.0-linux-preview.1", ">=7.2.1", true),
+            ("v0.3.0-linux-preview.2", ">=0.3.0", false),
+        ] {
+            let expected = if refused {
+                Err(format!(
+                    "this pack needs box {floor}, and this is box {version}"
+                ))
+            } else {
+                Ok(())
+            };
+            assert_eq!(
+                engine_outcome(version, floor),
+                expected,
+                "box {version} against {floor}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_box_version_is_refused_and_named() {
+        for version in [
+            "",
+            "linux-preview",
+            "0-linux-preview",
+            "0.x.0",
+            "0.x.0-linux-preview.1",
+            "-linux-preview.1",
+            "0.3.0+build.5",
+        ] {
+            let reason = engine_outcome(version, ">=0.1.0").expect_err("a malformed version");
+            assert!(
+                reason.contains("needs box >=0.1.0")
+                    && reason.contains(&format!("this is box {version}")),
+                "{version:?}: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_engine_floor_is_refused_and_named() {
+        for floor in [
+            ">=",
+            ">=abc",
+            ">=0.x.0",
+            ">=0.3.0-linux-preview.1",
+            ">=0.3.0+build.5",
+            "0.3.0",
+            "^0.3.0",
+        ] {
+            let reason = engine_outcome("0.3.0", floor).expect_err("a malformed floor");
+            assert!(reason.contains("is not `>=X.Y.Z`"), "{floor}: {reason}");
         }
     }
 

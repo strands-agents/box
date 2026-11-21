@@ -84,6 +84,110 @@ fn loads_code(name: &str) -> bool {
     strands_box::reserved_env(name) == Some(ReservedEnv::LoadsCode)
 }
 
+/// The endings of a variable name that holds a file, a folder, or a list of them.
+const PATH_NAME_ENDINGS: [&str; 7] = ["PATH", "PATHS", "LIB", "LIBS", "DIR", "DIRS", "HOME"];
+
+/// The characters that stand between the parts of a value, such as the paths in a list.
+const PART_SEPARATORS: [char; 7] = [':', ';', ',', '=', '@', '"', '\''];
+
+/// Whether `name` ends as the name of a path does, in either case.
+fn named_as_path(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    PATH_NAME_ENDINGS
+        .iter()
+        .any(|ending| upper.ends_with(ending))
+}
+
+/// Whether `value` is a number or a word for on or off, which names no path.
+fn is_switch(value: &str) -> bool {
+    value.parse::<f64>().is_ok_and(f64::is_finite)
+        || ["true", "false", "yes", "no", "on", "off"]
+            .iter()
+            .any(|word| value.eq_ignore_ascii_case(word))
+}
+
+/// Whether `part` is written as a path: it is `~`, or it starts with `/`, `./`, `../`, or `~/`.
+fn written_as_path(part: &str) -> bool {
+    part == "~"
+        || ["/", "./", "../", "~/"]
+            .iter()
+            .any(|start| part.starts_with(start))
+}
+
+/// The path in the operator's home that `text` names, when it is `~` or opens with `~/`.
+fn in_home(text: &str, home: &Path) -> Option<PathBuf> {
+    match text.strip_prefix('~')? {
+        "" => Some(home.to_path_buf()),
+        rest => rest.strip_prefix('/').map(|rest| home.join(rest)),
+    }
+}
+
+/// Why `box` declares no server whose variable `name` holds `value`, when a part of `value` is a
+/// path that is not a full path, or a path where a box can write, as written or real.
+fn writable_path(name: &str, value: &str, context: &Context<'_>) -> Option<String> {
+    let options = written_as_options(value);
+    let listed: Vec<&str> = value.split([':', ';']).collect();
+    let url = value.contains("://");
+    let named = named_as_path(name) && !is_switch(value);
+    let written = listed
+        .iter()
+        .all(|part| matches!(*part, "" | "." | "..") || written_as_path(part))
+        && listed.iter().any(|part| written_as_path(part));
+    if !value.is_empty()
+        && !options
+        && !url
+        && (named || written)
+        && listed.iter().any(|part| !Path::new(part).is_absolute())
+    {
+        let read = if written {
+            ""
+        } else {
+            ", which box reads as a path by its name,"
+        };
+        return Some(format!(
+            "sets {name}{read} to a path that is not a full path, which starts from the \
+             workspace, where the box can write, so box does not declare this server \
+             automatically"
+        ));
+    }
+    let parts = value
+        .split(|separator: char| separator.is_whitespace() || PART_SEPARATORS.contains(&separator))
+        .chain(listed.iter().copied())
+        .chain([value]);
+    for part in parts {
+        if ["./", "../", "~/"]
+            .iter()
+            .any(|start| part.starts_with(start))
+        {
+            return Some(format!(
+                "sets {name} to a path that is not a full path, which starts from the workspace, \
+                 where the box can write, so box does not declare this server automatically"
+            ));
+        }
+        let path = Path::new(part);
+        if !path.is_absolute() {
+            continue;
+        }
+        if let Some(reason) = context.refusals.inside(path) {
+            return Some(format!(
+                "sets {name} to a place the box can write ({reason}), so box does not declare \
+                 this server automatically"
+            ));
+        }
+    }
+    None
+}
+
+/// Whether `value` is written as options: it opens with `-` or `--` and a letter.
+fn written_as_options(value: &str) -> bool {
+    let value = value.trim_start();
+    let rest = value
+        .strip_prefix("--")
+        .or_else(|| value.strip_prefix('-'))
+        .unwrap_or("");
+    rest.starts_with(|first: char| first.is_ascii_alphabetic())
+}
+
 /// Whether a remote server's key cannot come from `name`, because Box Core sets it or writes over it.
 fn reserved_for_key(name: &str) -> bool {
     matches!(name, "HOME" | "PATH") || box_owned(name) || loads_code(name)
@@ -383,6 +487,8 @@ pub struct Detected {
     pub env: Vec<String>,
     /// Each variable the server's configuration sets that the box sets itself, with the reason.
     pub dropped: Vec<(String, String)>,
+    /// Each variable of a stdio server whose value holds options, which `box` does not read.
+    pub options: Vec<String>,
 }
 
 impl Detected {
@@ -503,6 +609,22 @@ impl Servers {
                         server.name.clone(),
                         tilde(home, &server.source),
                         reason.clone(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Each variable of a detected server that holds options, as `(variable, name, source)`.
+    pub fn option_lines(&self, home: &Path) -> Vec<(String, String, String)> {
+        self.detected
+            .iter()
+            .flat_map(|server| {
+                server.options.iter().map(|variable| {
+                    (
+                        variable.clone(),
+                        server.name.clone(),
+                        tilde(home, &server.source),
                     )
                 })
             })
@@ -706,6 +828,7 @@ struct Candidate {
     variables: Vec<String>,
     env: Vec<String>,
     dropped: Vec<(String, String)>,
+    options: Vec<String>,
     held: BTreeMap<String, Held>,
 }
 
@@ -802,6 +925,7 @@ pub(crate) fn detect(
                 variables,
                 env,
                 dropped,
+                options,
                 held,
             }) => candidates.push(Candidate {
                 installations,
@@ -812,6 +936,7 @@ pub(crate) fn detect(
                 variables,
                 env,
                 dropped,
+                options,
                 held,
             }),
             Err(reason) => servers.skipped.push(Skipped {
@@ -1153,6 +1278,7 @@ pub(crate) fn detect(
             variables: candidate.variables,
             env,
             dropped,
+            options: candidate.options,
         });
     }
     let additions: Vec<String> = mcp
@@ -1408,6 +1534,8 @@ struct Converted {
     env: Vec<String>,
     /// Each variable left out of a stdio server's `env`, with the reason.
     dropped: Vec<(String, String)>,
+    /// Each variable in a stdio server's `env` whose value holds options.
+    options: Vec<String>,
     /// Each left-out variable that a server with direct network access keeps, with its value.
     held: BTreeMap<String, Held>,
 }
@@ -1602,6 +1730,7 @@ fn convert(
         variables,
         env: Vec::new(),
         dropped: Vec::new(),
+        options: Vec::new(),
         held: BTreeMap::new(),
     })
 }
@@ -1882,6 +2011,7 @@ enum PassedVariable {
 struct LocalEnv {
     env: BTreeMap<String, String>,
     dropped: Vec<(String, String)>,
+    options: Vec<String>,
     held: BTreeMap<String, Held>,
 }
 
@@ -1937,18 +2067,16 @@ fn local_env(
         Some(_) => return Err("`env` is not a table".into()),
     }
     let mut dropped = Vec::new();
+    let mut options = Vec::new();
     let mut held = BTreeMap::new();
     let mut env = BTreeMap::new();
     let value_of = |origin: Origin<'_>| -> Result<String, String> {
         Ok(match origin {
             Origin::Passed(value) => value,
             Origin::Written(value) => match expanded("env", value)? {
-                Some(value) => match value.strip_prefix('~') {
-                    Some("") => context.home.display().to_string(),
-                    Some(rest) if rest.starts_with('/') => {
-                        context.home.join(&rest[1..]).display().to_string()
-                    }
-                    _ => value,
+                Some(value) => match in_home(&value, context.home) {
+                    Some(path) => path.display().to_string(),
+                    None => value,
                 },
                 None => value.to_string(),
             },
@@ -1992,10 +2120,20 @@ fn local_env(
                     "its {name} {value:?} is not a full path, which the box refuses"
                 ));
             }
+        } else if let Some(reason) = writable_path(&name, &value, context) {
+            return Err(reason);
+        }
+        if written_as_options(&value) {
+            options.push(name.clone());
         }
         env.insert(name, value);
     }
-    Ok(LocalEnv { env, dropped, held })
+    Ok(LocalEnv {
+        env,
+        dropped,
+        options,
+        held,
+    })
 }
 
 /// The CA file that `name` names, or why the box cannot grant a server a read of it.
@@ -2290,7 +2428,12 @@ fn stdio(
         }
     });
     let mut names = read.borrow().clone();
-    let LocalEnv { env, dropped, held } = local_env(fields, roles, expanded, &*sources, context)?;
+    let LocalEnv {
+        env,
+        dropped,
+        options,
+        held,
+    } = local_env(fields, roles, expanded, &*sources, context)?;
     if let Some(reason) = holds_credential(&env, &*sources, context.credentials) {
         return Err(reason);
     }
@@ -2619,6 +2762,7 @@ fn stdio(
         variables: Vec::new(),
         env: names,
         dropped,
+        options,
         held,
     })
 }
@@ -2881,6 +3025,7 @@ mod tests {
                     (self.workspace(), "the workspace".into()),
                     (self.home().join(".strands/box"), "the box home".into()),
                     (self.home().join("shared"), "a write grant".into()),
+                    (self.home().join("team folder"), "a write grant".into()),
                 ],
                 shipped: None,
                 protected: Vec::new(),
@@ -6908,6 +7053,461 @@ mod tests {
         );
     }
 
+    /// The reasons and the tables for one server per `(name, env)`, each with its own program.
+    fn with_envs(host: &Host, servers: &[(&str, &str)]) -> (Servers, toml::Table) {
+        let entries: Vec<String> = servers
+            .iter()
+            .map(|(name, env)| {
+                host.program(&format!("bin/{name}-tool"), "/bin/sh");
+                format!(r#""{name}": {{"command": "{name}-tool", "env": {env}}}"#)
+            })
+            .collect();
+        let file = host.file(
+            ".claude.json",
+            &format!(r#"{{"s": {{{}}}}}"#, entries.join(", ")),
+        );
+        let mut mcp = toml::Table::new();
+        let servers = host.detect(&[expanding(row(&file, &["s"]))], &mut mcp);
+        (servers, mcp)
+    }
+
+    fn not_full(name: &str) -> String {
+        format!(
+            "sets {name} to a path that is not a full path, which starts from the workspace, \
+             where the box can write, so box does not declare this server automatically"
+        )
+    }
+
+    fn not_full_by_name(name: &str) -> String {
+        format!(
+            "sets {name}, which box reads as a path by its name, to a path that is not a full \
+             path, which starts from the workspace, where the box can write, so box does not \
+             declare this server automatically"
+        )
+    }
+
+    #[test]
+    fn a_variable_that_holds_a_path_that_is_not_a_full_path_skips_the_server() {
+        let host = Host::new();
+        let (servers, mcp) = with_envs(
+            &host,
+            &[
+                (
+                    "ruby-opt",
+                    r#"{"NOTES_TOKEN": "sk-real", "RUBYOPT": "-I./lib"}"#,
+                ),
+                (
+                    "ruby-lib",
+                    r#"{"NOTES_TOKEN": "sk-real", "RUBYLIB": "./lib"}"#,
+                ),
+                ("perl-lib", r#"{"PERLLIB": "./lib"}"#),
+                ("node-path", r#"{"NODE_PATH": "./lib"}"#),
+                ("gem-home", r#"{"GEM_HOME": "./gems"}"#),
+                ("zdotdir", r#"{"ZDOTDIR": "./z"}"#),
+                ("any-name", r#"{"NOTES": "../notes"}"#),
+                ("plain-word", r#"{"RUBYLIB": "lib"}"#),
+                ("lower-case", r#"{"notes_dir": "notes"}"#),
+                ("in-a-list", r#"{"NOTES": "/usr/lib:./lib"}"#),
+                ("empty-element", r#"{"NOTES": "/usr/lib:"}"#),
+                ("other-separator", r#"{"NOTES": "/usr/lib/?.lua;./?.lua"}"#),
+                ("mixed", r#"{"NOTES_LIBS": "site:/usr/lib"}"#),
+                ("name-path", r#"{"NOTES_PATH": "lib"}"#),
+                ("other-list", r#"{"NOTES_PATH": "/usr/lib/?.lua;?.lua"}"#),
+                ("no-number", r#"{"NOTES_LIB": "nan"}"#),
+                ("name-paths", r#"{"NOTES_PATHS": "lib"}"#),
+                ("name-dirs", r#"{"NOTES_DIRS": "lib"}"#),
+                ("name-home", r#"{"NOTES_HOME": "lib"}"#),
+                ("here", r#"{"NOTES": "/usr/lib:."}"#),
+                ("above", r#"{"NOTES": "/usr/lib:.."}"#),
+                ("above-in-a-part", r#"{"NOTES": "site;../lib"}"#),
+                (
+                    "in-options",
+                    r#"{"JDK_JAVA_OPTIONS": "-javaagent:./agent.jar"}"#,
+                ),
+                ("empty-and-home", r#"{"NOTES": ":~/lib"}"#),
+                ("as-written", r#"{"NOTES": "/usr/lib:~/lib"}"#),
+                ("as-written-part", r#"{"NOTES": "site,~/lib"}"#),
+                ("empty-and-tilde", r#"{"NOTES": ":~"}"#),
+            ],
+        );
+        let found: Vec<(&str, String)> = servers
+            .skipped
+            .iter()
+            .map(|skip| (skip.name.as_str(), skip.reason.clone()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("above", not_full("NOTES")),
+                ("above-in-a-part", not_full("NOTES")),
+                ("any-name", not_full("NOTES")),
+                ("as-written", not_full("NOTES")),
+                ("as-written-part", not_full("NOTES")),
+                ("empty-and-home", not_full("NOTES")),
+                ("empty-and-tilde", not_full("NOTES")),
+                ("empty-element", not_full("NOTES")),
+                ("gem-home", not_full("GEM_HOME")),
+                ("here", not_full("NOTES")),
+                ("in-a-list", not_full("NOTES")),
+                ("in-options", not_full("JDK_JAVA_OPTIONS")),
+                ("lower-case", not_full_by_name("notes_dir")),
+                ("mixed", not_full_by_name("NOTES_LIBS")),
+                ("name-dirs", not_full_by_name("NOTES_DIRS")),
+                ("name-home", not_full_by_name("NOTES_HOME")),
+                ("name-path", not_full_by_name("NOTES_PATH")),
+                ("name-paths", not_full_by_name("NOTES_PATHS")),
+                ("no-number", not_full_by_name("NOTES_LIB")),
+                ("node-path", not_full("NODE_PATH")),
+                ("other-list", not_full_by_name("NOTES_PATH")),
+                ("other-separator", not_full("NOTES")),
+                ("perl-lib", not_full("PERLLIB")),
+                ("plain-word", not_full_by_name("RUBYLIB")),
+                ("ruby-lib", not_full("RUBYLIB")),
+                (
+                    "ruby-opt",
+                    "sets RUBYOPT, a variable that makes a program load code, so box does not \
+                     declare this server automatically"
+                        .to_string()
+                ),
+                ("zdotdir", not_full("ZDOTDIR")),
+            ]
+        );
+        assert!(mcp.is_empty(), "{mcp:?}");
+    }
+
+    #[test]
+    fn a_variable_that_holds_a_path_where_the_box_can_write_skips_the_server() {
+        let host = Host::new();
+        let workspace = host.workspace();
+        std::fs::create_dir_all(workspace.join("lib")).expect("a folder");
+        let linked = host.home().join("linked");
+        symlink(workspace.join("lib"), &linked).expect("a link");
+        let (servers, mcp) = with_envs(
+            &host,
+            &[
+                (
+                    "workspace",
+                    &format!(r#"{{"RUBYLIB": "{}/lib"}}"#, workspace.display()),
+                ),
+                (
+                    "not-yet-there",
+                    &format!(r#"{{"NOTES": "{}/later/lib"}}"#, workspace.display()),
+                ),
+                (
+                    "parent",
+                    &format!(r#"{{"NOTES": "{}/../later"}}"#, linked.display()),
+                ),
+                ("linked", &format!(r#"{{"NOTES": "{}"}}"#, linked.display())),
+                (
+                    "grant",
+                    &format!(r#"{{"NOTES": "{}/shared/lib"}}"#, host.home().display()),
+                ),
+                ("box-home", r#"{"NOTES": "~/.strands/box/lib"}"#),
+                (
+                    "in-a-list",
+                    &format!(r#"{{"NOTES": "/usr/lib:{}/lib"}}"#, workspace.display()),
+                ),
+                (
+                    "other-separator",
+                    &format!(r#"{{"NOTES": "/usr/lib;{}/lib"}}"#, workspace.display()),
+                ),
+                (
+                    "spaces",
+                    &format!(r#"{{"NOTES": "/usr/lib {}/lib"}}"#, workspace.display()),
+                ),
+                (
+                    "mixed",
+                    &format!(r#"{{"NOTES": "site:{}/lib"}}"#, workspace.display()),
+                ),
+                (
+                    "file-url",
+                    &format!(r#"{{"NOTES": "file://{}/lib"}}"#, workspace.display()),
+                ),
+                (
+                    "in-options",
+                    &format!(r#"{{"NOTES": "-agent:{}/lib"}}"#, workspace.display()),
+                ),
+                (
+                    "sep-comma",
+                    &format!(r#"{{"NOTES": "site,{}/lib"}}"#, workspace.display()),
+                ),
+                (
+                    "sep-equals",
+                    &format!(r#"{{"NOTES": "site={}/lib"}}"#, workspace.display()),
+                ),
+                (
+                    "sep-at",
+                    &format!(r#"{{"NOTES": "@{}/lib"}}"#, workspace.display()),
+                ),
+                (
+                    "sep-quote",
+                    &format!(r#"{{"NOTES": "site \"{}/lib\""}}"#, workspace.display()),
+                ),
+                (
+                    "sep-single-quote",
+                    &format!(r#"{{"NOTES": "site '{}/lib'"}}"#, workspace.display()),
+                ),
+                (
+                    "whole",
+                    &format!(
+                        r#"{{"NOTES": "{}/team folder/lib"}}"#,
+                        host.home().display()
+                    ),
+                ),
+                (
+                    "the-root",
+                    &format!(r#"{{"NOTES": "{}"}}"#, workspace.display()),
+                ),
+                (
+                    "whole-in-a-list",
+                    &format!(
+                        r#"{{"NOTES": "/usr/lib:{}/team folder/lib"}}"#,
+                        host.home().display()
+                    ),
+                ),
+                (
+                    "holds",
+                    &format!(r#"{{"NOTES": "{}"}}"#, host.home().display()),
+                ),
+            ],
+        );
+        let writable = |name: &str, reason: &str| {
+            format!(
+                "sets {name} to a place the box can write ({reason}), so box does not declare \
+                 this server automatically"
+            )
+        };
+        let found: Vec<(&str, String)> = servers
+            .skipped
+            .iter()
+            .map(|skip| (skip.name.as_str(), skip.reason.clone()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                (
+                    "box-home",
+                    writable(
+                        "NOTES",
+                        "~/.strands/box/lib lies in the box home, ~/.strands/box"
+                    )
+                ),
+                (
+                    "file-url",
+                    writable("NOTES", "~/project/lib lies in the workspace, ~/project")
+                ),
+                (
+                    "grant",
+                    writable("NOTES", "~/shared/lib lies in a write grant, ~/shared")
+                ),
+                (
+                    "in-a-list",
+                    writable("NOTES", "~/project/lib lies in the workspace, ~/project")
+                ),
+                (
+                    "in-options",
+                    writable("NOTES", "~/project/lib lies in the workspace, ~/project")
+                ),
+                (
+                    "linked",
+                    writable(
+                        "NOTES",
+                        "~/linked (a link to ~/project/lib) lies in the workspace, ~/project"
+                    )
+                ),
+                (
+                    "mixed",
+                    writable("NOTES", "~/project/lib lies in the workspace, ~/project")
+                ),
+                (
+                    "not-yet-there",
+                    writable(
+                        "NOTES",
+                        "~/project/later/lib lies in the workspace, ~/project"
+                    )
+                ),
+                (
+                    "other-separator",
+                    writable("NOTES", "~/project/lib lies in the workspace, ~/project")
+                ),
+                (
+                    "parent",
+                    writable(
+                        "NOTES",
+                        "~/linked/../later (a link to ~/project/later) lies in the workspace, \
+                         ~/project"
+                    )
+                ),
+                (
+                    "sep-at",
+                    writable("NOTES", "~/project/lib lies in the workspace, ~/project")
+                ),
+                (
+                    "sep-comma",
+                    writable("NOTES", "~/project/lib lies in the workspace, ~/project")
+                ),
+                (
+                    "sep-equals",
+                    writable("NOTES", "~/project/lib lies in the workspace, ~/project")
+                ),
+                (
+                    "sep-quote",
+                    writable("NOTES", "~/project/lib lies in the workspace, ~/project")
+                ),
+                (
+                    "sep-single-quote",
+                    writable("NOTES", "~/project/lib lies in the workspace, ~/project")
+                ),
+                (
+                    "spaces",
+                    writable("NOTES", "~/project/lib lies in the workspace, ~/project")
+                ),
+                ("the-root", writable("NOTES", "~/project is the workspace")),
+                (
+                    "whole",
+                    writable(
+                        "NOTES",
+                        "~/team folder/lib lies in a write grant, ~/team folder"
+                    )
+                ),
+                (
+                    "whole-in-a-list",
+                    writable(
+                        "NOTES",
+                        "~/team folder/lib lies in a write grant, ~/team folder"
+                    )
+                ),
+                (
+                    "workspace",
+                    writable("RUBYLIB", "~/project/lib lies in the workspace, ~/project")
+                ),
+            ]
+        );
+        assert_eq!(
+            mcp.keys().collect::<Vec<_>>(),
+            vec!["holds"],
+            "a folder that holds the workspace is copied"
+        );
+    }
+
+    #[test]
+    fn a_variable_that_holds_a_path_the_box_cannot_write_is_copied() {
+        let host = Host::new();
+        let library = host.home().join("lib");
+        std::fs::create_dir_all(&library).expect("a folder");
+        let (servers, mcp) = with_envs(
+            &host,
+            &[
+                (
+                    "home",
+                    &format!(r#"{{"RUBYLIB": "{}"}}"#, library.display()),
+                ),
+                ("tilde", r#"{"NODE_PATH": "~/lib"}"#),
+                ("system", r#"{"NOTES": "/usr/lib/notes"}"#),
+                (
+                    "list",
+                    &format!(r#"{{"PERLLIB": "/usr/lib/perl:{}"}}"#, library.display()),
+                ),
+            ],
+        );
+        assert_eq!(reasons(&servers), Vec::<(&str, &str)>::new());
+        let env = |server: &str, name: &str| mcp[server]["env"][name].as_str().map(str::to_string);
+        let library = library.display().to_string();
+        assert_eq!(env("home", "RUBYLIB"), Some(library.clone()));
+        assert_eq!(
+            env("tilde", "NODE_PATH"),
+            Some(library.clone()),
+            "a value that opens with `~/` is filled in before the check"
+        );
+        assert_eq!(env("system", "NOTES"), Some("/usr/lib/notes".to_string()));
+        assert_eq!(
+            env("list", "PERLLIB"),
+            Some(format!("/usr/lib/perl:{library}"))
+        );
+        assert_eq!(servers.option_lines(&host.home()), Vec::new());
+    }
+
+    #[test]
+    fn a_variable_that_holds_options_is_copied_and_reported() {
+        let host = Host::new();
+        let (servers, mcp) = with_envs(
+            &host,
+            &[
+                (
+                    "jdk-opts",
+                    r#"{"JDK_JAVA_OPTIONS": "-javaagent:agent.jar"}"#,
+                ),
+                ("flag", r#"{"NOTES_FLAGS": "--verbose --level=2"}"#),
+                ("path-name", r#"{"NOTES_PATH": "-x lib"}"#),
+                ("space", r#"{"NOTES_OPTIONS": " -agent:agent.jar"}"#),
+            ],
+        );
+        assert_eq!(reasons(&servers), Vec::<(&str, &str)>::new());
+        assert_eq!(
+            mcp["jdk-opts"]["env"]["JDK_JAVA_OPTIONS"].as_str(),
+            Some("-javaagent:agent.jar")
+        );
+        assert_eq!(
+            mcp["flag"]["env"]["NOTES_FLAGS"].as_str(),
+            Some("--verbose --level=2")
+        );
+        let file = "~/.claude.json".to_string();
+        assert_eq!(
+            servers.option_lines(&host.home()),
+            vec![
+                ("NOTES_FLAGS".to_string(), "flag".to_string(), file.clone()),
+                (
+                    "JDK_JAVA_OPTIONS".to_string(),
+                    "jdk-opts".to_string(),
+                    file.clone()
+                ),
+                (
+                    "NOTES_PATH".to_string(),
+                    "path-name".to_string(),
+                    file.clone()
+                ),
+                ("NOTES_OPTIONS".to_string(), "space".to_string(), file),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_variable_that_holds_no_path_is_copied() {
+        let host = Host::new();
+        let values = [
+            ("NOTES_TOKEN", "sk-real"),
+            ("NOTES_SECRET", "wJalr/XUtnFEMI+K7MDENG/bPxRfiCY"),
+            ("NOTES_URL", "https://notes.example.com/v1"),
+            ("NOTES_SOCKET", "unix:///var/run/notes.sock"),
+            ("NOTES_ADDRESS", "localhost:8080"),
+            ("NOTES_REPOSITORY", "owner/repository"),
+            ("NOTES_MODE", "production"),
+            ("NOTES_ZONE", "America/New_York"),
+            ("NOTES_LIMIT", "-1"),
+            ("NOTES_CERTIFICATE", "-----BEGIN CERTIFICATE-----"),
+            ("NOTES_EMPTY", ""),
+            ("NOTES_PATH", "https://notes.example.com/v1"),
+            ("NOTES_HOME", "on"),
+            ("NOTES_DIR", "OFF"),
+            ("NOTES_DIRS", "yes"),
+            ("NOTES_PATHS", "No"),
+            ("NOTES_LIBS", "false"),
+            ("NOTES_CACHE_DIR", ""),
+            ("NOTES_DATA_DIR", "true"),
+            ("NOTES_LIB", "1"),
+            ("NOTES_SEPARATOR", "."),
+            ("NOTES_ROOT", "true"),
+            ("NOTES_NOTE", "see docs/notes."),
+        ];
+        let env = serde_json::to_string(&BTreeMap::from(values)).expect("JSON");
+        let (servers, mcp) = with_envs(&host, &[("notes", &env)]);
+        assert_eq!(reasons(&servers), Vec::<(&str, &str)>::new());
+        for (name, value) in values {
+            assert_eq!(mcp["notes"]["env"][name].as_str(), Some(value), "{name}");
+        }
+        assert_eq!(servers.option_lines(&host.home()), Vec::new());
+    }
+
     #[test]
     fn a_name_the_box_sets_itself_is_dropped_and_the_server_kept() {
         let host = Host::new();
@@ -6983,6 +7583,8 @@ mod tests {
         host.program("bin/literal-tool", "/bin/sh");
         host.program("bin/other", "/bin/sh");
         host.program("bin/optional", "/bin/sh");
+        host.program("bin/passed-tool", "/bin/sh");
+        host.program("bin/written-tool", "/bin/sh");
         host.set = vec![
             ("GITHUB_TOKEN", "ghp_real"),
             ("LEVEL", "debug"),
@@ -6995,8 +7597,16 @@ mod tests {
             r#"
             [mcp_servers.github]
             command = "tool"
-            env_vars = ["GITHUB_TOKEN", "LEVEL", "PASSED_DIR"]
-            env = { LEVEL = "${LEVEL}", PASTED = "sk-pasted", WRITTEN_DIR = "~/written" }
+            env_vars = ["GITHUB_TOKEN", "LEVEL"]
+            env = { LEVEL = "${LEVEL}", PASTED = "sk-pasted" }
+
+            [mcp_servers.passed-tilde]
+            command = "passed-tool"
+            env_vars = ["PASSED_DIR"]
+
+            [mcp_servers.written-tilde]
+            command = "written-tool"
+            env = { WRITTEN_DIR = "~/written" }
 
             [mcp_servers.missing]
             command = "optional"
@@ -7031,6 +7641,7 @@ mod tests {
         ]);
         let mut mcp = toml::Table::new();
         let servers = host.detect(&[codex], &mut mcp);
+        let (passed, written) = (not_full("PASSED_DIR"), not_full("WRITTEN_DIR"));
         assert_eq!(
             reasons(&servers),
             vec![
@@ -7039,22 +7650,25 @@ mod tests {
                     "sets LD_PRELOAD, a variable that makes a program load code, so box \
                      does not declare this server automatically"
                 ),
+                ("passed-tilde", passed.as_str()),
                 ("remote", "uses env_vars"),
                 (
                     "tilde-home",
                     "its HOME \"~/x\" is not a full path, which the box refuses"
                 ),
-            ]
+                ("written-tilde", written.as_str()),
+            ],
+            "a passed or a written value keeps its ~, which a program reads as a path that \
+             is not a full path"
         );
         let expected: toml::Table = toml::from_str(
-            "GITHUB_TOKEN = \"ghp_real\"\nLEVEL = \"${LEVEL}\"\nPASTED = \"sk-pasted\"\n\
-             PASSED_DIR = \"~/passed\"\nWRITTEN_DIR = \"~/written\"",
+            "GITHUB_TOKEN = \"ghp_real\"\nLEVEL = \"${LEVEL}\"\nPASTED = \"sk-pasted\"",
         )
         .expect("TOML");
         assert_eq!(
             mcp["github"]["env"],
             toml::Value::Table(expected),
-            "a passed or a written value keeps its ~, as on the host"
+            "a written value is copied as written"
         );
         assert!(mcp["proxied"].get("env").is_none(), "{:?}", mcp["proxied"]);
         assert!(mcp["missing"].get("env").is_none(), "{:?}", mcp["missing"]);
