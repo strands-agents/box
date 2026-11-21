@@ -295,7 +295,7 @@ check_installation() {
     fi
 }
 
-box_work= box_stage= box_path_temp= box_lock=
+box_work= box_stage= box_unpack= box_path_temp= box_lock= box_made_strands=0 box_made_box=0 box_made_root=0
 box_previous= box_activating=0 box_created_launcher=0 box_replaced_launcher=0
 cleanup() {
     box_status=$?
@@ -333,6 +333,13 @@ cleanup() {
     fi
     [ -z "$box_path_temp" ] || rm -f "$box_path_temp"
     [ -z "$box_stage" ] || rm -rf "$box_stage"
+    [ -z "$box_unpack" ] || rm -rf "$box_unpack"
+    # A failed install removes the folders it created to unpack in, while they are still empty.
+    if [ "$box_status" -ne 0 ]; then
+        [ "$box_made_root" -eq 0 ] || rmdir "$box_root" 2>/dev/null || true
+        [ "$box_made_box" -eq 0 ] || rmdir "$box_home/.strands/box" 2>/dev/null || true
+        [ "$box_made_strands" -eq 0 ] || rmdir "$box_home/.strands" 2>/dev/null || true
+    fi
     [ -z "$box_work" ] || rm -rf "$box_work"
     [ -z "$box_lock" ] || rmdir "$box_lock"
     exit "$box_status"
@@ -609,7 +616,18 @@ awk -v native="$box_native" '
     END { if (bad || entries != FNR || entries == 0 || (native && aliases != 4)) exit 1 }
 ' "$box_work/types" "$box_work/names" > "$box_work/expected-files" ||
     die "archive contains unsafe paths, links, permissions, or duplicate entries"
-box_payload="$box_work/payload"
+# Linux hosts may mount /var/tmp noexec, so on Linux the checked archive unpacks on the
+# filesystem it installs to, as download.sh does, and its programs run from there.
+if [ "$box_system" = Linux ]; then
+    [ -d "$box_home/.strands" ] || box_made_strands=1
+    [ -d "$box_home/.strands/box" ] || box_made_box=1
+    [ -d "$box_root" ] || box_made_root=1
+    for box_dir in "$box_home/.strands" "$box_home/.strands/box" "$box_root"; do directory "$box_dir"; done
+    box_unpack=$(mktemp -d "$box_root/.unpack.XXXXXXXX") || die "cannot prepare $box_root"
+    box_payload="$box_unpack/payload"
+else
+    box_payload="$box_work/payload"
+fi
 mkdir "$box_payload"
 tar -xzf "$box_work/archive" -C "$box_payload" --no-same-owner --no-same-permissions ||
     die "cannot extract archive"

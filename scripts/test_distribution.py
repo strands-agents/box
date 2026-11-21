@@ -768,6 +768,34 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
                 self.assertNotIn("Apple", result.stderr)
                 self.assertFalse((self.root / "gatekeeper-calls").exists())
 
+    @unittest.skipUnless(platform.system() == "Linux", "Linux noexec mounts")
+    def test_a_noexec_var_tmp_still_installs(self):
+        """A /var/tmp mounted noexec, as on hardened Linux hosts, does not stop an install"""
+        unshare = shutil.which("unshare")
+        self.assertIsNotNone(unshare, "noexec tests require util-linux")
+        saved = Path(tempfile.mkdtemp(prefix="box-test-saved-", dir="/tmp"))
+        self.addCleanup(saved.rmdir)
+        # In a private mount namespace: a noexec tmpfs over /var/tmp, with this fixture bound back
+        # in place, so only the installer's own temporary storage is noexec.
+        command = r'''set -eu
+root=$1 saved=$2 script=$3
+mount --bind "$root" "$saved"
+mount -t tmpfs -o noexec,size=64m tmpfs /var/tmp
+mkdir -p "$root"
+mount --bind "$saved" "$root"
+printf '#!/bin/sh\nexit 0\n' > /var/tmp/exec-probe
+chmod 0755 /var/tmp/exec-probe
+if [ -x /var/tmp/exec-probe ]; then echo "test requires a noexec /var/tmp" >&2; exit 97; fi
+exec /bin/sh "$script"
+'''
+        result = subprocess.run([unshare, "--user", "--map-root-user", "--mount", "/bin/sh", "-c",
+                                 command, "sh", str(self.root), str(saved), str(self.script)],
+                                env=self.env, text=True, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.current(), f"0.1.0-{self.target}")
+        self.assertEqual([p.name for p in (self.home / ".strands/box/packages").iterdir()
+                          if p.name.startswith(".")], [])
+
     @unittest.skipUnless(platform.system() == "Linux", "Linux installation")
     def test_x86_64_linux_selects_its_own_package(self):
         """x86-64 Linux installs the x86_64-unknown-linux-gnu package"""
