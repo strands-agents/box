@@ -1766,6 +1766,7 @@ fn show_format_json_prints_one_document_with_what_the_text_and_full_print() {
             "unstarted",
             "servers",
             "dropped",
+            "unchecked",
             "path_dropped",
             "skipped",
             "unread"
@@ -4731,7 +4732,7 @@ fn an_absolute_mcp_command_imports_its_filename_and_starts_the_selected_server()
     let server = KEYED_SERVER
         .replacen(
             "while IFS=",
-            "printf '%s\\n' \"$0\" > \"$CAPTURE\"\nchecked=no\n\
+            "printf '%s\\n' \"$0\" > invoked-program\nchecked=no\n\
              [ \"$BOX_LOCAL_KEY\" = private-token ] && [ \"$1\" = selected-argument ] && checked=yes\n\
              while IFS=",
             1,
@@ -4757,7 +4758,7 @@ fn an_absolute_mcp_command_imports_its_filename_and_starts_the_selected_server()
         "mcpServers": {"selected": {
             "command": program,
             "args": ["selected-argument"],
-            "env": {"BOX_LOCAL_KEY": "private-token", "CAPTURE": capture}
+            "env": {"BOX_LOCAL_KEY": "private-token"}
         }}
     })
     .to_string();

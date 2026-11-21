@@ -404,6 +404,7 @@ fn contributing_packs_keep_each_accepted_launcher_once() {
             variables: vec![],
             env: vec![],
             dropped: vec![],
+            options: vec![],
         }],
         skipped: vec![Skipped {
             name: "rejected-uvx".into(),
