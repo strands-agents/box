@@ -199,10 +199,10 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - An MCP `$defs` definition that refers to itself, directly or through other definitions, is cut
   where it repeats: `make_definition_cycles_opaque` makes the reference that closes the cycle an
   opaque `Unknown`, an entity type with no attributes. A rule that compares the cut field with a
-  string or a number does not validate. A rule that reads a field inside it validates only behind
-  `has` tests, and the inner test is always false, so it never matches. The request gate refuses
-  an ordinary value at the cut field (an object, a string, a number, `null`, a list) as
-  `InternalFault`.
+  string, a number, or a boolean does not validate; a comparison with an entity, such as
+  `<server>::Unknown::"x"` or the field itself, validates. A rule that reads a field inside it
+  validates only behind `has` tests. The request gate refuses an ordinary object, a string, a
+  number, a boolean, `null`, or a list at the cut field as `InternalFault`.
   Renamed definitions and array elements change only generated type names. `outputSchema` `$defs`
   stay as the server wrote them, so a server that generated before generates the same schema. An
   output whose `$defs` name is not an identifier, or is an array of objects, is dropped as before.

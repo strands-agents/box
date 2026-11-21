@@ -1105,6 +1105,9 @@ fn make_definitions_generable_in(response: &mut serde_json::Value) -> Definition
         for definitions in tool.definitions_mut() {
             names.taken.extend(definitions.keys().cloned());
         }
+        if let Some(definitions) = schema_definitions(tool.output.as_deref_mut()) {
+            names.taken.extend(definitions.keys().cloned());
+        }
     }
     names.taken.extend(server_names.iter().cloned());
     if let Some(definitions) = server
@@ -1165,11 +1168,12 @@ fn make_definitions_generable_in(response: &mut serde_json::Value) -> Definition
     }
 }
 
-/// The schemas of one tool whose `$defs` [`make_definitions_generable`] fixes.
+/// The schemas of one tool whose `$defs` the generator reads.
 struct ToolDefinitions<'a> {
     name: String,
     definitions: Option<&'a mut serde_json::Value>,
     input: Option<&'a mut serde_json::Value>,
+    output: Option<&'a mut serde_json::Value>,
 }
 
 impl ToolDefinitions<'_> {
@@ -1232,10 +1236,12 @@ fn definition_scopes(
                 name,
                 definitions: None,
                 input: None,
+                output: None,
             };
             for (key, value) in tool.iter_mut() {
                 match key.as_str() {
                     "$defs" => definitions.definitions = Some(value),
+                    "outputSchema" => definitions.output = Some(value),
                     key if key == input_key => definitions.input = Some(value),
                     _ => {}
                 }
@@ -1246,7 +1252,7 @@ fn definition_scopes(
     (server, tools)
 }
 
-/// The `$defs` map of an input schema, inside its `json` wrapper when it has one.
+/// The `$defs` map of an input or output schema, inside its `json` wrapper when it has one.
 fn schema_definitions(
     schema: Option<&mut serde_json::Value>,
 ) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
@@ -1292,7 +1298,7 @@ struct DefinitionScope {
 
 impl DefinitionScope {
     /// Rename each definition the generator refuses, or that `refused` names, to a name that no
-    /// server, tool, or input definition and no reference in the server uses.
+    /// definition or reference in the server uses.
     fn rename(
         definitions: Option<&mut serde_json::Map<String, serde_json::Value>>,
         names: &mut ArgumentNames,
@@ -2017,6 +2023,26 @@ mod tests {
         let refused = generate_mcp_schema("desk", &cycle)
             .and_then(|schema| validate_mcp_schema_composition(&[("desk", &schema)]));
         assert!(refused.is_err(), "an output cycle stays refused, as before");
+    }
+
+    #[test]
+    fn a_renamed_definition_avoids_an_output_definition_name_so_no_tool_loses_its_output() {
+        let tools = serde_json::json!({"result": {"tools": [
+            {"name": "t", "inputSchema": {"type": "object", "properties": {"s": {"type": "string"}}},
+             "outputSchema": {
+                 "type": "object",
+                 "properties": {"s": {"type": "string"}},
+                 "$defs": {"k_x": {"type": "object", "properties": {"o": {"type": "string"}}}}
+             }},
+            {"name": "t_Output", "inputSchema": {"type": "object", "properties": {"a": {"$ref": "#/$defs/k-x"}}},
+             "$defs": {"k-x": {"type": "object", "properties": {"q": {"type": "string"}}}}}
+        ]}})
+        .to_string();
+        let schema = generate_mcp_schema("cf", &tools).unwrap_or_else(|error| panic!("{error:?}"));
+        validate_mcp_schema_composition(&[("cf", &schema)])
+            .unwrap_or_else(|error| panic!("{error:?}\n{schema}"));
+        assert!(schema.contains("a?: cf::t_Output_k_x_2"), "{schema}");
+        assert!(schema.contains("structured?: tOutput"), "{schema}");
     }
 
     const TOOLS: &str = r#"

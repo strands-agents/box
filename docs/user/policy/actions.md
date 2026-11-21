@@ -238,8 +238,10 @@ name isn't a plain name, such as `zone-id`, keeps it, and a rule reads it as
 `context.input["zone-id"]`. A `temporal` clause can't name such an argument; it reads only
 arguments with plain names. An argument typed by a definition in the server's `$defs` reads the
 same way whatever the definition is called. A definition that refers to itself has a type only down
-to the field where it repeats. A rule that compares that field with a value doesn't load, and a rule
-that reads a field inside it loads only behind `has` tests and never matches. Run the
+to the field where it repeats. A rule that compares that field with a string, a number, `true`, or
+`false` doesn't load, and a rule that reads a field inside it loads only behind `has` tests. Box
+refuses an ordinary value in that field (see
+[MCP policy](../mcp-policy.md#step-3-find-the-tool-and-argument-names)). Run the
 `policy generate-schema` verb to see the exact names:
 
 ```sh
