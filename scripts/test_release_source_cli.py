@@ -109,11 +109,10 @@ class ReleasePackageTests(unittest.TestCase):
     REMOTE = "git+https://github.com/strands-agents/box?branch=main#" + "b" * 40
     RESOURCE_FOLDERS = ("packs", "plugins", "policies", "starters")
 
-    def package(self, core_source, helper_source, core_root=None):
+    def package(self, core_source, helper_source, core_root=None, triple="aarch64-apple-darwin"):
         """Run the Package tarball step with a fake Cargo and return its result and release.json."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
-            triple = "aarch64-apple-darwin"
             release = root / "target" / triple / "release"
             release.mkdir(parents=True)
             for name in ("box", "strands-box-sock-alias", "strands-box-contain-trampoline"):
@@ -150,7 +149,13 @@ class ReleasePackageTests(unittest.TestCase):
                 result, record = self.package(source, source)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(record, dict(box_version="0.1.2", box_commit="a" * 40, core_version="0.3.0",
-                                              core_commit=expected, target="aarch64-apple-darwin"))
+                                              core_commit=expected, target="aarch64-apple-darwin",
+                                              macos_minimum_version="27.0"))
+
+    def test_linux_package_does_not_declare_a_macos_minimum(self):
+        result, record = self.package(None, None, triple="aarch64-unknown-linux-gnu")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("macos_minimum_version", record)
 
     def test_package_holds_each_resource_folder(self):
         result, _ = self.package(None, None)

@@ -12,7 +12,7 @@ listen only on localhost.
 
 ## Requirements
 
-- An Apple Silicon Mac with macOS 15 or later, or Linux on ARM64 or x86_64.
+- An Apple Silicon Mac with macOS 27 or later, or Linux on ARM64 or x86_64.
   [Install Box](install.md#requirements) lists what Linux needs.
 - The [AWS CLI](https://aws.amazon.com/cli/), to look up a model ID and check your sign-in.
 - Claude Code from its native installer. The box starts the native executable, and the `npm`

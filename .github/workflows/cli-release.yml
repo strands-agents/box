@@ -70,7 +70,7 @@ jobs:
           - triple: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
           - triple: aarch64-apple-darwin
-            runner: ${{ inputs.native_filesystem_policy && 'xcode-27' || 'macos-latest' }}
+            runner: xcode-27
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -112,6 +112,7 @@ jobs:
         # Box, sock-alias, and contain-trampoline must ship together.
         if: matrix.target.triple == 'aarch64-apple-darwin'
         env:
+          MACOSX_DEPLOYMENT_TARGET: '27.0'
           TARGET: ${{ matrix.target.triple }}
           NATIVE_FILESYSTEM_POLICY: ${{ inputs.native_filesystem_policy }}
         run: |
@@ -195,7 +196,8 @@ jobs:
                else error("Core must be a locked public Core revision") end) as $core_commit |
               {box_version: $version, box_commit: $commit,
                core_version: ($core[] | select(.name == "strands-box") | .version),
-               core_commit: $core_commit, target: $target}
+               core_commit: $core_commit, target: $target} +
+              (if $target == "aarch64-apple-darwin" then {macos_minimum_version: "27.0"} else {} end)
             ' > "$stage/release.json"
           # Without this, macOS tar adds a ._ file for each extended attribute.
           COPYFILE_DISABLE=1 tar -C "$stage" -czf "dist/${asset}" .
@@ -300,7 +302,7 @@ jobs:
       github.repository_owner == 'strands-agents' && github.ref == 'refs/heads/main' &&
       inputs.sign == true
     cache-mode: none
-    runs-on: macos-latest
+    runs-on: xcode-27
     timeout-minutes: 90
     environment: macos-signing
     outputs:
@@ -438,7 +440,7 @@ jobs:
     needs: sign-macos
     if: github.repository_owner == 'strands-agents' && github.ref == 'refs/heads/main'
     cache-mode: none
-    runs-on: ${{ inputs.native_filesystem_policy && 'xcode-27' || 'macos-latest' }}
+    runs-on: xcode-27
     timeout-minutes: 20
     permissions:
       contents: read

@@ -59,6 +59,8 @@ def workflow_environment(name, context):
     for key in ("NATIVE_FILESYSTEM_POLICY", "TARGET", "NEW_VERSION", "SHA_INPUT", "DRY_RUN", "DISPATCH_SHA", "NEW_TAG"):
         environment.pop(key, None)
     for key, value in step_mapping(name, "env").items():
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
         environment[key] = re.sub(r"\$\{\{\s*([^{}]+?)\s*\}\}",
                                   lambda match: context[match[1].strip()], value)
     return environment
@@ -114,6 +116,8 @@ with (root / "commands.jsonl").open("a") as output:
     print(json.dumps(sys.argv), file=output)
 with (root / "cargo-sdkroots.jsonl").open("a") as output:
     print(json.dumps(os.environ.get("SDKROOT")), file=output)
+with (root / "cargo-deployment-targets.jsonl").open("a") as output:
+    print(json.dumps(os.environ.get("MACOSX_DEPLOYMENT_TARGET")), file=output)
 """)
     step = "Build Box (release)" if target == TARGETS[0] else "Build Linux against glibc 2.34"
     environment = workflow_environment(step, {
@@ -121,6 +125,8 @@ with (root / "cargo-sdkroots.jsonl").open("a") as output:
         "inputs.native_filesystem_policy": native if native is not None else "false",
     })
     environment.pop("SDKROOT", None)
+    if target != TARGETS[0]:
+        environment.pop("MACOSX_DEPLOYMENT_TARGET", None)
     if explicit_old:
         environment["SDKROOT"] = str(old)
     output = root / "github-output"
@@ -133,6 +139,7 @@ with (root / "cargo-sdkroots.jsonl").open("a") as output:
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
     return result, dict(commands=records("commands.jsonl"), sdk_calls=records("sdk-calls.jsonl"),
                         cargo_sdkroots=records("cargo-sdkroots.jsonl"), sdk_path=str(sdk),
+                        deployment_targets=records("cargo-deployment-targets.jsonl"),
                         old_sdk_path=str(old), outputs=dict(line.split("=", 1) for line in output.read_text().splitlines()))
 
 
@@ -202,6 +209,7 @@ class BuildFeatureTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     commands = observed["commands"]
                     self.assertEqual(len(commands), 1)
+                    self.assertEqual(observed["deployment_targets"], ["27.0" if target == TARGETS[0] else None])
                     args = commands[0]
                     self.assertNotIn("--all-features", args)
                     expected = native == "true" and target != TARGETS[2]
@@ -290,13 +298,41 @@ class BuildFeatureTests(unittest.TestCase):
                 self.assertEqual(observed["cargo_sdkroots"], [observed["old_sdk_path"]])
                 self.assertEqual(observed["outputs"], {})
 
-    def test_workflow_uses_the_sdk27_runner_only_for_native_macos(self):
+    def test_workflow_uses_the_sdk27_runner_for_all_macos_packages(self):
         workflow = release_source.CLI_WORKFLOW.read_text()
         matrix = workflow.split("      matrix:\n", 1)[1].split("    steps:\n", 1)[0]
         self.assertIn("- triple: aarch64-apple-darwin\n"
-                      "            runner: ${{ inputs.native_filesystem_policy && 'xcode-27' || 'macos-latest' }}", matrix)
+                      "            runner: xcode-27", matrix)
         self.assertIn("- triple: aarch64-unknown-linux-gnu\n            runner: ubuntu-24.04-arm", matrix)
         self.assertIn("- triple: x86_64-unknown-linux-gnu\n            runner: ubuntu-24.04", matrix)
+        for job in ("sign-macos", "verify-macos"):
+            body = workflow.split(f"  {job}:\n", 1)[1].split("    steps:", 1)[0]
+            self.assertIn("    runs-on: xcode-27\n", body)
+        checks = (release_source.CLI_WORKFLOW.parent / "cli-test.yml").read_text()
+        for job in ("macos", "package"):
+            body = checks.split(f"\n  {job}:\n", 1)[1].split("    steps:", 1)[0]
+            self.assertIn("    runs-on: xcode-27\n", body)
+            if job == "macos":
+                self.assertIn('      MACOSX_DEPLOYMENT_TARGET: "27.0"\n', body)
+        self.assertIn("        os: [xcode-27]\n", checks)
+
+    def test_package_ci_refuses_older_macos_before_building(self):
+        checks = (release_source.CLI_WORKFLOW.parent / "cli-test.yml").read_text()
+        step = checks.split("      - name: Check build host\n", 1)[1].split("      - name:", 1)[0]
+        command = "\n".join(line[10:] for line in step.splitlines() if line.startswith("          "))
+        with tempfile.TemporaryDirectory() as temporary:
+            tools = Path(temporary)
+            distribution.executable(tools / "uname", '#!/bin/sh\nprintf "%s\\n" "$TEST_ARCH"\n')
+            distribution.executable(tools / "sw_vers", '#!/bin/sh\nprintf "%s\\n" "$TEST_MACOS"\n')
+            for version, architecture, accepted in (("15.0", "arm64", False), ("26.6", "arm64", False),
+                                                     ("27.0", "arm64", True), ("28.0", "arm64", True),
+                                                     ("27.0", "x86_64", False)):
+                with self.subTest(version=version, architecture=architecture):
+                    result = subprocess.run(["bash", "-e", "-c", command], env={
+                        **os.environ, "PATH": f"{tools}:{os.environ['PATH']}",
+                        "TEST_MACOS": version, "TEST_ARCH": architecture,
+                    }, capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
 
     def test_workflow_uploads_each_experimental_receipt_separately(self):
         step = "Upload experimental build features"
