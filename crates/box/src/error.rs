@@ -8,6 +8,7 @@ pub(crate) struct BoxError(Internal);
 
 impl BoxError {
     /// Expected interruption of a private storage controller during owned shutdown.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn is_storage_cancelled(&self) -> bool {
         matches!(
             self.0,

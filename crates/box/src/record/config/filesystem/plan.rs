@@ -244,7 +244,7 @@ impl FilesystemPlan {
 
 impl PendingFilesystem {
     /// The partial reach for tests that always install every pending-root barrier.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn available_for_test(&self) -> &DirectReach {
         &self.available
     }
