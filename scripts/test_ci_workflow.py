@@ -173,6 +173,18 @@ class LaunchCommandTests(unittest.TestCase):
         self.assertIn('echo "$CLAUDE_CODE_SHA256  $claude" | shasum -a 256 -c -', install)
         self.assertIn('echo "$CODEX_SHA256  $RUNNER_TEMP/codex.tar.gz" | shasum -a 256 -c -', install)
         self.assertIn('--version "$KIRO_CLI_VERSION"', install)
+        check = 'echo "$KIRO_INSTALL_SHA256  $RUNNER_TEMP/kiro-install.sh" | shasum -a 256 -c -'
+        self.assertLess(install.index(check), install.index('bash "$RUNNER_TEMP/kiro-install.sh"'))
+
+    def test_the_workloads_jobs_check_the_kiro_installer(self):
+        text = (WORKFLOWS / "workloads.yml").read_text()
+        self.assertEqual(text.count('bash "$RUNNER_TEMP/kiro-install.sh"'), 2)
+        self.assertEqual(text.count(
+            'echo "$KIRO_INSTALL_SHA256  $RUNNER_TEMP/kiro-install.sh" | shasum -a 256 -c -'), 2)
+        for line in text.splitlines():
+            if 'bash "$RUNNER_TEMP/kiro-install.sh"' in line:
+                before = text[:text.index(line)]
+                self.assertTrue(before.rstrip().endswith("shasum -a 256 -c -"), line)
 
 
 class CiWorkflowTests(unittest.TestCase):

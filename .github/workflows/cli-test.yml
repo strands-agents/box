@@ -109,8 +109,11 @@ jobs:
       CLAUDE_CODE_SHA256: 64c327e92b2c5e0f78c0a980c5a518121e1f0d140ca771ca5dd4488d1a2dcb3f
       CODEX_VERSION: "0.166.0"
       CODEX_SHA256: c48824462fc57681eafb0925d97b11b589010475613904f570b42fea53e240d5
-      # Kiro's installer checks the package against the SHA-256 in Kiro's own release index.
+      # Kiro's installer checks the package against the SHA-256 in Kiro's own release index, and the
+      # job checks the installer against this SHA-256. A new installer script fails the check until
+      # this changes.
       KIRO_CLI_VERSION: "3.4.0"
+      KIRO_INSTALL_SHA256: a8bce4c6b740deb61009e3ad10995ec3027a51e6345025f1a2e5048ffdbf4b84
       # The `engine` suite skips the corpus and launch checks.
       LAUNCH: ${{ inputs.suite == 'all' }}
     steps:
@@ -203,6 +206,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/codex.tar.gz" -C "$RUNNER_TEMP"
           install -m 755 "$RUNNER_TEMP/codex-aarch64-apple-darwin" "$bin/codex"
           curl -fsSL -o "$RUNNER_TEMP/kiro-install.sh" https://cli.kiro.dev/install
+          echo "$KIRO_INSTALL_SHA256  $RUNNER_TEMP/kiro-install.sh" | shasum -a 256 -c -
           bash "$RUNNER_TEMP/kiro-install.sh" --version "$KIRO_CLI_VERSION" --force --no-modify-path
           # The box runs Kiro's runtime only from a folder it cannot write (resources/packs/kiro/README.md).
           # Kiro CLI refuses to start a chat until it has a login or a key. Listing sessions makes no

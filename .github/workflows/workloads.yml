@@ -112,8 +112,11 @@ env:
   # The features job runs Codex, pinned as cli-test.yml pins it, and Kiro CLI.
   CODEX_VERSION: "0.166.0"
   CODEX_SHA256: c48824462fc57681eafb0925d97b11b589010475613904f570b42fea53e240d5
-  # Kiro's installer checks the package against the SHA-256 in Kiro's own release index.
+  # Kiro's installer checks the package against the SHA-256 in Kiro's own release index, and the
+  # job checks the installer against this SHA-256. A new installer script fails the check until
+  # this changes.
   KIRO_CLI_VERSION: "3.4.0"
+  KIRO_INSTALL_SHA256: a8bce4c6b740deb61009e3ad10995ec3027a51e6345025f1a2e5048ffdbf4b84
   # A dispatch names its agent. The 10:11 cron runs Kiro CLI and the 09:41 cron runs Claude Code.
   AGENT: ${{ inputs.agent || (github.event.schedule == '11 10 * * *' && 'kiro') || 'claude' }}
   # The default dispatch set (the nightly runs every cell): a few launch-gate cells that run on a
@@ -357,6 +360,7 @@ jobs:
           KIRO_API_KEY: ksk_placeholder-no-model-call
         run: |
           curl -fsSL -o "$RUNNER_TEMP/kiro-install.sh" https://cli.kiro.dev/install
+          echo "$KIRO_INSTALL_SHA256  $RUNNER_TEMP/kiro-install.sh" | shasum -a 256 -c -
           bash "$RUNNER_TEMP/kiro-install.sh" --version "$KIRO_CLI_VERSION" --force --no-modify-path
           KIRO_RUNTIME_DIR="$HOME/.kiro-runtime" "$HOME/.local/bin/kiro-cli" --v3 chat --list-sessions
 
@@ -493,6 +497,7 @@ jobs:
           KIRO_API_KEY: ksk_placeholder-no-model-call
         run: |
           curl -fsSL -o "$RUNNER_TEMP/kiro-install.sh" https://cli.kiro.dev/install
+          echo "$KIRO_INSTALL_SHA256  $RUNNER_TEMP/kiro-install.sh" | shasum -a 256 -c -
           bash "$RUNNER_TEMP/kiro-install.sh" --version "$KIRO_CLI_VERSION" --force --no-modify-path
           KIRO_RUNTIME_DIR="$HOME/.kiro-runtime" "$HOME/.local/bin/kiro-cli" --v3 chat --list-sessions
 
