@@ -90,7 +90,7 @@ each run, so a second run of the same profile on the host cannot be scored by mi
 The scripted layer runs on the corpus bench, `corpus.yml`, on GitHub-hosted macOS runners, with
 advisory ARM64 Linux runners beside them, on a schedule and on dispatch. It never runs on a pull
 request, and `CI Gate` does not need it. The `macos` job of `cli-test.yml` runs the `probe` launch check
-and starts Claude Code and Codex under the profiles their starters make (`launch.toml`). The bench
+and starts Claude Code, Codex, and Kiro CLI under the profiles their starters make (`launch.toml`). The bench
 runs the cells that have a script. Each cell runs under the profile its `profile` field names,
 by default the `corpus` profile: the tool packs `box profile create` adds, `@box/npx`, and the corpus's own, with bash
 as the agent, and
@@ -110,7 +110,8 @@ existing caches, a git credential helper, `gh` logged in, and a private npm regi
 other cells run on a clean image. Each cell's `machine` field sets the split: the lived-in cells test reading
 existing developer config and credentials, which a clean image cannot exercise. Two images
 are two artifacts to build and keep current. Until strands-agents/box#564 decides the lived-in image, EV-03 is
-marked clean so the bench runs it, and its `expect` records today's failure.
+marked clean so the bench runs it. It stays RED until `@box/gh` can reach GitHub's log storage
+(strands-agents/box#569), and its `expect` keeps GREEN so the bench reports that gap on each run.
 
 ## Harness coverage
 

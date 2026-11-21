@@ -436,11 +436,25 @@ def create_profile(argv, env):
         return subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
                               text=True, env=env)
 
+MARKER = ".corpus"
+
+def claim(target):
+    """Stop the run when `target` is a pack or profile folder the corpus did not make, because the
+    runner would otherwise replace it. A folder the corpus made carries a MARKER file."""
+    if target.exists() and not (target / MARKER).is_file():
+        sys.exit(f"{target} is not the corpus's own {target.parent.name[:-1]} of that name; move it "
+                 f"aside to run the corpus, which would otherwise replace it")
+
+def mark(target):
+    target.mkdir(parents=True, exist_ok=True)
+    (target / MARKER).write_text("Installed by test-corpus/run_corpus.py.\n")
+
 def install_profiles(checks, env):
     """Copy each committed pack into ~/.strands/box/packs/ and each committed profile into
     ~/.strands/box/profiles/, and make each launch check's profile with `box profile create`, as an
     operator would who takes the default policy, `@box/open`. Replaces packs and profiles of the
-    same names.
+    same names. Each profile it writes carries a `.corpus` marker, and a profile folder without one
+    stops the run rather than being replaced, because it is the operator's own.
 
     A pack here is the operator's own, not one box ships, so `box profile create` never adds
     it to a profile of its own accord. A cell that needs one names it in its profile. Each copy
@@ -450,17 +464,20 @@ def install_profiles(checks, env):
     operator.mkdir(parents=True, exist_ok=True)
     for folder in sorted(p for p in PACKS.iterdir() if p.is_dir()) if PACKS.is_dir() else []:
         target = operator / folder.name
-        if target.exists() and not (target / ".corpus").is_file():
-            sys.exit(f"{target} is not the corpus pack of that name; move it aside to run the "
-                     f"corpus, which would otherwise replace it")
+        claim(target)
         shutil.rmtree(target, ignore_errors=True)
         shutil.copytree(folder, target)
-        (target / ".corpus").write_text("Installed by test-corpus/run_corpus.py.\n")
-    target = HOME / ".strands/box" / "profiles"
-    target.mkdir(parents=True, exist_ok=True)
-    for folder in sorted(p for p in PROFILES.iterdir() if p.is_dir()):
-        shutil.rmtree(target / folder.name, ignore_errors=True)
-        shutil.copytree(folder, target / folder.name)
+        mark(target)
+    profiles = HOME / ".strands/box" / "profiles"
+    profiles.mkdir(parents=True, exist_ok=True)
+    committed = sorted(p for p in PROFILES.iterdir() if p.is_dir())
+    created = sorted({c["profile"] for c in checks if c.get("with")})
+    for name in [folder.name for folder in committed] + created:
+        claim(profiles / name)
+    for folder in committed:
+        shutil.rmtree(profiles / folder.name, ignore_errors=True)
+        shutil.copytree(folder, profiles / folder.name)
+        mark(profiles / folder.name)
     made = set()
     for check in checks:
         if check.get("with") and check["profile"] not in made:
@@ -471,6 +488,7 @@ def install_profiles(checks, env):
                                 check["with"], "--policy", "open", *options, "--force"], env)
             if r.returncode:
                 sys.exit(f"box profile create {check['profile']} failed:\n{r.stdout}{r.stderr}")
+            mark(profiles / check["profile"])
 
 def key_sign_in(packs):
     """The option that makes a Bedrock profile sign in with the key that CI mints, because the
@@ -511,14 +529,18 @@ def agent_profile_args(profile):
 
 def install_agent_profile(profile, env):
     """Make the agent layer's profile. Call it after install_profiles, which puts the corpus's own
-    packs in ~/.strands/box/packs/ where `box profile create` finds them."""
+    packs in ~/.strands/box/packs/ where `box profile create` finds them. An operator's own profile
+    of that name stops the run instead of being replaced."""
     try:
         argv = agent_profile_args(profile)
     except ValueError as e:
         sys.exit(str(e))
+    target = HOME / ".strands/box" / "profiles" / profile
+    claim(target)
     r = create_profile(argv, env)
     if r.returncode:
         sys.exit(f"box profile create {profile} failed:\n{r.stdout}{r.stderr}")
+    mark(target)
 
 def fixture_built(cell):
     """Whether make_fixture can build the cell's project."""

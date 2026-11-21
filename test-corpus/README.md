@@ -96,10 +96,11 @@ The scripted layer and the launch checks run profiles the runner installs. `--in
 copies each pack in `packs/` into `~/.strands/box/packs/` and each committed profile in
 [`profiles/`](profiles/) into `~/.strands/box/profiles/`. On the launch layer it
 also makes each check's profile, such as `launch-claude`, with `box profile create --policy open`.
-It replaces
-packs and profiles of those names, and never touches `claude` or `codex`. A pack of your own under
-one of those names stops the run instead of being replaced. This copies the profiles and runs
-the probe check alone:
+On the agent layer, it makes the `--profile` it names (`claude`, `codex`, or `kiro`) the same way.
+It replaces only packs and profiles it made, which carry a `.corpus` marker. A pack or profile of
+your own under one of those names, such as the `claude` profile above, stops the run instead of
+being replaced, so run the agent layer without `--install-profiles` to use your own. This copies
+the profiles and runs the probe check alone:
 
 ```sh
 python3 test-corpus/run_corpus.py --layer launch --ids probe --install-profiles

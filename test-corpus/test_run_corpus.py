@@ -775,6 +775,73 @@ class CorpusPacks(unittest.TestCase):
         self.assertIn(str(theirs), str(refused.exception))
         self.assertEqual((theirs / "pack.toml").read_text(), 'program = "theirs"\n')
 
+    def operator_profile(self, root, name):
+        theirs = root / ".strands/box" / "profiles" / name
+        theirs.mkdir(parents=True)
+        (theirs / "policy.dw").write_text("// my own rules\n")
+        return theirs
+
+    def test_install_profiles_keeps_an_operator_s_own_profile_of_a_committed_name(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        theirs = self.operator_profile(root, rc.CELL_PROFILE)
+        original = rc.HOME
+        rc.HOME = root
+        try:
+            with self.assertRaises(SystemExit) as refused:
+                rc.install_profiles([], dict(os.environ))
+        finally:
+            rc.HOME = original
+        self.assertIn(str(theirs), str(refused.exception))
+        self.assertEqual((theirs / "policy.dw").read_text(), "// my own rules\n")
+
+    def test_install_profiles_replaces_its_own_copy_of_a_committed_profile(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        original = rc.HOME
+        rc.HOME = root
+        try:
+            rc.install_profiles([], dict(os.environ))
+            mine = root / ".strands/box" / "profiles" / rc.CELL_PROFILE
+            self.assertTrue((mine / ".corpus").is_file())
+            (mine / "profile.toml").write_text("stale = true\n")
+            rc.install_profiles([], dict(os.environ))
+        finally:
+            rc.HOME = original
+        self.assertEqual((mine / "profile.toml").read_bytes(),
+                         (rc.PROFILES / rc.CELL_PROFILE / "profile.toml").read_bytes())
+
+    def test_the_agent_layer_keeps_an_operator_s_own_agent_profile(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        theirs = self.operator_profile(root, "claude")
+        original = rc.HOME
+        rc.HOME = root
+        try:
+            with mock.patch.object(rc, "create_profile") as create, \
+                    self.assertRaises(SystemExit) as refused:
+                rc.install_agent_profile("claude", dict(os.environ))
+        finally:
+            rc.HOME = original
+        create.assert_not_called()
+        self.assertIn(str(theirs), str(refused.exception))
+        self.assertEqual((theirs / "policy.dw").read_text(), "// my own rules\n")
+
+    def test_the_agent_layer_remakes_the_agent_profile_it_made(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        made = mock.Mock(returncode=0, stdout="", stderr="")
+        original = rc.HOME
+        rc.HOME = root
+        try:
+            with mock.patch.object(rc, "create_profile", return_value=made) as create:
+                rc.install_agent_profile("claude", dict(os.environ))
+                rc.install_agent_profile("claude", dict(os.environ))
+        finally:
+            rc.HOME = original
+        self.assertEqual(create.call_count, 2)
+        self.assertTrue((root / ".strands/box" / "profiles" / "claude" / ".corpus").is_file())
+
 
 class Grid(unittest.TestCase):
     def test_a_check_before_a_script_s_last_line_uses_single_brackets(self):
