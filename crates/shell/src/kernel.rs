@@ -402,10 +402,13 @@ impl ShellKernel {
         let host_to = self.host_for(to, Follow::No);
         if let Some((host_path, _)) = &host_to {
             #[cfg(target_os = "linux")]
-            let metadata = to.storage().map(|held| held.metadata());
+            let metadata = to
+                .storage()
+                .map(|held| held.metadata())
+                .unwrap_or_else(|| host_path.symlink_metadata());
             #[cfg(not(target_os = "linux"))]
-            let metadata: Option<io::Result<std::fs::Metadata>> = None;
-            match metadata.unwrap_or_else(|| host_path.symlink_metadata()) {
+            let metadata = host_path.symlink_metadata();
+            match metadata {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
@@ -605,13 +608,13 @@ impl Kernel for ShellKernel {
                     .host_for(&resolved, Follow::Yes)
                     .ok_or_else(not_found)?;
                 #[cfg(target_os = "linux")]
-                let metadata = resolved.storage().map(|held| held.metadata());
+                let metadata = resolved
+                    .storage()
+                    .map(|held| held.metadata())
+                    .unwrap_or_else(|| std::fs::metadata(&host_path));
                 #[cfg(not(target_os = "linux"))]
-                let metadata: Option<io::Result<std::fs::Metadata>> = None;
-                if !metadata
-                    .unwrap_or_else(|| std::fs::metadata(&host_path))?
-                    .is_dir()
-                {
+                let metadata = std::fs::metadata(&host_path);
+                if !metadata?.is_dir() {
                     return Err(io::Error::new(
                         io::ErrorKind::NotADirectory,
                         "Not a directory",
