@@ -7576,11 +7576,17 @@ mod tests {
             ("7.2.0-linux-preview.1", ">=7.2.1", true),
             ("v0.3.0-linux-preview.2", ">=0.3.0", false),
         ] {
-            let outcome = engine_outcome(version, floor);
+            let expected = if refused {
+                Err(format!(
+                    "this pack needs box {floor}, and this is box {version}"
+                ))
+            } else {
+                Ok(())
+            };
             assert_eq!(
-                outcome.is_err(),
-                refused,
-                "box {version} against {floor}: {outcome:?}"
+                engine_outcome(version, floor),
+                expected,
+                "box {version} against {floor}"
             );
         }
     }
