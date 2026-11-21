@@ -108,6 +108,11 @@ native-filesystem-policy = ["containment/native-filesystem-policy"]
 test-support = ["dep:rcgen", "dep:rustls-pemfile"]
 
 [[bin]]
+name = "box-storage-probe"
+path = "tests/support/storage_probe.rs"
+required-features = ["test-support"]
+
+[[bin]]
 name = "box-filesystem-probe"
 path = "tests/support/filesystem_probe.rs"
 required-features = ["test-support"]
