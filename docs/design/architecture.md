@@ -130,6 +130,14 @@ then becomes the target program, which inherits the restrictions.
 The trampoline applies the configuration it receives and makes no authorization decisions.
 [The box binaries](binaries.md) explains how Box verifies the trampoline before starting it.
 
+Linux packages also carry the private `strands-box-storage-compiler` executable. It
+compiles filesystem permissions in a fresh process whose private filesystem view contains
+mounts received as file descriptors. It verifies imported command and installation identities
+through the original owner, then returns a containment configuration and the paths that
+must remain hidden until their storage is ready. Its library entry is
+`strands_box::storage_compiler_main()`. Ordinary runs do not start this compiler; mount
+configuration and the controller that invokes it are not connected in this foundation.
+
 ### The sandboxes
 
 A box has two kinds of sandbox. The trampoline applies both.

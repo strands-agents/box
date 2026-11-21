@@ -14,7 +14,7 @@ use crate::record::layout::{disk_identity, lies_within};
 #[path = "installation_mounts.rs"]
 mod mounts;
 
-#[cfg(test)]
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) mod snapshot;
 
 #[cfg(target_os = "linux")]
@@ -63,7 +63,7 @@ pub(super) fn directory(executable: &Path) -> Option<&Path> {
 pub(crate) struct TrustedInstallation {
     binaries: Vec<InstalledBinary>,
     preparation: std::sync::Mutex<()>,
-    #[cfg(test)]
+    #[cfg(any(test, target_os = "linux"))]
     compiler_index: Option<usize>,
 }
 
@@ -73,7 +73,7 @@ struct InstalledBinary {
     names: Vec<PathBuf>,
     opened: File,
     identity: (u64, u64),
-    #[cfg(test)]
+    #[cfg(any(test, target_os = "linux"))]
     verification: Option<super::commands::snapshot::ReplicaVerifier>,
 }
 
@@ -96,14 +96,7 @@ impl TrustedInstallation {
         Ok(installation)
     }
 
-    #[cfg_attr(
-        not(target_os = "linux"),
-        allow(
-            dead_code,
-            reason = "The storage compiler executable is launched only on Linux"
-        )
-    )]
-    #[cfg(test)]
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn storage_compiler(&self) -> Option<(&Path, &File)> {
         self.compiler_index.map(|index| {
             let compiler = &self.binaries[index];
@@ -148,7 +141,7 @@ impl TrustedInstallation {
         let installation = Self {
             binaries,
             preparation: std::sync::Mutex::new(()),
-            #[cfg(test)]
+            #[cfg(any(test, target_os = "linux"))]
             compiler_index: None,
         };
         installation.verify()?;
@@ -350,14 +343,14 @@ impl InstalledBinary {
             names,
             opened,
             identity,
-            #[cfg(test)]
+            #[cfg(any(test, target_os = "linux"))]
             verification: None,
         })
     }
 
     fn verify(&self) -> Result<(), BoxError> {
         let unchanged_descriptor = self.unchanged_owner_state();
-        #[cfg(test)]
+        #[cfg(any(test, target_os = "linux"))]
         let unchanged_descriptor = if let Some(verification) = &self.verification {
             verification.verify(&self.opened)?;
             true

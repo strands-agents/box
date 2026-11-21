@@ -8,6 +8,10 @@ mod generation;
 use super::{DirectReach, FilesystemContext, direct_grants, expand_home, refuse};
 use crate::error::ConfigError;
 use crate::record::config::process::{Filesystem, Grant};
+#[cfg(target_os = "linux")]
+pub(crate) use generation::{
+    FilesystemCheckpoint, FilesystemGeneration, PendingMask, PublicationTarget,
+};
 
 /// The original lists and the mount roots whose contents must be judged later.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,23 +243,19 @@ impl FilesystemPlan {
 
 impl PendingFilesystem {
     /// The declared roots that must remain unavailable to sandboxed code.
+    #[cfg(test)]
     pub(crate) fn roots(&self) -> &[PathBuf] {
         &self.roots
     }
 
     /// The authored rules retained for a later source observation.
+    #[cfg(test)]
     pub(crate) fn original(&self) -> &Filesystem {
         &self.plan.original
     }
 
     /// Rejudge retained lists against the complete set of roots the caller has admitted.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "The protected mount admission loop is not connected yet"
-        )
-    )]
+    #[cfg(test)]
     pub(crate) fn judge_current_view(
         self,
         admitted: &[PathBuf],
@@ -266,6 +266,7 @@ impl PendingFilesystem {
     }
 
     /// Reject use by a launcher that has no pending-root barriers.
+    #[cfg(test)]
     pub(crate) fn unavailable(&self, context: &FilesystemContext<'_>) -> ConfigError {
         debug_assert!(self.available.grants.len() <= self.original().entries().count());
         refuse(

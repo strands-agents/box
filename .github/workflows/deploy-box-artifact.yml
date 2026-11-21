@@ -443,6 +443,9 @@ jobs:
           cp "target/${TRIPLE}/release/strands-box" "$stage/box"
           cp "target/${TRIPLE}/release/strands-box-sock-alias" "$stage/strands-box-sock-alias"
           cp "target/${TRIPLE}/release/strands-box-contain-trampoline" "$stage/strands-box-contain-trampoline"
+          if [[ "$TRIPLE" == *linux* ]]; then
+            cp "target/${TRIPLE}/release/strands-box-storage-compiler" "$stage/strands-box-storage-compiler"
+          fi
           chmod 0755 "$stage"/*
           tar -C "$stage" -czf "dist/${asset}" .
           tar -tzf "dist/${asset}"

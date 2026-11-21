@@ -174,6 +174,7 @@ jobs:
         run: |
           if [ "$PART" = box ]; then
             install -m 0755 target/debug/strands-box-sock-alias target/debug/deps/strands-box-sock-alias
+            install -m 0755 target/debug/strands-box-storage-compiler target/debug/deps/strands-box-storage-compiler
           fi
           install -m 0755 target/debug/strands-box-contain-trampoline target/debug/deps/strands-box-contain-trampoline
 
@@ -279,6 +280,7 @@ jobs:
         run: |
           install -m 0755 target/debug/strands-box-sock-alias target/debug/deps/strands-box-sock-alias
           install -m 0755 target/debug/strands-box-contain-trampoline target/debug/deps/strands-box-contain-trampoline
+          install -m 0755 target/debug/strands-box-storage-compiler target/debug/deps/strands-box-storage-compiler
 
       - name: "History persistence (default): test crash recovery"
         if: ${{ !cancelled() && steps.history_default_build.outcome == 'success' }}
@@ -348,6 +350,7 @@ jobs:
         run: |
           install -m 0755 target/debug/strands-box-sock-alias target/debug/deps/strands-box-sock-alias
           install -m 0755 target/debug/strands-box-contain-trampoline target/debug/deps/strands-box-contain-trampoline
+          install -m 0755 target/debug/strands-box-storage-compiler target/debug/deps/strands-box-storage-compiler
 
       - name: "History persistence (per-event): test crash recovery"
         if: ${{ !cancelled() && steps.history_per_event_build.outcome == 'success' }}

@@ -139,8 +139,8 @@ fn the_enter_only_grant_renders_before_the_direct_grants() {
         .find("for alias in layout")
         .expect("the alias grants, which follow the workspace's own");
     let direct_grants = source
-        .find("containment.allow_prepared(prepared, grant.operation, grant.scope)")
-        .expect("the direct grants, which are emitted last");
+        .find("containment = apply_filesystem_reach(")
+        .expect("the direct-grant emission call, which follows the alias grants");
 
     assert!(
         enter_only < alias_loop && alias_loop < direct_grants,

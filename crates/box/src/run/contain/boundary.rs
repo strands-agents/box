@@ -25,6 +25,9 @@ use crate::run::contain::executable;
 use crate::run::contain::runtime_minimum::{self, MinimumCell};
 use crate::run::hosted::Attachment;
 
+#[cfg(target_os = "linux")]
+pub(crate) mod storage;
+
 /// Where a `ProcessSpec` is translated: this BoxRun's attachment, layout, record, and loaded
 /// authority sources.
 pub(crate) struct Site<'a> {
@@ -138,6 +141,18 @@ pub(crate) fn judge_lists(
     tables: &ProcessTables,
     protected_sources: &[AuthoritySource],
 ) -> Result<DirectReach, BoxError> {
+    with_filesystem_context(table, tables, protected_sources, |context| {
+        Ok(filesystem::direct_grants(&spec.filesystem, context)?)
+    })
+}
+
+/// Borrow the ordinary filesystem guards for startup and captured-storage compilation.
+fn with_filesystem_context<T>(
+    table: &str,
+    tables: &ProcessTables,
+    protected_sources: &[AuthoritySource],
+    judge: impl FnOnce(&FilesystemContext<'_>) -> Result<T, BoxError>,
+) -> Result<T, BoxError> {
     let operator_home = crate::record::layout::operator_home_directory()?;
     // Canonical, because a `~/` entry resolves against it and carries the identity the kernel
     // checks.
@@ -174,7 +189,76 @@ pub(crate) fn judge_lists(
         },
         source_paths: &tables.source_paths,
     };
-    Ok(filesystem::direct_grants(&spec.filesystem, &context)?)
+    judge(&context)
+}
+
+/// Apply a process table's already judged lists through the normal containment guards.
+fn apply_filesystem_reach(
+    mut containment: ContainmentConfig,
+    reach: &DirectReach,
+    table: &str,
+    guard: &GuardedBoxState<'_>,
+    program_identity: &Path,
+    interpreter_exec_files: &[PathBuf],
+) -> Result<ContainmentConfig, BoxError> {
+    // **Every refusal the grants need, applied before the grants themselves.** macOS renders
+    // these after every allow and Linux overmounts them empty, so each subtracts from the grant
+    // rather than sitting beside it.
+    for refusal in &reach.refusals {
+        containment = containment.refuse(&refusal.path, refusal.scope)?;
+    }
+    // The box's private tree is refused beneath every grant.
+    containment = containment.refuse(guard.private, Scope::Root)?;
+    for grant in &reach.grants {
+        if grant.operation == Operation::Exec
+            && grant.scope == Scope::File
+            && (grant.resolved == program_identity
+                || interpreter_exec_files.contains(&grant.resolved))
+        {
+            continue;
+        }
+        containment = if grant.credential_store {
+            // The guards judge the canonical identity; the grant itself keeps the authored
+            // path, which the credential-store exception validates on its own terms.
+            guard.judge(&grant.resolved, grant.operation, grant.scope)?;
+            containment.allow_credential_store(&grant.lexical, grant.operation, grant.scope)?
+        } else {
+            // One lookup, compared with the approved identity and then granted as it is.
+            let prepared = grant.prepare(table)?;
+            guard.judge(prepared.resolved_path(), grant.operation, grant.scope)?;
+            containment.allow_prepared(prepared, grant.operation, grant.scope)?
+        };
+    }
+
+    for tree in &reach.write_protections {
+        containment = containment.protect_write_tree(tree)?;
+    }
+    Ok(containment)
+}
+
+/// Recheck the startup command identity before admitting another filesystem view.
+fn apply_command_identity(
+    mut containment: ContainmentConfig,
+    reach: &DirectReach,
+    table: &str,
+    program_identity: &Path,
+) -> Result<ContainmentConfig, BoxError> {
+    if let Some(command) = reach.command.as_ref() {
+        command.verify()?;
+        if command.path() != program_identity {
+            return Err(ConfigError::Process {
+                table: table.to_string(),
+                reason: "configured command identity changed before launch".to_string(),
+            }
+            .into());
+        }
+        containment = if command.has_several_names() {
+            containment.require_command_identity(command.path(), command.opened())?
+        } else {
+            containment.require_file_identity(command.path(), command.opened())?
+        };
+    }
+    Ok(containment)
 }
 
 /// The host trust the egress gateway reads this run, judged once for every table and interpreter.
@@ -721,54 +805,15 @@ impl Boundary {
             containment = containment.allow_file_watching();
         }
 
-        // **Every refusal the grants need, applied before the grants themselves.** macOS renders
-        // these after every allow and Linux overmounts them empty, so each subtracts from the grant
-        // rather than sitting beside it.
-        for refusal in &reach.refusals {
-            containment = containment.refuse(&refusal.path, refusal.scope)?;
-        }
-        // The box's private tree is refused beneath every grant.
-        containment = containment.refuse(guard.private, Scope::Root)?;
-        for grant in &reach.grants {
-            if grant.operation == Operation::Exec
-                && grant.scope == Scope::File
-                && (grant.resolved == program_identity
-                    || interpreter_exec_files.contains(&grant.resolved))
-            {
-                continue;
-            }
-            containment = if grant.credential_store {
-                // The guards judge the canonical identity; the grant itself keeps the authored
-                // path, which the credential-store exception validates on its own terms.
-                guard.judge(&grant.resolved, grant.operation, grant.scope)?;
-                containment.allow_credential_store(&grant.lexical, grant.operation, grant.scope)?
-            } else {
-                // One lookup, compared with the approved identity and then granted as it is.
-                let prepared = grant.prepare(table)?;
-                guard.judge(prepared.resolved_path(), grant.operation, grant.scope)?;
-                containment.allow_prepared(prepared, grant.operation, grant.scope)?
-            };
-        }
-
-        for tree in &reach.write_protections {
-            containment = containment.protect_write_tree(tree)?;
-        }
-
-        if let Some(command) = reach.command.as_ref() {
-            command.verify()?;
-            if command.path() != program_identity {
-                return Err(ConfigError::Process {
-                    table: table.to_string(),
-                    reason: "configured command identity changed before launch".to_string(),
-                }
-                .into());
-            }
-            containment = if command.has_several_names() {
-                containment.require_command_identity(command.path(), command.opened())?
-            } else {
-                containment.require_file_identity(command.path(), command.opened())?
-            };
-        }
+        containment = apply_filesystem_reach(
+            containment,
+            reach,
+            table,
+            &guard,
+            &program_identity,
+            &interpreter_exec_files,
+        )?;
+        containment = apply_command_identity(containment, reach, table, &program_identity)?;
 
         containment = protect_authorities(
             containment,
