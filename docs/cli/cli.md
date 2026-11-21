@@ -257,6 +257,7 @@ The document holds what the text report prints, and `--full` adds `box_toml` and
 | `mcp.unstarted` | `server` and `reason` of each `no permit to start MCP server` line. |
 | `mcp.servers` | `server`, `file`, and `detail` (the end of the `mcp` line, such as `, with the key in GITHUB_TOKEN`, or empty). |
 | `mcp.dropped` | `variable`, `server`, `file`, and `reason` of each variable that an MCP server goes without. |
+| `mcp.unchecked` | `variable`, `server`, and `file` of each `did not check` line: a variable of a declared MCP server whose value opens as options do, which `box` doesn't read. |
 | `mcp.path_dropped` | The text after `dropped` for each folder on your `PATH` that isn't a full path. |
 | `mcp.skipped` | `server`, `file`, and `reason` of each `no automatic MCP declaration for` line. |
 | `mcp.unread` | `file` and `reason` of each `did not read` line. |
