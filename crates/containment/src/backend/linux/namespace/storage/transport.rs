@@ -149,6 +149,13 @@ pub(super) fn receive_text(
     String::from_utf8(bytes).map_err(|_| failure("storage control frame is not UTF-8"))
 }
 
+pub(super) fn send_json(
+    socket: &UnixStream,
+    value: &serde_json::Value,
+) -> Result<(), ContainmentError> {
+    send_text(socket, &value.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,8 +7,7 @@ mod native_filesystem;
 pub(crate) mod netns;
 pub(crate) mod probe;
 pub(crate) mod reaper;
-#[cfg(test)]
-mod storage;
+pub(crate) mod storage;
 pub(crate) mod syscall;
 pub(crate) mod view;
 
@@ -157,14 +156,80 @@ impl ContainmentBackend for NamespaceBackend {
         egress_handoff: Option<&std::os::unix::net::UnixStream>,
         confirm_fd: Option<std::os::fd::RawFd>,
         native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
+        storage_control_fd: Option<std::os::fd::RawFd>,
+    ) -> Result<(), ContainmentError> {
+        let production_request = storage_control_fd
+            .map(storage::production::request)
+            .transpose()?;
+        self.apply_with_storage(
+            config,
+            egress_handoff,
+            confirm_fd,
+            native_filesystem_handoff,
+            #[cfg(any(test, feature = "test-support"))]
+            None,
+            production_request,
+        )
+    }
+
+    fn support_info(&self) -> SupportInfo {
+        let details = if self.user_namespace_permitted {
+            "Linux namespaces available (user namespace creation measured)"
+        } else {
+            "Linux namespace launcher unavailable: this identity may not create a \
+             user namespace"
+        };
+
+        SupportInfo {
+            is_supported: self.user_namespace_permitted,
+            platform: Platform::Linux,
+            mechanism: MECHANISM.to_string(),
+            details: details.to_string(),
+        }
+    }
+}
+
+impl NamespaceBackend {
+    fn apply_with_storage(
+        &self,
+        config: &ContainmentConfig,
+        egress_handoff: Option<&std::os::unix::net::UnixStream>,
+        confirm_fd: Option<std::os::fd::RawFd>,
+        native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
+        #[cfg(any(test, feature = "test-support"))] storage_request: Option<storage::Request>,
+        production_request: Option<storage::production::ProductionRequest>,
     ) -> Result<(), ContainmentError> {
         // Repeat live pathname validation at this backend's last safe point, per the
         // `ContainmentBackend` contract.
         config.require_live_path_identities()?;
         require_no_configured_devices(config)?;
 
+        // Pending storage has no readable underlay, including through an ancestor grant. Only
+        // the workload view receives this mask; the receiver is forked before materialization.
+        #[cfg(any(test, feature = "test-support"))]
+        let pending_config = storage_request
+            .as_ref()
+            .map(|request| config.clone().refuse(&request.root, Scope::Root))
+            .transpose()?;
+        #[cfg(any(test, feature = "test-support"))]
+        let initial_config = pending_config.as_ref().unwrap_or(config);
+        #[cfg(not(any(test, feature = "test-support")))]
+        let initial_config = config;
+
         // Build the plan and compile both filters before anything irreversible.
-        let view = view::MountView::plan(config)?;
+        let view = view::MountView::plan(initial_config)?;
+        let view = if let Some(request) = &production_request {
+            view.with_pending_masks(
+                &request
+                    .layout
+                    .masks
+                    .iter()
+                    .map(|target| (target.path.clone(), target.scope))
+                    .collect::<Vec<_>>(),
+            )?
+        } else {
+            view
+        };
         let policy = syscall::SyscallPolicy::for_config(config.network());
         #[cfg(feature = "native-filesystem-policy")]
         let policy = policy.with_native_filesystem(native_filesystem_handoff.is_some());
@@ -182,6 +247,20 @@ impl ContainmentBackend for NamespaceBackend {
         // a private, routeless one. Decided before the unshare, which cannot be undone.
         let join_host_network = matches!(config.network(), Network::AllowAll);
         enter_namespaces(join_host_network)?;
+        #[cfg(any(test, feature = "test-support"))]
+        let storage_setup = storage_request.map(storage::prepare).transpose()?;
+        #[cfg(not(any(test, feature = "test-support")))]
+        let storage_setup: Option<storage::Setup> = None;
+        let storage_setup = if let Some(request) = production_request {
+            if storage_setup.is_some() {
+                return Err(unenforceable(
+                    "test and production storage handoffs cannot be combined",
+                ));
+            }
+            Some(storage::production::prepare(request)?)
+        } else {
+            storage_setup
+        };
 
         // The egress listener is created *before* the mount view, while the network namespace is
         // new and nothing else has run.
@@ -243,7 +322,7 @@ impl ContainmentBackend for NamespaceBackend {
         }
         keep.extend(connector.as_ref().map(|connector| connector.handoff));
         let filesystem_handoff =
-            establish_pid_namespace_and_reaper(&view, &keep, confirm_fd, connector)?;
+            establish_pid_namespace_and_reaper(&view, &keep, confirm_fd, connector, storage_setup)?;
 
         // Only the workload process reaches here, in the pivoted view.
         authority::drop_all_capabilities()?;
@@ -269,22 +348,6 @@ impl ContainmentBackend for NamespaceBackend {
         drop(listeners);
 
         Ok(())
-    }
-
-    fn support_info(&self) -> SupportInfo {
-        let details = if self.user_namespace_permitted {
-            "Linux namespaces available (user namespace creation measured)"
-        } else {
-            "Linux namespace launcher unavailable: this identity may not create a \
-             user namespace"
-        };
-
-        SupportInfo {
-            is_supported: self.user_namespace_permitted,
-            platform: Platform::Linux,
-            mechanism: MECHANISM.to_string(),
-            details: details.to_string(),
-        }
     }
 }
 
@@ -508,6 +571,7 @@ fn establish_pid_namespace_and_reaper(
     keep: &[libc::c_int],
     confirm_fd: Option<std::os::fd::RawFd>,
     connector: Option<reaper::Connector>,
+    mut storage_setup: Option<storage::Setup>,
 ) -> Result<std::os::unix::net::UnixStream, ContainmentError> {
     use std::os::fd::AsRawFd as _;
     let proc = filesystem_queries::open_proc()
@@ -535,6 +599,9 @@ fn establish_pid_namespace_and_reaper(
     }
 
     if reaper > 0 {
+        if let Some(setup) = storage_setup.as_mut() {
+            setup.close_registration();
+        }
         drop(reaper_control);
         drop(query_workload);
         let preserved = [
@@ -547,6 +614,7 @@ fn establish_pid_namespace_and_reaper(
         ];
         let mut preserved = preserved.to_vec();
         preserved.extend(confirm_fd);
+        preserved.extend(storage_setup.as_ref().and_then(storage::Setup::lifetime_fd));
         let hardened = authority::close_inherited_descriptors(&preserved)
             .and_then(|_| authority::retain_workload_memory_access())
             .and_then(|_| authority::set_no_new_privileges())
@@ -566,11 +634,17 @@ fn establish_pid_namespace_and_reaper(
         close_confirm_descriptor(confirm_fd);
         // The original caller retains only scoped process inspection and the notification channel.
         let code = filesystem_queries::supervise(reaper, proc, query_parent);
+        if let Some(setup) = storage_setup.as_mut() {
+            setup.complete();
+        }
         // SAFETY: exiting the launcher process with the run's status.
         unsafe { libc::_exit(code) };
     }
 
     // Namespace PID 1.
+    if let Some(setup) = storage_setup.as_mut() {
+        setup.disown_child();
+    }
     drop(proc);
     drop(query_parent);
     drop(parent_control);
@@ -587,6 +661,15 @@ fn establish_pid_namespace_and_reaper(
         write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: PID 1 exiting kills the namespace, which is the right response to
         // being unable to build the boundary at all.
+        unsafe { libc::_exit(127) };
+    }
+
+    if let Some(setup) = storage_setup.as_mut()
+        && let Err(error) = setup.register_target()
+    {
+        eprintln!("strands-box: storage target registration failed: {error}");
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
+        // SAFETY: PID 1 exits before starting a workload with an unprotected target.
         unsafe { libc::_exit(127) };
     }
 
@@ -1082,7 +1165,7 @@ mod tests {
             assert_ne!(child, -1, "fork failed");
             if child == 0 {
                 let backend = NamespaceBackend::with_probe_result(true);
-                if let Err(error) = backend.apply(&config, None, None, None) {
+                if let Err(error) = backend.apply(&config, None, None, None, None) {
                     eprintln!("apply failed: {error}");
                     // SAFETY: terminating the child.
                     unsafe { libc::_exit(20) };
@@ -1155,7 +1238,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -1287,7 +1370,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -1355,7 +1438,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -2233,7 +2316,7 @@ mod tests {
 
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if backend.apply(&config, None, None, None).is_err() {
+            if backend.apply(&config, None, None, None, None).is_err() {
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(30) };
             }
@@ -2310,7 +2393,7 @@ mod tests {
 
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(40) };
@@ -2409,7 +2492,7 @@ mod tests {
 
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if backend.apply(&config, None, None, None).is_err() {
+            if backend.apply(&config, None, None, None, None).is_err() {
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
             }
@@ -2497,7 +2580,7 @@ mod tests {
             let backend = NamespaceBackend::with_probe_result(true);
             // No handoff: this test asserts the filesystem, process, and authority properties, and
             // the request below is `Blocked` by default so no egress endpoint is created.
-            if let Err(error) = backend.apply(&config, None, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None, None) {
                 // Printed rather than swallowed: exit code 20 says "apply failed" and this says
                 // why, which is the difference between a five-minute diagnosis and an afternoon of
                 // bisecting namespaces.
@@ -2674,7 +2757,7 @@ mod tests {
             assert_ne!(child, -1, "fork failed");
             if child == 0 {
                 let backend = NamespaceBackend::with_probe_result(true);
-                if let Err(error) = backend.apply(&config, None, None, None) {
+                if let Err(error) = backend.apply(&config, None, None, None, None) {
                     eprintln!("apply failed: {error}");
                     // SAFETY: terminating the child.
                     unsafe { libc::_exit(20) };
@@ -2850,7 +2933,7 @@ mod tests {
                 // SAFETY: closing the child's copy of the read end.
                 unsafe { libc::close(reader) };
                 let backend = NamespaceBackend::with_probe_result(true);
-                if let Err(error) = backend.apply(config, None, Some(writer), None) {
+                if let Err(error) = backend.apply(config, None, Some(writer), None, None) {
                     eprintln!("apply failed: {error}");
                     // SAFETY: terminating the child.
                     unsafe { libc::_exit(50) };
@@ -2913,7 +2996,9 @@ mod tests {
             // SAFETY: closing the child's copy of the read end.
             unsafe { libc::close(reader) };
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&ContainmentConfig::new(), None, Some(writer), None) {
+            if let Err(error) =
+                backend.apply(&ContainmentConfig::new(), None, Some(writer), None, None)
+            {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(50) };

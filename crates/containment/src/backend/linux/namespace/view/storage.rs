@@ -661,7 +661,7 @@ mod tests {
             if child == 0 {
                 use crate::backend::ContainmentBackend as _;
                 super::super::super::NamespaceBackend::with_probe_result(true)
-                    .apply(&config, None, None, None)
+                    .apply(&config, None, None, None, None)
                     .unwrap();
                 assert_eq!(unsafe { libc::getpid() }, 2);
                 assert_eq!(std::fs::read(&alias).unwrap(), b"source bytes");
