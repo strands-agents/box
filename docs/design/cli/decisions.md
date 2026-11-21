@@ -1428,25 +1428,19 @@ A disconnected terminal still stops the run.
 <a id="policy-off-keeps-the-forbids-box-writes"></a>
 ### Policy off turns off what the operator adds, and keeps each forbid `box` writes for every box or to protect itself
 
-Turning policy off installs one permit for every operation and each forbid that `box` writes for
-every box or to protect itself, such as those on the box home, the folders `box` is installed in,
-the profile, and `.box`. Everything the operator adds turns off: the rules in rule files, and the
-forbids that a profile's `[filesystem] deny` and `deny_write` add. The kept forbids keep the Shell
-and Monty, which run outside the cage, from changing what a later run trusts
-([trusted directories](#a-run-cannot-write-what-a-later-run-trusts)). Policy off works only while
-the banner shows it, and a banner failure turns policy back on.
+Policy off installs one permit for every operation and each forbid that `box` writes for every box
+or to protect itself, such as those on the box home, the folders `box` is installed in, the
+profile, and `.box`, so the Shell and Monty cannot plant rules for a later run. Everything the
+operator adds turns off: rule files, and the forbids of a profile's `[filesystem] deny` and
+`deny_write`. Policy off works only while the banner shows it.
 
-**Rejected.** One permit in place of the whole policy, which lifts every rule: a box with policy
-off could then append to the profile's rule files, and the next run would load them.
-
-**Rejected.** Keeping the forbids the operator adds, which would keep their own safeguards: policy
-off is the operator's switch for their own rules, and `box`
-[does not parse the policy language](#box-never-parses-the-policy-language), so it could not keep a
-rule file's forbids anyway.
+**Rejected.** One permit in place of the whole policy: the Shell could then append to the
+profile's rule files. Keeping what the operator adds, such as the `deny_write` forbids that let
+`box` accept a program under a write grant: policy off is the operator's switch for their own
+choices.
 
 **Cost.** While policy is off, the Shell and Monty can read a `deny` path and change a `deny_write`
-folder; the agent's own sandbox still holds both. Policy off cannot lift a forbid that `box` writes
-for every box, and no profile change opens a protected root.
+folder, including a program a later run runs. The agent's sandbox still holds both.
 
 <a id="box-run-takes-no-option-values"></a>
 ### A run's grants and rules are what the profile says, so `box run` sets no input
@@ -1807,7 +1801,8 @@ imports, so a grant stays on the process that needs it.
 
 **Cost.** In a profile, `[filesystem]` is every process; in an agent or tool pack, it is that
 pack's own process. An installer cannot write a listed folder. Policy off lifts the forbids for the
-Shell and Monty ([policy off](#policy-off-keeps-the-forbids-box-writes)). A hard link in a writable folder
+Shell and Monty, so they can then change a program in the folder that a later run runs
+([policy off](#policy-off-keeps-the-forbids-box-writes)). A hard link in a writable folder
 still changes a file in it.
 
 <a id="a-detected-servers-arguments-are-not-programs"></a>

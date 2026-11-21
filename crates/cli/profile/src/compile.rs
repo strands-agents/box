@@ -448,7 +448,7 @@ fn generated_policy(
             &format!("route_{name}"),
             &destinations,
         )? {
-            rules.add(&id, &rule);
+            rules.permit(&id, &rule);
         }
     }
     for (name, entry) in &profile.mcp {
@@ -456,10 +456,10 @@ fn generated_policy(
             continue;
         };
         let id = |kind: &str| format!("mcp_{name}_{kind}");
-        rules.add(
+        rules.permit(
             &id("call"),
             &format!(
-                "permit (principal, action == Box::Action::\"mcp:call\", resource) when {{ context.input.server == {} }};",
+                "(principal, action == Box::Action::\"mcp:call\", resource) when {{ context.input.server == {} }};",
                 literal(name)
             ),
         );
@@ -505,10 +505,10 @@ fn generated_policy(
                     ));
                     continue;
                 }
-                rules.add(
+                rules.permit(
                     &id("spawn"),
                     &format!(
-                        "permit (principal, action == Box::Action::\"shell:spawn\", resource) when {{ context.input.program_path == {} && context.input.program == {} }};",
+                        "(principal, action == Box::Action::\"shell:spawn\", resource) when {{ context.input.program_path == {} && context.input.program == {} }};",
                         literal(&tilde(home, &path)),
                         literal(program.rsplit('/').next().unwrap_or(program))
                     ),
@@ -518,7 +518,7 @@ fn generated_policy(
                     for (id, rule) in
                         reach_rules(&launcher.pack, &format!("launcher_{name}_registry"), &hosts)?
                     {
-                        rules.add(&id, &rule);
+                        rules.permit(&id, &rule);
                     }
                 }
             }
@@ -528,7 +528,7 @@ fn generated_policy(
                     &format!("mcp_{name}"),
                     &strings_in(entry.get("destinations")),
                 )? {
-                    rules.add(&id, &rule);
+                    rules.permit(&id, &rule);
                 }
             }
             _ => {}
@@ -554,20 +554,20 @@ fn generated_policy(
             ("fs:delete", "delete"),
             ("fs:move", "move"),
         ] {
-            rules.add(
+            rules.permit(
                 &format!("storage_{index}_{verb}"),
                 &format!(
-                    "permit (principal, action == Box::Action::{action:?}, resource) when {{ {} }};",
+                    "(principal, action == Box::Action::{action:?}, resource) when {{ {} }};",
                     within(directory)
                 ),
             );
         }
     }
     for (index, script) in profile.storage.hook_scripts.iter().enumerate() {
-        rules.add(
+        rules.permit(
             &format!("hook_script_{index}_read"),
             &format!(
-                "permit (principal, action == Box::Action::\"fs:read\", resource) when {{ context.input.path == {} }};",
+                "(principal, action == Box::Action::\"fs:read\", resource) when {{ context.input.path == {} }};",
                 literal(&tilde(home, script))
             ),
         );
@@ -595,10 +595,10 @@ fn generated_policy(
             ("fs:delete", "delete"),
             ("fs:move", "move"),
         ] {
-            rules.add(
+            rules.forbid(
                 &format!("{prefix}_{verb}"),
                 &format!(
-                    "forbid (principal, action == Box::Action::{action:?}, resource) when {{ ({}){except} }};",
+                    "(principal, action == Box::Action::{action:?}, resource) when {{ ({}){except} }};",
                     within(&box_home)
                 ),
             );
@@ -692,10 +692,10 @@ fn directory_rules(rules: &mut Rules, run: &Run<'_>, prefix: &str, directory: &P
             ("fs:delete", "delete"),
             ("fs:move", "move"),
         ] {
-            rules.add(
+            rules.forbid(
                 &format!("{prefix}_{verb}"),
                 &format!(
-                    "forbid (principal, action == Box::Action::{action:?}, resource) when {{ {below} }};"
+                    "(principal, action == Box::Action::{action:?}, resource) when {{ {below} }};"
                 ),
             );
         }
@@ -709,10 +709,10 @@ fn directory_rules(rules: &mut Rules, run: &Run<'_>, prefix: &str, directory: &P
         .collect::<Vec<_>>()
         .join(" || ");
     for (action, verb) in [("fs:move", "move"), ("fs:delete", "delete")] {
-        rules.add(
+        rules.forbid(
             &format!("{prefix}_folder_{verb}"),
             &format!(
-                "forbid (principal, action == Box::Action::{action:?}, resource) when {{ {folders} }};"
+                "(principal, action == Box::Action::{action:?}, resource) when {{ {folders} }};"
             ),
         );
     }
@@ -756,10 +756,10 @@ fn trusted_file_rules(rules: &mut Rules, run: &Run<'_>) {
         ("fs:delete", "delete"),
         ("fs:move", "move"),
     ] {
-        rules.add(
+        rules.forbid(
             &format!("profile_file_{verb}"),
             &format!(
-                "forbid (principal, action == Box::Action::{action:?}, resource) when {{ {} }};",
+                "(principal, action == Box::Action::{action:?}, resource) when {{ {} }};",
                 exactly(&files)
             ),
         );
@@ -768,10 +768,10 @@ fn trusted_file_rules(rules: &mut Rules, run: &Run<'_>) {
         return;
     }
     for (action, verb) in [("fs:move", "move"), ("fs:delete", "delete")] {
-        rules.add(
+        rules.forbid(
             &format!("profile_folder_{verb}"),
             &format!(
-                "forbid (principal, action == Box::Action::{action:?}, resource) when {{ {} }};",
+                "(principal, action == Box::Action::{action:?}, resource) when {{ {} }};",
                 exactly(&parents)
             ),
         );
@@ -790,7 +790,7 @@ fn strings_in(value: Option<&toml::Value>) -> Vec<&str> {
 const MAX_HOSTS_PER_RULE: usize = 100;
 
 /// The `net:connect` and `http:request` permits for each of `destinations`, as `(@id, rule)`, with
-/// `@id`s that start with `prefix`.
+/// `@id`s that start with `prefix` and each rule's text after `permit`.
 fn reach_rules(
     owner: &str,
     prefix: &str,
@@ -845,14 +845,14 @@ fn reach_rules(
         (
             format!("{prefix}_connect"),
             format!(
-                "permit (principal, action == Box::Action::\"net:connect\", resource) when {{ {} }};",
+                "(principal, action == Box::Action::\"net:connect\", resource) when {{ {} }};",
                 any_of(&connect)
             ),
         ),
         (
             format!("{prefix}_request"),
             format!(
-                "permit (principal, action == Box::Action::\"http:request\", resource) when {{ {} }};",
+                "(principal, action == Box::Action::\"http:request\", resource) when {{ {} }};",
                 any_of(&request)
             ),
         ),
@@ -1511,10 +1511,10 @@ fn project_rules(workspace: &str, access: ProjectAccess) -> Rules {
         ],
     };
     for (action, id) in permits {
-        rules.add(
+        rules.permit(
             id,
             &format!(
-                "permit (principal, action == Box::Action::{action:?}, resource) when {{ {} }};",
+                "(principal, action == Box::Action::{action:?}, resource) when {{ {} }};",
                 within(workspace)
             ),
         );
@@ -1527,10 +1527,10 @@ fn project_rules(workspace: &str, access: ProjectAccess) -> Rules {
         ("fs:delete", "project_configuration_delete"),
         ("fs:move", "project_configuration_move"),
     ] {
-        rules.add(
+        rules.forbid(
             id,
             &format!(
-                "forbid (principal, action == Box::Action::{action:?}, resource) when {{ {} }};",
+                "(principal, action == Box::Action::{action:?}, resource) when {{ {} }};",
                 within(&configuration)
             ),
         );
@@ -1583,11 +1583,11 @@ fn deny_write_rules(rules: &mut Rules, folders: &[(String, Vec<String>)]) {
             ("fs:delete", "deny_write_delete"),
             ("fs:move", "deny_write_move"),
         ] {
-            rules.add_described(
+            rules.forbid_described(
                 &format!("{id}_{index}"),
                 DENY_WRITE_DESCRIPTION,
                 &format!(
-                    "forbid (principal, action == Box::Action::{action:?}, resource) when {{ {within} }};"
+                    "(principal, action == Box::Action::{action:?}, resource) when {{ {within} }};"
                 ),
             );
         }
@@ -1603,11 +1603,11 @@ fn deny_write_rules(rules: &mut Rules, folders: &[(String, Vec<String>)]) {
             ("fs:move", "deny_write_parent_move"),
             ("fs:delete", "deny_write_parent_delete"),
         ] {
-            rules.add_described(
+            rules.forbid_described(
                 &format!("{id}_{index}"),
                 DENY_WRITE_DESCRIPTION,
                 &format!(
-                    "forbid (principal, action == Box::Action::{action:?}, resource) when {{ {parents} }};"
+                    "(principal, action == Box::Action::{action:?}, resource) when {{ {parents} }};"
                 ),
             );
         }
@@ -1630,11 +1630,11 @@ fn deny_rules(rules: &mut Rules, paths: &[(String, Vec<String>)]) {
             ("fs:delete", "filesystem_deny_delete"),
             ("fs:move", "filesystem_deny_move"),
         ] {
-            rules.add_described(
+            rules.forbid_described(
                 &format!("{id}_{index}"),
                 DENY_DESCRIPTION,
                 &format!(
-                    "forbid (principal, action == Box::Action::{action:?}, resource) when {{ {within} }};"
+                    "(principal, action == Box::Action::{action:?}, resource) when {{ {within} }};"
                 ),
             );
         }
@@ -1650,11 +1650,11 @@ fn deny_rules(rules: &mut Rules, paths: &[(String, Vec<String>)]) {
             ("fs:move", "filesystem_deny_parent_move"),
             ("fs:delete", "filesystem_deny_parent_delete"),
         ] {
-            rules.add_described(
+            rules.forbid_described(
                 &format!("{id}_{index}"),
                 DENY_DESCRIPTION,
                 &format!(
-                    "forbid (principal, action == Box::Action::{action:?}, resource) when {{ {parents} }};"
+                    "(principal, action == Box::Action::{action:?}, resource) when {{ {parents} }};"
                 ),
             );
         }

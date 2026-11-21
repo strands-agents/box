@@ -454,6 +454,8 @@ fn relay(
             }
         }
         if failed {
+            // A toggle that arrived with the last frame would turn policy off with no banner.
+            input.toggle_policy = false;
             if let Some(policy) = policy {
                 policy.restore()?;
             }
@@ -466,6 +468,7 @@ fn relay(
             dirty = true;
         }
         input.enabled = worker.is_some() && visible;
+        input.banner_running = worker.is_some();
         dirty |= terminal.resizes.pending().next().is_some();
         let requested_size = terminal_size(terminal.input.as_raw_fd())?;
         let rows = if worker.is_none() {
@@ -623,6 +626,7 @@ fn relay(
                 pending_files = Some(panel.files.clone());
             } else {
                 drawn = None;
+                input.banner_shown = false;
                 pending_files = Some(Vec::new());
                 for row in input.native_rows..terminal.size.ws_row {
                     write!(output, "\x1b[{};1H\x1b[0m\x1b[2K", row + 1)?;
@@ -1506,10 +1510,15 @@ mod tests {
             }
             Ok(())
         });
-        // A banner frame is on screen when the test presses Ctrl+\, so the key turns policy off;
-        // without one it reaches the agent.
-        let banner_up = !native && banner_ready.is_some();
-        let expected: &'static [u8] = if banner_up { b"ping\r" } else { b"\x1cping\r" };
+        // With a banner running, Ctrl+\ belongs to `box`: it turns policy off once a frame is on
+        // screen, and does nothing before. Without a banner it reaches the agent.
+        let banner_running = !native && child_rows < size.ws_row;
+        let banner_up = banner_running && banner_ready.is_some();
+        let expected: &'static [u8] = if banner_running {
+            b"ping\r"
+        } else {
+            b"\x1cping\r"
+        };
         let relay_thread = std::thread::spawn(move || {
             relay(
                 &mut terminal,

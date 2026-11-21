@@ -48,8 +48,9 @@ With the activity banner on, **Ctrl+\\** turns off what you add to the policy un
 again: the rules in your policy files, and the shell and Python limits of your profile's
 `[filesystem] deny` and `deny_write`. Then the box allows every operation except what `box` forbids
 for every box, such as changes to the box home, your profile, and `.box`
-([Generated policy](policies-reference.md#generated-policy)), so the run still can't change what a
-later run trusts. The folders and programs set when the run started still limit the agent.
+([Generated policy](policies-reference.md#generated-policy)). A `deny_write` folder is then open to
+the box's shell and Python, so they can change a program in it that a later run runs. The folders
+and programs set when the run started still limit the agent.
 
 A run's records, in `~/.strands/box/r/<box ID>/`, are the box's own decisions for that run, and they
 stay until `box clean` removes the run. They're a plain file on your machine, not a tamper-proof
