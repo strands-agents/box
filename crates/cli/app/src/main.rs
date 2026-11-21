@@ -803,6 +803,7 @@ fn show(name: &str, full: bool, format: OutputFormat, output: &mut dyn Write) ->
             || !preview.mcp_unread.is_empty()
             || !preview.mcp_servers.is_empty()
             || !preview.mcp_dropped.is_empty()
+            || !preview.mcp_unchecked.is_empty()
             || !preview.mcp_path_dropped.is_empty()
             || !preview.mcp_skipped.is_empty())
     {
@@ -825,6 +826,9 @@ fn show(name: &str, full: bool, format: OutputFormat, output: &mut dyn Write) ->
             output,
             format!("dropped {variable} from MCP server {server} (from {file}): {why}"),
         );
+    }
+    for line in preview.mcp_unchecked_lines() {
+        note(output, line);
     }
     for line in &preview.mcp_path_dropped {
         note(output, format!("dropped {line}"));

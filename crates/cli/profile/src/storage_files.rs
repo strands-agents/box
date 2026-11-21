@@ -131,6 +131,11 @@ impl Refusals {
         self.refusal(path, true)
     }
 
+    /// How `path` is or lies in a refused root, as written or real, if it does.
+    pub(crate) fn inside(&self, path: &Path) -> Option<String> {
+        self.refusal(path, false)
+    }
+
     fn refusal(&self, path: &Path, include_contents: bool) -> Option<String> {
         for (root, what) in &self.roots {
             let Some(how) = overlap(path, root) else {

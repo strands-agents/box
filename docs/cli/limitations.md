@@ -323,6 +323,31 @@ opens:
   such as a package that `npx` or `bunx` picks from it. If the agent replaces that package, its
   code runs with the server's keys. A server whose `HOME` is in your project keeps what it writes
   there, such as a cached token, where the agent can read it.
+- **A server's variables can change what code it loads.** A library path, such as `RUBYLIB` or
+  `NODE_PATH`, and runtime options, such as `JDK_JAVA_OPTIONS`, tell a program where to load code
+  from. If one points to a place the agent can write, the agent's code runs with the server's
+  keys. So `box` looks for paths in each value of a server's `env`, whatever the variable is
+  called, except `HOME` and `TMPDIR`. It doesn't declare a server when a path there starts with `./` or `../`, or lies in
+  your project, the run's storage, `~/.strands/box`, or a folder your profile lets the box write.
+  Under a name that ends like the name of a path, such as `RUBYLIB` or `NODE_PATH`, every part of
+  the value must be a full path.
+
+  `box` can't find every path. These pass, so check them yourself:
+
+  - A plain word or a path with no `./` in front, such as `lib`, `lib/ruby`, or `@options.txt`,
+    under a name that doesn't end like the name of a path. A program looks for it in your project.
+  - A part that starts with `~/` and that the agent's settings don't fill in. `box` takes it as
+    your home folder, but a program that doesn't fill it in looks in your project.
+  - A variable that the agent's settings don't fill in, such as `$HOME/lib`.
+  - Options. In a value that opens with `-`, `box` checks only the full paths. It declares the
+    server and names the variable:
+
+    ```text
+    box: did not check JDK_JAVA_OPTIONS of MCP server build (from ~/.claude.json): it opens as options do, and box checks only the full paths in it. An option that loads code by a path that is not a full path loads it from the workspace, where the agent can write, with the server's keys
+    ```
+
+  Write each file and folder in a server's `env` as a full path outside the places the agent can
+  write.
 - **Launcher caches are shared across projects.** Servers started with `npx`, `uvx`, `bunx`, or
   `pnpx` share one cache in the profile's storage, so a server in one project can run code that a
   server in another project cached

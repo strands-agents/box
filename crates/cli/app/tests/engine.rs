@@ -1642,6 +1642,7 @@ fn show_format_json_prints_one_document_with_what_the_text_and_full_print() {
             "unstarted",
             "servers",
             "dropped",
+            "unchecked",
             "path_dropped",
             "skipped",
             "unread"
