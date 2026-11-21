@@ -60,6 +60,15 @@ and MCP servers reach every file the profile grants them, and the run history do
 [Where file rules apply](file-rules.md) shows how to keep a file from every process, and what
 native filesystem policy will change.
 
+## Broad write rules reach past what box protects
+
+`box` refuses a filesystem `write` grant over the places a later run trusts, such as
+`~/.local/bin` and its own install folders, and its own rules keep the box's shell out of them.
+But it doesn't check the rules in your policy. A rule that permits writes across your home lets
+the shell change the rest of it, such as another folder on your `PATH` or an agent's settings,
+with no warning. Keep write rules to the folders the agent needs, or add a `forbid` beside a broad
+one ([Keep write rules narrow](policies.md#keep-write-rules-narrow)).
+
 ## The agent can plant code that runs outside the box later
 
 The agent can change any file in your project, unless the profile's `[project] access` is
