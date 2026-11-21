@@ -11,6 +11,10 @@ pub(super) struct Input {
     pub(super) enabled: bool,
     pub(super) navigation: usize,
     pub(super) toggle_policy: bool,
+    /// Whether a banner frame, which shows the policy state, is on screen.
+    pub(super) banner_shown: bool,
+    /// Whether the run has a banner that has not failed, so Ctrl+\ belongs to `box`.
+    pub(super) banner_running: bool,
     pub(super) reload_policy: bool,
     pub(super) reload_available: bool,
     pending: Vec<u8>,
@@ -42,6 +46,8 @@ impl Input {
             enabled: true,
             navigation: 0,
             toggle_policy: false,
+            banner_shown: false,
+            banner_running: true,
             reload_policy: false,
             reload_available: false,
             pending: Vec::new(),
@@ -137,11 +143,12 @@ impl Input {
             }
             return;
         }
-        // Ctrl+\ requests a policy toggle.
+        // Ctrl+\ requests a policy toggle while a banner frame shows the policy state. With a
+        // banner that is not drawn yet the key does nothing; without a banner it reaches the agent.
         let policy_toggle = bytes == b"\x1c"
             || report.is_some_and(|(code, modifiers, _)| code == 92 && modifiers == 5);
-        if policy_toggle {
-            if report.is_none_or(|(_, _, event)| event == 1) {
+        if policy_toggle && self.banner_running {
+            if self.enabled && self.banner_shown && report.is_none_or(|(_, _, event)| event == 1) {
                 self.toggle_policy = !self.toggle_policy;
             }
             return;
@@ -520,6 +527,7 @@ mod tests {
     fn policy_shortcut_toggles_and_ignores_repeats_and_releases() {
         for key in [b"\x1c".as_slice(), b"\x1b[92;5u", b"\x1b[27;5;92~"] {
             let mut input = Input::new();
+            input.banner_shown = true;
             let mut agent = Vec::new();
             for byte in key {
                 input.route(&[*byte], &mut agent);
@@ -529,13 +537,36 @@ mod tests {
                 input.route(event, &mut agent);
                 assert!(input.toggle_policy);
             }
-            input.enabled = false;
             input.route(key, &mut agent);
-            assert!(!input.toggle_policy);
-            input.route(&[key, key].concat(), &mut agent);
             assert!(!input.toggle_policy);
             assert!(input.minimized);
             assert!(agent.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_run_without_a_banner_forwards_the_policy_shortcut_to_the_agent() {
+        let mut input = Input::new();
+        input.banner_running = false;
+        input.enabled = false;
+        let mut agent = Vec::new();
+        let keys = b"\x1c\x1b[92;5u\x1b[92;5:2u\x1b[92;5:3u\x1b[27;5;92~";
+        input.route(keys, &mut agent);
+        assert!(!input.toggle_policy);
+        assert_eq!(agent, keys);
+    }
+
+    #[test]
+    fn a_banner_not_drawn_yet_drops_the_policy_shortcut() {
+        for (enabled, banner_shown) in [(false, false), (false, true), (true, false)] {
+            let mut input = Input::new();
+            input.enabled = enabled;
+            input.banner_shown = banner_shown;
+            let mut agent = Vec::new();
+            let keys = b"\x1c\x1b[92;5u\x1b[92;5:2u\x1b[92;5:3u\x1b[27;5;92~";
+            input.route(keys, &mut agent);
+            assert!(!input.toggle_policy, "{enabled} {banner_shown}");
+            assert!(agent.is_empty(), "{enabled} {banner_shown}: {agent:?}");
         }
     }
 

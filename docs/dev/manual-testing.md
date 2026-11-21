@@ -196,6 +196,9 @@ the banner again. Type and paste a prompt, and resize the terminal while the age
 the cursor remains in the agent area and that pasted control characters do not toggle the banner.
 Press **Ctrl+\\** to turn policy off, then click `Ctrl+\ policy on/off` to restore it without restarting
 the agent. Check that `POLICY OFF` stays visible and `POLICY ON` disappears after five seconds.
+With policy off, run `bash -c 'echo >> ~/.strands/box/profiles/<profile>/policy.dw'` in the box and
+check that it is denied by `box_home_write`. Run again with `--no-banner`, press **Ctrl+\\**, and
+check that the agent gets the key and `box runs history` shows no `policy off` row.
 In the expanded banner, check that the activity heading and count stay aligned with the table
 through both toggles and notice expiry. Repeat the clicks and keyboard checks in both banner sizes
 and with `NO_COLOR=1`. The copy notice remains readable without color.
