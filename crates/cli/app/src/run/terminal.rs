@@ -21,10 +21,12 @@ use crate::error::Error;
 use alacritty_terminal::term::{ClipboardType, TermMode};
 use emulator::Emulator;
 use input::Input;
+use log::Log;
 use mouse::Mouse;
 
 mod emulator;
 mod input;
+mod log;
 mod mouse;
 mod native;
 
@@ -34,7 +36,6 @@ const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const DECISION_CAPACITY: usize = 8 * 1024;
 /// The most policy decisions the banner takes before it draws a frame.
 const DECISIONS_PER_FRAME: usize = 8 * 1024;
-const DIAGNOSTIC_LIMIT: usize = 32 * 1024;
 
 pub(super) fn attached() -> bool {
     io::stdin().is_terminal()
@@ -49,6 +50,7 @@ fn terminal_error(source: io::Error) -> Error {
 
 pub(super) fn run(
     launch: &Launch,
+    keep_run: &mut bool,
     execute: impl for<'a> FnOnce(strands_box::RunOptions<'a>) -> ExitCode,
 ) -> Result<ExitCode, Error> {
     let mut terminal = Terminal::new().map_err(terminal_error)?;
@@ -97,14 +99,14 @@ pub(super) fn run(
         duplicate(2).map_err(terminal_error)?,
     ];
     let (reader, writer) = nix::unistd::pipe().map_err(|error| terminal_error(error.into()))?;
-    let mut diagnostics = File::from(reader);
+    let mut diagnostics = Log::open(launch, File::from(reader));
     let writer = File::from(writer);
-    for fd in [&diagnostics, &writer] {
+    for fd in [&diagnostics.input, &writer] {
         if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
             return Err(terminal_error(io::Error::last_os_error()));
         }
     }
-    let mut fallback = diagnostics.try_clone().map_err(terminal_error)?;
+    let mut fallback = diagnostics.input.try_clone().map_err(terminal_error)?;
     let mut restore = None;
     let (sender, decisions) = strands_box::policy_decisions(DECISION_CAPACITY);
     let profile = launch.profile_name.clone();
@@ -149,11 +151,12 @@ pub(super) fn run(
                                 libc::kill(libc::getpid(), libc::SIGTERM);
                             }
                             drop(master);
-                            let _ = io::copy(&mut diagnostics, &mut io::sink());
+                            let _ = io::copy(&mut diagnostics.input, &mut io::sink());
                         }
-                        result
+                        result.map(|()| diagnostics)
                     })?,
             );
+            *keep_run = true;
             restore = Some(redirect);
             launch.report();
             Ok(())
@@ -164,19 +167,17 @@ pub(super) fn run(
     drop(restore);
     match ui {
         Some(thread) => {
-            let (startup, diagnostics) = thread
+            let diagnostics = thread
                 .join()
                 .map_err(|_| terminal_error(io::Error::other("terminal relay panicked")))?
                 .map_err(terminal_error)?;
-            let reporting_deadline = Instant::now() + OUTPUT_DRAIN_TIMEOUT;
-            if code != ExitCode::SUCCESS
-                && write_until(&mut reporting, &startup, reporting_deadline).is_err()
-            {
-                return Ok(ExitCode::FAILURE);
-            }
-            if write_until(&mut reporting, &diagnostics, reporting_deadline).is_err() {
-                return Ok(ExitCode::FAILURE);
-            }
+            let report = diagnostics.report(launch);
+            let deadline = Instant::now() + OUTPUT_DRAIN_TIMEOUT;
+            let _ = write_until(
+                &mut reporting,
+                &diagnostic_text(report.as_bytes()),
+                deadline,
+            );
         }
         None => {
             let _ = io::copy(&mut fallback, &mut io::stderr());
@@ -355,11 +356,11 @@ fn relay(
     terminal: &mut Terminal,
     master: &mut File,
     workload_terminal: File,
-    diagnostics: &mut File,
+    diagnostics: &mut Log,
     policy: Option<&PolicyControl>,
     profile: &str,
     start_banner: impl FnOnce(BannerRequest) -> io::Result<BannerWorker>,
-) -> io::Result<(Vec<u8>, Vec<u8>)> {
+) -> io::Result<()> {
     use super::history::ActivityView;
     use std::sync::mpsc::TryRecvError;
     #[derive(PartialEq)]
@@ -391,15 +392,10 @@ fn relay(
         policy: PolicyStatus::default(),
         copied: None,
     };
-    let mut delayed_diagnostics = Vec::new();
-    let mut startup_diagnostics = Vec::new();
     let mut worker = match (!native).then(|| start_banner(initial)) {
         Some(Ok(worker)) => Some(worker),
         Some(Err(error)) => {
-            append_diagnostics(
-                &mut delayed_diagnostics,
-                format!("box: banner disabled: {error}\n").as_bytes(),
-            );
+            diagnostics.push(format!("box: banner disabled: {error}\n").as_bytes());
             None
         }
         None => None,
@@ -434,18 +430,12 @@ fn relay(
                         panel = Some(next);
                     }
                     Ok(Err(error)) => {
-                        append_diagnostics(
-                            &mut delayed_diagnostics,
-                            format!("box: banner disabled: {error}\n").as_bytes(),
-                        );
+                        diagnostics.push(format!("box: banner disabled: {error}\n").as_bytes());
                         failed = true;
                         break;
                     }
                     Err(TryRecvError::Disconnected) => {
-                        append_diagnostics(
-                            &mut delayed_diagnostics,
-                            b"box: banner disabled: worker stopped\n",
-                        );
+                        diagnostics.push(b"box: banner disabled: worker stopped\n");
                         failed = true;
                         break;
                     }
@@ -509,9 +499,8 @@ fn relay(
             for (status, error) in policy.changes.try_iter() {
                 policy_status = status;
                 if let Some(error) = error {
-                    let text =
-                        diagnostic_text(format!("box: policy update failed: {error}\n").as_bytes());
-                    append_diagnostics(&mut delayed_diagnostics, &text);
+                    diagnostics
+                        .push(format!("box: error: policy update failed: {error}\n").as_bytes());
                 }
             }
         }
@@ -665,7 +654,7 @@ fn relay(
                 if finishing {
                     termios::tcsetattr(&terminal.input, SetArg::TCSANOW, &terminal.original)?;
                     terminal.active = false;
-                    return Ok((startup_diagnostics, delayed_diagnostics));
+                    return Ok(());
                 }
                 let hidden = !visible && phase != DisplayPhase::Ready && !content_ready;
                 if hidden && (native_startup.is_some() || !native) {
@@ -684,11 +673,10 @@ fn relay(
             let deadline =
                 drain_deadline.get_or_insert_with(|| Instant::now() + OUTPUT_DRAIN_TIMEOUT);
             if Instant::now() >= *deadline {
-                append_diagnostics(
-                    &mut delayed_diagnostics,
-                    b"box: terminal output stayed blocked; final screen was not fully written\n",
+                diagnostics.push(
+                    b"box: error: terminal output stayed blocked; final screen was not fully written\n",
                 );
-                return Ok((startup_diagnostics, delayed_diagnostics));
+                return Ok(());
             }
         }
         let mut fds = [
@@ -734,7 +722,7 @@ fn relay(
                 fd: if diagnostics_closed {
                     -1
                 } else {
-                    diagnostics.as_raw_fd()
+                    diagnostics.input.as_raw_fd()
                 },
                 events: libc::POLLHUP
                     | if phase == DisplayPhase::Agent || output.len() < INPUT_LIMIT {
@@ -796,20 +784,13 @@ fn relay(
             }
         }
         if fds[2].revents != 0 {
-            match diagnostics.read(&mut bytes) {
+            match diagnostics.input.read(&mut bytes) {
                 Ok(0) => {
                     diagnostics_closed = true;
                     pending_input.close();
                 }
                 Ok(n) => {
-                    let text = diagnostic_text(&bytes[..n]);
-                    if phase == DisplayPhase::Agent {
-                        append_diagnostics(&mut delayed_diagnostics, &text);
-                    } else {
-                        startup_diagnostics.extend_from_slice(&text);
-                        let excess = startup_diagnostics.len().saturating_sub(DIAGNOSTIC_LIMIT);
-                        startup_diagnostics.drain(..excess);
-                    }
+                    diagnostics.push(&bytes[..n]);
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
@@ -928,11 +909,6 @@ fn diagnostic_text(bytes: &[u8]) -> Vec<u8> {
         }
     }
     text
-}
-
-fn append_diagnostics(buffer: &mut Vec<u8>, bytes: &[u8]) {
-    let room = DIAGNOSTIC_LIMIT.saturating_sub(buffer.len());
-    buffer.extend_from_slice(&bytes[..bytes.len().min(room)]);
 }
 
 enum InputSource {
@@ -1325,7 +1301,7 @@ mod tests {
             let workload_terminal = child.try_clone().unwrap();
             nonblocking(&master);
             let (read, write) = nix::unistd::pipe().unwrap();
-            let mut diagnostics = File::from(read);
+            let mut diagnostics = Log::new(File::from(read), tempfile::tempfile());
             let producer = if slow {
                 Some(std::thread::spawn(move || {
                     for row in 0..1500 {
@@ -1365,7 +1341,7 @@ mod tests {
                         })
                     },
                 );
-                (result, terminal)
+                (result.map(|()| diagnostics), terminal)
             });
             let started = Instant::now();
             let mut last_output = started;
@@ -1396,7 +1372,8 @@ mod tests {
             }
             let error = host.read_to_end(&mut output).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-            assert_eq!(result.unwrap(), (Vec::new(), Vec::new()));
+            let mut diagnostics = result.unwrap();
+            assert!(diagnostics.preview().is_empty());
             assert!(!terminal.active);
             if !slow {
                 assert_eq!(
@@ -1495,7 +1472,7 @@ mod tests {
         let size = terminal.size;
         let (read, write) = nix::unistd::pipe().unwrap();
         let mut core_output = File::from(write);
-        let mut diagnostics = File::from(read);
+        let mut diagnostics = Log::new(File::from(read), tempfile::tempfile());
         let _host_lifetime = terminal.output.try_clone().unwrap();
         let (ready, readiness) = mpsc::channel();
         let (toggled, toggles) = mpsc::channel();
@@ -1529,6 +1506,7 @@ mod tests {
                 "test",
                 start,
             )
+            .map(|()| diagnostics)
         });
         let native_bytes = b"\x1b[?u\x1b]52;c;?\x07\x1b_Ga=q;AAAA\x1b\\";
         let child_thread = std::thread::spawn(move || {
@@ -1594,7 +1572,7 @@ mod tests {
         let mut output = Vec::new();
         let mut child_ready = false;
         let mut bytes = [0; 8192];
-        let (startup, mut result) = loop {
+        let mut result = loop {
             assert!(
                 Instant::now() < deadline,
                 "relay did not finish after child EOF"
@@ -1655,8 +1633,13 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(2));
         };
+        use std::io::Seek as _;
+        let mut report = String::new();
+        let file = result.output.as_mut().unwrap();
+        file.rewind().unwrap();
+        file.read_to_string(&mut report).unwrap();
         assert!(
-            startup.ends_with(b"CORE_START\r\n"),
+            report.contains("CORE_START\n"),
             "startup stderr was not captured"
         );
         assert!(
@@ -1671,12 +1654,13 @@ mod tests {
                 .any(|bytes| bytes == b"CORE_LIVE"),
             "Core messages reached the agent display"
         );
-        let live = diagnostic_text(&b"\nCORE_LIVE\n".repeat(16));
-        let saved = result
-            .windows(live.len())
-            .position(|bytes| bytes == live.as_slice())
-            .unwrap();
-        result.drain(saved..saved + live.len());
+        assert_eq!(report.matches("CORE_LIVE").count(), 16);
+        let result = report
+            .replace(&" ".repeat(33 * 1024), "")
+            .replace("CORE_START\n", "")
+            .replace(&"\nCORE_LIVE\n".repeat(16), "")
+            .trim()
+            .to_string();
         while let Ok(n) = host.read(&mut bytes) {
             if n == 0 {
                 break;
@@ -1713,7 +1697,7 @@ mod tests {
             contents.contains("DONE"),
             "synchronized output lost at EOF: {contents}"
         );
-        (result, policies)
+        (result.into_bytes(), policies)
     }
 
     #[test]
@@ -1723,7 +1707,7 @@ mod tests {
         let size = terminal.size;
         let _host_lifetime = terminal.output.try_clone().unwrap();
         let (read, core_output) = nix::unistd::pipe().unwrap();
-        let mut diagnostics = File::from(read);
+        let mut diagnostics = Log::new(File::from(read), tempfile::tempfile());
         let scene = super::super::policy::tests::Scene::new();
         let policy = scene.start(|_| Ok(()));
         let worker = std::thread::spawn(move || {
@@ -2089,15 +2073,6 @@ mod tests {
             assert!(pending.is_empty());
             assert_eq!((pending.keyboard, pending.replies), (0, 0));
         }
-    }
-
-    #[test]
-    fn diagnostic_storage_is_bounded_and_retains_the_first_error() {
-        let mut diagnostics = Vec::new();
-        append_diagnostics(&mut diagnostics, b"first error\n");
-        append_diagnostics(&mut diagnostics, &vec![b'x'; 40 * 1024]);
-        assert_eq!(diagnostics.len(), 32 * 1024);
-        assert!(diagnostics.starts_with(b"first error\n"));
     }
 
     #[test]

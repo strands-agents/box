@@ -208,6 +208,10 @@ Check that the pasted text matches the selection, including wrapped lines and Un
 Scroll to earlier agent output, select text there, and check the pasted text.
 Scroll back down, then scroll up and type or paste to return to the prompt.
 After exit, check that the shell accepts input and has its default cursor style and mouse behavior.
+Check that the agent's final output remains above a blank line, any Box error preview,
+the `box.log` path, another blank line, and reuse instructions. Error headlines are indented.
+Read the file to check that captured warnings and omitted error details are saved.
+A run with no Box errors prints the log path and reuse instructions without a preview.
 
 Repeat with `--no-banner`. Neither display shows startup logs on a successful run. Then put
 `[banner]` with `enabled = false` in the profile and check that a run without a flag has no

@@ -153,8 +153,15 @@ holds the settings and rules the run used (`box.toml` and `policy.dw`), a record
 allowed and stopped (`records.jsonl`), and the box's own state. The box ID lets you
 [run in the same box again](cli.md#run-in-the-same-box-again).
 
-A new run that fails before the box starts leaves no folder. Every other run folder stays until you
-clean it up, and storage stays until you delete it.
+At a terminal, `box.log` saves the Box messages the CLI receives, including repeats, while the
+agent's output stays on the terminal. Only your account can read the file, and reusing a box
+appends to it. The file has no size limit or automatic cleanup. Output discarded before it
+reaches the CLI, a storage failure, or a forced stop can leave it incomplete.
+The [exit preview](cli.md#box-run) points to it.
+
+A new run that fails before the box starts leaves no folder unless its terminal session has
+started, with or without a banner. That run stays so you can inspect its saved files and reuse it.
+Every other run folder stays until you clean it up, and storage stays until you delete it.
 
 Two more items in `~/.strands/box` need no edits. `installation.toml` holds the choice made with
 `box telemetry` and the random ID that [usage telemetry](../../CLI_TELEMETRY.md) sends. `packages/`

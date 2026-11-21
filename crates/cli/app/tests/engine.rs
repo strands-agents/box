@@ -3883,6 +3883,80 @@ fn a_new_run_refused_for_path_length_leaves_no_run_folder() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn a_startup_failure_at_a_terminal_keeps_its_log_and_reuse_id() {
+    use std::io::Read as _;
+    use std::os::unix::process::CommandExt as _;
+
+    let scene = Scene::new();
+    let long = long_box_home(&scene, 66);
+    let mut command = scene.command_with(
+        &scene.workspace(),
+        "probe",
+        &["--no-banner"],
+        &["-c", "true"],
+    );
+    command.env("BOX_HOME", &long);
+    let size = nix::pty::Winsize {
+        ws_row: 40,
+        ws_col: 200,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let pair = nix::pty::openpty(Some(&size), None).unwrap();
+    let mut output = std::fs::File::from(pair.master);
+    let terminal = std::fs::File::from(pair.slave);
+    command
+        .env("TERM", "xterm-256color")
+        .stdin(terminal.try_clone().unwrap())
+        .stdout(terminal.try_clone().unwrap())
+        .stderr(terminal);
+    // SAFETY: only async-signal-safe terminal setup runs between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            if nix::libc::setsid() < 0 || nix::libc::ioctl(0, nix::libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn().unwrap();
+    drop(command);
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = Vec::new();
+        // A closed PTY can finish with EIO.
+        let _ = output.read_to_end(&mut text);
+        let _ = sent.send(text);
+    });
+    let result = wait_for_output(child);
+    let text = received.recv_timeout(Duration::from_secs(5)).unwrap();
+    let text = String::from_utf8_lossy(&text);
+    assert_eq!(result.status.code(), Some(1));
+    let runs: Vec<_> = std::fs::read_dir(long.join("r"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(runs.len(), 1, "the announced run must remain\n{text}");
+    let run = &runs[0];
+    assert!(run.join("box").is_dir(), "the run must remain reusable");
+    assert!(text.contains(&format!("box run probe --box-id {}", box_id(run))));
+    let report = run.join("box.log");
+    assert!(text.contains(&format!("box: full log: {}", report.display())));
+    assert!(
+        text.replace('\r', "")
+            .contains("\nbox: recent log output\n  strands-box: error: "),
+        "{text}",
+    );
+    assert!(!text.contains("box: running profile"), "{text}");
+    assert!(
+        std::fs::read_to_string(report)
+            .unwrap()
+            .contains("its broker socket path exceeds the platform limit")
+    );
+}
+
+#[test]
 fn a_folder_too_deep_for_any_profile_name_is_left_to_box_core() {
     let scene = Scene::new();
     let long = long_box_home(&scene, 100);
