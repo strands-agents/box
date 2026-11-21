@@ -66,7 +66,9 @@ run, and keeps your `chat.defaultAgent` from `cli.json`. `kiro-cli agent list` i
 your agents, and each agent's `allowedTools` and `toolsSettings` decide what Kiro CLI asks about, as
 on your machine. The default agent comes in with the first copy of `cli.json`, so for a profile that
 already ran, delete `home/.kiro/settings/cli.json` in the profile's storage folder,
-`~/.strands/box/storage/<profile>/default/agent/`, before the next run.
+`~/.strands/box/storage/<profile>/default/agent/`, before the next run. Turning the input off again
+leaves the copied agents in the box, with any keys in their files: to take them out, set it to
+`false` and delete `home/.kiro/agents` and `home/.kiro/settings/cli.json` in that folder.
 
 It is off by default, because each agent's file comes in whole:
 
