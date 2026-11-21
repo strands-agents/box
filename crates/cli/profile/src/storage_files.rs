@@ -758,10 +758,27 @@ fn make(staging: &Path, plan: &Plan, file: &StorageFile) -> Result<Vec<(PathBuf,
                     std::io::copy(&mut input, &mut output)
                         .map_err(|source| io_error("write", &path, source))?;
                 }
+                #[cfg(test)]
+                AFTER_EACH_FILE.with(|hook| {
+                    if let Some(hook) = &*hook.borrow() {
+                        hook(from);
+                    }
+                });
             }
         }
     }
     Ok(made)
+}
+
+/// A test's step that [`make`] runs after it copies each host file, so a test can change a host
+/// file in the middle of a copy.
+#[cfg(test)]
+type AfterEachFile = Option<Box<dyn Fn(&Path)>>;
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_EACH_FILE: std::cell::RefCell<AfterEachFile> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Apply each `set` row of `file` to its copy in storage. `box` opens each directory from the
@@ -1533,6 +1550,34 @@ mod tests {
         assert_eq!(plan.changed(), None);
         std::fs::write(&database, "db 1, and a page").expect("a write");
         assert_eq!(plan.changed(), Some(database.as_path()));
+    }
+
+    #[test]
+    fn a_file_that_changes_after_box_copied_it_fails_the_copy_and_nothing_reaches_storage() {
+        let fixture = Fixture::new();
+        let database = fixture.write(".kiro/memories/memories.db", "db 1");
+        fixture.write(".kiro/memories/memories.db-wal", "wal 1");
+        let file = fixture.row(".kiro/memories", "home/.kiro/memories");
+        let plan = fixture.plan(&file);
+        // The open-time check has passed for the database by now, so only the check at the end
+        // of the copy can see this write.
+        let written = database.clone();
+        AFTER_EACH_FILE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |from: &Path| {
+                if from == written.as_path() {
+                    std::fs::write(&written, "db 1, and a page").expect("a write");
+                }
+            }));
+        });
+        let copied = copy(&file, &plan, &fixture.staging(), &fixture.home);
+        AFTER_EACH_FILE.with(|hook| hook.borrow_mut().take());
+        let error = copied.expect_err("a change");
+        assert!(
+            matches!(&error, Error::Changed { path } if *path == database),
+            "{error}"
+        );
+        assert!(!file.target.exists(), "nothing reaches storage");
+        assert!(!fixture.staging().exists(), "the staging folder is removed");
     }
 
     #[test]

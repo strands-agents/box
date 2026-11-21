@@ -1,7 +1,7 @@
 use crate::support::*;
 
 #[test]
-fn a_kiro_run_brings_in_the_model_and_default_agent_but_not_the_engine_and_turns_off_updates_and_the_trust_all_question()
+fn a_kiro_run_brings_in_the_model_but_not_the_engine_and_turns_off_updates_and_the_trust_all_question()
  {
     let host = FakeHost::new();
     host.profile()
@@ -36,7 +36,6 @@ fn a_kiro_run_brings_in_the_model_and_default_agent_but_not_the_engine_and_turns
         serde_json::json!({
             "chat.defaultModel": "auto",
             "chat.enableContextUsageIndicator": true,
-            "chat.defaultAgent": "team-agent",
             "app.disableAutoupdates": true,
             "chat.disableTrustAllConfirmation": true,
         })
@@ -76,10 +75,31 @@ fn kiro_agent_storage(host: &FakeHost) -> std::path::PathBuf {
 }
 
 #[test]
-fn a_kiro_run_copies_each_agent_whole_and_keeps_the_default_agent() {
+fn a_kiro_run_leaves_the_hosts_agents_and_default_agent_out_unless_import_agents_is_on() {
     let host = FakeHost::new();
     host.profile()
         .with("kiro")
+        .create()
+        .expect("a profile")
+        .write(false)
+        .expect("a write");
+    write_host_agent(&host);
+    host.launcher()
+        .prepare("kiro", &host.project(), None)
+        .expect("a launch");
+    let storage = kiro_agent_storage(&host);
+    assert!(!storage.join("agents").exists());
+    let settings = std::fs::read_to_string(storage.join("settings/cli.json")).expect("settings");
+    assert!(!settings.contains("chat.defaultAgent"), "{settings}");
+    assert!(settings.contains("chat.defaultModel"), "{settings}");
+}
+
+#[test]
+fn a_kiro_run_with_import_agents_copies_each_agent_whole_and_keeps_the_default_agent() {
+    let host = FakeHost::new();
+    host.profile()
+        .with("kiro")
+        .option("kiro.import-agents", "true")
         .create()
         .expect("a profile")
         .write(false)
@@ -94,7 +114,7 @@ fn a_kiro_run_copies_each_agent_whole_and_keeps_the_default_agent() {
     )
     .expect("JSON");
     assert_eq!(agent["allowedTools"], serde_json::json!(["fs_read"]));
-    // A folder copy cannot drop keys, as with Claude Code's and Codex's agent folders.
+    // A folder copy cannot drop keys: this is the trade-off that the input's warning states.
     assert!(agent.get("hooks").is_some());
     assert!(agent.get("mcpServers").is_some());
     let settings: serde_json::Value = serde_json::from_str(

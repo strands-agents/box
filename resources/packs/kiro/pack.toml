@@ -51,6 +51,20 @@ description = "The folder that holds Kiro CLI's unpacked runtime. The box reads 
 from = "env:KIRO_RUNTIME_DIR"
 default = "${{ home }}/.kiro-runtime"
 
+# A folder copy cannot drop keys, so each agent's file comes in whole, with its `hooks` and
+# `mcpServers`. [[storage.hooks]] and [[mcp-servers]] take one file and refuse a folder, and Kiro
+# keeps one file per agent, so the box's checks of hooks and MCP servers do not reach them yet.
+# That is why the input is off by default, as kiro.import-mcp is
+# (docs/design/cli/decisions.md#a-pack-names-where-its-agents-mcp-servers-are).
+[inputs.kiro.import-agents]
+description = "Copy and update your custom agents in ~/.kiro/agents, and your default agent, in the box."
+type = "bool"
+default = false
+warning = """Each agent's file comes in whole, with its hooks and its MCP servers, and Box checks neither.
+The agent can read any key in an agent's mcpServers.
+Kiro CLI starts a hook through /bin/sh, which the box does not run, so a hook does not run.
+An agent's own tool settings decide only what Kiro asks about. Box's policy still decides each action."""
+
 # A power's mcp.json names programs that Kiro starts, and its env and headers can hold keys. The
 # box's checks of MCP servers ([[mcp-servers]]) read one file at a known key, not a folder of
 # powers, so the copy leaves each mcp.json out until that import can route a power's servers.
@@ -112,9 +126,9 @@ source = "${{ pack }}/box.md"
 target = "home/.kiro/steering/box.md"
 sync = true
 
-# Your own instructions, skills, prompts, and agents, copied into storage on the profile's first
-# run and brought up to date with the host on each run after it. A box's edit stays until the
-# host's file changes.
+# Your own instructions, skills, and prompts, copied into storage on the profile's first run and
+# brought up to date with the host on each run after it. A box's edit stays until the host's file
+# changes.
 [[storage.files]]
 source = "${{ home }}/.kiro/steering"
 target = "home/.kiro/steering/host"
@@ -171,24 +185,26 @@ sync = true
 exclude = ["mcp.json"]
 when = { variable = "inputs.kiro.import-powers", equals = "true" }
 
-# Each agent's file comes in whole, as Claude Code's and Codex's agent folders do. Its `hooks` and
-# `mcpServers` come in unchecked: [[storage.hooks]] and [[mcp-servers]] read one file, and Kiro
-# keeps one file per agent. Kiro starts a hook through /bin/sh, which the box does not run, so no
-# hook runs. A local MCP server runs in the box with its policy, and a remote one's host stays
-# closed until a route opens it.
+# Your custom agents, each in its own file, copied into storage on the profile's first run and
+# brought up to date with the host on each run after it. A box's edit stays until the host's file
+# changes. Each file comes in whole: see kiro.import-agents.
 [[storage.files]]
 source = "${{ home }}/.kiro/agents"
 target = "home/.kiro/agents"
 optional = true
 sync = true
+when = { variable = "inputs.kiro.import-agents", equals = "true" }
 
-# Your model and your default agent. Not chat.agentEngine: the command names V3.
+# Your model. Not chat.agentEngine: the command names V3. chat.defaultAgent comes in only with
+# kiro.import-agents: without the agent's file in the box, Kiro would name an agent it cannot find.
+# The next row is the same row with that key, so only one of the two applies.
 [[storage.files]]
 source = "${{ home }}/.kiro/settings/cli.json"
 target = "home/.kiro/settings/cli.json"
 kind = "json"
 optional = true
-keep = [["chat.defaultModel"], ["chat.enableContextUsageIndicator"], ["chat.defaultAgent"]]
+when = { variable = "inputs.kiro.import-agents", equals = "false" }
+keep = [["chat.defaultModel"], ["chat.enableContextUsageIndicator"]]
 
 # An update in the box cannot replace the host's kiro-cli.
 [[storage.files.set]]
@@ -198,6 +214,22 @@ value = true
 # With --trust-all-tools, Kiro asks at each start to accept the mode. agent.skip-permissions is that
 # answer. Without the switch, Kiro never shows the question. A host with no cli.json gets a copy of
 # only these set rows.
+[[storage.files.set]]
+key = ["chat.disableTrustAllConfirmation"]
+value = true
+
+[[storage.files]]
+source = "${{ home }}/.kiro/settings/cli.json"
+target = "home/.kiro/settings/cli.json"
+kind = "json"
+optional = true
+when = { variable = "inputs.kiro.import-agents", equals = "true" }
+keep = [["chat.defaultModel"], ["chat.enableContextUsageIndicator"], ["chat.defaultAgent"]]
+
+[[storage.files.set]]
+key = ["app.disableAutoupdates"]
+value = true
+
 [[storage.files.set]]
 key = ["chat.disableTrustAllConfirmation"]
 value = true

@@ -42,28 +42,39 @@ box run kiro -- chat --no-interactive "Summarize this project"
 
 ## What comes into the box
 
-The first time you run a profile, `box` copies your `~/.kiro/steering`, `~/.kiro/skills`,
-`~/.kiro/prompts`, and `~/.kiro/agents` into the profile's storage, and brings them up to date with
-your machine on each run. Your steering goes into a `host` folder inside the box's steering folder.
-From `~/.kiro/settings/cli.json`, only your model (`chat.defaultModel`), your default agent
-(`chat.defaultAgent`), and `chat.enableContextUsageIndicator` come in. Kiro CLI's memory and your
-powers stay out unless you turn them on: see
-[Bring in Kiro CLI's memory](#bring-in-kiro-clis-memory) and
+The first time you run a profile, `box` copies your `~/.kiro/steering`, `~/.kiro/skills`, and
+`~/.kiro/prompts` into the profile's storage, and brings them up to date with your machine on each
+run. Your steering goes into a `host` folder inside the box's steering folder. From
+`~/.kiro/settings/cli.json`, only your model (`chat.defaultModel`) and
+`chat.enableContextUsageIndicator` come in. Your custom agents, Kiro CLI's memory, and your powers
+stay out unless you turn them on: see
+[Bring in your custom agents](#bring-in-your-custom-agents),
+[Bring in Kiro CLI's memory](#bring-in-kiro-clis-memory), and
 [Bring in your powers](#bring-in-your-powers).
 
-## Your custom agents
+## Bring in your custom agents
 
-`kiro-cli agent list` in the box shows your agents from `~/.kiro/agents`, and each agent's
-`allowedTools` and `toolsSettings` decide what Kiro CLI asks about, as on your machine. Each agent's
-file comes in whole, as Claude Code's and Codex's agent files do:
+Set `kiro.import-agents = true` under `[options]` in the profile's `profile.toml`:
+
+```toml
+[options]
+kiro.import-agents = true
+```
+
+`box` then copies `~/.kiro/agents` into the box, brings it up to date with your machine on each
+run, and keeps your `chat.defaultAgent` from `cli.json`. `kiro-cli agent list` in the box shows
+your agents, and each agent's `allowedTools` and `toolsSettings` decide what Kiro CLI asks about, as
+on your machine. The default agent comes in with the first copy of `cli.json`, so for a profile that
+already ran, delete `home/.kiro/settings/cli.json` in the profile's storage folder,
+`~/.strands/box/storage/<profile>/default/agent/`, before the next run.
+
+It is off by default, because each agent's file comes in whole:
 
 - **Hooks.** Kiro CLI 3.5.0 starts each hook through `/bin/sh` and ignores `SHELL`. A box does not
   run `/bin/sh`, so no hook in an agent runs.
-- **MCP servers.** `box` does not check an agent's `mcpServers`. A local server runs in the box under
-  its policy, with the keys in the agent's file, and the agent can read them. A remote server's host
-  stays unreachable until the profile allows it. Keep keys out of an agent's `mcpServers`: Kiro CLI
-  reads `${VAR}` in a server's `env`, so `"GITHUB_TOKEN": "${GITHUB_TOKEN}"` takes the value from
-  the environment instead of the file.
+- **MCP servers.** `box` does not check or declare an agent's `mcpServers`, and the agent can read
+  any key in them. Keep keys out of the file: Kiro CLI reads `${VAR}` in a server's `env`, so
+  `"GITHUB_TOKEN": "${GITHUB_TOKEN}"` takes the value from the environment instead.
 - **The box still decides.** An agent's tool settings change what Kiro CLI asks about, not what the
   box allows. A profile's policy decides each action.
 
@@ -166,8 +177,9 @@ program, or host, and show the change to make in `profile.toml`.
 
 ## How Kiro CLI asks before it acts
 
-Kiro CLI asks before it runs a tool, as your default agent does on your machine. Your own agents in
-`~/.kiro/agents` come into the box, so their tool settings apply.
+Kiro CLI asks before it runs a tool, as its default agent does on your machine. Your own agents in
+`~/.kiro/agents` don't come into the box unless `kiro.import-agents` is on, so their tool settings
+don't apply.
 
 With `agent.skip-permissions = true` under `[options]` in a Kiro CLI profile, it starts with
 `--trust-all-tools` and runs every tool without asking. That option belongs to Kiro CLI's `chat`, so
