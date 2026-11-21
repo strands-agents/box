@@ -151,8 +151,9 @@ interactive change works. When the operator asks how to try a change by hand, po
 changes. `scripts/try-build.sh <pr|main>` runs the build that CI made for a pull request or for
 `main`, so a reviewer can try a change without building it.
 
-`scripts/macos-release-cli.py` signs and notarizes the macOS build of `box`. No workflow calls it
-yet. Its `NATIVE_LAUNCHER` is the launcher that a test in `resources.rs` installs.
+`scripts/macos-release-cli.py` signs and notarizes the macOS build of `box`. The reusable
+`.github/workflows/cli-release.yml` calls it, and `Release Box` calls that workflow. Its
+`NATIVE_LAUNCHER` is the launcher that a test in `resources.rs` installs.
 
 ## Working principles
 

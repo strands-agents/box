@@ -82,8 +82,8 @@ interpreters and keep those files out of the agent's direct grants. See
 A profile names the agent, its tools, and what it may reach, and `box` turns it into the box's
 configuration and policies on each run. Its source is in [`crates/cli/`](crates/cli/), with the
 packs, policies, and starters it ships in [`resources/`](resources/). Its user guide starts at
-[docs/cli/README.md](docs/cli/README.md). To build it, run `just build-cli`; the programs are in
-`target/debug`.
+[docs/cli/README.md](docs/cli/README.md). To install it, follow [Install Box](docs/cli/install.md).
+To build it, run `just build-cli`; the programs are in `target/debug`.
 
 ## Use Box as a Rust library
 
@@ -309,7 +309,7 @@ cargo test --locked -p strands-box --no-default-features --test box_killed_run -
 ```
 
 On Linux, follow the namespace and launcher-image setup in the
-[`history-persistence` workflow job](.github/workflows/rust-test-lint.yml) before running the tests.
+history persistence steps of the [`unit-test` workflow job](.github/workflows/rust-test-lint.yml) before running the tests.
 
 In pull-request CI, changes to `docs/site-manifest.json`,
 `docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` run the focused

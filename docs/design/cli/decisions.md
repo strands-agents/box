@@ -78,6 +78,7 @@ pull request that changes what an entry says fixes that entry.
   - [Telemetry sends from a thread in the CLI](#telemetry-sends-from-a-thread-in-the-cli)
   - [The telemetry choice lives with the installation ID](#the-telemetry-choice-lives-with-the-installation-id)
   - [A banner failure keeps the agent running](#banner-failure-keeps-the-agent-running)
+  - [Policy off turns off what the operator adds, and keeps each forbid `box` writes for every box or to protect itself](#policy-off-keeps-the-forbids-box-writes)
   - [A run's grants and rules are what the profile says, so `box run` sets no input](#box-run-takes-no-option-values)
   - [The workspace is the current directory, and `[project] access` decides the grants `box` adds there](#the-workspace-is-the-current-directory)
   - [The profile's project access is one level that sets the project grants and permits `box` adds](#project-access-is-one-profile-level)
@@ -178,9 +179,9 @@ saved telemetry choices under the former home are not loaded.
 `crates/cli/app/Info.plist` gives `box` the identifier `com.amazon.strands.box-cli`, and the two
 helpers keep Box Core's `com.amazon.strands.box`. For ordinary packages,
 `scripts/macos-release-cli.py` signs all three in one request for Box Core's application, with
-Box Core's AWS role and notarization credential. No workflow in this repository runs it yet, so
-no workflow here releases `box`. The signing service signs each program with the identifier in its
-plist. macOS does not treat the CLI and Box Core's `box` as one program, for example in the
+Box Core's AWS role and notarization credential. The reusable `CLI release` workflow runs it, and
+`Release Box` calls that workflow, so one release publishes both Box Core and `box`. The signing
+service signs each program with the identifier in its plist. macOS does not treat the CLI and Box Core's `box` as one program, for example in the
 access list of a keychain item.
 
 A signed experimental native package keeps that identity separation and shared service setup.
@@ -205,8 +206,8 @@ CLI distribution profile. Local script tests do not establish that this permissi
 ### `box` supports macOS and Linux
 
 `box` runs on macOS on Apple silicon, and on Linux on aarch64 and x86_64. Box Core's Linux
-containment runs on both, with no opt-in. No release has an x86_64 archive yet, so on x86_64 you
-build `box` from source, and CI runs the engine suite only on macOS. Box
+containment runs on both, with no opt-in. A release publishes an x86_64 archive of `box` when
+`publish_linux_x86` is set, which it is by default, and CI runs the engine suite only on macOS. Box
 Core on Linux refuses a deny of an absent path, so on Linux `box run` creates an empty
 `<workspace>/.box` before the run, and the run denies it as on macOS.
 
@@ -1424,6 +1425,23 @@ terminal and keeps only the first 32 KiB. Temporary output delays do not stop th
 Final output waits are limited so a blocked terminal cannot hold up normal shutdown indefinitely.
 A disconnected terminal still stops the run.
 
+<a id="policy-off-keeps-the-forbids-box-writes"></a>
+### Policy off turns off what the operator adds, and keeps each forbid `box` writes for every box or to protect itself
+
+Policy off installs one permit for every operation and each forbid that `box` writes for every box
+or to protect itself, such as those on the box home, the folders `box` is installed in, the
+profile, and `.box`, so the Shell and Monty cannot plant rules for a later run. Everything the
+operator adds turns off: rule files, and the forbids of a profile's `[filesystem] deny` and
+`deny_write`. Policy off works only while the banner shows it.
+
+**Rejected.** One permit in place of the whole policy: the Shell could then append to the
+profile's rule files. Keeping what the operator adds, such as the `deny_write` forbids that let
+`box` accept a program under a write grant: policy off is the operator's switch for their own
+choices.
+
+**Cost.** While policy is off, the Shell and Monty can read a `deny` path and change a `deny_write`
+folder, including a program a later run runs. The agent's sandbox still holds both.
+
 <a id="box-run-takes-no-option-values"></a>
 ### A run's grants and rules are what the profile says, so `box run` sets no input
 
@@ -1782,7 +1800,9 @@ to close can lie under a write grant outside the project, such as a tool's cache
 imports, so a grant stays on the process that needs it.
 
 **Cost.** In a profile, `[filesystem]` is every process; in an agent or tool pack, it is that
-pack's own process. An installer cannot write a listed folder. A hard link in a writable folder
+pack's own process. An installer cannot write a listed folder. Policy off lifts the forbids for the
+Shell and Monty, so they can then change a program in the folder that a later run runs
+([policy off](#policy-off-keeps-the-forbids-box-writes)). A hard link in a writable folder
 still changes a file in it.
 
 <a id="a-detected-servers-arguments-are-not-programs"></a>

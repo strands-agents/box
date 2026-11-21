@@ -31,6 +31,16 @@ pub(super) struct ProfilePolicy {
     protected: Vec<PathBuf>,
     config: String,
     text: String,
+    /// The forbids in `text` that `box` writes for every box, which stay while policy is off.
+    generated: String,
+}
+
+/// A compiled policy that waits for a reload, and the forbids in it that `box` writes for every
+/// box.
+#[derive(Debug, Clone, PartialEq)]
+struct Pending {
+    text: String,
+    generated: String,
 }
 
 impl ProfilePolicy {
@@ -60,10 +70,19 @@ impl ProfilePolicy {
             protected,
             config: run.compiled.box_toml.clone(),
             text: run.compiled.policy.clone(),
+            generated: run.compiled.box_forbids.clone(),
         }
     }
 
-    fn compile(&self) -> Result<Option<String>, String> {
+    /// The policy that policy off installs: `OFF`, then the forbids that `box` writes for every box.
+    pub(super) fn off(&self) -> String {
+        match self.generated.trim_end() {
+            "" => OFF.to_string(),
+            generated => format!("{OFF}\n\n{generated}\n"),
+        }
+    }
+
+    fn compile(&self) -> Result<Option<Pending>, String> {
         let super::Located {
             name,
             profile,
@@ -107,7 +126,10 @@ impl ProfilePolicy {
         self.launcher
             .check_in_scratch(&compiled, &resolved)
             .map_err(|error| error.to_string())?;
-        Ok(Some(compiled.policy))
+        Ok(Some(Pending {
+            text: compiled.policy,
+            generated: compiled.box_forbids,
+        }))
     }
 }
 
@@ -116,6 +138,7 @@ enum Request {
     WatchRoot,
     Reload,
     Toggle,
+    Restore,
     WatchFailed(String),
 }
 
@@ -140,6 +163,13 @@ impl PolicyControl {
     pub(super) fn toggle(&self) -> io::Result<()> {
         self.requests
             .send(Request::Toggle)
+            .map_err(|_| io::Error::other("policy worker stopped"))
+    }
+
+    /// Turn policy back on if it is off.
+    pub(super) fn restore(&self) -> io::Result<()> {
+        self.requests
+            .send(Request::Restore)
             .map_err(|_| io::Error::other("policy worker stopped"))
     }
 
@@ -219,7 +249,7 @@ impl PolicyControl {
 
 struct Worker<F> {
     status: PolicyStatus,
-    pending: Option<String>,
+    pending: Option<Pending>,
     profile: ProfilePolicy,
     results: Sender<(PolicyStatus, Option<String>)>,
     reload: F,
@@ -298,22 +328,25 @@ where
                         self.refresh();
                     }
                     if self.status.enabled
-                        && let Some(text) = &self.pending
+                        && let Some(pending) = &self.pending
                     {
                         policy.origin.clone_from(&profile_origin);
-                        policy.text.clone_from(text);
+                        policy.text.clone_from(&pending.text);
                         let error = (self.reload)(&policy).err();
                         if error.is_none() {
-                            self.profile.text = self.pending.take().unwrap();
+                            let Pending { text, generated } = self.pending.take().unwrap();
+                            self.profile.text = text;
+                            self.profile.generated = generated;
                             self.status.reloaded = true;
                         }
                         self.report(error);
                     }
                 }
-                Ok(Request::Toggle) => {
+                Ok(Request::Restore) if self.status.enabled => {}
+                Ok(Request::Toggle | Request::Restore) => {
                     self.status.reloaded = false;
                     (policy.origin, policy.text) = if self.status.enabled {
-                        (OFF_ORIGIN.into(), OFF.into())
+                        (OFF_ORIGIN.into(), self.profile.off())
                     } else {
                         (profile_origin.clone(), self.profile.text.clone())
                     };
@@ -360,7 +393,7 @@ pub(super) mod tests {
     pub(in crate::run) struct Scene {
         _root: tempfile::TempDir,
         folder: PathBuf,
-        profile: ProfilePolicy,
+        pub(in crate::run) profile: ProfilePolicy,
     }
 
     impl Scene {
@@ -552,6 +585,97 @@ pub(super) mod tests {
         );
     }
 
+    /// **Policy off drops the operator's rules and keeps the forbids `box` writes for every box**,
+    /// so the box's shell and Python still cannot change what a later run trusts, and `policy_off`
+    /// is the one permit.
+    #[test]
+    fn policy_off_keeps_the_generated_rules_and_drops_the_operators() {
+        let scene = Scene::new();
+        scene.save(
+            "policy.dw",
+            "@id(\"mine\") permit (principal, action, resource);",
+        );
+        let (sent, reloads) = mpsc::channel();
+        let policy = scene.start(move |policy| {
+            sent.send(policy.text.clone()).unwrap();
+            Ok(())
+        });
+        assert!(received(&policy.changes).0.pending);
+        policy.reload().unwrap();
+        let installed = received(&reloads);
+        assert!(installed.contains("@id(\"mine\")"));
+        assert!(installed.contains("@id(\"box_home_write\")"));
+        policy.toggle().unwrap();
+        let off = received(&reloads);
+        assert!(!off.contains("@id(\"mine\")"), "{off}");
+        for id in [
+            "box_home_write",
+            "project_configuration_write",
+            "policy_off",
+        ] {
+            assert!(off.contains(&format!("@id(\"{id}\")")), "{id}: {off}");
+        }
+        assert!(off.starts_with(OFF), "{off}");
+        assert_eq!(off.matches("permit").count(), 1, "{off}");
+        policy.toggle().unwrap();
+        assert_eq!(received(&reloads), installed);
+    }
+
+    /// **Policy off after a reload keeps the reloaded policy's forbids**: a profile that moves to
+    /// another rule file gets the forbid on the new file while policy is off.
+    #[test]
+    fn policy_off_after_a_reload_keeps_the_reloaded_forbids() {
+        let scene = Scene::file();
+        let (sent, reloads) = mpsc::channel();
+        let policy = scene.start(move |policy| {
+            sent.send(policy.text.clone()).unwrap();
+            Ok(())
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        while policy.changes.try_recv().is_ok() {}
+        scene.save("moved.dw", "");
+        scene.save(
+            "profile.toml",
+            "policies = [\"moved.dw\"]\n[agent]\ncommand = [\"/usr/bin/true\"]\n\
+             [profile]\nname = \"filed\"\n",
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !received(&policy.changes).0.pending {
+            assert!(Instant::now() < deadline, "the watcher saw no edit");
+        }
+        policy.reload().unwrap();
+        assert!(received(&reloads).contains("moved.dw"));
+        policy.toggle().unwrap();
+        let off = received(&reloads);
+        assert!(
+            off.lines()
+                .any(|line| line.contains("forbid") && line.contains("moved.dw")),
+            "{off}"
+        );
+    }
+
+    /// **A restore turns policy back on only when it is off**, so a banner failure never leaves
+    /// policy off without a banner that says so.
+    #[test]
+    fn restore_turns_policy_back_on_only_when_it_is_off() {
+        let scene = Scene::new();
+        let (sent, reloads) = mpsc::channel();
+        let policy = scene.start(move |policy| {
+            sent.send(policy.origin.clone()).unwrap();
+            Ok(())
+        });
+        let profile = scene.profile.instance.directory.join("policy.dw");
+        for _ in 0..2 {
+            policy.restore().unwrap();
+            policy.toggle().unwrap();
+            assert!(!received(&policy.changes).0.enabled);
+            assert_eq!(received(&reloads), PathBuf::from(OFF_ORIGIN));
+            policy.restore().unwrap();
+            assert!(received(&policy.changes).0.enabled);
+            assert_eq!(received(&reloads), profile);
+        }
+    }
+
     #[test]
     fn policy_off_is_installed_under_its_own_name_and_a_refusal_keeps_the_profile_name() {
         let scene = Scene::new();
@@ -603,7 +727,7 @@ pub(super) mod tests {
         assert!(reloads.try_recv().is_err());
         policy.toggle().unwrap();
         assert!(!received(&policy.changes).0.enabled);
-        assert_eq!(received(&reloads), OFF);
+        assert_eq!(received(&reloads), scene.profile.off());
         policy.reload().unwrap();
         policy.toggle().unwrap();
         assert!(received(&policy.changes).0.pending);
@@ -631,7 +755,7 @@ pub(super) mod tests {
         assert!(status.pending && !status.reloaded);
         assert_eq!(error.as_deref(), Some("Core refused"));
         assert!(received(&reloads).contains("refused"));
-        for text in [OFF, installed.as_str()] {
+        for text in [scene.profile.off().as_str(), installed.as_str()] {
             policy.toggle().unwrap();
             assert!(received(&policy.changes).0.pending);
             assert_eq!(received(&reloads), text);
@@ -674,7 +798,7 @@ pub(super) mod tests {
             .policy
             .compile()
             .expect("a policy update, not a restart");
-        assert!(updated.is_some_and(|policy| policy.contains("edited")));
+        assert!(updated.is_some_and(|policy| policy.text.contains("edited")));
     }
 
     #[test]

@@ -29,12 +29,17 @@ def step_command(path, name):
 
 
 class CliTestWorkflowTests(unittest.TestCase):
-    def test_it_is_reusable_with_the_two_inputs(self):
+    def test_it_is_reusable_with_its_inputs(self):
         text = CLI_TEST.read_text()
         triggers = text.split("\non:\n", 1)[1].split("\n\n", 1)[0]
         self.assertEqual(re.findall(r"(?m)^  ([a-z_]+):", triggers), ["workflow_call"])
         self.assertEqual(re.findall(r"(?m)^      ([a-z_]+):", triggers),
-                         ["suite", "macos"])
+                         ["suite", "macos", "package", "ref"])
+        # The package jobs are off unless a caller asks for them.
+        package = triggers.split("      package:\n", 1)[1].split("\n      ref:", 1)[0]
+        self.assertIn("        default: false", package)
+        self.assertIn("    if: inputs.macos && inputs.package && inputs.suite == 'all'\n",
+                      job(CLI_TEST, "package"))
 
     def test_it_keeps_the_job_names(self):
         for name, title in [
@@ -58,14 +63,21 @@ class CliTestWorkflowTests(unittest.TestCase):
                                         capture_output=True, text=True)
                 self.assertEqual(result.returncode == 0, success, result.stdout)
 
-    def test_every_checkout_tests_the_callers_commit(self):
-        # The caller's commit, not an input: CodeQL treats a checkout of an input ref in a job
-        # that saves the Rust cache as cache poisoning.
+    def test_every_checkout_tests_the_requested_commit_and_only_main_pushes_save_the_cache(self):
+        # The release passes the commit it releases as `ref`. A checkout of an input ref in a job
+        # that saves the Rust cache is cache poisoning, so, as in rust-test-lint.yml, only a push
+        # to main saves it, and that run checks out github.sha.
         text = CLI_TEST.read_text()
         checkouts = text.count("uses: actions/checkout@")
-        self.assertEqual(checkouts, 2)
-        self.assertEqual(text.count("          ref: ${{ github.sha }}\n"), checkouts)
-        self.assertNotIn("inputs.ref", text)
+        self.assertEqual(checkouts, 3)
+        self.assertEqual(text.count("          ref: ${{ inputs.ref || github.sha }}\n"), checkouts)
+        caches = text.count("uses: Swatinem/rust-cache@")
+        self.assertEqual(caches, 3)
+        self.assertEqual(text.count(
+            "          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n"),
+            caches)
+        # CI tests the commit that triggered it.
+        self.assertNotIn("      ref:", job(CLI_TEST.with_name("ci.yml"), "cli"))
 
 
 def step_run(path, job_name, step_name):

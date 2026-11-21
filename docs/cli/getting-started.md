@@ -12,10 +12,8 @@ listen only on localhost.
 
 ## Requirements
 
-- An Apple Silicon Mac with macOS 15 or later, or ARM64 Linux.
+- An Apple Silicon Mac with macOS 15 or later, or Linux on ARM64 or x86_64.
   [Install Box](install.md#requirements) lists what Linux needs.
-- [Rust](https://rustup.rs/), [`just`](https://github.com/casey/just), and `git`, to build Box
-  from source until a release is published.
 - The [AWS CLI](https://aws.amazon.com/cli/), to look up a model ID and check your sign-in.
 - Claude Code from its native installer. The box starts the native executable, and the `npm`
   package is a Node script, so if you installed Claude Code with `npm`, reinstall it:
@@ -34,28 +32,26 @@ listen only on localhost.
 
 ## 1. Install Box
 
-Build Box from source and put it on your `PATH`:
+Download the installer and run it:
 
 ```sh
-git clone https://github.com/strands-agents/box.git
-cd box
-just build-cli
-export PATH="$PWD/target/debug:$PATH"
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | BOX_VERSION=0.3.0-preview.1 sh
 ```
 
-Usage telemetry is on by default ([Usage telemetry](../../CLI_TELEMETRY.md)), and
-`box telemetry off` turns it off.
+It installs the `0.3.0-preview.1` release, puts `box` on your `PATH`, and ends with example next
+steps. Usage telemetry is on by default, and the installer says how to turn it off
+([Usage telemetry](../../CLI_TELEMETRY.md)).
 
-Do every step from here on in this terminal, because the `export` lasts only here and later steps
-use variables that earlier ones set. Check that `box` runs:
+Open a new terminal, and do every step from here on in it, because later steps use variables that
+earlier ones set. Check that `box` runs:
 
 ```console
 $ box --version
-box 0.2.0
+box 0.3.0-preview.1
 ```
 
-[Install Box](install.md) covers building from source and the installer that comes with the
-first release.
+If the installer stops instead, it says why. [Install Box](install.md) covers what it adds,
+upgrading, and uninstalling.
 
 ## 2. Create a Claude Code profile
 
@@ -241,10 +237,10 @@ box run claude -- --continue
 
 ## What's set up
 
-You have a `claude` profile, and `box run claude` uses it in any project. A new terminal finds
-`box` once `target/debug` is on your `PATH` in your shell's startup file. `AWS_PROFILE`, exported keys, and a Bedrock API key last only in the terminal that set them,
+You have a `claude` profile, and `box run claude` uses it in any project. Every new terminal finds
+`box`. `AWS_PROFILE`, exported keys, and a Bedrock API key last only in the terminal that set them,
 so run step 4 again in each new one.
-To get a newer build, run `git pull` and `just build-cli` again in the checkout.
+To get a newer release, see [Upgrade or choose a version](install.md#upgrade-or-choose-a-version).
 
 `box` keeps the profile, Claude Code's settings and history, and a record of each run in `~/.strands/box`.
 [Where Box keeps its files](files.md) says what each folder holds, and which files the tools write
