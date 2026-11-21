@@ -5,7 +5,8 @@ name: CI
 #
 #   core    Box Core: everything under crates/ outside crates/cli/, and its test harnesses.
 #           Runs Core's unit tests and lint (rust-test-lint.yml), containment, and the CLI's
-#           engine suite (cli-test.yml, suite `engine`), because the CLI builds on Core.
+#           Linux tests and macOS engine suite (cli-test.yml, suite `core`), because the CLI
+#           builds on Core.
 #   cli     The box CLI: crates/cli/, resources/, the test-corpus files its tests read, and its
 #           scripts. Runs cli-test.yml (all). A CLI-only change skips Core's unit tests and the
 #           containment suite.
@@ -206,7 +207,7 @@ jobs:
       containment_macos: ${{ github.event.pull_request.draft != true && needs.detect-changes.outputs.containment == 'true' }}
 
   # The CLI's build, test, and lint on Linux, and the macOS checks (cli-test.yml). A Core-only
-  # change runs the engine suite, and a draft skips the macOS jobs.
+  # change runs the Linux job and only the engine suite on macOS, and a draft skips the macOS jobs.
   cli:
     name: CLI
     needs: detect-changes
@@ -215,7 +216,7 @@ jobs:
       contents: read
     uses: ./.github/workflows/cli-test.yml
     with:
-      suite: ${{ needs.detect-changes.outputs.cli == 'true' && 'all' || 'engine' }}
+      suite: ${{ needs.detect-changes.outputs.cli == 'true' && 'all' || 'core' }}
       macos: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
 
   site-manifest:

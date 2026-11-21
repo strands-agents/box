@@ -45,12 +45,13 @@ class CliTestWorkflowTests(unittest.TestCase):
                 self.assertIn(f"    name: {title}\n", job(CLI_TEST, name))
 
     def test_each_suite_selects_its_jobs(self):
-        self.assertIn("    if: inputs.suite == 'all'\n", job(CLI_TEST, "build-test-lint"))
+        # Both suites run the Linux job, so a Core change runs the CLI's tests of Core's API.
+        self.assertNotIn("\n    if: ", job(CLI_TEST, "build-test-lint"))
         self.assertIn("    if: inputs.macos\n", job(CLI_TEST, "macos"))
 
     def test_an_unknown_suite_is_refused(self):
         command = step_command(CLI_TEST, "Refuse an unknown suite")
-        for suite, success in [("all", True), ("engine", True), ("launch", False),
+        for suite, success in [("all", True), ("core", True), ("engine", False), ("launch", False),
                                ("", False), ("ALL", False), ("corpus", False)]:
             with self.subTest(suite=suite):
                 result = subprocess.run(["bash", "-c", command], env={**os.environ, "SUITE": suite},
@@ -109,7 +110,7 @@ class MovedCommandTests(unittest.TestCase):
         test = step_run(CLI_TEST, "macos", "Test")
         self.assertIn('  *) echo "::error::full Xcode is not selected: $developer_dir"; exit 1 ;;\n',
                       test)
-        self.assertIn("  cargo test -p strands-box-cli --all-features --test engine\n", test)
+        self.assertIn('if [ "$SUITE" = core ]; then\n  cargo test -p strands-box-cli --all-features --test engine\n', test)
         self.assertIn("else\n  cargo test -p strands-box-cli -p strands-box-cli-pack-tests -p strands-box-cli-profile -p strands-box-cli-telemetry --all-features\nfi", test)
 
 
@@ -133,7 +134,7 @@ class SuiteStepTests(unittest.TestCase):
     def test_lint_runs_only_for_all(self):
         self.assertEqual(self.step_if("Clippy"), self.ALL)
 
-    def test_test_steps_run_for_all_and_engine(self):
+    def test_test_steps_run_for_all_and_core(self):
         for name in ["Install launcher test prerequisites", "Test"]:
             with self.subTest(step=name):
                 self.assertEqual(self.step_if(name), self.TESTS)
@@ -145,7 +146,7 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("    uses: ./.github/workflows/cli-test.yml\n", cli)
         self.assertIn("    if: needs.detect-changes.outputs.cli == 'true' || "
                       "needs.detect-changes.outputs.core == 'true'\n", cli)
-        self.assertIn("      suite: ${{ needs.detect-changes.outputs.cli == 'true' && 'all' || 'engine' }}\n", cli)
+        self.assertIn("      suite: ${{ needs.detect-changes.outputs.cli == 'true' && 'all' || 'core' }}\n", cli)
         self.assertIn("      macos: ${{ github.event_name != 'pull_request' || "
                       "github.event.pull_request.draft == false }}\n", cli)
 
