@@ -54,8 +54,25 @@ impl Rules {
         self.ids.push(id.to_string());
     }
 
+    /// Add a blank line and a `//` comment that names where the rules after it come from.
+    pub(crate) fn note(&mut self, text: &str) {
+        if !self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        for line in text.lines() {
+            self.lines.push(format!("// {line}").trim_end().to_string());
+        }
+    }
+
     /// Add an empty line.
     pub(crate) fn gap(&mut self) {
+        if self
+            .lines
+            .last()
+            .is_none_or(|line| line.is_empty() || line.starts_with("//"))
+        {
+            return;
+        }
         self.lines.push(String::new());
     }
 
@@ -78,6 +95,17 @@ impl Rules {
 pub fn tool_rules(tools: &[Found], host: &Host) -> Rules {
     let mut rules = Rules::default();
     for tool in tools {
+        let grammar = if tool.grammar.is_some() {
+            ", and every action its grammar decides"
+        } else {
+            ""
+        };
+        rules.note(&format!(
+            "From [tool.{}] in {}: run {}{grammar}.",
+            tool.name,
+            owner_name(&tool.pack),
+            tool.program
+        ));
         rules.permit(
             &format!("spawn_{}", tool.name),
             &format!(
@@ -108,7 +136,17 @@ pub fn tool_rules(tools: &[Found], host: &Host) -> Rules {
                 .map(|host| format!("context.input.host == {}", literal(host)))
                 .collect::<Vec<_>>(),
         );
-        rules.gap();
+        let mut packs: Vec<String> = Vec::new();
+        for tool in tools.iter().filter(|tool| !tool.hosts.is_empty()) {
+            let pack = owner_name(&tool.pack);
+            if !packs.contains(&pack) {
+                packs.push(pack);
+            }
+        }
+        rules.note(&format!(
+            "From the package registries of {}. Every process in the box can reach these hosts.",
+            packs.join(", ")
+        ));
         rules.permit(
             "package_hosts_connect",
             &format!(
@@ -123,6 +161,16 @@ pub fn tool_rules(tools: &[Found], host: &Host) -> Rules {
         );
     }
     rules
+}
+
+/// How a generated rule's comment names the layer `name`: a pack by its name, the operator's own
+/// profile as `your profile`.
+pub(crate) fn owner_name(name: &str) -> String {
+    if name.is_empty() || name == crate::lang::THE_PROFILE {
+        "your profile".to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 /// The most terms that one `||` chain in a written rule joins.

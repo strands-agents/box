@@ -1242,6 +1242,9 @@ fn save_profile(
         request.answer(None)?.create()?
     };
     created.write(force)?;
+    if let Ok(workspace) = current_dir() {
+        let _ = Launcher::from_host().preview(created.name(), &workspace);
+    }
     Ok(created)
 }
 
