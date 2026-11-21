@@ -367,10 +367,11 @@ Record the source revision, source changes, and signed executable hash beside th
 The test package requires the binary path and bounds each workload to 60 seconds.
 Ordinary workspace tests do not need a signing identity.
 
-The required macOS unit-test job builds the feature and runs adapter and configuration tests.
-It tests the receipt checker and reports receipt freshness as informational.
+The required macOS unit-test jobs build the feature.
+`Unit Tests (box, macos-latest)` runs the adapter and configuration tests.
+`Unit Tests (others, macos-latest)` tests the receipt checker and reports receipt freshness as informational.
 An outdated or invalid receipt does not fail the job.
-Its summary distinguishes the automated adapter and startup tests from the full signed native enforcement suite.
+Its summary distinguishes the automated startup tests from the full signed native enforcement suite.
 That signed suite does not run in this job.
 Pull requests can merge without fresh signed native test evidence.
 The manual signed suite and receipt tool remain available.
@@ -402,7 +403,7 @@ The receipt covers workspace package sources and assets, build configuration, lo
 the native test package, its shared capture helper, and the unit-test workflow.
 Cargo supplies the workspace package list, including nested packages.
 Separate crate tests, examples, benchmarks, documentation, and unrelated workflows do not invalidate that receipt.
-The required macOS unit-test job also runs startup-refusal tests with and without the Cargo feature.
+`Unit Tests (others, macos-latest)` also runs startup-refusal tests with and without the Cargo feature.
 
 
 ## Run real-agent workloads

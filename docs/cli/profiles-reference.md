@@ -302,7 +302,7 @@ box = ">=0.3.0"
 
 | Key | What it does |
 | --- | --- |
-| `box` | The oldest version of `box` that reads this file, as `>=X.Y.Z`. An older `box` refuses the file with `this pack needs box >=0.3.0, and this is box 0.2.3`. |
+| `box` | The oldest version of `box` that reads this file, as `>=X.Y.Z`. An older `box` refuses the file with `this pack needs box >=0.3.0, and this is box 0.2.3`. A preview build of `box`, such as `0.3.0-linux-preview.1`, counts as its release, `0.3.0`. |
 
 `box` checks `box` first. So when a later `box` adds a requirement, an older `box` that reads it
 names the version to update to. A requirement that this `box` does not know is refused.
