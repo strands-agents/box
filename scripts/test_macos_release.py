@@ -583,6 +583,25 @@ class WorkflowGateTests(unittest.TestCase):
                                         env={**valid, **change}, capture_output=True)
                 self.assertEqual(result.returncode == 0, success)
 
+    def test_premerge_mode_from_main_says_to_leave_it_unchecked(self):
+        """A signed dry run from main with the premerge box ticked names the fix"""
+        import os
+        from test_release_source import ReleaseSourceTests, workflow_command
+
+        fixture = ReleaseSourceTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        result = subprocess.run(["bash", "-c", workflow_command("Validate signing mode and source")],
+                                cwd=fixture.root, capture_output=True, text=True, env={
+            **os.environ, "PREMERGE_TEST": "true", "DRY_RUN": "true", "SIGN_MACOS": "true",
+            "REPOSITORY": "strands-agents/box", "WORKFLOW_REF": "refs/heads/main",
+            "RELEASE_SHA": fixture.main,
+        })
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("::error::premerge_signing_test runs only from "
+                      "feature/macos-release-notarization, not refs/heads/main.", result.stdout)
+        self.assertIn("Leave it unchecked", result.stdout)
+
     def test_test_commit_pins_refuse_missing_malformed_and_different_commits(self):
         import os
         from test_release_source import workflow_command

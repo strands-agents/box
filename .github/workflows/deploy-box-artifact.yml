@@ -33,7 +33,7 @@ on:
       version:
         # Stable: 0.1.1. Pre-release: 0.1.1-preview.1. Linux preview:
         # 0.1.1-linux-preview.1. The workflow adds the v.
-        description: 'Version, e.g. 0.1.1 (no v)'
+        description: 'Version, e.g. 0.3.0, or 0.3.0-preview.1 for a pre-release (no v)'
         required: true
         type: string
       publish_linux_x86:
@@ -65,7 +65,7 @@ on:
       premerge_signing_test:
         # Protected PR signing test only. Requires dry_run, sign_macos, and
         # macos-signing-test approval.
-        description: 'Pre-merge signing test'
+        description: 'Pre-merge signing test (feature/macos-release-notarization only)'
         required: true
         default: false
         type: boolean
@@ -266,16 +266,22 @@ jobs:
           RELEASE_SHA: ${{ steps.scan.outputs.release_sha }}
         run: |
           set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
           if [ "$PREMERGE_TEST" = true ]; then
-            test "$DRY_RUN" = true
-            test "$SIGN_MACOS" = true
-            test "$REPOSITORY" = strands-agents/box
-            test "$WORKFLOW_REF" = refs/heads/feature/macos-release-notarization
-            git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+            [ "$WORKFLOW_REF" = refs/heads/feature/macos-release-notarization ] ||
+              fail "premerge_signing_test runs only from feature/macos-release-notarization, not $WORKFLOW_REF. Leave it unchecked for a release or a signed dry run from main."
+            [ "$DRY_RUN" = true ] || fail "premerge_signing_test requires dry_run."
+            [ "$SIGN_MACOS" = true ] || fail "premerge_signing_test requires sign_macos."
+            [ "$REPOSITORY" = strands-agents/box ] || fail "premerge_signing_test runs only in strands-agents/box."
+            git merge-base --is-ancestor "$RELEASE_SHA" origin/main ||
+              fail "source $RELEASE_SHA is not in main history."
           elif [ "$DRY_RUN" != true ] || [ "$SIGN_MACOS" = true ]; then
-            test "$REPOSITORY" = strands-agents/box
-            test "$WORKFLOW_REF" = refs/heads/main
-            git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+            [ "$REPOSITORY" = strands-agents/box ] ||
+              fail "a release or a signed dry run runs only in strands-agents/box. Use dry_run without sign_macos in $REPOSITORY."
+            [ "$WORKFLOW_REF" = refs/heads/main ] ||
+              fail "a release or a signed dry run runs only from main, not $WORKFLOW_REF."
+            git merge-base --is-ancestor "$RELEASE_SHA" origin/main ||
+              fail "source $RELEASE_SHA is not in main history."
           fi
 
   # ── Build + lint + unit-test gate ──────────────────────────────────────
