@@ -2310,7 +2310,17 @@ fn a_deny_write_folder_is_forbidden_to_the_shell_and_monty() {
             compiled.generated_ids.iter().any(|known| known == id),
             "{id}"
         );
+        assert!(
+            !compiled.box_forbids.contains(&format!("@id({id:?})")),
+            "policy off lifts a profile's deny_write: {}",
+            compiled.box_forbids
+        );
     }
+    assert!(
+        compiled.box_forbids.contains("@id(\"box_home_write\")"),
+        "{}",
+        compiled.box_forbids
+    );
     assert!(
         !compiled.policy.contains("deny_write_parent"),
         "the workspace is the only folder above .venv: {}",
@@ -2699,7 +2709,19 @@ fn a_profile_deny_reaches_every_process_and_the_shell() {
             compiled.generated_ids.iter().any(|known| known == id),
             "{id}"
         );
+        assert!(
+            !compiled.box_forbids.contains(&format!("@id({id:?})")),
+            "policy off lifts a profile's deny: {}",
+            compiled.box_forbids
+        );
     }
+    assert!(
+        compiled
+            .box_forbids
+            .contains("@id(\"project_configuration_write\")"),
+        "{}",
+        compiled.box_forbids
+    );
     for id in [
         "filesystem_deny_parent_move_0",
         "filesystem_deny_parent_delete_0",
