@@ -7,6 +7,7 @@ use std::os::fd::{BorrowedFd, RawFd};
 pub(crate) struct ProductionRequest {
     pub(crate) layout: StorageLayout,
     control: UnixStream,
+    sources: UnixStream,
 }
 
 impl StorageLayout {
@@ -108,7 +109,13 @@ pub(crate) fn request(raw: RawFd) -> Result<ProductionRequest, ContainmentError>
         ));
     };
     layout.validate()?;
-    Ok(ProductionRequest { layout, control })
+    let sources = UnixStream::from(transport::receive_fd(&control)?);
+    sources.peer_addr().map_err(io_failure)?;
+    Ok(ProductionRequest {
+        layout,
+        control,
+        sources,
+    })
 }
 
 pub(in crate::backend::linux::namespace) fn prepare(
@@ -131,6 +138,7 @@ pub(in crate::backend::linux::namespace) fn prepare(
                 1,
                 2,
                 request.control.as_raw_fd(),
+                request.sources.as_raw_fd(),
                 receiver_registration.as_raw_fd(),
                 receiver_lifetime.as_raw_fd(),
             ])?;
@@ -146,6 +154,7 @@ pub(in crate::backend::linux::namespace) fn prepare(
                 &request.control,
                 &receiver_registration,
                 &receiver_lifetime,
+                &request.sources,
             )
         })();
         match &result {

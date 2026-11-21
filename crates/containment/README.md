@@ -76,9 +76,12 @@ Pass `None` when native filesystem checks are disabled.
 Builds without Linux native filesystem support refuse a supplied handoff.
 
 The fifth argument, `storage_control_fd`, is an optional descriptor for the Linux storage
-control channel. It lets the trusted storage worker attach prepared filesystem views after
-the workload starts. Pass `None` when experimental storage mounts are disabled. The macOS
-backend refuses a supplied storage descriptor. The workload receives no mount capability.
+control channel. The private `storage::sources` transport connects one Box-owned source helper
+to separate recipient receivers. Each receiver holds workload startup until its already-arrived
+sources have completed preparation, then continues accepting protected views for later arrivals.
+`storage::send_fd` transfers the recipient's private subscription channel during initialization.
+Pass `None` when experimental storage mounts are disabled. The macOS backend refuses a supplied
+storage descriptor. The workload receives no mount capability.
 
 A successful `apply` returns `()`. Kernel enforcement remains active until the
 process exits and is inherited by child processes and across `exec`. There is no
