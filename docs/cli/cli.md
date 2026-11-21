@@ -60,7 +60,6 @@ box run [<profile>] [--box-id <box ID>] [--banner | --no-banner] [-- <agent argu
 
 Once the terminal session starts, with or without the banner, `box` shows recent Box errors on exit,
 then the [log path](files.md#profile-storage-and-runs) and a command to reuse the box.
-If saving fails, `box` reports the failure and keeps the agent's exit status.
 
 If input or output is redirected, including stderr, or `TERM=dumb`, `box` prints the box ID and
 these commands at startup:

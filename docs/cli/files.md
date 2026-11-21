@@ -153,10 +153,9 @@ holds the settings and rules the run used (`box.toml` and `policy.dw`), a record
 allowed and stopped (`records.jsonl`), and the box's own state. The box ID lets you
 [run in the same box again](cli.md#run-in-the-same-box-again).
 
-Once an [interactive terminal session](cli.md#box-run) starts, `box.log` saves the Box messages
-the CLI receives, including warnings. The
-agent's output stays on the terminal. Only your account can read the log. Reusing a box
-appends to it, with no size limit.
+[Terminal runs](cli.md#box-run) append the Box messages they receive, including warnings, to
+`box.log`. Only your account can read it, and it has no size limit. The agent's output stays on
+the terminal.
 
 A new run that fails before the box starts leaves no folder unless its terminal session has
 started. Every other run folder stays until you clean it up, and storage stays until you delete it.

@@ -1252,7 +1252,7 @@ mod tests {
 
     #[test]
     fn native_display_hides_startup_logs_and_preserves_terminal_bytes() {
-        assert!(!exercise_worker(|_| unreachable!(), 12, None, true).contains("box:"));
+        assert!(exercise_worker(|_| unreachable!(), 12, None, true).is_empty());
     }
 
     #[test]
@@ -1288,7 +1288,8 @@ mod tests {
             let workload_terminal = child.try_clone().unwrap();
             nonblocking(&master);
             let (read, write) = nix::unistd::pipe().unwrap();
-            let mut diagnostics = Log::new(File::from(read), tempfile::tempfile());
+            let saved = tempfile::tempfile().unwrap();
+            let mut diagnostics = Log::new(File::from(read), saved.try_clone());
             let producer = if slow {
                 Some(std::thread::spawn(move || {
                     for row in 0..1500 {
@@ -1328,7 +1329,7 @@ mod tests {
                         })
                     },
                 );
-                (result.map(|()| diagnostics), terminal)
+                (result, terminal)
             });
             let started = Instant::now();
             let mut last_output = started;
@@ -1359,8 +1360,8 @@ mod tests {
             }
             let error = host.read_to_end(&mut output).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-            let mut diagnostics = result.unwrap();
-            assert!(diagnostics.preview().is_empty());
+            result.unwrap();
+            assert_eq!(saved.metadata().unwrap().len(), 0);
             assert!(!terminal.active);
             if !slow {
                 assert_eq!(
@@ -1638,9 +1639,12 @@ mod tests {
                 .any(|bytes| bytes == b"CORE_LIVE"),
             "Core messages reached the agent display"
         );
-        assert_eq!(report.matches("CORE_LIVE").count(), 16);
+        let startup = format!("{}CORE_START\n", " ".repeat(33 * 1024));
+        let live = "\nCORE_LIVE\n".repeat(16);
+        assert!(report.contains(&live), "runtime stderr was not captured");
+        let diagnostics = report.replacen(&startup, "", 1).replacen(&live, "", 1);
         assert!(
-            !report.contains("TRANSIENT"),
+            !diagnostics.contains("TRANSIENT"),
             "workload output reached the log"
         );
         while let Ok(n) = host.read(&mut bytes) {
@@ -1679,7 +1683,7 @@ mod tests {
             contents.contains("DONE"),
             "synchronized output lost at EOF: {contents}"
         );
-        (report, policies)
+        (diagnostics, policies)
     }
 
     #[test]
@@ -1833,7 +1837,7 @@ mod tests {
     }
 
     #[test]
-    fn late_core_messages_wait_until_exit_without_changing_the_agent_screen() {
+    fn late_core_messages_are_logged_without_changing_the_agent_screen() {
         let diagnostics = exercise_worker(
             |initial| {
                 BannerWorker::spawn(initial, |request| {
@@ -1849,7 +1853,7 @@ mod tests {
             Some("BANNER"),
             false,
         );
-        assert!(!diagnostics.contains("box:"));
+        assert!(diagnostics.is_empty());
     }
 
     #[test]
@@ -1937,7 +1941,7 @@ mod tests {
             Some("RECOVERED"),
             false,
         );
-        assert!(!diagnostics.contains("box:"));
+        assert!(diagnostics.is_empty());
     }
 
     #[test]

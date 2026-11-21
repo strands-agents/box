@@ -166,22 +166,23 @@ mod tests {
             format!("{preview}  box: error: policy update failed: invalid edit\n")
         );
 
-        for number in 0..20 {
+        for number in 0..7 {
             log.push(format!("box: error: failure {number}\n").as_bytes());
         }
-        let preview = log.preview();
-        assert!(preview.contains("  box: error: failure 19\n"));
-        assert!(!preview.contains("  box: error: failure 0\n"));
-        assert_eq!(preview.lines().count(), PREVIEW_LINES + 1);
+        let recent: String = (1..7)
+            .map(|number| format!("  box: error: failure {number}\n"))
+            .collect();
+        assert_eq!(
+            log.preview(),
+            format!("box: recent log output (truncated)\n{recent}")
+        );
         log.push(format!("box: error: {}", "éé\0".repeat(PREVIEW_BYTES)).as_bytes());
         let preview = log.preview();
-        assert!(preview.contains("  box: error: éé\\u{0}"));
-        let payload: usize = preview
-            .lines()
-            .skip(1)
-            .map(|line| line.strip_prefix("  ").unwrap().len() + 1)
-            .sum();
-        assert!(payload <= PREVIEW_BYTES);
+        let error = preview
+            .strip_prefix("box: recent log output (truncated)\n  ")
+            .unwrap();
+        assert!(error.starts_with("box: error: éé\\u{0}"));
+        assert!(error.len() <= PREVIEW_BYTES);
     }
 
     #[test]

@@ -3909,22 +3909,19 @@ fn a_startup_failure_at_a_terminal_keeps_its_log_and_reuse_id() {
     });
     let result = wait_for_output(child);
     let text = received.recv_timeout(Duration::from_secs(5)).unwrap();
-    let text = String::from_utf8_lossy(&text);
+    let text = String::from_utf8_lossy(&text).replace('\r', "");
     assert_eq!(result.status.code(), Some(1));
-    let runs: Vec<_> = std::fs::read_dir(long.join("r"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
-    assert_eq!(runs.len(), 1, "the announced run must remain\n{text}");
-    let run = &runs[0];
+    let id = text
+        .lines()
+        .find_map(|line| line.strip_prefix("box: to reuse this box run: box run probe --box-id "))
+        .expect("the terminal prints the reuse command");
+    let run = long.join("r").join(id);
     assert!(run.join("box").is_dir(), "the run must remain reusable");
-    assert!(text.contains(&format!("box run probe --box-id {}", box_id(run))));
     let report = run.join("box.log");
     assert!(text.contains(&format!("box: full log: {}", report.display())));
     assert!(
-        text.replace('\r', "")
-            .contains("\nbox: recent log output\n  strands-box: error: "),
-        "{text}",
+        text.contains("\nbox: recent log output\n  strands-box: error: "),
+        "{text}"
     );
     assert!(!text.contains("box: running profile"), "{text}");
     assert!(
