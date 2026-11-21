@@ -124,7 +124,6 @@ fn in_home(text: &str, home: &Path) -> Option<PathBuf> {
 /// path that is not a full path, or a path where a box can write, as written or real.
 fn writable_path(name: &str, value: &str, context: &Context<'_>) -> Option<String> {
     let options = written_as_options(value);
-    let at = |text: &str| in_home(text, context.home).unwrap_or_else(|| PathBuf::from(text));
     let listed: Vec<&str> = value.split([':', ';']).collect();
     let url = value.contains("://");
     let named = named_as_path(name) && !is_switch(value);
@@ -136,7 +135,7 @@ fn writable_path(name: &str, value: &str, context: &Context<'_>) -> Option<Strin
         && !options
         && !url
         && (named || written)
-        && listed.iter().any(|part| !at(part).is_absolute())
+        && listed.iter().any(|part| !Path::new(part).is_absolute())
     {
         let read = if written {
             ""
@@ -153,17 +152,21 @@ fn writable_path(name: &str, value: &str, context: &Context<'_>) -> Option<Strin
         .split(|separator: char| separator.is_whitespace() || PART_SEPARATORS.contains(&separator))
         .chain([value]);
     for part in parts {
-        if !options && ["./", "../"].iter().any(|start| part.starts_with(start)) {
+        if !options
+            && ["./", "../", "~/"]
+                .iter()
+                .any(|start| part.starts_with(start))
+        {
             return Some(format!(
                 "sets {name} to a path that is not a full path, which starts from the workspace, \
                  where the box can write, so box does not declare this server automatically"
             ));
         }
-        let path = at(part);
+        let path = Path::new(part);
         if !path.is_absolute() {
             continue;
         }
-        if let Some(reason) = context.refusals.inside(&path) {
+        if let Some(reason) = context.refusals.inside(path) {
             return Some(format!(
                 "sets {name} to a place the box can write ({reason}), so box does not declare \
                  this server automatically"
@@ -7109,6 +7112,8 @@ mod tests {
                 ("above", r#"{"NOTES": "/usr/lib:.."}"#),
                 ("above-in-a-part", r#"{"NOTES": "site;../lib"}"#),
                 ("empty-and-home", r#"{"NOTES": ":~/lib"}"#),
+                ("as-written", r#"{"NOTES": "/usr/lib:~/lib"}"#),
+                ("as-written-part", r#"{"NOTES": "site,~/lib"}"#),
                 ("empty-and-tilde", r#"{"NOTES": ":~"}"#),
             ],
         );
@@ -7123,6 +7128,8 @@ mod tests {
                 ("above", not_full("NOTES")),
                 ("above-in-a-part", not_full("NOTES")),
                 ("any-name", not_full("NOTES")),
+                ("as-written", not_full("NOTES")),
+                ("as-written-part", not_full("NOTES")),
                 ("empty-and-home", not_full("NOTES")),
                 ("empty-and-tilde", not_full("NOTES")),
                 ("empty-element", not_full("NOTES")),
@@ -7186,7 +7193,6 @@ mod tests {
                     "in-a-list",
                     &format!(r#"{{"NOTES": "/usr/lib:{}/lib"}}"#, workspace.display()),
                 ),
-                ("as-written", r#"{"NOTES": "/usr/lib:~/project/lib"}"#),
                 (
                     "other-separator",
                     &format!(r#"{{"NOTES": "/usr/lib;{}/lib"}}"#, workspace.display()),
@@ -7258,10 +7264,6 @@ mod tests {
         assert_eq!(
             found,
             vec![
-                (
-                    "as-written",
-                    writable("NOTES", "~/project/lib lies in the workspace, ~/project")
-                ),
                 (
                     "box-home",
                     writable(
@@ -7374,7 +7376,6 @@ mod tests {
                 ),
                 ("tilde", r#"{"NODE_PATH": "~/lib"}"#),
                 ("system", r#"{"NOTES": "/usr/lib/notes"}"#),
-                ("as-written", r#"{"NOTES": "/usr/lib:~/lib"}"#),
                 (
                     "list",
                     &format!(r#"{{"PERLLIB": "/usr/lib/perl:{}"}}"#, library.display()),
@@ -7391,10 +7392,6 @@ mod tests {
             "a value that opens with `~/` is filled in before the check"
         );
         assert_eq!(env("system", "NOTES"), Some("/usr/lib/notes".to_string()));
-        assert_eq!(
-            env("as-written", "NOTES"),
-            Some("/usr/lib:~/lib".to_string())
-        );
         assert_eq!(
             env("list", "PERLLIB"),
             Some(format!("/usr/lib/perl:{library}"))
@@ -7558,6 +7555,8 @@ mod tests {
         host.program("bin/literal-tool", "/bin/sh");
         host.program("bin/other", "/bin/sh");
         host.program("bin/optional", "/bin/sh");
+        host.program("bin/passed-tool", "/bin/sh");
+        host.program("bin/written-tool", "/bin/sh");
         host.set = vec![
             ("GITHUB_TOKEN", "ghp_real"),
             ("LEVEL", "debug"),
@@ -7570,8 +7569,16 @@ mod tests {
             r#"
             [mcp_servers.github]
             command = "tool"
-            env_vars = ["GITHUB_TOKEN", "LEVEL", "PASSED_DIR"]
-            env = { LEVEL = "${LEVEL}", PASTED = "sk-pasted", WRITTEN_DIR = "~/written" }
+            env_vars = ["GITHUB_TOKEN", "LEVEL"]
+            env = { LEVEL = "${LEVEL}", PASTED = "sk-pasted" }
+
+            [mcp_servers.passed-tilde]
+            command = "passed-tool"
+            env_vars = ["PASSED_DIR"]
+
+            [mcp_servers.written-tilde]
+            command = "written-tool"
+            env = { WRITTEN_DIR = "~/written" }
 
             [mcp_servers.missing]
             command = "optional"
@@ -7606,6 +7613,7 @@ mod tests {
         ]);
         let mut mcp = toml::Table::new();
         let servers = host.detect(&[codex], &mut mcp);
+        let (passed, written) = (not_full("PASSED_DIR"), not_full("WRITTEN_DIR"));
         assert_eq!(
             reasons(&servers),
             vec![
@@ -7614,22 +7622,25 @@ mod tests {
                     "sets LD_PRELOAD, a variable that makes a program load code, so box \
                      does not declare this server automatically"
                 ),
+                ("passed-tilde", passed.as_str()),
                 ("remote", "uses env_vars"),
                 (
                     "tilde-home",
                     "its HOME \"~/x\" is not a full path, which the box refuses"
                 ),
-            ]
+                ("written-tilde", written.as_str()),
+            ],
+            "a passed or a written value keeps its ~, which a program reads as a path that \
+             is not a full path"
         );
         let expected: toml::Table = toml::from_str(
-            "GITHUB_TOKEN = \"ghp_real\"\nLEVEL = \"${LEVEL}\"\nPASTED = \"sk-pasted\"\n\
-             PASSED_DIR = \"~/passed\"\nWRITTEN_DIR = \"~/written\"",
+            "GITHUB_TOKEN = \"ghp_real\"\nLEVEL = \"${LEVEL}\"\nPASTED = \"sk-pasted\"",
         )
         .expect("TOML");
         assert_eq!(
             mcp["github"]["env"],
             toml::Value::Table(expected),
-            "a passed or a written value keeps its ~, as on the host"
+            "a written value is copied as written"
         );
         assert!(mcp["proxied"].get("env").is_none(), "{:?}", mcp["proxied"]);
         assert!(mcp["missing"].get("env").is_none(), "{:?}", mcp["missing"]);
