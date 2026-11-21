@@ -1,0 +1,81 @@
+# Launch checks: each starts one profile's agent in a box, with no model call, and records what
+# happens. CI runs them with `run_corpus.py --layer launch` on every pull request that changes the
+# CLI and is not a draft, and on every push to main. Fields:
+#
+#   id       The name --ids takes.
+#   profile  The profile it runs. A folder under test-corpus/profiles/ holds it, or `with` makes it.
+#   with     The packs `box profile create <profile> --with` makes the profile from, so the check
+#            runs the profile an operator gets. With a Bedrock pack, the runner also sets
+#            `bedrock.sign-in=api-key`, because CI signs in with the key it mints.
+#   options  Inputs the runner sets with `--option` when it makes the profile.
+#   needs    Programs the check needs on PATH. A missing one makes the check SKIP.
+#   args     What the runner passes to the agent after `--`.
+#   expect   The result on CI's runner today, in corpus.toml's form. No expect means GREEN.
+#   note     Why the result is what `expect` records.
+#
+# Checks that share a profile share `with`, `options`, and `needs`. The agent checks turn off the
+# import of the host's own MCP servers, so a check gives the same result on any host.
+#
+# `--version` shows that the agent's program runs in the box: each agent prints it while it reads
+# its arguments, before it reads any settings. `mcp list` also reads the settings the profile gives
+# the agent, so settings it cannot read or parse fail it. Neither shows that an MCP server works or
+# that the agent can reach its model.
+
+# The box starts, and its agent, bash, writes and reads its workspace.
+[[launch]]
+id = "probe"
+profile = "probe"
+args = ["-c", 'echo probe > probe.txt && read -r line < probe.txt && [ "$line" = probe ]']
+
+# Claude Code's program runs, from the claude starter with Amazon Bedrock. box finds it on PATH or
+# where its native installer puts it, so the checks have no `needs`.
+[[launch]]
+id = "claude"
+profile = "launch-claude"
+with = "claude,bedrock"
+options = ["claude.import-mcp=false"]
+args = ["--version"]
+
+# Claude Code reads its settings from the profile's storage.
+[[launch]]
+id = "claude-settings"
+profile = "launch-claude"
+with = "claude,bedrock"
+options = ["claude.import-mcp=false"]
+args = ["mcp", "list"]
+
+# Codex's program runs, from the codex starter with Bedrock's OpenAI-compatible endpoint.
+[[launch]]
+id = "codex"
+profile = "launch-codex"
+with = "codex,bedrock-mantle"
+options = ["codex.import-mcp=false"]
+needs = ["codex"]
+args = ["--version"]
+
+# Codex reads the pack's `-c` settings and its CODEX_HOME in storage.
+[[launch]]
+id = "codex-settings"
+profile = "launch-codex"
+with = "codex,bedrock-mantle"
+options = ["codex.import-mcp=false"]
+needs = ["codex"]
+args = ["mcp", "list"]
+
+# Kiro CLI's V3 engine starts from the runtime folder that KIRO_RUNTIME_DIR names, and reads its
+# sessions in the profile's storage. The pack's agent.skip-permissions starts `chat`, which takes
+# no --version. The route needs a KIRO_API_KEY, and the runner sets a stand-in when none is set.
+[[launch]]
+id = "kiro"
+profile = "launch-kiro"
+with = "kiro"
+options = ["kiro.sign-in=api-key", "agent.skip-permissions=true"]
+needs = ["kiro-cli"]
+args = ["--list-sessions"]
+expect = { verdict = "red", denies = [
+    "net:connect kiro-management.us-iso-east-1.c2s.ic.gov:443",
+    "net:connect kiro-management.us-isob-east-1.sc2s.sgov.gov:443",
+    "net:connect kiro-management.us-isof-east-1.csp.hci.ic.gov:443",
+    "net:connect kiro-management.us-isof-south-1.csp.hci.ic.gov:443",
+] }
+note = "The check gets a stand-in key, which Kiro's us-east-1 service refuses, so Kiro CLI 3.4.0 tries its other regions. On macOS the box refuses its four US government isolated-region hosts, and the sessions still list."

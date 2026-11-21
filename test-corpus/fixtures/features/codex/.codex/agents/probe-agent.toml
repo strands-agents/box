@@ -1,0 +1,3 @@
+name = "probe-agent"
+description = "A subagent that the feature checks look for."
+developer_instructions = "Say feature-probe-agent."

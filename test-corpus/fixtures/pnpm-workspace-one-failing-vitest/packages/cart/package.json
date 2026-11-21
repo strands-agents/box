@@ -1,0 +1,16 @@
+{
+  "name": "@shop/cart",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/total.js",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@shop/format": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "3.2.7"
+  }
+}

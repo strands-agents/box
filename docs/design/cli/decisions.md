@@ -102,6 +102,8 @@ pull request that changes what an entry says fixes that entry.
   - [A command that removes state never also starts a box](#removing-state-never-starts-a-box)
   - [Each `box profile` removal command removes one kind of state, by name or `--all`](#reset-with-no-name-removes-every-profile)
   - [A starter answers from the host first, and `box` asks only at a terminal](#box-asks-only-at-a-terminal)
+- **Corpus**
+  - [The corpus's scripted layer gates pack coverage, and a toolchain's first pack is a corpus pack](#the-scripted-layer-gates-pack-coverage)
 
 ## Box Core
 
@@ -1980,3 +1982,23 @@ that asks before it reads outside its project asks for one more folder. Each hel
 starts with one line that a person does not need. The guide repeats rules that `docs/cli/` also
 states. Tests keep the parts a parser or the command line can check aligned, and review keeps
 the rest.
+
+## Corpus
+
+<a id="the-scripted-layer-gates-pack-coverage"></a>
+### The corpus's scripted layer gates pack coverage, and a toolchain's first pack is a corpus pack
+
+The scripted layer runs each cell's fixed commands in a box under the `corpus` profile, with no
+model, so its result changes only when a pack, the profile, or Box Core changes. It is the gate on
+pack coverage: dispatch it on a branch before a pack change merges, and it runs each night, and a
+row that differs from its `expect` fails ([corpus](corpus.md#where-each-layer-runs)). The agent
+layer runs a real harness on the cell's prompt. It is the real measure of a first-use session, and
+it runs on a schedule. A toolchain that `box` ships no pack for gets a pack in `test-corpus/packs/`
+first, and the pack moves to `resources/packs/` when `box` ships it to operators.
+
+**Rejected.** Gate on the agent layer: a model takes another path on each run, so a changed result
+does not point at a pack change. Write each new pack in `resources/packs/`: a pack there joins
+`box profile create`'s `--tools` list, so every operator is offered a pack that only the corpus uses.
+
+**Cost.** A green scripted cell proves only the commands that its script names. A model that runs
+another command can still meet a wall that only the agent layer finds.
