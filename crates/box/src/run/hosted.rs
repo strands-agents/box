@@ -21,6 +21,9 @@
 //! Drop order carries teardown: discovery joins, the broker unbinds, the gateway joins, the record
 //! is withdrawn, and the lock releases last.
 
+#[cfg(test)]
+pub(crate) mod storage;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
