@@ -205,4 +205,76 @@ mod tests {
             Err(ContainmentError::ApplyFailed { .. })
         ));
     }
+    #[test]
+    fn descriptor_frames_accept_one_and_reject_extra_handles_without_leaks() {
+        const CHILD: &str = "BOX_STORAGE_DESCRIPTOR_FRAME_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "backend::linux::namespace::storage::transport::tests::descriptor_frames_accept_one_and_reject_extra_handles_without_leaks", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+        let count = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+        for descriptors in [1_usize, 2, 64] {
+            let (sender, receiver) = UnixStream::pair().unwrap();
+            let source: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+            let baseline = count();
+            let payload = *b"F";
+            let mut io = libc::iovec {
+                iov_base: payload.as_ptr().cast_mut().cast(),
+                iov_len: 1,
+            };
+            let mut control = [0_u64; 40];
+            // SAFETY: all required buffers are initialized before sendmsg.
+            let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+            message.msg_iov = &mut io;
+            message.msg_iovlen = 1;
+            message.msg_control = control.as_mut_ptr().cast();
+            message.msg_controllen = std::mem::size_of_val(&control);
+            // SAFETY: the aligned buffer fits the header and at most 64 valid descriptors.
+            unsafe {
+                let header = libc::CMSG_FIRSTHDR(&message);
+                (*header).cmsg_level = libc::SOL_SOCKET;
+                (*header).cmsg_type = libc::SCM_RIGHTS;
+                (*header).cmsg_len =
+                    libc::CMSG_LEN((descriptors * std::mem::size_of::<libc::c_int>()) as u32)
+                        as usize;
+                for index in 0..descriptors {
+                    std::ptr::write(
+                        libc::CMSG_DATA(header).cast::<libc::c_int>().add(index),
+                        source.as_raw_fd(),
+                    );
+                }
+                message.msg_controllen = (*header).cmsg_len;
+                assert_eq!(
+                    libc::sendmsg(sender.as_raw_fd(), &message, libc::MSG_NOSIGNAL),
+                    1
+                );
+            }
+            let received = receive_fd(&receiver);
+            if descriptors == 1 {
+                let received = received.unwrap();
+                // SAFETY: F_GETFD reads flags on the owned, open descriptor.
+                let flags = unsafe { libc::fcntl(received.as_raw_fd(), libc::F_GETFD) };
+                assert_ne!(flags & libc::FD_CLOEXEC, 0);
+                assert_eq!(count(), baseline + 1);
+                drop(received);
+            } else {
+                assert!(
+                    matches!(received, Err(ContainmentError::ApplyFailed { .. })),
+                    "count={descriptors}"
+                );
+            }
+            assert_eq!(count(), baseline, "count={descriptors}");
+        }
+    }
 }
