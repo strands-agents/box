@@ -683,7 +683,7 @@ fn other_commands_do_not_start_delivery_or_create_identity() {
         vec!["--version"],
         vec!["profile", "list"],
         vec!["profile", "show", "probe"],
-        vec!["clean", "--all", "--no-ask"],
+        vec!["profile", "clean", "--all", "--no-ask"],
         vec!["profile", "delete", "probe", "--no-ask"],
     ] {
         let output = scene.command(&server).args(args).output().unwrap();

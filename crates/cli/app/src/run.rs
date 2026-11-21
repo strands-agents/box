@@ -601,15 +601,6 @@ impl HeldBoxes {
     }
 }
 
-/// What `box clean --all` removed and kept.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Cleaned {
-    /// How many run folders were removed.
-    pub removed: usize,
-    /// The running boxes that were kept.
-    pub running: Vec<String>,
-}
-
 impl Launcher {
     /// Run profiles for this process's own operator.
     pub fn from_host() -> Self {
@@ -885,54 +876,6 @@ impl Launcher {
             .collect();
         names.sort();
         Ok(names)
-    }
-
-    /// Check that `id` names one of the run folders that `runs` lists, and that its box is not
-    /// running. Refuse it otherwise.
-    pub fn find_run(&self, id: &str) -> Result<(), Error> {
-        self.saved_box(id)?;
-        hold(&self.runs_root(), id).map(drop)
-    }
-
-    /// Remove the run folder `id`, a link without its target. Refuse a box that is still running,
-    /// and hold the lock until the folder is gone, so a box cannot start in it meanwhile.
-    pub fn remove_run(&self, id: &str) -> Result<(), Error> {
-        self.saved_box(id)?;
-        let held = hold(&self.runs_root(), id)?;
-        remove_held(&self.runs_root().join(id), &held)?;
-        Ok(())
-    }
-
-    /// Refuse `id` unless it names one of the run folders that `runs` lists.
-    fn saved_box(&self, id: &str) -> Result<(), Error> {
-        if self.runs()?.iter().any(|name| name == id) {
-            Ok(())
-        } else {
-            Err(Error::BoxUnknown {
-                id: id.to_string(),
-                root: self.runs_root(),
-            })
-        }
-    }
-
-    /// Remove every run folder whose box is not running. `cleaned` counts the removed folders and
-    /// names the running boxes that were kept, also when a removal fails.
-    pub fn remove_runs(&self, cleaned: &mut Cleaned) -> Result<(), Error> {
-        let root = self.runs_root();
-        for name in self.runs()? {
-            let held = match hold(&root, &name) {
-                Ok(held) => held,
-                Err(Error::BoxRunning { id }) => {
-                    cleaned.running.push(id);
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            if remove_held(&root.join(name), &held)? {
-                cleaned.removed += 1;
-            }
-        }
-        Ok(())
     }
 
     /// The saved boxes of `profiles`, by ID, or every saved box when `profiles` is `None`. A box
@@ -2290,7 +2233,7 @@ pub(crate) fn mint(runs: &Path, profile: &str, base: &Path) -> Result<Instance, 
 }
 
 /// A new instance under `runs`: a name no other run holds, its directory, and its `box_dir`, and
-/// the lock on its directory, taken before the directory holds anything, so `box clean` keeps it.
+/// the lock on its directory, taken before the directory holds anything, so `box profile clean` refuses it.
 pub(crate) fn mint_claimed(
     runs: &Path,
     profile: &str,
@@ -2349,7 +2292,7 @@ pub(crate) fn mint_claimed(
     Err(io_error("create", &directory, source))
 }
 
-/// Lock the run folder that `mint_claimed` just created. `None` when `box clean` took it first:
+/// Lock the run folder that `mint_claimed` just created. `None` when `box profile clean` took it first:
 /// it holds the lock, or it removed the folder before the lock.
 fn lock_new(directory: &Path) -> Result<Option<std::fs::File>, Error> {
     let file = match std::fs::OpenOptions::new()
