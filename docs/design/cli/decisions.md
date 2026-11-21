@@ -131,7 +131,8 @@ change can break `box`, so CI runs the CLI's engine suite for each Box Core chan
 ### Box Core helper programs stay beside `box`
 
 Box Core locates `strands-box-sock-alias` and `strands-box-contain-trampoline` beside the `box`
-binary. `box` does not download Box Core. For development, `just build` builds the helpers.
+binary. On Linux, `strands-box-storage-compiler` also stays beside `box`. `box` does not
+download Box Core. For development, `just build` builds the helpers.
 
 **Rejected.** Search `PATH`: a search can find the wrong binary.
 

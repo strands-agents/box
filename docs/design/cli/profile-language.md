@@ -1637,3 +1637,16 @@ link rows by path, so the same holds for the folder that receives a link.
   `PATH` or has the tool's name as its real name, and skip the tool otherwise.
 - Tools that keep their state out of the workspace
   ([decisions.md](decisions.md#a-profile-can-name-launch-directories)).
+
+## Incoming mount sources
+
+The CLI resolves `mounts` in each agent, tool, and local server's filesystem table before
+resolving its permission paths. It applies entry and recipient conditions, expands path
+placeholders, and validates absolute paths without inspecting the arriving filesystem.
+Mount lists merge only within one recipient. The resolver keeps a separate list for each
+recipient, so a mount declared for the agent does not defer a tool's ordinary path checks.
+
+The compiler writes each list into that recipient's filesystem table in `box.toml`. Listing
+sources grants no access and does not create managed profile storage. The profile's Linux
+experimental flag authorizes the feature; [Incoming Linux storage](../../cli/profiles-reference.md#incoming-linux-storage)
+owns the settings and operator examples.

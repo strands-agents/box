@@ -11,6 +11,7 @@ just test-engine
 
 `just test-engine` runs `just build-cli` first. `just build-cli` puts `box`, Box Core's
 `strands-box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` in `target/debug`.
+Linux also builds `strands-box-storage-compiler` there.
 A missing helper fails the suite. `just check` runs the suite too, through `just test`.
 
 The suite runs with `PATH=/usr/bin:/bin`, so on macOS `the_agent_runs_git_through_the_git_pack`
@@ -179,3 +180,70 @@ trusted project's `shellPath` changes neither and its `shellCommandPrefix` still
 `PATH`. With none it skips with a message, unless `BOX_REQUIRE_PI` is set, and then it fails. The
 CI `macos` job sets it and installs the pi version that `resources/packs/pi/pack.toml` names. To run it, install pi
 with `npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.5.2`.
+
+## Incoming Linux storage tests
+
+The CLI's `storage_mounts` tests start real profiles before attaching a filesystem through
+Filesystem in Userspace (FUSE). Core's `runtime_storage_mounts` tests also cover storage attached
+before startup and two roots arriving in either order. Both suites require native Linux user
+and mount namespaces, a usable `/dev/fuse`, `mount`, `umount`, `unshare`, and `ip`. Their FUSE
+cases are ignored by ordinary test runs. Run them explicitly; a missing fixture fails the test.
+
+Run the following commands from the repository root. Build the trusted passthrough fixture
+with a C compiler, `pkg-config`, libfuse 3 development headers, and its library:
+
+```sh
+cc -D_FILE_OFFSET_BITS=64 -std=c11 -Wall -Wextra -Werror -O2 \
+  $(pkg-config --cflags fuse3) crates/cli/app/tests/support/storage_fixture.c \
+  $(pkg-config --libs fuse3) -o /tmp/boxy-storage-fixture
+```
+
+Build the CLI, Core, and their helpers from the same source revision. `--all-features` includes
+Core's `test-support` feature, which builds the test-only `box-storage-probe`. This command also
+builds `strands-box-storage-compiler` beside the CLI and Core binaries. The explicit target
+directory keeps the probe path aligned with Cargo output:
+
+```sh
+export CARGO_TARGET_DIR="$(pwd)/target"
+cargo build --locked -p strands-box -p strands-box-cli -p strands-box-containment \
+  --all-features --bins
+export BOX_STORAGE_TEST_FUSE=/tmp/boxy-storage-fixture
+export BOX_STORAGE_TEST_PROBE="$CARGO_TARGET_DIR/debug/box-storage-probe"
+```
+
+Run the Core tests, then the CLI tests. `--include-ignored` runs each suite's six FUSE cases
+and its ordinary control that distinguishes a reaped child from a live child. Run them serially:
+
+```sh
+cargo test --locked -p strands-box --all-features --test runtime_storage_mounts \
+  -- --include-ignored --test-threads=1 --nocapture
+cargo test --locked -p strands-box-cli --all-features --test engine storage_mounts:: \
+  -- --include-ignored --test-threads=1 --nocapture
+```
+
+Each FUSE test creates its own user, mount, process, and network namespaces. The CLI cases
+attach storage only after observing the original process's pending marker. The three-role case checks an
+agent, a program-resolved tool, and a local Model Context Protocol (MCP) server. The failure case
+requires all observed Box-owned processes to exit when a required denial cannot be applied.
+
+The file case checks exact-file read and write grants, a hidden subtree, a canonical-directory write
+denial, and allowed versus denied execution. A separate test requires Core to reject a mutable
+symbolic link used as a write-denial target. Source-side positive controls prove that the
+filesystem itself permits the operations Box refuses. The hosted case starts one Shell before
+attachment and checks pending paths through both Shell and Monty. After native access succeeds,
+that same Shell runs allowed and denied file operations through both interpreters. Each
+interpreter also checks metadata and lists a directory containing only two granted files;
+the ungranted sibling must remain absent. A separate
+file is native-readable and native-writable but has explicit hosted policy denials; each
+interpreter must produce the corresponding recorded policy decisions. Ordinary sibling
+operations must succeed, and the exact generated rule must deny moving a protected ancestor.
+A kernel refusal to move a mount is insufficient evidence for that policy check.
+
+The hosted failure case keeps a Shell program and one Monty evaluation active before
+attachment. Both must perform pending read and write checks and acknowledge a challenge.
+The incoming source omits a required denial path. The test requires the specific rule
+compilation error, shutdown within 15 seconds, no successful read or write markers, and
+no remaining observed processes or fixture mounts. A hosted timeout does not satisfy it.
+
+The tests do not cover every storage provider, remount behavior, or macOS. Fixture output is
+captured in temporary files so a noisy FUSE request log cannot fill a process pipe.

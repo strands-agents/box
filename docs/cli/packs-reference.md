@@ -269,6 +269,10 @@ your project. Each profile gets one storage folder, which every project it runs 
 - `box run` creates each directory and gives the agent read and write on it, so do not add that
   access yourself.
 
+External mount paths belong to each recipient's `filesystem.mounts` list, described in
+[Incoming Linux storage](profiles-reference.md#incoming-linux-storage). They are separate from
+the managed directories in `[storage]`.
+
 ### Copy files into storage
 
 A `[[storage.files]]` row copies a file or a folder of yours into storage on the profile's first
