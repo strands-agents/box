@@ -113,6 +113,13 @@ box 0.2.2 and earlier installed into `~/.box`. The installer upgrades such an in
 it points `~/.local/bin/box` at the new release and leaves `~/.box` as it is. `box` no longer reads
 `~/.box`, so create your profiles again, and delete `~/.box` when you no longer need it.
 
+On macOS, the installer accepts the current Box signing identity and the legacy CLI identity for
+older releases. Both must pass the same Apple publisher, signature, and notarization checks.
+You don't need `BOX_ALLOW_UNSIGNED` to install a genuine older release.
+
+The macOS CLI shares its code-signing identity with Box Core, the engine that runs workloads.
+Permissions based on that identity and certificate can apply to either program.
+
 Old releases stay in `~/.strands/box/packages/`. Installing one you already have switches `current` back
 to it without touching its folder. To free the space, delete an old release's folder, but not the
 one `current` points to.

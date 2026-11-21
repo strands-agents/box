@@ -15,7 +15,7 @@ pull request that changes what an entry says fixes that entry.
   - [Box Core helper programs stay beside `box`](#box-finds-box-core-at-an-explicit-path)
   - [The packs that `box` ships are separate resource files](#the-starters-are-files-beside-box)
   - [The command is `box`](#the-command-is-box)
-  - [The macOS `box` has its own identifier and signs through Box Core's setup](#box-signs-through-box-core)
+  - [The macOS `box` shares Box Core's identifier and signing setup](#box-signs-through-box-core)
   - [`box` supports macOS and Linux](#box-supports-macos-only)
   - [Packs and profiles are their own crate](#packs-and-profiles-are-their-own-crate)
 - **Profiles and packs**
@@ -169,38 +169,26 @@ does not install Box Core's own `box` binary.
 **Rejected.** The tried `~/.box` home is short, but collides with the Box.com CLI.
 
 **Cost.** Box Core's binary is also `box`. An operator who puts both on `PATH` runs the first
-one, and the CLI and its macOS identifier must stay distinct from Box Core's. See
-[the signing entry](#box-signs-through-box-core). The default home has no fallback: profiles and
-saved telemetry choices under the former home are not loaded.
+one. Both use [the same macOS signing identity](#box-signs-through-box-core). The default home
+has no fallback: profiles and saved telemetry choices under the former home are not loaded.
 
 <a id="box-signs-through-box-core"></a>
-### The macOS `box` has its own identifier and signs through Box Core's setup
+### The macOS `box` shares Box Core's identifier and signing setup
 
-`crates/cli/app/Info.plist` gives `box` the identifier `com.amazon.strands.box-cli`, and the two
-helpers keep Box Core's `com.amazon.strands.box`. For ordinary packages,
-`scripts/macos-release-cli.py` signs all three in one request for Box Core's application, with
-Box Core's AWS role and notarization credential. The reusable `CLI release` workflow runs it, and
-`Release Box` calls that workflow, so one release publishes both Box Core and `box`. The signing
-service signs each program with the identifier in its plist. macOS does not treat the CLI and Box Core's `box` as one program, for example in the
-access list of a keychain item.
+The CLI and its helpers use Box Core's `com.amazon.strands.box` macOS identifier and share its
+signing role and notarization credential. A signed experimental native app uses the matching
+Developer ID profile with Endpoint Security authorization. The reusable `CLI release` workflow
+runs inside `Release Box`, so one release publishes both Box Core and `box`.
 
-A signed experimental native package keeps that identity separation and shared service setup.
-It signs the helpers first, then signs a CLI app bundle with a separate distribution profile
-for `com.amazon.strands.box-cli`. The profile must authorize Endpoint Security, Apple's API for
-authorizing file operations. `CD_SIGNER_CLI_PROFILE_NAME` selects it. A missing or mismatched
-profile stops signing; configuring it and granting access remain administrator actions.
+**Rejected.** The tried separate CLI identifier lets macOS access rules distinguish the CLI from
+Box Core, but adds separate registration and native capability provisioning for the same product.
+A separate signing role: the shared service already signs both packages.
 
-**Rejected.** Box Core's identifier for the CLI: macOS would treat the CLI and Box Core's `box` as
-one program.
-A separate service role for ordinary CLI signing: the shared setup already signs that package.
-Reusing the Core application profile for native CLI signing: its application identifier does
-not authorize the CLI.
-
-**Cost.** Two maintainers, one to start a run and one to approve it, can produce a program that
-is signed and notarized under the configured Apple team.
-Box Core and `box` use one AWS role and one bucket, under `box-release/`, and one change to the
-notarization secret changes the credential for both. Native CLI signing also needs an authorized
-CLI distribution profile. Local script tests do not establish that this permission is granted.
+**Cost.** Box Core and the CLI trust the same signing role and notarization credential. For
+operator consequences and older-release support, see
+[macOS upgrades and permissions](../../cli/install.md#upgrade-or-choose-a-version).
+Sharing the identifier does not prove native enforcement; the signed package must pass the
+protected macOS validation run.
 
 <a id="box-supports-macos-only"></a>
 ### `box` supports macOS and Linux
