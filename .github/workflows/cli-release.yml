@@ -55,6 +55,8 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.target.triple }}
+    # The build uses no cache, so a commit it builds can never write one.
+    cache-mode: none
     runs-on: ${{ matrix.target.runner }}
     timeout-minutes: 45
     permissions:
