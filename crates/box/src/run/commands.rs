@@ -18,6 +18,9 @@ use crate::record::layout::{
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod aliases;
 
+#[cfg(test)]
+pub(crate) mod snapshot;
+
 #[derive(Debug, Default)]
 pub(crate) struct ConfiguredCommands {
     tools: BTreeMap<String, Arc<ConfiguredCommand>>,
@@ -105,12 +108,17 @@ pub(crate) struct ConfiguredCommand {
     opened: File,
     identity: (u64, u64),
     loaded: FileState,
+    /// Compiler replicas verify original-identity authority through their owner.
+    #[cfg(test)]
+    verification: Option<snapshot::ReplicaVerifier>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     needs_alias_scan: bool,
 }
 
 /// The link count, owner, group, and mode of a command file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(test, serde(deny_unknown_fields))]
 struct FileState {
     links: u64,
     owner: u32,
@@ -432,6 +440,8 @@ impl ConfiguredCommand {
             opened,
             identity: (metadata.dev(), metadata.ino()),
             loaded,
+            #[cfg(test)]
+            verification: None,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             needs_alias_scan: writable_links,
         };
@@ -461,8 +471,8 @@ impl ConfiguredCommand {
         &self.opened
     }
 
-    pub(crate) fn verify(&self) -> Result<(), BoxError> {
-        let unchanged_names = self.opened.metadata().is_ok_and(|metadata| {
+    fn unchanged_owner_state(&self) -> bool {
+        self.opened.metadata().is_ok_and(|metadata| {
             let now = FileState::of(&metadata);
             if self.loaded.links == 1 {
                 now.links == 1
@@ -474,7 +484,18 @@ impl ConfiguredCommand {
                 now == self.loaded
                     && (protected_by_reach || !writable_by_this_user(&self.opened, &self.path, now))
             }
-        });
+        })
+    }
+
+    pub(crate) fn verify(&self) -> Result<(), BoxError> {
+        let unchanged_names = self.unchanged_owner_state();
+        #[cfg(test)]
+        let unchanged_names = if let Some(verification) = &self.verification {
+            verification.verify(&self.opened)?;
+            true
+        } else {
+            unchanged_names
+        };
         if unchanged_names
             && disk_identity(&self.path) == Some(self.identity)
             && self
@@ -1481,6 +1502,8 @@ mod tests {
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 needs_alias_scan: false,
                 opened,
+                #[cfg(test)]
+                verification: None,
             }
         };
         loaded_as(&system, None)
