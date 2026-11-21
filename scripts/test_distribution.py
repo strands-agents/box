@@ -848,6 +848,16 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
         self.run_install(BOX_VERSION="0.3.0-preview.1")
         self.assertEqual(self.current(), f"0.3.0-preview.1-{self.target}")
 
+    def test_a_version_may_start_with_the_tag_v(self):
+        """BOX_VERSION takes the release tag too, as download.sh does"""
+        self.release("0.3.0-preview.1")
+        self.run_install(BOX_VERSION="v0.3.0-preview.1")
+        self.assertEqual(self.current(), f"0.3.0-preview.1-{self.target}")
+        for version in ("vv0.3.0", "V0.3.0", "v"):
+            with self.subTest(version=version):
+                result = self.run_install(success=False, BOX_VERSION=version)
+                self.assertIn("expected a version such as 0.3.0 or 0.3.0-preview.1", result.stderr)
+
     def test_missing_platform_asset_names_the_requested_archive(self):
         """A release without the host archive fails before installation"""
         asset = f"box-cli-v0.1.0-{self.target}.tar.gz"
@@ -1231,7 +1241,7 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
 
     def test_version_and_launcher_conflicts_refuse(self):
         """Invalid versions and existing launchers are rejected"""
-        for version in ("v0.1.0", "../0.1.0", "", "0.1.0;exit", "01.0.0",
+        for version in ("vv0.1.0", "../0.1.0", "", "0.1.0;exit", "01.0.0",
                         "0.1.1-linux-preview.0", "0.1.1-linux-preview.01", "0.1.1-rc.1",
                         "0.1.1-linux-preview.1+build", "0.1.1-preview.0", "0.1.1-preview.01",
                         "0.1.1-preview", "0.1.1-preview.1-linux", "0.1.1-macos-preview.1"):

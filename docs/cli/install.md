@@ -91,8 +91,7 @@ on Linux.
 
 ## Upgrade or choose a version
 
-To install another release, run the installer again with its number in `BOX_VERSION`, without a
-leading `v`:
+To install another release, run the installer again with its number in `BOX_VERSION`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | BOX_VERSION=0.3.0-preview.2 sh
@@ -181,7 +180,7 @@ from `# >>> Box PATH >>>` to `# <<< Box PATH <<<`. For fish, delete
 
 | Variable | What it does |
 | --- | --- |
-| `BOX_VERSION` | The release to install, such as `0.3.0-preview.1`, without a leading `v`. Without it, the latest stable release. |
+| `BOX_VERSION` | The release to install, such as `0.3.0-preview.1` or its tag `v0.3.0-preview.1`. Without it, the latest stable release. |
 | `BOX_GITHUB_REPO` | The GitHub repository that supplies releases, as `owner/repo`. Without it, `strands-agents/box`. |
 | `BOX_ALLOW_UNSIGNED` | `1` skips Apple's signature and Gatekeeper checks on macOS. It has no effect on Linux. |
 | `BOX_NO_MODIFY_PATH` | `1` leaves your shell's startup files alone. |

@@ -352,7 +352,8 @@ box_unsigned=${BOX_ALLOW_UNSIGNED-0}
 case "$box_unsigned" in 0|1) ;; *) die "BOX_ALLOW_UNSIGNED must be 0 or 1" ;; esac
 box_no_path=${BOX_NO_MODIFY_PATH-0}
 case "$box_no_path" in 0|1) ;; *) die "BOX_NO_MODIFY_PATH must be 0 or 1" ;; esac
-if [ "${BOX_VERSION+x}" = x ]; then version "$BOX_VERSION"; fi
+# BOX_VERSION takes the release tag too (v0.3.0), as download.sh does.
+if [ "${BOX_VERSION+x}" = x ]; then BOX_VERSION=${BOX_VERSION#v}; version "$BOX_VERSION"; fi
 for box_tool in uname awk tar mktemp mkdir rmdir mv ln rm readlink find \
     sort cmp stat chmod sed grep cat cp gh dirname wc sleep; do
     need "$box_tool"
