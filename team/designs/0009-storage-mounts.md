@@ -63,16 +63,20 @@ To support this agent init -> session creation + new mounted filesystem startup 
 
 Box starts a (new) trusted helper that monitors configured `box.toml` mount sources. The sandboxed workload keeps its private mount namespace. An empty filesystem covers each pending mount path.
 
+For paths under a declared storage mount, Box no longer requires the source paths to exist at startup. It defers existence, file-type, and filesystem-object identity checks until the mount arrives. Configuration syntax, conflicting grants, and restrictions on Box state and credentials remain checked at startup. Paths outside declared storage mounts retain their existing startup checks.
+
 ### 5.2 When a new mount arrives
 
 Linux notifies the Box helper when the mounts visible in its namespace change. Box observes these changes through `/proc`. The helper uses `open_tree()` to create a private *inspection* and *preparation* views. These views reference the same files; they do not copy the data.
 
 ### 5.3 Before the workload receives the mount
 
-1. Box evaluates the existing `box.toml` rules against the inspection view.
+1. Box checks the required paths in the inspection view, records their filesystem-object identities, and evaluates the existing `box.toml` rules. It repeats these checks against the arriving filesystem even if placeholder directories existed at startup.
 2. The helper prepares restricted file and directory attachments, applies mount attributes with `mount_setattr()`, then attaches the completed view with `move_mount()`. The helper retains mount-administration privileges within Box’s user namespace.
 
 For example, Box can expose `/mnt/data` as read-only, permit writes under `/mnt/data/output`, and cover `/mnt/data/private`. The workload receives the completed arrangement without exposure to the unprotected source mount.
+
+A source mount that has not arrived remains pending while the workload runs. Once a mount arrives, a missing required permission target or another preparation failure keeps it covered and stops Box with an error. Deferring startup checks does not remove the checks required before exposing storage.
 
 Each agent, tool, and local Model Context Protocol (MCP) server receives its own protected view.
 
@@ -80,7 +84,19 @@ Each agent, tool, and local Model Context Protocol (MCP) server receives its own
 
 ### D1. Declaring a mount grants no access
 
+The proposed Box Core `box.toml` interface uses an array of absolute paths to identify storage mounts that can arrive after startup:
+
+```toml
+[experimental-features]
+linux-storage-mounts = true
+
+[storage]
+mounts = ["/mnt/data", "/mnt/shared"]
+```
+
 `storage.mounts` names storage sources. Existing `read`, `write`, `exec`, file-specific grants, `deny`, and `deny_write` rules remain authoritative. Linux’s existing rule limitations still apply.
+
+A nonempty `storage.mounts` configuration requires the `linux-storage-mounts` experimental flag and Linux; otherwise Box rejects startup. Box CLI profiles expose the same Linux-only opt-in. The feature remains experimental until regression and security testing qualify the supported environments.
 
 ### D2. Source restrictions remain
 
@@ -95,8 +111,8 @@ The Box workload and Runtime continue while storage is pending. Early file opera
 
 1. Linux comes first to unblock Runtime. The macOS design remains pending.
 2. Paths needed for permission exceptions must exist when Box prepares the mount. A missing deny target fails preparation. Files created later inside admitted directories remain subject to their existing protections.
-
-   This first version supports the initial arrival of each configured storage mount. Box trusts the external storage manager, such as AgentCore Runtime, to mount the intended filesystem. Replacing or removing an admitted mount, or adding new mounts beneath it, remains follow-up work.
+3. This first version supports the initial arrival of each configured storage mount. Box trusts the external storage manager, such as AgentCore Runtime, to mount the intended filesystem. Replacing or removing an admitted mount, or adding new mounts beneath it, remains follow-up work.
+4. **P1 (deferred hardening): concurrent directory changes.** The first version assumes that paths requiring different permissions remain stable while Box checks and prepares storage. Another application or a writable alias can rename or replace those directories during preparation. Box could then apply restrictions to a different directory from the one it checked. Hardening against this edge case remains follow-up work; trusting the storage manager does not prevent other writers from changing directories.
 
 ## 8. References
 
