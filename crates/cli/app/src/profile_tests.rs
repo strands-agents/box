@@ -14829,10 +14829,16 @@ fn the_shipped_node_pack_reads_the_hosts_file() {
 }
 
 #[test]
-fn the_shipped_launchers_that_run_node_as_a_helper_read_the_hosts_file() {
-    for pack in [
-        include_str!("../../../../resources/packs/bunx/pack.toml"),
-        include_str!("../../../../resources/packs/pnpx/pack.toml"),
+fn the_shipped_node_launchers_read_hosts_and_their_linux_interpreters() {
+    for (pack, interpreter) in [
+        (
+            include_str!("../../../../resources/packs/bunx/pack.toml"),
+            "/usr/bin/env",
+        ),
+        (
+            include_str!("../../../../resources/packs/pnpx/pack.toml"),
+            "/bin/sh",
+        ),
     ] {
         let table: toml::Table = pack.parse().expect("TOML");
         let read_file = table["filesystem"]["read_file"].as_array().expect("a list");
@@ -14847,7 +14853,11 @@ fn the_shipped_launchers_that_run_node_as_a_helper_read_the_hosts_file() {
             .collect();
         assert_eq!(
             paths,
-            [("/private/etc/hosts", "macos"), ("/etc/hosts", "linux")]
+            [
+                ("/private/etc/hosts", "macos"),
+                ("/etc/hosts", "linux"),
+                (interpreter, "linux"),
+            ]
         );
     }
 }

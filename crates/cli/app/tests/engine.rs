@@ -298,7 +298,18 @@ fn a_helper_python_outside_homebrew_passes_core_validation() {
         filesystem["read"].as_array().unwrap().contains(&python),
         "{filesystem}"
     );
-    assert!(filesystem.get("read_file").is_none(), "{filesystem}");
+    if cfg!(target_os = "linux") {
+        let shell = std::fs::canonicalize("/bin")
+            .expect("canonical bin directory")
+            .join("sh");
+        assert_eq!(
+            filesystem["read_file"].as_array().expect("file grants"),
+            &[toml::Value::String(shell.display().to_string())],
+            "{filesystem}"
+        );
+    } else {
+        assert!(filesystem.get("read_file").is_none(), "{filesystem}");
+    }
 }
 
 fn wait_for_output(mut child: Child) -> Output {
