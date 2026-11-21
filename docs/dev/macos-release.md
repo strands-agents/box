@@ -70,10 +70,10 @@ This supplies the Apple authorization needed by the native Endpoint Security fea
 It does not enable the runtime experiment or replace native enforcement tests.
 Unsigned dry runs do not need these signing variables.
 
-The CLI's signing job runs in the same `macos-signing` environment and reads the same variables, except `CD_SIGNER_PROFILE_NAME`.
-It signs the CLI's ordinary package for Box Core's application with no profile.
-Only an experimental native-policy CLI dry run also needs `CD_SIGNER_CLI_PROFILE_NAME`, a distribution profile for `com.amazon.strands.box-cli`.
-Never reuse `CD_SIGNER_PROFILE_NAME` for it.
+The CLI's signing job runs in the same `macos-signing` environment and reads the same variables.
+Its experimental native-policy dry run uses the same `CD_SIGNER_PROFILE_NAME` for the shared `com.amazon.strands.box` identity.
+Its ordinary package signs the programs without embedding a profile.
+The [CLI macOS release guide](macos-release-cli.md#the-macos-signing-variables) describes native CLI signing and verification.
 Account-specific values and access requests belong in the team's internal runbook.
 
 ## Run a dry run

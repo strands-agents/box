@@ -141,7 +141,7 @@ runs in <new>`. A new run writes the full profile name to `profile-name` in its 
 `0600`. The profile check reads the `profile-name` record, which must be a file that names this profile
 exactly. Every run then holds an exclusive lock on its run directory until it ends, opened without
 following a link, and `box` refuses a run directory that another `box run` holds, or that a
-`box clean` holds while it removes it.
+`box profile clean` holds while it removes it.
 
 ### Load the packs
 
@@ -490,6 +490,9 @@ work in this order:
    | `PATH` | Skips the server. | The server and its helpers use the operator's `PATH`; a server-specific value can select different programs. |
    | `~` or `~/` at the start of an `env` value that `references` fills in | Starts the value with the operator's home. A value copied as written keeps its `~`. | Claude Code's rules fill it in. |
    | A relative `HOME` or `TMPDIR` | Skips the server. A full path is copied wherever it points. | Box Core refuses a relative one. A full path is the operator's choice. |
+   | Any other `env` value, after `box` fills it in, with a path in it. `box` splits the value at `:`, `;`, `,`, `=`, `@`, a quote, and white space. It also reads the value whole, and each part between `:` or `;` whole, so that a folder name with a space stays one path. A part is a path when it starts with `/`, `./`, `../`, or `~/`, or is `~`. | Skips the server (`mcp::writable_path`) when a part starts with `./`, `../`, or `~/`, or when a part is or lies in the workspace, the run's storage, `~/.strands/box`, or a write grant, as written or real. `Refusals::inside` answers that from the roots that refuse the server's program and each `PATH` directory. A `~/` that `box` did not fill in reaches the server as written, and a program reads it as a path that is not a full path. A full path anywhere else is copied, and so is a folder that holds one of those places, such as the operator's home. | A program loads code from the files and folders that its variables name, and a path that is not a full path starts from the workspace, where each server starts. The check reads where a value points, so it needs no list of names, and a URL such as `file://` is read by its path. |
+   | Any other `env` value that is a list of paths with `:` or `;` between them: each part is a path, `.`, `..`, or empty, or the name ends as the name of a path does, in either case ([the endings](../../cli/troubleshooting.md#an-mcp-server-has-no-automatic-declaration)). A value with `://`, a number, and `true`, `false`, `yes`, `no`, `on`, and `off` are no list. | Skips the server when a part is not a full path. Under a name with one of those endings, the reason says that `box` reads the value as a path by its name. | A plain word in a path list, such as `lib`, and an empty part both lead into the workspace. A plain word under any other name is copied, because `box` cannot tell a folder from a mode or a repository name. |
+   | An `env` value that opens with `-` or `--` and a letter, after any white space | Checks each path in it as in any other value, but reads it as no list of paths. When it passes, copies it, and the report names the variable in a `did not check` line (`Servers::option_lines`). | The value holds options, such as `JDK_JAVA_OPTIONS` does, and `box` reads no option. An option can load code by a plain word, which `box` does not see as a path, and [limitations.md](../../cli/limitations.md#mcp-servers-in-the-box) names that gap. |
    | An argument that holds `${`, `{env:`, or the opening part of a form of `env-var-syntax`, with or without `references` (a form with no closing text, such as `$NAME`, only with `references` on `args`; the same rule applies to `command`) | Replaces the whole argument with `*` and sets `argument_wildcards = true`. It reads no host variable for that argument. | Core forwards the caller's argument unchanged, including literal variable text. |
    | A literal whole `*` beside a variable argument | Skips the server. | Core would interpret both as wildcards. With no variable arguments, the star stays literal and the flag is omitted. |
 
@@ -651,8 +654,7 @@ history and each `when temporal` rule that the compiled policy has not changed k
 `policy.dw`. Two runs of
 one profile in one workspace share its storage, so the run that starts last writes each
 `[[storage.files.set]]` value into the shared copy. Run directories stay after the run stops, about
-2 MB each. `box clean <BOX_ID>` removes one run directory, and `box clean --all` removes every run
-directory whose box is not running. It asks `[y/N]` first, and `--no-ask` removes without asking.
+2 MB each. [`box profile clean`](../../cli/cli.md#box-profile-clean) removes them.
 
 ## What `box run` refuses
 
@@ -723,8 +725,8 @@ candidate it can run, and lists each candidate it passed over and why.
 **`--box-id`.** The value is not `b-` followed by 16 lowercase hexadecimal digits, names no run
 directory with a `box.toml` and a `box/` (none of them a link), or names a run whose `box.toml`
 names no workspace. The run's `profile-name` record is missing, is not a file, or does not name
-this profile exactly. Another `box run` holds the run directory, or a `box clean` holds it while
-it removes it.
+this profile exactly. Another `box run` holds the run directory, or a `box profile clean` holds it
+while it removes it.
 
 ## Paths and variables
 

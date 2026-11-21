@@ -205,8 +205,9 @@ into your project.
 
 ## Clean up
 
-Each run leaves a folder in `~/.strands/box/r`, and they pile up. `box clean --all` asks, then
-removes them. It keeps the profile, and Claude Code's settings and history. To start over, run
+Each run leaves a folder in `~/.strands/box/r`, and they pile up. `box profile clean --all` asks,
+then removes them. It keeps the profile, and Claude Code's settings and history. If one of the boxes
+is still running, it removes nothing and names that box, so exit it first. To start over, run
 `box profile delete --all`, which also asks first, and redo steps 2 and 3.
 
 ## Where to go next

@@ -78,6 +78,8 @@ type = "bool"
 default = false
 warning = """Includes servers you add later and servers configured for each project this profile runs in.
 Local servers run in the box with keys from their settings and your environment.
+A server variable that names a library folder or runtime options can load code.
+If it points where the agent can write, the agent's code runs with the server's keys.
 Remote servers' hosts become reachable.
 Copied settings can expose keys to the agent, even for servers Box skips."""
 

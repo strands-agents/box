@@ -439,15 +439,6 @@ pub enum Error {
         id: String,
     },
 
-    /// `box clean` names no saved box.
-    #[error("no saved box {id} in {root}; pass a box ID from `box runs list`")]
-    BoxUnknown {
-        /// The box ID.
-        id: String,
-        /// The runs directory.
-        root: PathBuf,
-    },
-
     /// `box profile clean --box-id` names a box that the named profile does not own.
     #[error(
         "box {id} is not a box of profile {profile}; pass a box ID that `box runs list {profile}` shows"
@@ -498,13 +489,6 @@ pub enum Error {
         command: &'static str,
         /// The running box IDs, comma-separated.
         ids: String,
-    },
-
-    /// `box clean` names a box that is still running.
-    #[error("box {id} is still running; wait for it to exit, then run box clean again")]
-    BoxRunning {
-        /// The box ID.
-        id: String,
     },
 
     /// The operator did not answer yes to a removal.

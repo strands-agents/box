@@ -22,7 +22,6 @@ box run claude
 | [`box profile delete`](#box-profile-delete) | Delete a profile, with its boxes and storage. |
 | [`box runs list`](#box-runs-list) | Find an earlier run and its box ID. |
 | [`box runs history`](#box-runs-history) | See what the box allowed and denied in a run. |
-| [`box clean`](#box-clean) | Remove one earlier run, or every run that has finished. |
 | [`box telemetry`](#box-telemetry) | Turn usage telemetry on or off. |
 | [`box help agent`](#box-help-agent) | Give a coding agent on your host the guide to make or change a profile. |
 
@@ -252,6 +251,7 @@ The document holds what the text report prints, and `--full` adds `box_toml` and
 | `mcp.unstarted` | `server` and `reason` of each `no permit to start MCP server` line. |
 | `mcp.servers` | `server`, `file`, and `detail` (the end of the `mcp` line, such as `, with the key in GITHUB_TOKEN`, or empty). |
 | `mcp.dropped` | `variable`, `server`, `file`, and `reason` of each variable that an MCP server goes without. |
+| `mcp.unchecked` | `variable`, `server`, and `file` of each `did not check` line: a variable of a declared MCP server whose value opens as options do, which `box` doesn't read. |
 | `mcp.path_dropped` | The text after `dropped` for each folder on your `PATH` that isn't a full path. |
 | `mcp.skipped` | `server`, `file`, and `reason` of each `no automatic MCP declaration for` line. |
 | `mcp.unread` | `file` and `reason` of each `did not read` line. |
@@ -407,7 +407,7 @@ box runs list [<profile>] [--format json]
 
 | Flag | What it does |
 | --- | --- |
-| `<profile>` | Show only this profile's runs. For a profile file, give the name in its `[profile]` table. |
+| `<profile>` | Show only this profile's runs: the same boxes that [`box profile clean`](#box-profile-clean) removes for it. For a profile file, give the name in its `[profile]` table. |
 | `--format json` | Print one JSON array, for a script. Each object has `profile`, `updated`, and `id`. |
 
 ```text
@@ -462,30 +462,6 @@ TIME (UTC)	RESULT	ACTION	RESOURCE	RULE	REASON
 2026-11-11T12:30:02.481516234Z	installed	policy	policy off	-	-
 2026-11-11T12:31:40.112358132Z	installed	policy	policy.dw	-	-
 ```
-
-## box clean
-
-Remove the box of an earlier run, and its records. A run's box stays after the agent exits, so you
-can run in it again or read its history. `box` asks before it removes anything, and never removes a
-run that is still going. Your profiles and their storage stay, so the agent keeps its settings and
-sessions.
-
-```sh
-box clean b-5b8e3d70c92f14ab
-```
-
-```text
-box clean <box ID> [--no-ask]
-box clean --all [--no-ask]
-```
-
-| Flag | What it does |
-| --- | --- |
-| `<box ID>` | The run to remove, from [`box runs list`](#box-runs-list). |
-| `--all` | Remove every run that isn't still going. |
-| `--no-ask` | Remove without asking, for a script. |
-
-To remove only one profile's runs, use [`box profile clean`](#box-profile-clean).
 
 ## box telemetry
 

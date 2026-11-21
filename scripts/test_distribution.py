@@ -397,7 +397,8 @@ with (captured / "transfers.jsonl").open("a") as log:
         executable(self.tools / "codesign", f"""#!{sys.executable}
 import os, pathlib, sys
 name = pathlib.Path(sys.argv[-1]).name
-identifier = "com.amazon.strands.box-cli" if name in ("box", "Box.app") else "com.amazon.strands.box"
+identifier = os.environ.get("TEST_CLI_IDENTIFIER" if name in ("box", "Box.app") else "TEST_HELPER_IDENTIFIER",
+                            "com.amazon.strands.box")
 if os.environ.get("TEST_BAD_SIGNATURE"): sys.exit(1)
 team = os.environ.get("TEST_TEAM", "{TEAM}")
 if "--display" in sys.argv:
@@ -546,6 +547,55 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
             text = (self.tools / "mv").read_text().replace('exec /bin/mv "$@"',
                 '[ "$1" != -fh ] || {{ shift; set -- -fT "$@"; }}\nexec /bin/mv "$@"'.replace("{{", "{").replace("}}", "}"))
             (self.tools / "mv").write_text(text)
+
+    def assert_macos_identity_upgrade_and_rollback(self, native):
+        self.native_platform()
+        self.release("0.1.0", native=native)
+        self.run_install(TEST_CLI_IDENTIFIER="com.amazon.strands.box-cli")
+        self.assertEqual(self.current(), f"0.1.0-{self.target}")
+        self.release("0.2.0", native=native)
+        self.run_install()
+        self.assertEqual(self.current(), f"0.2.0-{self.target}")
+        launcher = self.home / ".local/bin/box"
+        self.assertEqual(subprocess.check_output([str(launcher), "--version"], env=self.env, text=True),
+                         "box 0.2.0\n")
+        self.run_install(BOX_VERSION="0.1.0", TEST_CLI_IDENTIFIER="com.amazon.strands.box-cli")
+        self.assertEqual(self.current(), f"0.1.0-{self.target}")
+        self.assertEqual(subprocess.check_output([str(launcher), "--version"], env=self.env, text=True),
+                         "box 0.1.0\n")
+        self.assertEqual(len((self.root / "gatekeeper-calls").read_text().splitlines()), 9)
+
+    def test_macos_shared_identity_upgrade_and_pinned_legacy_rollback(self):
+        """Signed flat releases upgrade to the Box identity and retain pinned legacy installs"""
+        self.assert_macos_identity_upgrade_and_rollback(native=False)
+
+    def test_native_macos_shared_identity_upgrade_and_pinned_legacy_rollback(self):
+        """Signed native apps upgrade to the Box identity and retain pinned legacy installs"""
+        self.assert_macos_identity_upgrade_and_rollback(native=True)
+
+    @category("Verification")
+    def test_macos_identity_compatibility_keeps_publisher_and_signature_refusals(self):
+        """Both layouts reject unknown identities and unsigned or untrusted publishers before execution"""
+        self.native_platform()
+        for native in (False, True):
+            self.release("0.1.0", native=native)
+            for changes in (
+                {"TEST_CLI_IDENTIFIER": "com.example.other"},
+                {"TEST_CLI_IDENTIFIER": "com.amazon.strands.box-cli.other"},
+                {"TEST_CLI_IDENTIFIER": "com.amazon.strands.box\nIdentifier=com.amazon.strands.box"},
+                {"TEST_HELPER_IDENTIFIER": "com.amazon.strands.box-cli"},
+                {"TEST_TEAM": "OTHER12345"},
+                {"TEST_BAD_SIGNATURE": "1"},
+                {"TEST_BAD_REQUIREMENT": "1"},
+                {"TEST_BAD_GATEKEEPER": "1"},
+                {"TEST_CLI_IDENTIFIER": "com.amazon.strands.box-cli", "TEST_TEAM": "OTHER12345"},
+                {"TEST_CLI_IDENTIFIER": "com.amazon.strands.box-cli", "TEST_BAD_SIGNATURE": "1"},
+                {"TEST_CLI_IDENTIFIER": "com.amazon.strands.box-cli", "TEST_BAD_REQUIREMENT": "1"},
+                {"TEST_CLI_IDENTIFIER": "com.amazon.strands.box-cli", "TEST_BAD_GATEKEEPER": "1"},
+            ):
+                with self.subTest(native=native, changes=changes):
+                    self.run_install(success=False, **changes)
+                    self.untouched()
 
     def test_native_bundle_installs_through_bin_symlink_and_preserves_aliases(self):
         """A native bundle keeps signed files, exact aliases, and the installed entry point"""

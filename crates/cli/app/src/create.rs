@@ -427,7 +427,7 @@ impl Settings {
             }
             text = document.to_string();
         }
-        let mut profile = Profile::parse(&text, path)?;
+        let mut profile = Profile::parse(&text, path, crate::VERSION)?;
         if let Some(saved) = saved.filter(|saved| saved.table == profile.table) {
             text = saved.text.clone();
             profile = saved.clone();
@@ -798,6 +798,7 @@ impl NewProfile {
             self.profiles
                 .clone()
                 .unwrap_or_else(|| crate::run::profiles_root(&self.settings.host.box_home)),
+            crate::VERSION,
         )
     }
 

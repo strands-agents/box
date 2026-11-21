@@ -9,8 +9,8 @@ use std::time::{Instant, SystemTime};
 use chrono::{DateTime, Utc};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use strands_box_cli::{
-    Cleaned, CreatedProfile, Error, HeldBoxes, Launch, Launcher, NewProfile, OutputFormat,
-    Preparation, RecordsOptions, Report, Terminal, is_profile_path, json_line, validate_name,
+    CreatedProfile, Error, HeldBoxes, Launch, Launcher, NewProfile, OutputFormat, Preparation,
+    RecordsOptions, Report, Terminal, is_profile_path, json_line, validate_name,
 };
 use strands_box_cli_telemetry::{
     COMPLETION_BUDGET, ExitOutcome, Invocation, LaunchOutcome, Session,
@@ -67,24 +67,6 @@ Tip: Create a new profile with {}.", styled(true, Report::ACCENT, "box profile c
         /// Arguments for the agent, after `--`.
         #[arg(last = true)]
         args: Vec<OsString>,
-    },
-    /// Remove saved boxes and their records. A box that is still running is kept.
-    #[command(after_help = "Examples:
-  box clean <BOX_ID>   Remove one saved box
-  box clean --all      Remove every saved box
-
-Find box IDs with box runs list. Profiles and storage are kept.")]
-    #[command(group = clap::ArgGroup::new("target").required(true).args(["box_id", "all"]))]
-    Clean {
-        /// The box to remove, from `box runs list`.
-        #[arg(value_name = "BOX_ID")]
-        box_id: Option<String>,
-        /// Remove every saved box that is not running.
-        #[arg(long)]
-        all: bool,
-        /// Remove without asking first.
-        #[arg(long)]
-        no_ask: bool,
     },
     /// Inspect saved box runs.
     Runs {
@@ -474,11 +456,6 @@ fn main() -> ExitCode {
         return finish(Err(error), context);
     }
     let result = match cli.command {
-        Command::Clean {
-            box_id,
-            all: _,
-            no_ask,
-        } => clean(box_id.as_deref(), no_ask).map(|()| None),
         Command::Run {
             profile,
             box_id,
@@ -803,6 +780,7 @@ fn show(name: &str, full: bool, format: OutputFormat, output: &mut dyn Write) ->
             || !preview.mcp_unread.is_empty()
             || !preview.mcp_servers.is_empty()
             || !preview.mcp_dropped.is_empty()
+            || !preview.mcp_unchecked.is_empty()
             || !preview.mcp_path_dropped.is_empty()
             || !preview.mcp_skipped.is_empty())
     {
@@ -825,6 +803,9 @@ fn show(name: &str, full: bool, format: OutputFormat, output: &mut dyn Write) ->
             output,
             format!("dropped {variable} from MCP server {server} (from {file}): {why}"),
         );
+    }
+    for line in preview.mcp_unchecked_lines() {
+        note(output, line);
     }
     for line in &preview.mcp_path_dropped {
         note(output, format!("dropped {line}"));
@@ -1351,51 +1332,6 @@ fn list(output: &mut dyn Write) -> Result<(), Error> {
         );
     }
     Ok(())
-}
-
-fn clean(box_id: Option<&str>, no_ask: bool) -> Result<(), Error> {
-    let launcher = Launcher::from_host();
-    let root = launcher.runs_root();
-    if let Some(id) = box_id {
-        launcher.find_run(id)?;
-        ask(no_ask, &format!("Remove box {id} and its records?"))?;
-        launcher.remove_run(id)?;
-        eprintln!("box: removed box {id} from {}", root.display());
-        return Ok(());
-    }
-    let found = launcher.runs()?.len();
-    if found == 0 {
-        eprintln!("box: no saved boxes in {}", root.display());
-        return Ok(());
-    }
-    ask(
-        no_ask,
-        &format!(
-            "Remove {} and {} records? A box that is still running is kept.",
-            boxes(found),
-            if found == 1 { "its" } else { "their" }
-        ),
-    )?;
-    let mut cleaned = Cleaned::default();
-    let result = launcher.remove_runs(&mut cleaned);
-    eprintln!(
-        "box: removed {} from {}",
-        boxes(cleaned.removed),
-        root.display()
-    );
-    if !cleaned.running.is_empty() {
-        eprintln!(
-            "box: kept {} that {} still running: {}",
-            boxes(cleaned.running.len()),
-            if cleaned.running.len() == 1 {
-                "is"
-            } else {
-                "are"
-            },
-            cleaned.running.join(", ")
-        );
-    }
-    result
 }
 
 fn profile_clean_box(names: &[String], id: &str, no_ask: bool) -> Result<(), Error> {

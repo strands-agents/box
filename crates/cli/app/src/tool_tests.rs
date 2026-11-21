@@ -373,7 +373,7 @@ mod installation_grants {
         let profile = home.join(".strands/box/profiles/test/profile.toml");
         let box_dir = home.join(".strands/box/r/test/box");
         let storage = home.join(".strands/box/storage/test");
-        crate::profile::Profile::parse(text, &profile)
+        crate::profile::Profile::parse(text, &profile, crate::VERSION)
             .expect("a profile")
             .resolve(
                 None,

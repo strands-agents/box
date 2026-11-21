@@ -1374,6 +1374,40 @@ fn a_profile_deny_write_folder_runs_and_stays_read_only() {
     assert!(!scene.workspace().join(".venv/new").exists());
 }
 
+/// A run stops when an entry beneath a write grant became a link after the run before it.
+#[test]
+fn a_run_refuses_an_entry_that_became_a_link_beneath_a_write_grant() {
+    let scene = Scene::new();
+    let out = scene.home().join("notes/out");
+    let unnamed = scene.home().join("unnamed");
+    std::fs::create_dir_all(&out).expect("a folder beneath the grant");
+    std::fs::create_dir_all(&unnamed).expect("a folder that no entry names");
+    scene.profile(
+        "notes",
+        &format!(
+            "{PROBE}filesystem.read = [\"${{{{ home }}}}/notes/out\"]\n\
+             filesystem.write = [\"${{{{ home }}}}/notes\"]\n"
+        ),
+        PROBE_POLICY,
+    );
+    let write = |folder: &Path| format!("echo ok > {}/written.txt", folder.display());
+    let first = scene
+        .command(&scene.workspace(), "notes", &["-c", &write(&out)])
+        .output()
+        .expect("box runs");
+    succeeded(&first);
+    assert!(out.join("written.txt").is_file());
+
+    std::fs::remove_dir_all(&out).expect("remove the folder");
+    std::os::unix::fs::symlink(&unnamed, &out).expect("a link where the folder was");
+    let second = scene
+        .command(&scene.workspace(), "notes", &["-c", &write(&unnamed)])
+        .output()
+        .expect("box runs");
+    failed_with(&second, "resolves through a link");
+    assert!(!unnamed.join("written.txt").exists());
+}
+
 /// **A resources directory outside the box home is forbidden to the Shell and Monty**, even under
 /// an operator permit on every write, and Box Core accepts the rules.
 #[test]
@@ -1732,6 +1766,7 @@ fn show_format_json_prints_one_document_with_what_the_text_and_full_print() {
             "unstarted",
             "servers",
             "dropped",
+            "unchecked",
             "path_dropped",
             "skipped",
             "unread"
@@ -4129,7 +4164,7 @@ fn a_box_id_whose_run_is_still_running_is_refused_and_leaves_that_run_alone() {
 }
 
 #[test]
-fn a_clean_keeps_a_box_that_is_still_running() {
+fn a_profile_clean_refuses_a_box_that_is_still_running() {
     let scene = Scene::new();
     let waiting = scene
         .command(
@@ -4163,7 +4198,7 @@ fn a_clean_keeps_a_box_that_is_still_running() {
     let clean = |args: &[&str]| {
         scene
             .process(Path::new(env!("CARGO_BIN_EXE_box")))
-            .arg("clean")
+            .args(["profile", "clean"])
             .args(args)
             .arg("--no-ask")
             .output()
@@ -4172,7 +4207,7 @@ fn a_clean_keeps_a_box_that_is_still_running() {
 
     let asked = scene
         .process(Path::new(env!("CARGO_BIN_EXE_box")))
-        .args(["clean", &box_id(&run)])
+        .args(["profile", "clean", "probe"])
         .output()
         .expect("box runs");
     failed_with(&asked, "is still running");
@@ -4181,21 +4216,17 @@ fn a_clean_keeps_a_box_that_is_still_running() {
         "refused before it asks: {}",
         stderr(&asked)
     );
-    failed_with(&clean(&[&box_id(&run)]), "is still running");
+    failed_with(&clean(&["probe"]), "is still running");
     let all = clean(&["--all"]);
-    succeeded(&all);
-    assert!(
-        stderr(&all).contains(&format!("still running: {}", box_id(&run))),
-        "{}",
-        stderr(&all)
-    );
+    failed_with(&all, "is still running");
+    assert!(stderr(&all).contains(&box_id(&run)), "{}", stderr(&all));
     assert_eq!(scene.runs(), vec![run.clone()], "the running box stays");
 
     std::fs::write(scene.workspace().join("go"), "").expect("release the run");
     let first = wait_for_output(waiting);
     succeeded(&first);
     assert_eq!(stdout(&first), "done\n");
-    succeeded(&clean(&[&box_id(&run)]));
+    succeeded(&clean(&["probe"]));
     assert!(scene.runs().is_empty(), "a stopped box is removed");
 }
 
@@ -4250,15 +4281,15 @@ fn a_rerun_whose_policy_box_core_refuses_leaves_the_run_as_it_was() {
 }
 
 #[test]
-fn a_clean_with_a_box_id_removes_only_that_run() {
+fn a_profile_clean_removes_the_profiles_boxes_and_keeps_it_and_its_storage() {
     let scene = Scene::new();
     succeeded(&scene.probe(&scene.workspace(), "true"));
     let first = new_run(&[], &scene.runs());
     succeeded(&scene.probe(&scene.workspace(), "true"));
-    let second = new_run(std::slice::from_ref(&first), &scene.runs());
+    new_run(std::slice::from_ref(&first), &scene.runs());
     let clean = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_box"))
-            .arg("clean")
+            .args(["profile", "clean"])
             .args(args)
             .current_dir(scene.workspace())
             .env_clear()
@@ -4269,9 +4300,14 @@ fn a_clean_with_a_box_id_removes_only_that_run() {
             .expect("box runs")
     };
 
-    let refused = clean(&["no-such-run"]);
-    failed_with(&refused, "no saved box no-such-run");
-    let no_terminal = clean(&[&box_id(&first)]);
+    let none = clean(&["nosuch", "--no-ask"]);
+    succeeded(&none);
+    assert!(
+        stderr(&none).contains("no boxes found for profile nosuch"),
+        "{}",
+        stderr(&none)
+    );
+    let no_terminal = clean(&["probe"]);
     failed_with(&no_terminal, "box asks before it removes anything");
     assert_eq!(
         scene.runs().len(),
@@ -4282,14 +4318,14 @@ fn a_clean_with_a_box_id_removes_only_that_run() {
     let kept = scene.home().join(".strands/box/storage/probe/default/kept");
     std::fs::create_dir_all(kept.parent().unwrap()).expect("a storage folder");
     std::fs::write(&kept, "").expect("a storage file");
-    let removed = clean(&[&box_id(&first), "--no-ask"]);
+    let removed = clean(&["probe", "--no-ask"]);
     succeeded(&removed);
     assert!(
-        stderr(&removed).contains(&format!("removed box {}", box_id(&first))),
+        stderr(&removed).contains("removed 2 boxes of profile probe"),
         "{}",
         stderr(&removed)
     );
-    assert_eq!(scene.runs(), vec![second]);
+    assert!(scene.runs().is_empty());
     assert!(
         scene
             .home()
@@ -4301,20 +4337,23 @@ fn a_clean_with_a_box_id_removes_only_that_run() {
 }
 
 #[test]
-fn a_clean_takes_one_box_id_or_all() {
+fn a_profile_clean_takes_profile_names_or_all_and_box_clean_is_gone() {
     let scene = Scene::new();
     succeeded(&scene.probe(&scene.workspace(), "true"));
     let run = new_run(&[], &scene.runs());
     for (args, error) in [
-        (vec!["clean", "--no-ask"], "required"),
+        (vec!["profile", "clean", "--no-ask"], "required"),
         (
-            vec!["clean", &box_id(&run), "--all", "--no-ask"],
+            vec!["profile", "clean", "probe", "--all", "--no-ask"],
             "cannot be used with",
         ),
-        (vec!["clean", "probe", &box_id(&run)], "unexpected argument"),
         (
-            vec!["clean", "--all"],
+            vec!["profile", "clean", "--all"],
             "box asks before it removes anything",
+        ),
+        (
+            vec!["clean", "--all", "--no-ask"],
+            "unrecognized subcommand",
         ),
         (vec!["run", "--clean-up", "--no-ask"], "unexpected argument"),
     ] {
@@ -4697,7 +4736,7 @@ fn an_absolute_mcp_command_imports_its_filename_and_starts_the_selected_server()
     let server = KEYED_SERVER
         .replacen(
             "while IFS=",
-            "printf '%s\\n' \"$0\" > \"$CAPTURE\"\nchecked=no\n\
+            "printf '%s\\n' \"$0\" > invoked-program\nchecked=no\n\
              [ \"$BOX_LOCAL_KEY\" = private-token ] && [ \"$1\" = selected-argument ] && checked=yes\n\
              while IFS=",
             1,
@@ -4723,7 +4762,7 @@ fn an_absolute_mcp_command_imports_its_filename_and_starts_the_selected_server()
         "mcpServers": {"selected": {
             "command": program,
             "args": ["selected-argument"],
-            "env": {"BOX_LOCAL_KEY": "private-token", "CAPTURE": capture}
+            "env": {"BOX_LOCAL_KEY": "private-token"}
         }}
     })
     .to_string();
@@ -5134,12 +5173,12 @@ fn a_long_profile_name_reuses_its_own_box_id() {
 }
 
 #[test]
-fn a_box_id_names_no_run_after_clean() {
+fn a_box_id_names_no_run_after_a_profile_clean() {
     let scene = Scene::new();
     succeeded(&scene.probe(&scene.workspace(), "true"));
     let id = box_id(&new_run(&[], &scene.runs()));
     let clean = Command::new(env!("CARGO_BIN_EXE_box"))
-        .args(["clean", "--all", "--no-ask"])
+        .args(["profile", "clean", "--all", "--no-ask"])
         .current_dir(scene.workspace())
         .env_clear()
         .env("HOME", scene.home())
