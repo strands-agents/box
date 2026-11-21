@@ -61,9 +61,9 @@ To support this agent init -> session creation + new mounted filesystem startup 
 
 ### 5.1 At Box startup
 
-Box starts a (new) trusted helper that monitors configured `box.toml` mount sources. The sandboxed workload keeps its private mount namespace. An empty filesystem covers each pending mount path.
+Box starts a (new) trusted helper that monitors the sources in the mount groups selected for agents, tools, and local servers in `box.toml`. Each sandbox keeps its private mount namespace. An empty filesystem covers each selected source path while its mount is pending.
 
-For paths under a declared storage mount, Box no longer requires the source paths to exist at startup. It defers existence, file-type, and filesystem-object identity checks until the mount arrives. Configuration syntax, conflicting grants, and restrictions on Box state and credentials remain checked at startup. Paths outside declared storage mounts retain their existing startup checks.
+For paths under a source in a sandbox's selected mount groups, Box no longer requires the source paths to exist at startup. It defers existence, file-type, and filesystem-object identity checks until the mount arrives. Configuration syntax, mount-group references, conflicting grants, and restrictions on Box state and credentials remain checked at startup. Paths outside that sandbox's selected mount sources retain their existing startup checks.
 
 ### 5.2 When a new mount arrives
 
@@ -82,25 +82,37 @@ Each agent, tool, and local Model Context Protocol (MCP) server receives its own
 
 ## 6. Key decisions
 
-### D1. Declaring a mount grants no access
+### D1. Selecting a mount group grants no access
 
-The current Box Core `box.toml` interface proposal uses an array of absolute directory paths for mount sources. Each path identifies where Box expects a filesystem mount to arrive after startup:
+The proposed Box Core `box.toml` interface declares named mount groups under `[storage.mounts.<name>]`. Replace `<name>` with a label of your choice, such as `session`. Each group's `sources` array contains absolute directory paths where Box expects filesystems to be mounted after startup.
 
 ```toml
 [experimental-features]
 linux-storage-mounts = true
 
-[storage]
-mounts = ["/mnt/data", "/mnt/shared"]
+# Declare the mount group "session".
+[storage.mounts.session]
+sources = ["/mnt/data", "/mnt/shared"]
+
+# Select "session" for the agent; allow reading both directories.
+[agent.filesystem]
+mounts = ["session"]
+read = ["/mnt/data", "/mnt/shared"]
+
+# Select "session" for the indexer tool.
+# Of this group's directories, allow reading only /mnt/data.
+[tool.indexer.filesystem]
+mounts = ["session"]
+read = ["/mnt/data"]
 ```
 
-`storage.mounts` names storage sources. Existing `read`, `write`, `exec`, file-specific grants, `deny`, and `deny_write` rules remain authoritative. Linux’s existing rule limitations still apply.
+The group name identifies configuration; it does not create or rename the source directories. Groups are declared once per box and selected independently through `mounts` in `[agent.filesystem]`, `[tool.<name>.filesystem]`, or `[mcp.<name>.filesystem]`. Each recipient can select multiple groups. An omitted or empty `mounts` list enables no mount event forwarding for that sandbox. An unknown group name fails configuration validation at startup.
 
-The name `storage.mounts` remains provisional. Box CLI already uses `[storage]` for persistent directories, while this proposal handles filesystem mount events. Named mount entries following the pattern of `[egress.<name>]`, with a `sources` or `directories` list, remain interface options.
+In this example, the agent and `indexer` select the same group, but only the agent can read `/mnt/shared`. Selecting a group enables forwarding; it grants no filesystem access. Existing `read`, `write`, `exec`, file-specific grants, `deny`, and `deny_write` rules remain authoritative for the recipients that support them. Linux's existing rule limitations still apply. Each source is prepared when its mount arrives; grouping does not require all sources to arrive together.
 
-The current proposal declares multiple sources once per box. As Section 8.2 explains, each source can supply separate views for the agent, tools, and local MCP servers, governed by each recipient's filesystem rules. Whether source selection should also be part of those per-recipient configurations remains open.
+Box CLI already uses `[storage]` for persistent directories. The `mounts` subsection identifies this feature's mount sources, and named groups follow the convention used by `[egress.<name>]`. A recipient's own filesystem configuration determines both its selected groups and its permissions, as Section 8.2 explains.
 
-A nonempty `storage.mounts` configuration requires the `linux-storage-mounts` experimental flag and Linux; otherwise Box rejects startup. Box CLI profiles expose the same Linux-only opt-in. The feature remains experimental until regression and security testing qualify the supported environments.
+Declaring or selecting mount groups requires the `linux-storage-mounts` experimental flag and Linux; otherwise Box rejects startup. Box CLI profiles expose the same Linux-only opt-in. The feature remains experimental until regression and security testing qualify the supported environments.
 
 ### D2. Source restrictions remain
 
@@ -128,21 +140,21 @@ That works when the application can delay sandbox startup. This proposal also su
 
 Direct propagation could expose storage before Box applies its restrictions. The helper receives the mount separately, prepares the permitted filesystem view, and then exposes that view to the workload.
 
-The proposed hierarchy has one helper per box watching the configured storage sources. A box has one agent sandbox and can run multiple separate tool and local MCP server sandboxes. Forwarding serves those sandboxes independently; it does not pass storage through the agent sandbox to reach a tool.
+The proposed hierarchy has one helper per box watching sources from the selected mount groups. Each group can contain multiple sources, and each recipient can select multiple groups through its filesystem `mounts` list. A box has one agent sandbox and can run multiple separate tool and local MCP server sandboxes. Forwarding serves those sandboxes independently; it does not pass storage through the agent sandbox to reach a tool.
 
-| Recipient | Filesystem rules in Box Core's `box.toml` | Application of mount forwarding |
+| Recipient | Filesystem configuration in Box Core's `box.toml` | Application of mount forwarding |
 | --- | --- | --- |
-| Agent sandbox | `[agent.filesystem]` | Receives a view restricted by the agent's rules. |
-| Each sandboxed tool execution | `[tool.<name>.filesystem]` | Receives its own view restricted by that tool's rules. Calling a tool does not give it the agent's filesystem grants. |
-| Each local MCP server sandbox | `[mcp.<name>.filesystem]` | Receives its own view restricted by that server's rules. Remote MCP servers are outside this local mount mechanism. |
+| Agent sandbox | `[agent.filesystem]` | Selects groups through `mounts` and receives a view restricted by the agent's rules. |
+| Each sandboxed tool execution | `[tool.<name>.filesystem]` | Selects its own groups through `mounts` and receives a view restricted by that tool's rules. Calling a tool does not give it the agent's selections or grants. |
+| Each local MCP server sandbox | `[mcp.<name>.filesystem]` | Selects its own groups through `mounts` and receives a view restricted by that server's rules. Remote MCP servers are outside this local mount mechanism. |
 
-One source mount can therefore supply several differently restricted views, one for each sandbox permitted to access its contents. These views reference the same stored data. For example, the agent can receive read-only access to `/mnt/data`, while a tool receives read and write access only to `/mnt/data/output`. A tool without a storage grant receives no access to that storage's contents.
+One source mount can therefore supply several differently restricted views, one for each sandbox that selects its group and has permission to access its contents. These views reference the same stored data. For example, the agent can receive read-only access to `/mnt/data`, while a tool receives read and write access only to `/mnt/data/output`. A tool without a storage grant receives no access to that storage's contents.
 
 For an already running sandbox, Box attaches its prepared view after storage arrives. For a tool or server started after storage arrives, Box prepares the view under that recipient's rules before starting its process.
 
 ### 8.3 Why does Box currently reject paths that do not exist?
 
-Box cannot inspect a missing path or apply restrictions to it. For declared storage mounts, the proposal moves those checks from startup to mount preparation. Configuration checks remain at startup, and storage must pass the deferred checks before exposure.
+Box cannot inspect a missing path or apply restrictions to it. For sources in a sandbox's selected mount groups, the proposal moves those checks from startup to mount preparation. Configuration checks remain at startup, and storage must pass the deferred checks before exposure.
 
 ### 8.4 What happens if the agent accesses storage too early?
 
@@ -172,4 +184,4 @@ The feature remains experimental because testing is ongoing and we do not yet ha
 
 ## 10. Feedback
 
-Following feedback from siwabhi, AgentCore Runtime Principal Engineer, we clarified that ongoing testing and incomplete confidence in containment keep the feature experimental. Linux is the only platform explored so far; macOS work follows after Runtime is unblocked. Naming remains open: Box CLI already uses `[storage]`, while named mount entries with `sources` or `directories` could describe this feature and follow the named egress configuration pattern. One box can observe multiple sources and prepare separate views for its agent, tools, and local MCP servers, with access controlled by each recipient's filesystem rules. Source declarations are currently box-wide; moving source selection into per-recipient filesystem configuration remains an interface option.
+Following feedback from siwabhi, AgentCore Runtime Principal Engineer, we clarified that ongoing testing and incomplete confidence in containment keep the feature experimental. Linux is the only platform explored so far; macOS work follows after Runtime is unblocked. Named groups under `[storage.mounts.<name>]` hold a `sources` array, following the named-entry convention used for egress. Agents, tools, and local MCP servers select groups independently through their filesystem `mounts` list. Group selection enables forwarding; each recipient's existing filesystem rules still determine access.
