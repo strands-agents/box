@@ -1246,6 +1246,38 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
         self.run_install(success=False)
         self.assertEqual(foreign.read_text(), "another installer owns this")
         self.assertFalse(self.log.exists())
+        foreign.unlink()
+        foreign.symlink_to(self.root / "elsewhere/box")
+        result = self.run_install(success=False)
+        self.assertIn("another launcher exists", result.stderr)
+        self.assertEqual(foreign.readlink(), self.root / "elsewhere/box")
+
+    def test_a_launcher_from_the_earlier_box_folder_moves_to_the_new_one(self):
+        """An install in ~/.box/packages, from box 0.2.2 or earlier, upgrades in place"""
+        earlier = self.home.resolve() / ".box/packages"
+        (earlier / "0.2.2-x").mkdir(parents=True)
+        (earlier / "0.2.2-x/box").write_text("earlier box")
+        (earlier / "current").symlink_to("0.2.2-x")
+        launcher = self.home / ".local/bin/box"
+        launcher.parent.mkdir(parents=True)
+        launcher.symlink_to(earlier / "current/box")
+        result = self.run_install()
+        self.assertEqual(launcher.readlink(), self.home.resolve() / ".strands/box/packages/current/box")
+        self.assertEqual(self.current(), f"0.1.0-{self.target}")
+        self.assertIn("Replaced the launcher of an earlier box in ~/.box", result.stderr)
+        self.assertEqual((earlier / "0.2.2-x/box").read_text(), "earlier box")
+        self.assertEqual(launcher.parent.joinpath("box").resolve(),
+                         (self.home / f".strands/box/packages/0.1.0-{self.target}/box").resolve())
+
+    def test_a_failed_install_restores_the_launcher_of_the_earlier_box_folder(self):
+        """A failed upgrade from ~/.box/packages leaves the earlier launcher in place"""
+        earlier = self.home.resolve() / ".box/packages/current/box"
+        launcher = self.home / ".local/bin/box"
+        launcher.parent.mkdir(parents=True)
+        launcher.symlink_to(earlier)
+        self.run_install(success=False, TEST_FAIL_PATH="1")
+        self.assertEqual(launcher.readlink(), earlier)
+        self.assertFalse((self.home / ".strands/box/packages/current").is_symlink())
 
     @category("PATH & shells")
     def test_linked_or_unwritable_shell_files_refuse_before_download(self):

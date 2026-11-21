@@ -262,9 +262,16 @@ managed_metadata() {
     done
 }
 check_installation() {
+    box_earlier_launcher=0
     if [ -L "$box_launcher" ]; then
-        [ "$(readlink "$box_launcher")" = "$box_launcher_target" ] ||
-            die "another launcher exists at $box_launcher"
+        box_link=$(readlink "$box_launcher")
+        # box 0.2.2 and earlier installed into ~/.box/packages; this installer takes its launcher over.
+        if [ "$box_link" = "$box_earlier_target" ]; then
+            box_earlier_launcher=1
+        else
+            [ "$box_link" = "$box_launcher_target" ] ||
+                die "another launcher exists at $box_launcher"
+        fi
     elif [ -e "$box_launcher" ]; then
         die "another file exists at $box_launcher"
     fi
@@ -287,7 +294,7 @@ check_installation() {
 }
 
 box_work= box_stage= box_path_temp= box_lock=
-box_previous= box_activating=0 box_created_launcher=0
+box_previous= box_activating=0 box_created_launcher=0 box_replaced_launcher=0
 cleanup() {
     box_status=$?
     trap - 0 HUP INT TERM
@@ -312,6 +319,15 @@ cleanup() {
     if [ "$box_status" -ne 0 ] && [ "$box_created_launcher" -eq 1 ] &&
         [ -L "$box_launcher" ] && [ "$(readlink "$box_launcher")" = "$box_launcher_target" ]; then
         rm -f "$box_launcher"
+    fi
+    if [ "$box_status" -ne 0 ] && [ "$box_replaced_launcher" -eq 1 ] &&
+        [ -L "$box_launcher" ] && [ "$(readlink "$box_launcher")" = "$box_launcher_target" ]; then
+        if ln -s "$box_earlier_target" "$box_stage/launcher.rollback" &&
+            replace_link "$box_stage/launcher.rollback" "$box_launcher"; then
+            log "Restored the launcher of the earlier box in ~/.box."
+        else
+            log "Cannot restore $box_launcher to $box_earlier_target."
+        fi
     fi
     [ -z "$box_path_temp" ] || rm -f "$box_path_temp"
     [ -z "$box_stage" ] || rm -rf "$box_stage"
@@ -397,6 +413,7 @@ box_bin="$box_home/.local/bin"
 box_current="$box_root/current"
 box_launcher="$box_bin/box"
 box_launcher_target="$box_root/current/box"
+box_earlier_target="$box_home/.box/packages/current/box"
 check_directory "$box_root"
 check_directory "$box_bin"
 [ ! -e "$box_root/.install-lock" ] && [ ! -L "$box_root/.install-lock" ] ||
@@ -720,7 +737,11 @@ else
     cp -Rp "$box_payload" "$box_stage/payload"
     mv "$box_stage/payload" "$box_destination" || die "cannot install release"
 fi
-if [ ! -L "$box_launcher" ]; then
+if [ "$box_earlier_launcher" -eq 1 ]; then
+    ln -s "$box_launcher_target" "$box_stage/launcher.next" &&
+        replace_link "$box_stage/launcher.next" "$box_launcher" || die "cannot replace the earlier launcher"
+    box_replaced_launcher=1
+elif [ ! -L "$box_launcher" ]; then
     ln -s "$box_launcher_target" "$box_launcher" || die "cannot create launcher"
     box_created_launcher=1
 fi
@@ -739,6 +760,9 @@ box_reported=$("$box_launcher" --version) || die "installed box --version failed
 [ "$box_reported" = "box $box_version" ] || die "installed version does not match"
 box_activating=0
 box_created_launcher=0
+[ "$box_replaced_launcher" -eq 0 ] ||
+    log "Replaced the launcher of an earlier box in ~/.box. box now keeps its files in ~/.strands/box, and ~/.box is unchanged."
+box_replaced_launcher=0
 progress 100 ''
 if [ "$box_drawing" -eq 1 ]; then
     printf '\n\033[?25h' >&2

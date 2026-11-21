@@ -95,7 +95,7 @@ To install another release, run the installer again with its number in `BOX_VERS
 leading `v`:
 
 ```sh
-BOX_VERSION=0.3.0-preview.2 sh ./install.sh
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | BOX_VERSION=0.3.0-preview.2 sh
 ```
 
 It switches `current` to that release and prints `Updated box 0.3.0-preview.1 to 0.3.0-preview.2.`,
@@ -110,6 +110,10 @@ its own, and it stops and tells you to set `BOX_VERSION`.
 A release with no `box` archive for your computer stops the installer, which names the archive it
 couldn't find. Releases before `0.3.0-preview.1` have no `box` archive at all.
 
+box 0.2.2 and earlier installed into `~/.box`. The installer upgrades such an install the same way:
+it points `~/.local/bin/box` at the new release and leaves `~/.box` as it is. `box` no longer reads
+`~/.box`, so create your profiles again, and delete `~/.box` when you no longer need it.
+
 Old releases stay in `~/.strands/box/packages/`. Installing one you already have switches `current` back
 to it without touching its folder. To free the space, delete an old release's folder, but not the
 one `current` points to.
@@ -121,10 +125,8 @@ macOS, a release that isn't signed by the Box publisher, such as a fork's own bu
 `BOX_ALLOW_UNSIGNED=1`:
 
 ```sh
-BOX_GITHUB_REPO=your-account/box \
-BOX_ALLOW_UNSIGNED=1 \
-BOX_VERSION=0.3.0-preview.1 \
-sh ./install.sh
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh |
+  BOX_GITHUB_REPO=your-account/box BOX_ALLOW_UNSIGNED=1 BOX_VERSION=0.3.0-preview.1 sh
 ```
 
 `BOX_ALLOW_UNSIGNED=1` skips Apple's signature and Gatekeeper checks, and the installer says so
@@ -135,7 +137,8 @@ binary version.
 ## Manage PATH without the installer
 
 ```sh
-BOX_NO_MODIFY_PATH=1 BOX_VERSION=0.3.0-preview.1 sh ./install.sh
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh |
+  BOX_NO_MODIFY_PATH=1 BOX_VERSION=0.3.0-preview.1 sh
 ```
 
 This leaves your shell's startup files alone, so put `~/.local/bin` on your `PATH` in your own
