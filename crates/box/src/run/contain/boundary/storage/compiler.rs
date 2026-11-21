@@ -253,7 +253,9 @@ fn worker() -> Result<(), BoxError> {
         ));
     }
     let mut arguments = std::env::args_os().skip(1);
-    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("--control-fd")) {
+    let mode = arguments.next();
+    let source_helper = mode.as_deref() == Some(std::ffi::OsStr::new("--source-control-fd"));
+    if !source_helper && mode.as_deref() != Some(std::ffi::OsStr::new("--control-fd")) {
         return Err(failure(
             "this private executable requires its inherited controller channel",
         ));
@@ -277,13 +279,17 @@ fn worker() -> Result<(), BoxError> {
     // SAFETY: getppid has no preconditions and this executable does not create a PID namespace.
     let parent = unsafe { libc::getppid() };
     arm_parent_death(parent)?;
-    refuse_process_memory_access()?;
     control
         .set_read_timeout(Some(TRANSFER_TIMEOUT))
         .map_err(io_error)?;
     control
         .set_write_timeout(Some(TRANSFER_TIMEOUT))
         .map_err(io_error)?;
+    if source_helper {
+        return containment::storage::sources::serve(&control)
+            .map_err(|error| failure(error.to_string()));
+    }
+    refuse_process_memory_access()?;
     let result = compile_request(&control, parent);
     match result {
         Ok(output) => send_json(
