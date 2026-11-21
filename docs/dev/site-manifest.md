@@ -19,13 +19,14 @@ means. A consumer must reject an unsupported version and an unknown field.
 Do not increase `schemaVersion` for a normal page addition or removal, or for a metadata value
 that follows the current contract.
 
-Version `1` is the version that strandsagents.com, the consumer, reads. It accepts a source
-anywhere under `docs/` and a `nav.group` that is a name or an array of names, so publishing from
-`docs/cli/` and nesting groups are values of version `1`, not a new version.
+A change that only widens a field to values that every consumer's version `1` reader already
+accepts keeps the version. Name the consumer code that proves it in the pull request.
 
 An existing page keeps its `id` and `slug`. The `id` is a producer-assigned stable identifier
 reserved to identify the same page across revisions. It does not determine the route. The `slug` is the
-stable route suffix. Do not reuse either value for a different page. A route removal or move needs
+stable route suffix. Do not reuse either value for a different page. One pair is the exception:
+the `getting-started` id and the `quickstart` slug name the product's entry page, whichever source
+holds it. A route removal or move needs
 a coordinated consumer change and a redirect before it merges.
 
 `docs/site-manifest-retirements.json` is the producer-only, append-only registry of retired page
