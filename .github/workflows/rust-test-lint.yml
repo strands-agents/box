@@ -174,9 +174,9 @@ jobs:
         run: |
           if [ "$PART" = box ]; then
             install -m 0755 target/debug/strands-box-sock-alias target/debug/deps/strands-box-sock-alias
+            install -m 0755 target/debug/strands-box-storage-compiler target/debug/deps/strands-box-storage-compiler
           fi
           install -m 0755 target/debug/strands-box-contain-trampoline target/debug/deps/strands-box-contain-trampoline
-          install -m 0755 target/debug/strands-box-storage-compiler target/debug/deps/strands-box-storage-compiler
 
       - name: Run tests (linux)
         shell: bash

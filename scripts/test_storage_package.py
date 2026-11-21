@@ -25,6 +25,35 @@ TARGETS = ("aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-app
 
 
 class StorageBuildTests(unittest.TestCase):
+    def test_unit_test_images_follow_the_selected_package_group(self):
+        workflow = (ROOT / ".github/workflows/rust-test-lint.yml").read_text()
+        step = workflow.split("      - name: Install launcher images beside unit-test binaries\n", 1)[1]
+        step = step.split("\n      - name:", 1)[0]
+        command = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        trampoline = "strands-box-contain-trampoline"
+        alias = "strands-box-sock-alias"
+        for part, missing in (("others", False), ("box", False), ("box", True)):
+            with self.subTest(part=part, missing=missing), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                debug = root / "target/debug"
+                (debug / "deps").mkdir(parents=True)
+                images = {trampoline} if part == "others" else {trampoline, alias, COMPILER}
+                for name in images - ({COMPILER} if missing else set()):
+                    (debug / name).write_bytes(name.encode())
+                result = subprocess.run(
+                    ["bash", "-e", "-c", command], cwd=root,
+                    env={**os.environ, "PART": part}, capture_output=True, text=True, timeout=10,
+                )
+                if missing:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(COMPILER, result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual({path.name for path in (debug / "deps").iterdir()}, images)
+                    for name in images:
+                        self.assertEqual((debug / "deps" / name).read_bytes(), name.encode())
+                        self.assertEqual((debug / "deps" / name).stat().st_mode & 0o777, 0o755)
+
     def test_development_build_selects_compiler_only_on_linux(self):
         recipe = (ROOT / "justfile").read_text().split("build-cli:\n", 1)[1].split("\n\n", 1)[0]
         for system in ("Linux", "Darwin"):
