@@ -1,6 +1,6 @@
 # Run an agent with box.toml
 
-Box runs an agent on Linux or macOS under a policy.
+Box Core runs an agent on Linux or macOS under a policy.
 The agent can reach only the files, programs, and network destinations you allow. You describe a box in two files:
 `box.toml` says what to run and what it can reach, and `policy.dw` decides each request it makes.
 
@@ -9,6 +9,9 @@ in a box on macOS. You'll give it one tool, a shell, so your policy decides ever
 file its shell reads or writes, and you'll watch the box refuse a write, then change the policy to
 allow it. The finished files are in
 [`examples/strands-cli`](../../examples/strands-cli/).
+
+To run a coding agent such as Claude Code with a profile instead, install the Box CLI and follow
+[Get started with Box](../cli/getting-started.md).
 
 ## Set up with your coding agent
 

@@ -10,7 +10,7 @@
 
   <h1>Strands Box</h1>
 
-  <h2>An open source sandbox engine for AI agents.</h2>
+  <h2>Run coding agents like Claude Code in a sandbox, under a policy you control.</h2>
 
   <div align="center">
     <a href="https://github.com/strands-agents/box/graphs/commit-activity"><img src="https://img.shields.io/github/commit-activity/m/strands-agents/box" alt="Commit Activity"></a>
@@ -25,32 +25,71 @@
 
 ## Overview
 
-Strands Box is an open source sandbox for AI agents.
-It combines operating-system isolation with semantic policies
-written in [Dogwood](https://dogwood-policy.github.io/dogwood/), so you can control
-what agents can access and the conditions under which they can act.
+`box` runs a coding agent, such as Claude Code, Codex, Kiro CLI, or pi, in a box on your machine.
+The agent works in your project and reaches only what you allow, so your other files, your keys,
+and the services that listen only on localhost stay out of its reach. By default, Box checks the
+agent's shell commands, network requests, and MCP tool calls against a policy written in
+[Dogwood](https://dogwood-policy.github.io/dogwood/) before they happen. The check runs outside the
+model, so nothing the agent reads can change the answer
+([How Box works](docs/cli/how-box-works.md)).
 
-Box is harness-agnostic. You choose the agent program or binary to run, configure
-its access in `box.toml`, and write its policies in `policy.dw`.
+Strands Box has two parts, and both live in this repository: `box`, the command you run, and
+[Box Core](#box-core), the engine under it, which you can also run directly or embed in a Rust
+application. `box` includes the Box Core pieces it needs, so you install one thing.
 
-The host OS enforces the direct access restrictions in `box.toml`. Strands Shell,
-Monty for Python, the egress gateway, and the MCP broker send the operations
-they handle to the embedded Dogwood Local Engine, which evaluates the rules in
-`policy.dw`. Box enforces its allow or deny decisions outside the agent process.
-
-Dogwood uses `permit` and `forbid` rules. Operations checked by the engine are
-denied by default: a matching `permit` must allow the operation, and a matching
-`forbid` overrides that permission.
-
-Box's interpreters and gateways share an event history, so rules can use earlier
-actions and elapsed time to decide what is allowed next. For example, a file read
-through Shell or Python can cause the gateway to deny a later outbound HTTP request.
-
-**Preview:** Box supports local execution on Linux ARM64, Linux x86-64, and macOS with Apple silicon.
-Linux x86-64 builds start without an environment opt-in. See the [Linux download instructions](docs/user/getting-started.md#linux)
-for release selection and the [Linux requirements](docs/user/linux-requirements.md) for tested configurations.
-We welcome feedback through [GitHub issues](https://github.com/strands-agents/box/issues).
+**Preview:** `box` runs on Apple silicon Macs with macOS 15 or later, and on Linux ARM64 and
+x86-64. We welcome feedback through [GitHub issues](https://github.com/strands-agents/box/issues).
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
+
+## Install
+
+The installer downloads a release from GitHub, checks it, and puts `box` on your `PATH`. On a Mac,
+the checks include Apple's signing and notarization. You don't need a GitHub account, sudo, or
+Rust. The first release of `box` is a pre-release, so name it in `BOX_VERSION`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | BOX_VERSION=0.3.0-preview.1 sh
+```
+
+Open a new terminal, and check that it worked with `box --version`. Usage telemetry is on by
+default, and the installer says how to turn it off ([Usage telemetry](CLI_TELEMETRY.md)).
+[Install Box](docs/cli/install.md) covers the Linux requirements, upgrades, other versions, and
+uninstalling.
+
+## Run your first agent
+
+For Claude Code on Amazon Bedrock, install Claude Code from its native installer, then create a
+profile for it:
+
+```sh
+box profile create claude --with bedrock
+```
+
+`box` asks a few questions. Press Enter to take each default, choose **Save profile** on Review,
+and then choose **Exit**. Before the first run, [connect to Bedrock](docs/cli/getting-started.md#3-connect-to-bedrock):
+point your terminal at an AWS profile that can call Claude models on Bedrock, and set the model if
+Claude Code doesn't already name one. Then start Claude Code in a box from one of your own
+projects:
+
+```sh
+cd ~/src/my-app
+box run claude
+```
+
+[Get started](docs/cli/getting-started.md) walks through each step and what you see along the way.
+
+## Learn more
+
+- [Box CLI guide](docs/cli/README.md): every page for people who run `box`, starting with common
+  tasks.
+- [Profiles](docs/cli/profiles.md): set up Codex or another model provider, and change what the
+  agent can reach.
+- [Get help from a coding agent](docs/cli/profiles.md#get-help-from-a-coding-agent): tell your agent
+  `Run box help agent and follow it to create a profile.`
+- [Troubleshooting](docs/cli/troubleshooting.md): what an error means, and how to fix it.
+- [Command reference](docs/cli/cli.md): every command and flag.
+- [Limitations](docs/cli/limitations.md): what a box doesn't protect you from. Read this before you
+  trust a run with work that matters.
 
 ## Key capabilities
 
@@ -68,73 +107,8 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 - **Credential injection.** The gateway authenticates permitted requests with
   configured API credentials or AWS SigV4 signing. The agent does not receive the
   underlying secrets.
-- **Decision records.** Box records policy decisions in OTLP JSON. By default,
-  records go to `<box_dir>/private/telemetry/records.jsonl`.
-
-Direct filesystem grants in `box.toml` are enforced by the OS and do not produce
-individual Dogwood decisions. To apply a policy to file operations, use the
-interpreters and keep those files out of the agent's direct grants. See
-[filesystem access](docs/user/security.md) and [policy](docs/user/policy.md).
-
-## The `box` command-line tool
-
-`box` runs a coding agent, such as Claude Code, Codex, or Kiro, in a box set up from a profile.
-A profile names the agent, its tools, and what it may reach, and `box` turns it into the box's
-configuration and policies on each run. Its source is in [`crates/cli/`](crates/cli/), with the
-packs, policies, and starters it ships in [`resources/`](resources/). Its user guide starts at
-[docs/cli/README.md](docs/cli/README.md). To install it, follow [Install Box](docs/cli/install.md).
-To build it, run `just build-cli`; the programs are in `target/debug`.
-
-## Use Box as a Rust library
-
-Link the `strands-box` package in `crates/box`, then call:
-
-```rust,no_run
-let exit_code = strands_box::run("/absolute/box.toml".into(), Vec::new(), Default::default());
-```
-
-This runs the existing Box command in the calling process and waits until it finishes.
-By default, it uses the process's terminal and returns its exit
-code. The second argument appends arguments to `[agent] command`.
-Use `RunOptions::terminal` to supply the workload's terminal and `RunOptions::on_ready`
-to start host threads after hardening and signal registration, before workload setup.
-Use `RunOptions::policy_decisions` to receive each policy decision in memory as the box makes it
-(see [the library section](crates/box/README.md#policy-decisions-for-a-library-caller)).
-Use `RunOptions::box_id` to give a new box your own ID, such as
-`my-app-3f9a1c0e7b2d4a6f`: a prefix of 1 to 15 letters, digits, `.`, `_`, or `-`, then `-` and 16
-lowercase hexadecimal digits. Box stores it, prints it, and labels telemetry with it. A box that
-already has an ID refuses a different one. Without `box_id`, Box generates `box-` and 16
-hexadecimal digits.
-Call it before starting application threads or loading secrets, and use one Box workload
-per host process. Later `run` calls fail, even if the first call failed, unless `run` refused a
-malformed `box_id`.
-Ship the matching Box helper binaries beside the host application.
-
-To replace the running box's policy from a host thread:
-
-```rust,no_run
-strands_box::reload(&[strands_box::Policy {
-    origin: "policy.dw".into(),
-    text: new_policy_text,
-}])?;
-```
-
-`reload` waits until the change takes effect. Invalid policy returns `ReloadRefused` and leaves
-the current policy in place. An empty list denies all policy requests. Policy files and the
-OS sandbox stay unchanged. A box must be open; `on_ready` runs too early.
-Use `ReloadRefused::is_not_running()` to distinguish that case from a rejected policy.
-A rule for an MCP tool can reload only after Box loads that server's tool definitions.
-Without them, even reloading the unchanged policy is refused. If policy blocks discovery,
-waiting will not help. The current policy stays in place.
-
-To generate policy schemas:
-
-```rust,no_run
-let exit_code = strands_box::generate_policy_schema(
-    "/absolute/box.toml".into(),
-    "/absolute/schemas".into(),
-);
-```
+- **Decision records.** Box records policy decisions in OTLP JSON, and `box runs history` lists
+  what a run allowed and denied.
 
 ## Architecture
 
@@ -186,9 +160,43 @@ network traffic goes through Box's gateway by default. See the
 For each part, where it runs, what it decides, and how one request moves through them, read
 [Box architecture](docs/design/architecture.md).
 
-## Getting started
+## Box Core
 
-Follow the [getting-started guide](docs/user/getting-started.md) to download Box for macOS, Linux ARM64, or Linux x86-64.
+Box Core is the engine under `box`. Use it directly to run a program of your choice under a
+policy, to deploy a box to a cloud host, or to embed a box in a Rust application. Box Core is
+harness-agnostic: you choose the agent program or binary to run, configure its access in
+`box.toml`, and write its policies in `policy.dw`. These two files are Box Core's stable interface.
+`box` writes both for each run from your profile and its packs, so you write `box.toml` yourself
+only when you use Box Core directly. The [Box Core guide](docs/user/README.md) covers both files.
+
+The host OS enforces the direct access restrictions in `box.toml`. Strands Shell,
+Monty for Python, the egress gateway, and the MCP broker send the operations
+they handle to the embedded Dogwood Local Engine, which evaluates the rules in
+`policy.dw`. Box enforces its allow or deny decisions outside the agent process.
+
+Dogwood uses `permit` and `forbid` rules. Operations checked by the engine are
+denied by default: a matching `permit` must allow the operation, and a matching
+`forbid` overrides that permission.
+
+Box's interpreters and gateways share an event history, so rules can use earlier
+actions and elapsed time to decide what is allowed next. For example, a file read
+through Shell or Python can cause the gateway to deny a later outbound HTTP request.
+
+Direct filesystem grants in `box.toml` are enforced by the OS and do not produce
+individual Dogwood decisions. To apply a policy to file operations, use the
+interpreters and keep those files out of the agent's direct grants. See
+[filesystem access](docs/user/security.md) and [policy](docs/user/policy.md).
+
+By default, Box Core writes its decision records to
+`<box_dir>/private/telemetry/records.jsonl`.
+
+Box Core supports local execution on Linux ARM64, Linux x86-64, and macOS with Apple
+silicon. See the [Linux download instructions](docs/user/getting-started.md#linux) for release
+selection and the [Linux requirements](docs/user/linux-requirements.md) for tested configurations.
+
+### Download Box Core
+
+Follow [Run an agent with box.toml](docs/user/getting-started.md) to download Box Core for macOS, Linux ARM64, or Linux x86-64.
 The Strands CLI walkthrough uses macOS.
 For that walkthrough, you need macOS 15 or later on Apple silicon and Node.js 22.21 or later from Homebrew.
 You also need access to Claude Opus 5 on Amazon Bedrock in `us-west-2`.
@@ -233,7 +241,60 @@ with Dogwood syntax and Box's supported actions:
 https://raw.githubusercontent.com/strands-agents/box/main/.agents/skills/authoring-box-policy/SKILL.md
 ```
 
-## Examples
+### Use Box Core as a Rust library
+
+Link the `strands-box` package in `crates/box`, then call:
+
+```rust,no_run
+let exit_code = strands_box::run("/absolute/box.toml".into(), Vec::new(), Default::default());
+```
+
+This runs the existing Box command in the calling process and waits until it finishes.
+By default, it uses the process's terminal and returns its exit
+code. The second argument appends arguments to `[agent] command`.
+Use `RunOptions::terminal` to supply the workload's terminal and `RunOptions::on_ready`
+to start host threads after hardening and signal registration, before workload setup.
+Use `RunOptions::policy_decisions` to receive each policy decision in memory as the box makes it
+(see [the library section](crates/box/README.md#policy-decisions-for-a-library-caller)).
+Use `RunOptions::box_id` to give a new box your own ID, such as
+`my-app-3f9a1c0e7b2d4a6f`: a prefix of 1 to 15 letters, digits, `.`, `_`, or `-`, then `-` and 16
+lowercase hexadecimal digits. Box stores it, prints it, and labels telemetry with it. A box that
+already has an ID refuses a different one. Without `box_id`, Box generates `box-` and 16
+hexadecimal digits.
+Call it before starting application threads or loading secrets, and use one Box workload
+per host process. Later `run` calls fail, even if the first call failed, unless `run` refused a
+malformed `box_id`.
+Ship the matching Box helper binaries beside the host application.
+
+To replace the running box's policy from a host thread:
+
+```rust,no_run
+strands_box::reload(&[strands_box::Policy {
+    origin: "policy.dw".into(),
+    text: new_policy_text,
+}])?;
+```
+
+`reload` waits until the change takes effect. Invalid policy returns `ReloadRefused` and leaves
+the current policy in place. An empty list denies all policy requests. Policy files and the
+OS sandbox stay unchanged. A box must be open; `on_ready` runs too early.
+Use `ReloadRefused::is_not_running()` to distinguish that case from a rejected policy.
+A rule for an MCP tool can reload only after Box loads that server's tool definitions.
+Without them, even reloading the unchanged policy is refused. If policy blocks discovery,
+waiting will not help. The current policy stays in place.
+
+To generate policy schemas:
+
+```rust,no_run
+let exit_code = strands_box::generate_policy_schema(
+    "/absolute/box.toml".into(),
+    "/absolute/schemas".into(),
+);
+```
+
+### Examples
+
+These examples run Box Core directly.
 
 Run the [Strands Python SDK example](examples/strands-box/strands-sdk-agent/) for a small
 agent whose three tools use Shell.
@@ -242,13 +303,23 @@ See the [example index](examples/README.md) for dependencies and run instruction
 
 ## Build from source
 
-This is a Cargo workspace. `rust-toolchain.toml` pins the compiler, and rustup
-installs it on the first build. Build the box binaries from a clone with
-[rustup](https://rustup.rs/):
+This is a Cargo workspace. `rust-toolchain.toml` pins the compiler, and rustup installs it on the
+first build. Build `box` and the Box Core binaries it runs from a clone with
+[rustup](https://rustup.rs/) and [`just`](https://github.com/casey/just):
 
 ```sh
 git clone https://github.com/strands-agents/box.git
 cd box
+just build-cli
+```
+
+The programs are in `target/debug`, and [Install Box](docs/cli/install.md#build-from-source)
+shows how to put them on your `PATH`. The CLI's source is in [`crates/cli/`](crates/cli/), with the
+packs, policies, and starters it ships in [`resources/`](resources/).
+
+To build only Box Core's release binaries:
+
+```sh
 cargo build --release -p strands-box -p strands-box-containment
 ```
 
@@ -312,7 +383,7 @@ On Linux, follow the namespace and launcher-image setup in the
 history persistence steps of the [`unit-test` workflow job](.github/workflows/rust-test-lint.yml) before running the tests.
 
 In pull-request CI, changes to `docs/site-manifest.json`,
-`docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` run the focused
+`docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` or `docs/cli/` run the focused
 site-manifest contract test instead of the full Rust test matrix. The test compares the base
 contract to keep the product ID stable and require an append-only retirement before a page or route
 is removed.
@@ -331,14 +402,17 @@ It creates a `noexec` temporary mount only inside the test process's private nam
 
 | Guide | Contents |
 |---|---|
-| [`docs/user/`](docs/user) | How to install Box and run a box. |
+| [`docs/cli/`](docs/cli) | The Box CLI guide: install `box`, run an agent in a box, and change what it can reach. |
+| [`docs/user/`](docs/user) | The Box Core guide: run Box Core with `box.toml` and `policy.dw`, and deploy it. |
 | [`docs/design/`](docs/design) | Architecture, enforcement boundaries, and design decisions. |
+| [`docs/design/cli/`](docs/design/cli) | How `box` works inside, and its decisions. |
 
 See [AGENTS.md](AGENTS.md) for the repository rules.
 
 ## Reporting a problem
 
-Open an issue on this repository. For a suspected security problem, read
+Open an [issue](https://github.com/strands-agents/box/issues) with the command you ran, what you
+expected, what happened, and the output of `box --version`. For a suspected security problem, read
 [SECURITY.md](SECURITY.md) first.
 
 ## License

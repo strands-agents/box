@@ -375,8 +375,7 @@ from a route, so do this only for a tool and a host you trust.
 
 ## How Linux differs
 
-Box runs on Linux on aarch64, such as AWS Graviton, and on x86_64, with no opt-in. Releases have no
-x86_64 archive yet, so on x86_64 build `box` from source ([CONTRIBUTING.md](../../CONTRIBUTING.md)).
+Box runs on Linux on aarch64, such as AWS Graviton, and on x86_64, with no opt-in.
 What is different from a Mac:
 
 - Each run creates an empty `.box` folder in your project, so that the box can keep the agent out

@@ -1,5 +1,8 @@
 # Examples
 
+These examples run Box Core directly. To run a coding agent with the Box CLI instead, follow
+[Get started with Box](../docs/cli/getting-started.md).
+
 Run an agent with project operations through Strands Shell, where Box applies the policy.
 Each example states its dependencies and run commands.
 
