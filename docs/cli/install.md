@@ -98,9 +98,8 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh 
 ```
 
 It switches `current` to that release, prints `Updated box 0.3.0-preview.1 to 0.3.0-preview.2.`,
-and then shows the same welcome as a first install, including the telemetry lines while telemetry is
-on. When you have that release already, it prints only `box 0.3.0-preview.2 is already installed.`
-and changes nothing. If you installed with any
+and then shows the same welcome as a first install. When you have that release already, it prints
+`box 0.3.0-preview.2 is already installed.` and keeps your release, without the welcome. If you installed with any
 of the other [installer variables](#installer-variables), set them again.
 
 Without `BOX_VERSION`, the installer takes the latest stable release. A pre-release, such as

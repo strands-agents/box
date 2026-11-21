@@ -826,7 +826,7 @@ case ":${PATH-}:" in
         ;;
 esac
 # Installs and updates both welcome, so an update also shows the commands and the telemetry
-# notice. A rerun of the installed version changes nothing and says only that.
+# notice. A rerun of the installed version keeps that release and leaves the welcome out.
 if [ "$box_welcome" -eq 1 ]; then
     printf '\n' >&2
     welcome

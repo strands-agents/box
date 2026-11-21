@@ -1077,14 +1077,13 @@ exec /bin/sh "$script"
         self.assertEqual(repeated.stderr, "box 0.1.0 is already installed.\n")
         self.assertEqual((self.home / ".zshrc").read_text().count("# >>> Box PATH >>>"), 1)
         self.release("0.2.0")
+        # An update or downgrade shows the first install's welcome, telemetry notice included.
+        welcome = first.stderr[first.stderr.index("\nbox run"):]
         upgraded = self.run_install()
-        # An update welcomes again, so someone updating learns the commands and the telemetry notice.
-        self.assertTrue(upgraded.stderr.startswith("Updated box 0.1.0 to 0.2.0.\n\nbox run <profile>"),
-                        upgraded.stderr)
-        self.assertIn("Example next steps", upgraded.stderr)
-        self.assertIn("To opt out, run: box telemetry off\n", upgraded.stderr)
+        self.assertEqual(upgraded.stderr, "Updated box 0.1.0 to 0.2.0.\n" + welcome)
         self.assertEqual(self.current(), f"0.2.0-{self.target}")
-        self.run_install(BOX_VERSION="0.1.0")
+        downgraded = self.run_install(BOX_VERSION="0.1.0")
+        self.assertEqual(downgraded.stderr, "Updated box 0.2.0 to 0.1.0.\n" + welcome)
         self.assertEqual(self.current(), f"0.1.0-{self.target}")
         self.assertEqual(state.read_text(), "user data")
         self.assertTrue((self.home / f".strands/box/packages/0.2.0-{self.target}/box").is_file())
