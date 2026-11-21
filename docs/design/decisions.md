@@ -2461,31 +2461,30 @@ crate's `box_owned_route_attaches_the_real_secret_with_no_phantom`,
 <a id="where-a-re-route-signs-a-backend-auth-of-aws"></a>
 ### A re-route signs an `aws://` backend auth in the gateway, after the Host rewrite, over the backend host
 
-A backend `auth` of `aws://` signs the request the backend receives, so the signature must cover the
-backend host, the joined path, the sent headers (including the rewritten `Host`), and the body hash.
-The gateway signs it in `run_l7_legs` AFTER it rewrites the `Host` to the backend and builds the
-forwarded target, and BEFORE it serializes the request. That is the one point where the bytes that leave are
-final. The box lowers the `aws://` auth to a signed route keyed on the backend host, held in the
-backend vault; the gateway applies it with an `Outbound` whose host is the backend, so the existing
-in-boundary SigV4 signer covers the backend host. The service and region are **stated explicitly** on
-the auth (`aws.service`, `aws.region`), carried on the route (`RouteSpec::aws_scope`) and used by the
-signer verbatim. A backend is a gateway or custom domain whose host carries no derivable scope, and
-inferring it would mean encoding each AWS product's host shape in Box. Host derivation
-(`derive_service_region`) stays only for an ordinary AWS destination, whose host is standard.
-Signing per request keeps expiring credentials fresh, and the inbound signing artifacts are
-stripped first, as for a destination signature. The signer covers only the headers that leave:
-`content-length` is left unsigned because the forwarding layer owns it. That layer refreshes the
-value and omits the header entirely on a bodyless request. Signing the workload's value would attest
-a header the request may not send, which a strict verifier rejects. Signing before the rewrite was rejected: the `Host`
-is a signed header, so signing while the request still names the original destination and then
-rewriting it desynchronizes the signature from the bytes sent. Signing in the box was rejected: only
-the gateway holds the per-request bytes. The env:// box-owned backend token keeps its pre-rewrite
-attach, because a static token does not depend on the `Host`. The limit: the signature covers the
-backend host as written in `backends.url`, so a future URL rewrite that changes the sent host must
-re-derive the service and region from the rewritten host.
-`a_backend_aws_auth_signs_over_the_backend_host`,
-`an_aws_backend_auth_without_an_explicit_scope_is_refused`, and the credentials crate's
-`a_gateway_host_is_not_derived_and_needs_an_explicit_scope` pin it.
+The gateway signs an `aws://` backend auth after it rewrites the `Host` to the backend and joins the
+path, so the signed `Host` and path are the ones the backend receives. As for a destination
+signature, it resolves the credentials for each request and strips the inbound signing headers
+before it signs. Eight headers that the gateway sends stay out of the signature. The gateway writes
+`Content-Length` and `Connection` itself when it forwards the request, so a signature over the
+workload's values could cover a value that isn't sent. `X-Amzn-Trace-Id`, `traceparent`,
+`tracestate`, `baggage`, `User-Agent`, and `Expect` can change between the box and AWS. For example,
+X-Ray rewrites `X-Amzn-Trace-Id` in transit, so a signature over it fails at an AgentCore Gateway.
+These six are among the 14 headers that botocore doesn't sign. The rest of the 14 are hop-by-hop
+headers, which the gateway removes before it signs. `Connection` is in both groups: the gateway
+removes the workload's value before it signs and writes its own when it forwards. An `env://`
+backend token still attaches before the rewrite, because a static token doesn't depend on the
+`Host`.
+
+**Rejected.** The earlier design signed every header that leaves except `Content-Length` and
+`Connection`, and an AgentCore Gateway refused each call that carried a trace header. Signing before
+the rewrite would sign the original destination as the `Host`, so the signature wouldn't match the
+bytes sent. Signing in the box instead of the gateway can't work, because only the gateway holds the
+bytes of each request.
+
+**Cost.** A proxy or a service that terminates TLS between the box and AWS can change an unsigned
+header, and the signature still verifies. The list is a copy of botocore's, so it must follow
+botocore's changes. The signature covers the backend host as written in `backends.url`, so a future
+URL rewrite that changes the sent host must derive the service and region again.
 
 ## Credentials
 

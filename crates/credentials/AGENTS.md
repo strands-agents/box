@@ -112,6 +112,10 @@ the scrub of an echoed secret. `strands-box-egress-gateway` applies the edits to
 - Resolve signed AWS routes per request; session credentials expire.
 - Strip every inbound signing artifact before signing. `STRIP_SIGNING_HEADERS` must cover the
   payload-hash and query-signature artifacts.
+- Sign no header in `UNSIGNED_HEADERS`, which is the list of headers that botocore does not sign.
+  A proxy or a trace service between the box and AWS can change one of these headers, and AWS then
+  refuses the signature. The signer removes none of these headers from the request. It only keeps
+  them out of the canonical request.
 - Emit exactly one acquisition record per resolve, success or failure, including the per-request
   signing resolve. The discarding sink drops the record, never the build.
 - Keep phantom tokens distinct from real material: non-secret, unguessable at 256 CSPRNG bits. A
