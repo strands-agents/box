@@ -24,6 +24,11 @@ Two helper programs connect the trusted process to the sandboxes. The trampoline
 to itself, then becomes the program that will run there. The alias runs inside the agent's sandbox
 and sends requests to the broker.
 
+With experimental Linux storage mounts enabled, a storage worker observes incoming mounts and
+`strands-box-storage-compiler` prepares restricted attachments from the original filesystem lists.
+These trusted helpers keep unprepared storage outside the sandboxes. See
+[storage that arrives after startup](containment.md#storage-that-arrives-after-startup).
+
 [Each box has one trusted process](decisions.md#one-trusted-process-per-box), which holds that
 box's policy engine, interpreters, gateway, certificate authority, and secrets. A shared process
 would expose every box's plaintext secrets and signing keys to one memory-safety failure.

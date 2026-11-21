@@ -33,6 +33,8 @@ impl Unreached {
 pub(super) struct HeldPath {
     parent: File,
     leaf: CString,
+    #[cfg(target_os = "linux")]
+    protected: Option<box_shell::StoragePath>,
 }
 
 impl HeldPath {
@@ -63,11 +65,30 @@ impl HeldPath {
                 Err(error) => return Err(unreached(&parent, &name, error)),
             };
         }
-        Ok(Self { parent, leaf })
+        Ok(Self {
+            parent,
+            leaf,
+            #[cfg(target_os = "linux")]
+            protected: None,
+        })
+    }
+
+    /// Keep the exact protected view path approved for a hosted storage effect.
+    #[cfg(target_os = "linux")]
+    pub(super) fn protected(path: box_shell::StoragePath) -> io::Result<Self> {
+        Ok(Self {
+            parent: path.parent().try_clone()?,
+            leaf: path.leaf().to_owned(),
+            protected: Some(path),
+        })
     }
 
     /// Open the leaf itself, never through a symbolic link.
     pub(super) fn open(&self, flags: libc::c_int) -> io::Result<File> {
+        #[cfg(target_os = "linux")]
+        if let Some(path) = &self.protected {
+            return path.open(flags, 0o666);
+        }
         open_at(
             self.parent.as_raw_fd(),
             &self.leaf,
@@ -77,6 +98,10 @@ impl HeldPath {
 
     /// The leaf's own metadata, a symbolic link's included.
     pub(super) fn stat(&self) -> io::Result<libc::stat> {
+        #[cfg(target_os = "linux")]
+        if let Some(path) = &self.protected {
+            return path.stat();
+        }
         let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
         // SAFETY: the parent and the leaf are owned, valid handles, and `metadata` is writable.
         let result = unsafe {

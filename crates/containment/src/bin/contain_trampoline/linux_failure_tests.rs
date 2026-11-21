@@ -10,9 +10,11 @@ fn request() -> Args {
         config_fd: None,
         config_sha256: [0; 32],
         target_env_json: "{}".into(),
+        working_directory: None,
         setup_status_fd: None,
         relay_control_fd: None,
         launch_gate_fd: None,
+        storage_control_fd: None,
         command: vec!["/containment-unit-absent-program".into()],
         argv0: None,
     }

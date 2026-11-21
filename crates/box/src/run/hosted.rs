@@ -49,6 +49,10 @@ use crate::run::lock::{BoxLive, Lock};
 use crate::run::secret_sources::RouteSecrets;
 use crate::run::telemetry;
 
+pub(crate) mod storage;
+
+use storage::StorageOwner;
+
 type RunningPolicy = (Arc<PolicyEngine>, Arc<telemetry::Collector>);
 
 static RUNNING_POLICY: Mutex<Option<RunningPolicy>> = Mutex::new(None);
@@ -358,6 +362,7 @@ fn tool_spawner(
     approved: Arc<ApprovedReach>,
     workspace: PathBuf,
     recorder: Arc<telemetry::DecisionRecorder>,
+    storage: StorageOwner,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
         all(target_os = "linux", feature = "native-filesystem-policy")
@@ -377,6 +382,7 @@ fn tool_spawner(
     let spawn_selection = Arc::clone(&selection);
     let spawn: box_shell::HostSpawner = Arc::new(move |spawn: box_shell::HostSpawn| {
         let recorder = Arc::clone(&recorder);
+        let storage = storage.clone();
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
             all(target_os = "linux", feature = "native-filesystem-policy")
@@ -387,6 +393,9 @@ fn tool_spawner(
         let approved = Arc::clone(&approved);
         let protected_sources = protected_sources.clone();
         Box::pin(async move {
+            storage
+                .check()
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
             let mut selected = selection
                 .select(&spawn.program, &spawn.invoked, &spawn.args)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -441,9 +450,10 @@ fn tool_spawner(
                     "native-egress",
                 ));
             }
-            let captured = crate::run::contain::supervise::LeafBox::run(
+            let captured = crate::run::contain::supervise::LeafBox::run_owned(
                 boundary,
                 &layout,
+                &storage,
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
                     all(target_os = "linux", feature = "native-filesystem-policy")
@@ -471,6 +481,7 @@ fn tool_spawner(
 /// crossing the thread boundary. A contained MCP leaf reuses the parent's gateway and policy exactly
 /// as a tool leaf does; it owns no second [`HostedBox`].
 pub(crate) struct McpLeafLauncher {
+    storage: StorageOwner,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
         all(target_os = "linux", feature = "native-filesystem-policy")
@@ -488,6 +499,7 @@ pub(crate) struct McpLeafLauncher {
 }
 
 impl McpLeafLauncher {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         attachment: Attachment,
         layout: BoxRoot,
@@ -495,6 +507,7 @@ impl McpLeafLauncher {
         approved: Arc<ApprovedReach>,
         protected_sources: Vec<AuthoritySource>,
         workspace: PathBuf,
+        storage: StorageOwner,
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
             all(target_os = "linux", feature = "native-filesystem-policy")
@@ -513,6 +526,7 @@ impl McpLeafLauncher {
             approved,
             protected_sources,
             workspace,
+            storage,
         }
     }
 
@@ -564,6 +578,7 @@ impl McpLeafLauncher {
         server: &crate::record::config::mcp::McpServer,
         received: &[String],
     ) -> Result<Boundary, BoxError> {
+        self.storage.check()?;
         let contained = self.record.contained_mcp.get(&server.name).ok_or_else(|| {
             BoxError::from(ConfigError::Contract {
                 reason: format!("no contained MCP server named {:?}", server.name),
@@ -629,9 +644,10 @@ impl McpLeafLauncher {
         boundary: Boundary,
     ) -> Result<crate::run::contain::supervise::StreamingLeaf, BoxError> {
         eprintln!("{}", boundary.disclosure());
-        crate::run::contain::supervise::LeafBox::spawn_streaming(
+        crate::run::contain::supervise::LeafBox::spawn_streaming_owned(
             boundary,
             &self.layout,
+            &self.storage,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
                 all(target_os = "linux", feature = "native-filesystem-policy")
@@ -696,9 +712,11 @@ pub(crate) struct HostedBox {
     ))]
     _file_monitor: Option<super::native_enforcement::FileMonitor>,
 
-    /// A fatal cross-door completion verdict from the discovery coordinator,
-    /// raced against the broker and the registry in [`stopped`](Self::stopped).
+    /// Fatal trusted-component errors raced against the broker and the registry.
+    /// Storage also retains its first failure until owned admission work has stopped.
     coordinator_fatal: tokio::sync::mpsc::UnboundedReceiver<BoxError>,
+
+    storage: StorageOwner,
 
     /// The egress gateway. Shutdown joins its listener and connection workers after the broker.
     _proxy: Option<MitmHandle>,
@@ -905,6 +923,7 @@ impl HostedBox {
         // verdict reaches this box's supervision through `stopped`.
         let remote_mcp_servers: Vec<(String, String)> = record.mcp_servers();
         let (coordinator_fatal_sender, coordinator_fatal) = tokio::sync::mpsc::unbounded_channel();
+        let storage = StorageOwner::new(coordinator_fatal_sender.clone());
         let mut doors = BTreeSet::from([DiscoveryDoor::Stdio]);
         if !remote_mcp_servers.is_empty() {
             doors.insert(DiscoveryDoor::Egress);
@@ -1039,6 +1058,40 @@ impl HostedBox {
             protected_sources,
             commands,
         )?);
+        #[cfg(target_os = "linux")]
+        if let Some(policy) = approved
+            .table("[agent]")
+            .and_then(|reach| reach.storage.as_ref())
+        {
+            storage.configure_hosted(
+                policy
+                    .layout
+                    .pending_masks
+                    .iter()
+                    .map(|mask| {
+                        (
+                            mask.path.clone(),
+                            matches!(
+                                mask.kind,
+                                crate::record::config::filesystem::FilesystemTargetKind::Directory
+                            ),
+                        )
+                    })
+                    .collect(),
+            )?;
+        } else if !record.storage.mounts.is_empty() {
+            // No agent means no protected agent view can be published. Reserve these
+            // names anyway so hosted home/workspace mappings cannot disclose underlays.
+            storage.configure_hosted(
+                record
+                    .storage
+                    .mounts
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, true))
+                    .collect(),
+            )?;
+        }
         let broker_listener = BrokerHost::bind(root)?;
         #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
         let monitor_required = record.experimental_features.native_filesystem_policy;
@@ -1073,6 +1126,7 @@ impl HostedBox {
             Arc::clone(&approved),
             workspace.to_path_buf(),
             Arc::clone(&recorder),
+            storage.clone(),
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
                 all(target_os = "linux", feature = "native-filesystem-policy")
@@ -1090,6 +1144,7 @@ impl HostedBox {
                 Arc::clone(&approved),
                 protected_sources.to_vec(),
                 workspace.to_path_buf(),
+                storage.clone(),
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
                     all(target_os = "linux", feature = "native-filesystem-policy")
@@ -1113,6 +1168,8 @@ impl HostedBox {
             protected_sources,
             std::sync::Arc::clone(approved.commands()),
             std::sync::Arc::clone(approved.installation()),
+            #[cfg(target_os = "linux")]
+            storage.hosted_view(),
         )?;
         BoxLive::publish(root, proxy_port)?;
         let published = PublishedRecord(root.clone());
@@ -1128,6 +1185,7 @@ impl HostedBox {
             ))]
             _file_monitor: file_monitor,
             coordinator_fatal,
+            storage,
             _proxy: Some(proxy),
             #[cfg(feature = "experimental-idle-flush")]
             _history_flusher: Some(history_flusher),
@@ -1170,8 +1228,14 @@ impl HostedBox {
         &self.approved
     }
 
+    /// The shared storage admission owner for this Box and every contained leaf.
+    pub(crate) fn storage_owner(&self) -> StorageOwner {
+        self.storage.clone()
+    }
+
     /// Stop every event producer before the final history flush.
     pub(crate) fn shutdown(&mut self) -> Result<(), BoxError> {
+        self.storage.close();
         *RUNNING_POLICY
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = None;
@@ -1202,7 +1266,7 @@ impl HostedBox {
                 None => Ok(()),
             },
         );
-        with_shutdown(native, history)
+        with_shutdown(self.storage.finish(), with_shutdown(native, history))
     }
 
     fn stop_native(&mut self) -> Result<(), BoxError> {
@@ -1402,6 +1466,7 @@ mod tests {
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
+            storage: Default::default(),
             file_attributes: false,
             monty: true,
             gateway: Default::default(),
@@ -3146,6 +3211,66 @@ while :; do :; done"#
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn storage_failure_stops_the_owner_workload_and_its_descendant() {
+        let mut storage = None;
+        let running = supervised_workload_with(
+            r#"trap '' TERM; sleep 3600 & printf '%s %s' "$$" "$!" > "$1"; wait"#,
+            2,
+            |hosted| storage = Some(hosted.storage_owner()),
+        )
+        .await;
+        let storage = storage.expect("the owner was captured before workload startup");
+        let root = crate::record::layout::testing::box_root(running._operator.path(), "codex");
+        assert!(
+            BoxLive::read(&root).is_some(),
+            "the Box is live before admission fails"
+        );
+        storage.fail("test storage protection failed");
+        let failure =
+            tokio::time::timeout(std::time::Duration::from_secs(10), running.contained.wait())
+                .await
+                .expect("storage failure ends the owner")
+                .expect_err("the run reports admission failure");
+        assert!(
+            failure
+                .to_string()
+                .contains("test storage protection failed"),
+            "{failure}"
+        );
+        assert!(
+            processes_exit(&running.pids).await,
+            "owner teardown reaps both processes"
+        );
+        assert!(
+            BoxLive::read(&root).is_none(),
+            "teardown withdraws live state"
+        );
+        assert!(!Lock::is_held(&root.lock()).expect("read released lock"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn storage_failure_survives_shutdown_without_polling_the_fatal_channel() {
+        let operator = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(operator.path(), "storage-race");
+        let record = record(&root);
+        place_aliases(&root, &record);
+        let mut hosted = open_hosted(&operator, &root, &record);
+        let storage = hosted.storage_owner();
+        storage.fail("failure concurrent with normal exit");
+        let failure = hosted
+            .shutdown()
+            .expect_err("normal exit cannot discard an unread failure");
+        assert!(
+            failure
+                .to_string()
+                .contains("failure concurrent with normal exit"),
+            "{failure}"
+        );
+        assert!(storage.check().is_err(), "shutdown cannot reopen admission");
+    }
+
     /// A supervised workload run from `script` through `[agent] command`, with `"$1"` naming a
     /// writable file for its pids.
     #[cfg(unix)]
@@ -3497,6 +3622,7 @@ while :; do :; done"#
                 approved,
                 Vec::new(),
                 workspace,
+                StorageOwner::testing(),
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
                     all(target_os = "linux", feature = "native-filesystem-policy")
@@ -3556,6 +3682,7 @@ while :; do :; done"#
                 approved,
                 admitted.clone(),
                 telemetry::DecisionRecorder::discarding(),
+                StorageOwner::testing(),
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
                     all(target_os = "linux", feature = "native-filesystem-policy")
@@ -3614,6 +3741,7 @@ while :; do :; done"#
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
+            storage: Default::default(),
             file_attributes: false,
             monty: true,
             gateway: Default::default(),
@@ -4116,8 +4244,8 @@ while :; do :; done"#
             .find("\"egress:native\"")
             .expect("tool_spawner records egress:native");
         let run = spawner
-            .find("LeafBox::run(")
-            .expect("tool_spawner runs the leaf");
+            .find("LeafBox::run_owned(")
+            .expect("tool_spawner runs the owned leaf");
         assert!(
             record < run,
             "the egress:native record must precede LeafBox::run"

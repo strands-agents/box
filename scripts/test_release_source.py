@@ -665,7 +665,7 @@ class ReleasePackageTests(unittest.TestCase):
     def header(self, machine="Advanced Micro Devices X86-64", loader="/lib64/ld-linux-x86-64.so.2", version="2.34"):
         return f"Machine: {machine}\nRequesting program interpreter: {loader}]\nName: GLIBC_{version}\n"
 
-    def test_x86_package_step_checks_all_three_executables_in_read_only_container(self):
+    def test_x86_package_step_checks_all_four_executables_in_read_only_container(self):
         result = self.run_step("Check the x86-64 Linux package", PACKAGE_HEADER=self.header())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(self.docker_arguments.read_text())[0], [
@@ -675,7 +675,7 @@ class ReleasePackageTests(unittest.TestCase):
         ])
         report = json.loads(result.stdout)
         self.assertEqual([item["binary"] for item in report], [
-            "box", "strands-box-sock-alias", "strands-box-contain-trampoline",
+            "box", "strands-box-sock-alias", "strands-box-contain-trampoline", "strands-box-storage-compiler",
         ])
         self.assertEqual({item["architecture"] for item in report}, {"x86_64"})
 

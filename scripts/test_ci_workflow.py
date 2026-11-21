@@ -108,7 +108,7 @@ class MovedCommandTests(unittest.TestCase):
             ("Clippy", "cargo clippy --workspace --all-targets --all-features -- -D warnings"),
             ("Build", "cargo build --locked --all-features -p strands-box-cli -p strands-box "
                       "-p strands-box-containment --bin box --bin strands-box "
-                      "--bin strands-box-sock-alias --bin strands-box-contain-trampoline"),
+                      "--bin strands-box-sock-alias --bin strands-box-contain-trampoline --bin strands-box-storage-compiler"),
             ("Test", "cargo test -p strands-box-cli -p strands-box-cli-pack-tests -p strands-box-cli-profile -p strands-box-cli-telemetry --all-features"),
         ]:
             with self.subTest(step=step):

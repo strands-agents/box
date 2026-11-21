@@ -9484,11 +9484,11 @@ fn a_pack_that_another_pack_extends_is_checked_for_its_engine() {
 fn a_key_the_language_does_not_hold_is_refused() {
     let scene = Scene::new();
     let reason = scene.refusal(
-        "[storage]\ndirectories = [\"agent\"]\n[storage.mounts]\n\
+        "[storage]\ndirectories = [\"agent\"]\n[storage.unknown]\n\
          [agent]\ncommand = [\"/bin/x\"]",
     );
     assert!(
-        reason.contains("`[storage]` holds the unknown key `mounts`"),
+        reason.contains("`[storage]` holds the unknown key `unknown`"),
         "{reason}"
     );
     let reason = scene.refusal(
@@ -15922,3 +15922,461 @@ fn a_profile_header_holds_only_a_name() {
 }
 
 mod plugins;
+
+mod linux_storage_mounts_tests {
+    use super::*;
+
+    fn declarations(root: &Path) -> String {
+        format!(
+            "[experimental-features]\nlinux-storage-mounts = true\n[storage]\nmounts = [{:?}]\n",
+            root.display().to_string()
+        )
+    }
+
+    #[test]
+    fn settings_reach_core_without_creating_incoming_directories() {
+        let scene = Scene::new();
+        let incoming = scene.root.join("incoming");
+        let compiled = scene
+            .compile(
+                &profile(&format!("{}{AGENT}", declarations(&incoming))),
+                None,
+            )
+            .expect("incoming storage declarations compile");
+        let config = table(&compiled);
+        assert_eq!(
+            config["experimental-features"]["linux-storage-mounts"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            config["storage"]["mounts"].as_array().unwrap(),
+            &[toml::Value::String(incoming.display().to_string())]
+        );
+        assert!(!compiled.storage.directories.contains(&incoming));
+        crate::run::prepare_storage(&compiled.storage, &scene.home())
+            .expect("managed storage preparation");
+        assert!(
+            !incoming.exists(),
+            "the trusted mounter owns incoming roots"
+        );
+    }
+
+    #[test]
+    fn pending_program_tool_literals_survive_but_optional_and_unrelated_paths_do_not() {
+        let scene = Scene::new();
+        let incoming = scene.root.join("incoming");
+        let unrelated = scene.root.join("unrelated");
+        let text = format!(
+            "{}{AGENT}\n[tool.reader]\nprogram = \"reader\"\n[tool.reader.filesystem]\n\
+             read = [{read:?}, {unrelated:?}, {{ path = {optional:?}, optional = true }}]\n\
+             write = [{write:?}]\ndeny_write = [{frozen:?}]\ndeny = [{denied:?}]\n\
+             read_file = [{file_read:?}]\nwrite_file = [{file_write:?}]\n\
+             list = [{listed:?}]\nmetadata = [{metadata:?}]\nexec = [{executable:?}]",
+            declarations(&incoming),
+            read = incoming.join("read").display().to_string(),
+            write = incoming.join("write").display().to_string(),
+            frozen = incoming.join("write/frozen").display().to_string(),
+            denied = incoming.join("secret").display().to_string(),
+            optional = incoming.join("optional").display().to_string(),
+            unrelated = unrelated.display().to_string(),
+            file_read = incoming.join("file-read").display().to_string(),
+            file_write = incoming.join("file-write").display().to_string(),
+            listed = incoming.join("listed").display().to_string(),
+            metadata = incoming.join("metadata").display().to_string(),
+            executable = incoming.join("executable").display().to_string(),
+        );
+        let resolved = detected(&scene, &text).expect("program tool resolves before storage");
+        let fs = &resolved.tool["reader"].filesystem;
+        assert!(
+            fs.write
+                .contains(&incoming.join("write").display().to_string()),
+            "a required pending write must reach Core"
+        );
+        assert!(
+            fs.read
+                .contains(&incoming.join("read").display().to_string())
+        );
+        for (entries, leaf) in [
+            (&fs.read_file, "file-read"),
+            (&fs.write_file, "file-write"),
+            (&fs.list, "listed"),
+            (&fs.metadata, "metadata"),
+            (&fs.exec, "executable"),
+        ] {
+            assert!(
+                entries.contains(&incoming.join(leaf).display().to_string()),
+                "pending {leaf} must reach Core"
+            );
+        }
+        assert!(
+            fs.deny_write
+                .contains(&incoming.join("write/frozen").display().to_string())
+        );
+        assert!(
+            fs.deny
+                .contains(&incoming.join("secret").display().to_string())
+        );
+        assert!(!fs.read.contains(&unrelated.display().to_string()));
+        assert!(
+            !fs.read
+                .contains(&incoming.join("optional").display().to_string())
+        );
+    }
+
+    #[test]
+    fn placeholder_aliases_cannot_redirect_or_remove_write_restrictions() {
+        let scene = Scene::new();
+        let incoming = scene.root.join("incoming");
+        let outside = scene.root.join("outside");
+        std::fs::create_dir_all(&incoming).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, incoming.join("frozen")).unwrap();
+        let fields = format!(
+            "filesystem.write = [{:?}]\nfilesystem.deny_write = [{:?}]\n",
+            incoming.display().to_string(),
+            incoming.join("frozen").display().to_string()
+        );
+        let text = format!(
+            "{}{AGENT}\n{fields}[tool.writer]\ncommand = [\"/usr/bin/true\"]\n{fields}[mcp.local]\ntype = \"stdio\"\ncommand = [\"/usr/bin/true\"]\n{fields}",
+            declarations(&incoming)
+        );
+        let compiled = scene
+            .compile(&profile(&text), None)
+            .expect("pending restrictions survive");
+        let config = table(&compiled);
+        for process in [
+            &config["agent"],
+            &config["tool"]["writer"],
+            &config["mcp"]["local"],
+        ] {
+            assert_eq!(
+                process["filesystem"]["deny_write"].as_array().unwrap(),
+                &[toml::Value::String(
+                    incoming.join("frozen").display().to_string()
+                )]
+            );
+        }
+        assert!(
+            compiled
+                .policy
+                .contains(&incoming.join("frozen").display().to_string()),
+            "generated policy must retain the authored path: {}",
+            compiled.policy
+        );
+        assert!(
+            !compiled.policy.contains(&outside.display().to_string()),
+            "placeholder bytes must not choose the policy target"
+        );
+        assert_eq!(
+            std::fs::read_link(incoming.join("frozen")).unwrap(),
+            outside
+        );
+    }
+
+    #[test]
+    fn a_writable_outside_alias_into_pending_storage_is_still_refused() {
+        let scene = Scene::new();
+        let incoming = scene.root.join("incoming");
+        std::fs::create_dir_all(&incoming).unwrap();
+        let alias = scene.workspace().join("incoming-alias");
+        std::os::unix::fs::symlink(&incoming, &alias).unwrap();
+        let text = format!(
+            "{}{AGENT}\nfilesystem.read = [{:?}]\n",
+            declarations(&incoming),
+            alias.join("data").display().to_string()
+        );
+        let error = match scene.compile(&profile(&text), None) {
+            Ok(_) => panic!("a writable outside alias must remain refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("resolves through a link"), "{error}");
+        assert!(error.contains("box can write"), "{error}");
+    }
+
+    #[test]
+    fn external_read_file_alias_survives_ancestor_read_deduplication() {
+        let scene = Scene::new();
+        let incoming = scene.root.join("incoming");
+        std::fs::create_dir_all(&incoming).unwrap();
+        std::fs::write(incoming.join("value"), "placeholder").unwrap();
+        let alias = scene.root.join("alias");
+        std::os::unix::fs::symlink(incoming.join("value"), &alias).unwrap();
+        let text = format!(
+            "{}{AGENT}\n[tool.reader]\nprogram = \"reader\"\n[tool.reader.filesystem]\nread = [{:?}]\nread_file = [{:?}]",
+            declarations(&incoming),
+            scene.root.display().to_string(),
+            alias.display().to_string()
+        );
+        let resolved = detected(&scene, &text).expect("external file alias resolves");
+        assert!(
+            resolved.tool["reader"]
+                .filesystem
+                .read_file
+                .contains(&alias.display().to_string()),
+            "the alias needs its own captured-source projection: {:?}",
+            resolved.tool["reader"].filesystem
+        );
+    }
+
+    #[test]
+    fn experimental_switch_keeps_false_and_conditional_values() {
+        let scene = Scene::new();
+        for selected in [false, true] {
+            let compiled = scene.compile(&profile(&format!("[experimental-features]\nlinux-storage-mounts = {{ value = {selected}, when = \"macos\" }}\n{AGENT}")), None).unwrap();
+            assert_eq!(
+                table(&compiled)["experimental-features"]["linux-storage-mounts"].as_bool(),
+                Some(selected)
+            );
+        }
+        let compiled = scene.compile(&profile(&format!("[experimental-features]\nlinux-storage-mounts = {{ value = true, when = \"linux\" }}\n{AGENT}")), None).unwrap();
+        assert!(table(&compiled).get("experimental-features").is_none());
+    }
+    #[test]
+    fn pending_writes_keep_external_protections_until_core_can_resolve_the_alias() {
+        let scene = Scene::new();
+        let incoming = scene.root.join("incoming");
+        let protected = scene.root.join("protected");
+        let absent = scene.root.join("required-but-absent");
+        std::fs::create_dir_all(&protected).unwrap();
+        let fields = format!(
+            "filesystem.write = [{:?}]\nfilesystem.deny_write = [{:?}, {:?}]\n",
+            incoming.join("future-alias").display().to_string(),
+            protected.display().to_string(),
+            absent.display().to_string()
+        );
+        let text = format!(
+            "{}{AGENT}\n{fields}[tool.writer]\ncommand = [\"/usr/bin/true\"]\n{fields}[mcp.local]\ntype = \"stdio\"\ncommand = [\"/usr/bin/true\"]\n{fields}[tool.static]\ncommand = [\"/usr/bin/true\"]\nfilesystem.deny_write = [{:?}]\n",
+            declarations(&incoming),
+            absent.display().to_string()
+        );
+        let compiled = scene.compile(&profile(&text), None).unwrap();
+        let config = table(&compiled);
+        for process in [
+            &config["agent"],
+            &config["tool"]["writer"],
+            &config["mcp"]["local"],
+        ] {
+            let denied = process["filesystem"]["deny_write"].as_array().unwrap();
+            assert!(denied.contains(&toml::Value::String(protected.display().to_string())));
+            assert!(
+                denied.contains(&toml::Value::String(absent.display().to_string())),
+                "Core must decide whether the future alias reaches this required target"
+            );
+        }
+        assert!(
+            config["tool"]["static"]
+                .get("filesystem")
+                .and_then(|fs| fs.get("deny_write"))
+                .is_none(),
+            "ordinary roles still prune unrelated protections"
+        );
+        assert!(compiled.policy.contains(&protected.display().to_string()));
+        assert!(compiled.policy.contains(&absent.display().to_string()));
+    }
+
+    #[test]
+    fn dangling_external_file_alias_is_retained_and_optional_alias_is_omitted() {
+        let scene = Scene::new();
+        let incoming = scene.root.join("incoming");
+        let alias = scene.root.join("alias");
+        let optional = scene.root.join("optional-alias");
+        std::os::unix::fs::symlink(incoming.join("value"), &alias).unwrap();
+        std::os::unix::fs::symlink(incoming.join("optional"), &optional).unwrap();
+        let text = format!(
+            "{}{AGENT}\n[tool.reader]\nprogram = \"reader\"\nfilesystem.read_file = [{:?}, {{ path = {:?}, optional = true }}]",
+            declarations(&incoming),
+            alias.display().to_string(),
+            optional.display().to_string()
+        );
+        let resolved = detected(&scene, &text).unwrap();
+        assert!(
+            resolved.tool["reader"]
+                .filesystem
+                .read_file
+                .contains(&alias.display().to_string())
+        );
+        assert!(
+            !resolved.tool["reader"]
+                .filesystem
+                .read_file
+                .contains(&optional.display().to_string())
+        );
+        assert!(!incoming.exists());
+    }
+
+    #[test]
+    fn roots_expand_home_templates_and_conditions_without_becoming_managed_storage() {
+        let scene = Scene::new();
+        let text = format!(
+            "[experimental-features]\nlinux-storage-mounts = true\n[storage]\ndirectories = [\"agent\"]\nmounts = [\"${{{{ home }}}}/incoming\", {{ value = \"~/other\", when = \"macos\" }}, {{ value = \"~/omitted\", when = \"linux\" }}]\n{AGENT}"
+        );
+        let compiled = scene.compile(&profile(&text), None).unwrap();
+        let expected = vec![scene.home().join("incoming"), scene.home().join("other")];
+        assert_eq!(compiled.storage.mounts, expected);
+        assert_eq!(
+            table(&compiled)["storage"]["mounts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(compiled.storage.directories.len(), 1);
+        assert!(
+            expected
+                .iter()
+                .all(|root| !compiled.storage.directories.contains(root))
+        );
+    }
+
+    #[test]
+    fn incoming_settings_refuse_malformed_values_and_pack_owned_roots() {
+        let scene = Scene::new();
+        for value in ["1", "\"yes\""] {
+            let reason = scene.refusal(&format!(
+                "[experimental-features]\nlinux-storage-mounts = {value}\n{AGENT}"
+            ));
+            assert!(reason.contains("is `true` or `false`"), "{reason}");
+        }
+        for value in ["\"/incoming\"", "[1]", "[\"relative\"]"] {
+            let reason = scene.refusal(&format!("[storage]\nmounts = {value}\n{AGENT}"));
+            assert!(reason.contains("list of absolute paths"), "{reason}");
+        }
+        scene.share_raw("p", "[pack]\nname = \"@box/p\"\nversion = 1\nkind = \"support\"\nplatforms = [\"macos\"]\n[storage]\nmounts = [\"/incoming\"]");
+        let reason = scene.refusal(&format!("packs = [\"@box/p\"]\n{AGENT}"));
+        assert!(
+            reason.contains("a pack holds no `storage.mounts`"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn pending_file_writes_also_keep_external_denials() {
+        let scene = Scene::new();
+        let incoming = scene.root.join("incoming");
+        let protected = scene.root.join("protected");
+        std::fs::create_dir_all(&protected).unwrap();
+        let fields = format!(
+            "filesystem.write_file = [{:?}]\nfilesystem.deny_write = [{:?}]\n",
+            incoming.join("future-file-alias").display().to_string(),
+            protected.display().to_string()
+        );
+        let text = format!(
+            "{}{AGENT}\n{fields}[tool.writer]\ncommand = [\"/usr/bin/true\"]\n{fields}[mcp.local]\ntype = \"stdio\"\ncommand = [\"/usr/bin/true\"]\n{fields}",
+            declarations(&incoming)
+        );
+        let compiled = scene.compile(&profile(&text), None).unwrap();
+        let config = table(&compiled);
+        for process in [
+            &config["agent"],
+            &config["tool"]["writer"],
+            &config["mcp"]["local"],
+        ] {
+            assert_eq!(
+                process["filesystem"]["deny_write"].as_array().unwrap(),
+                &[toml::Value::String(protected.display().to_string())]
+            );
+        }
+    }
+
+    #[test]
+    fn incoming_program_globs_fail_without_enumerating_the_placeholder() {
+        let scene = Scene::new();
+        let incoming = scene.root.join("incoming");
+        let text = format!(
+            "{}{AGENT}\n[tool.reader]\nprogram = \"reader\"\nfilesystem.read = [{:?}]",
+            declarations(&incoming),
+            incoming.join("*").display().to_string()
+        );
+        let reason = detected(&scene, &text).unwrap_err().to_string();
+        assert!(
+            reason.contains("wildcard inside incoming storage"),
+            "{reason}"
+        );
+    }
+    #[test]
+    fn pending_write_parent_guards_match_ancestors_without_covering_siblings() {
+        let scene = Scene::new();
+        let incoming = scene.root.join("incoming");
+        let parent = scene.root.join("external/parent");
+        let protected = parent.join("protected");
+        let sibling = parent.join("permitted-sibling");
+        std::fs::create_dir_all(&protected).unwrap();
+        let text = format!(
+            "{}{AGENT}\nfilesystem.write = [{:?}]\nfilesystem.deny_write = [{:?}]",
+            declarations(&incoming),
+            incoming.join("future-alias").display().to_string(),
+            protected.display().to_string()
+        );
+        let compiled = scene.compile(&profile(&text), None).unwrap();
+        for (id, action) in [
+            ("deny_write_parent_move_0", "fs:move"),
+            ("deny_write_parent_delete_0", "fs:delete"),
+        ] {
+            let rule = generated_rule(&compiled.policy, id)
+                .expect("pending aliases retain ancestor guards");
+            assert!(
+                rule.contains(&format!("action == Box::Action::{action:?}")),
+                "{rule}"
+            );
+            assert!(
+                rule.contains(&format!(
+                    "context.input.path == {:?}",
+                    parent.display().to_string()
+                )),
+                "{rule}"
+            );
+            assert!(
+                !rule.contains(" like "),
+                "ancestor guards must never recursively deny siblings: {rule}"
+            );
+            assert!(!rule.contains(&sibling.display().to_string()), "{rule}");
+            assert!(
+                !rule.contains("fs:write"),
+                "ancestor identity cannot deny writing sibling files: {rule}"
+            );
+        }
+    }
+    #[test]
+    fn a_glob_that_discovers_an_incoming_alias_cannot_expand_its_placeholder() {
+        let scene = Scene::new();
+        let incoming = scene.root.join("incoming");
+        let aliases = scene.root.join("aliases");
+        std::fs::create_dir_all(&incoming).unwrap();
+        std::fs::create_dir_all(&aliases).unwrap();
+        std::fs::write(incoming.join("child"), "placeholder").unwrap();
+        std::os::unix::fs::symlink(&incoming, aliases.join("provider")).unwrap();
+        for pattern in ["*/child", "*/*"] {
+            let text = format!(
+                "{}{AGENT}\n[tool.reader]\nprogram = \"reader\"\nfilesystem.read = [{:?}]",
+                declarations(&incoming),
+                aliases.join(pattern).display().to_string()
+            );
+            let reason = detected(&scene, &text).unwrap_err().to_string();
+            assert!(
+                reason.contains("wildcard inside incoming storage"),
+                "{reason}"
+            );
+        }
+    }
+    #[test]
+    fn unrelated_optional_program_alias_keeps_existing_matching_behavior() {
+        let scene = Scene::new();
+        let incoming = scene.root.join("incoming");
+        let alias = scene.root.join("unrelated-alias");
+        std::os::unix::fs::symlink(scene.root.join("unrelated-missing"), &alias).unwrap();
+        for settings in [String::new(), declarations(&incoming)] {
+            let text = format!(
+                "{settings}{AGENT}\n[tool.reader]\nprogram = \"reader\"\nfilesystem.read_file = [{{ path = {:?}, optional = true }}]",
+                alias.display().to_string()
+            );
+            let resolved = detected(&scene, &text).unwrap();
+            assert!(
+                resolved.tool["reader"]
+                    .filesystem
+                    .read_file
+                    .contains(&alias.display().to_string()),
+                "unrelated program matching keeps its existing symlink-metadata semantics"
+            );
+        }
+    }
+}

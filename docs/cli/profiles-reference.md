@@ -33,7 +33,7 @@ writes. `packs`, `plugins`, `policies`, `agent-args`, and `file-attributes` go a
 | `[filesystem] deny` | Paths that no process in the box can reach, such as a folder of keys. `box` adds each one to the agent, each tool, and each MCP server, and refuses the box's shell and Python a read or change there. `[filesystem]` holds no other key but a `when` for the whole table. See [Keep a folder away from every process](profiles.md#keep-a-folder-away-from-every-process). |
 | `[banner] enabled` | `false` turns off the activity banner for this profile, and `true` turns it on. [`[banner]`](config.md#banner) says which setting wins. See [The activity banner](cli.md#the-activity-banner). |
 | `[limits]` | Limits of the box's shell. See [Limits](#limits). |
-| `[experimental-features]` | See [Experimental native filesystem policy](#experimental-native-filesystem-policy). |
+| `[experimental-features]` | See [Incoming Linux storage](#incoming-linux-storage) and [Experimental native filesystem policy](#experimental-native-filesystem-policy). |
 | `[agent]`, `[tool.<name>]`, `[egress.<name>]`, `[mcp.<name>]`, [`[storage]`](packs-reference.md#storage) | Additions to what the packs say, such as a second project folder in `[agent.filesystem]` or your own credential in `[egress.bedrock.secret]`. They merge over the packs, as [Merge order](#merge-order) states. |
 | `[telemetry]` | Where the box exports its records, such as to an OTLP collector. Box's [`[telemetry.<label>]` reference](../user/config.md#telemetrylabel) lists the keys. A target's `project`, `region`, `log_group`, and `log_stream` can hold [placeholders](#which-fields-take-a-placeholder), so a target can read them from your machine. So can its `destination`, unless it's a `file` target. |
 | `[secret-source.<scheme>]` | A [secret source](plugins.md) of your own, with the full path of its program as the first element of `command`. It reads no input of a pack or a plugin, and no `${{ root }}` or `${{ tool.<name>.root }}`, so you write each value of `command` yourself. A program, the interpreter that its `#!` line starts, or a path that its `command` names in full, such as the path in `-config=<path>`, that sits in your project, in `~/.strands/box`, or in a folder the agent can write, even through a link, stops the run, whatever the project access, and a `deny_write` doesn't change that. The path can be a file, a folder, or a path where nothing is yet, and a folder in `command` that holds a folder the agent can write stops the run too. `box` doesn't check a path that `{ref}` completes. Use a plugin instead when more than one profile needs it. A profile file that you run by its path can't hold one ([Rules](plugins-reference.md#a-profile-file-that-runs-by-its-path)). Its keys are Box's: Box's [`[secret-source.<scheme>]` reference](../user/config.md#secret-sourcescheme) lists them, and [A message from Box Core](plugins-reference.md#a-message-from-box-core) maps them to the keys of a plugin. |
@@ -549,6 +549,58 @@ the box refuses a grant in `~/.ssh`.
 To turn the gateway off on one system only, put `when` on the value:
 `contain_egress = { value = false, when = "macos" }`. Only your profile can hold this table, not a
 pack.
+
+## Incoming Linux storage
+
+Use a profile's `[experimental-features] linux-storage-mounts` setting when a trusted host
+attaches a filesystem after Box starts. Declare its mount paths in `[storage] mounts`:
+
+```toml
+[experimental-features]
+linux-storage-mounts = true
+
+[storage]
+mounts = ["/mnt/data", "/mnt/workspace"]
+
+[agent.filesystem]
+read = ["/mnt/data", "/mnt/workspace"]
+write = ["/mnt/workspace"]
+deny = ["/mnt/data/private"]
+```
+
+These settings belong to a profile, not a pack. Each mount path must resolve to an absolute
+path. Entry conditions and profile placeholders apply before Box Core validates the paths.
+The feature is experimental and Linux-specific. It is separate from native filesystem policy.
+
+A declared mount path is neither a permission grant nor a managed storage directory. Boxy does
+not create it or its contents. Set each agent, tool, and local MCP server's filesystem lists as
+usual. Profile-wide `deny` and `deny_write` lists also keep their existing scope. The host
+filesystem's restrictions continue to apply; a Box permission does not remove them.
+
+Boxy preserves required paths whose meaning depends on incoming storage, including paths
+reached through symbolic links. It does not expand wildcard patterns inside an incoming mount.
+Use literal permission paths there. Existing `optional` rules still apply; an optional path
+that is absent during profile resolution does not become a required future path.
+
+Box Core starts the process with incoming storage inaccessible. After the host attaches it,
+Box Core prepares the process's protected view and then exposes it. This happens asynchronously:
+application startup does not wait for storage. An application can retry a file operation while
+the storage remains unavailable. If a required permission or denial cannot be applied, Box Core
+stops the affected Box instead of exposing that filesystem without the restriction.
+
+Hosted Shell and Python (Monty) use the agent's protected incoming storage view. Their `fs:*`
+policy rules apply in addition to that view's restrictions. An allowed hosted-tool request
+cannot remove the agent's storage restrictions or the source filesystem's permissions. If no
+agent view starts, hosted storage remains unavailable.
+
+For this experiment, hosted tools reject symbolic links from incoming storage to paths outside
+the protected storage destinations: the declared roots and their captured aliases.
+
+When an incoming write grant could reach an external `deny_write` path through a symbolic link,
+Boxy retains that denial for Box Core to validate. A missing required denial can therefore stop
+admission even if the unavailable filesystem would ultimately prove unrelated. Generated Shell
+and Monty rules also prevent moving or deleting the protected path's exact ancestors; these
+ancestor rules do not deny operations on unrelated sibling files.
 
 ## Experimental native filesystem policy
 

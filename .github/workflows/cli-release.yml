@@ -154,7 +154,7 @@ jobs:
             box-linux-release \
             cargo build --release --locked --target "$TARGET" \
               -p strands-box-cli -p strands-box -p strands-box-containment \
-              --bin box --bin strands-box-sock-alias --bin strands-box-contain-trampoline "$@"
+              --bin box --bin strands-box-sock-alias --bin strands-box-contain-trampoline --bin strands-box-storage-compiler "$@"
 
       - name: Package tarball
         # Stage Box with its helpers and resources, then tar its contents.
@@ -170,6 +170,9 @@ jobs:
           cp "target/${TRIPLE}/release/box" "$stage/box"
           cp "target/${TRIPLE}/release/strands-box-sock-alias" "$stage/strands-box-sock-alias"
           cp "target/${TRIPLE}/release/strands-box-contain-trampoline" "$stage/strands-box-contain-trampoline"
+          if [[ "$TRIPLE" == *-unknown-linux-gnu ]]; then
+            cp "target/${TRIPLE}/release/strands-box-storage-compiler" "$stage/strands-box-storage-compiler"
+          fi
           chmod 0755 "$stage"/*
           mkdir "$stage/resources"
           cp resources/config.toml "$stage/resources/"
@@ -196,6 +199,7 @@ jobs:
               {box_version: $version, box_commit: $commit,
                core_version: ($core[] | select(.name == "strands-box") | .version),
                core_commit: $core_commit, target: $target}
+              + (if ($target | endswith("-unknown-linux-gnu")) then {storage_compiler: true} else {} end)
             ' > "$stage/release.json"
           # Without this, macOS tar adds a ._ file for each extended attribute.
           COPYFILE_DISABLE=1 tar -C "$stage" -czf "dist/${asset}" .
@@ -259,7 +263,7 @@ jobs:
           docker run --rm \
             --mount "type=bind,source=$PWD,target=/src,readonly" \
             box-linux-release \
-            python3 scripts/check-linux-package.py stage/package --target "$TRIPLE"
+            python3 scripts/check-linux-package.py stage/package --target "$TRIPLE" --require-storage-metadata
           python3 -c 'import json, os; print("installation_id = " + json.dumps(os.environ.get("BOX_TEST_INSTALLATION_ID", "")))' \
             > "$RUNNER_TEMP/box-smoke-installation.toml"
           # Namespace setup needs a fresh proc mount, without Docker's masked system paths.

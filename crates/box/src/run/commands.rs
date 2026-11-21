@@ -18,6 +18,11 @@ use crate::record::layout::{
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod aliases;
 
+pub(crate) mod snapshot;
+
+#[cfg(target_os = "linux")]
+mod storage_scan;
+
 #[derive(Debug, Default)]
 pub(crate) struct ConfiguredCommands {
     tools: BTreeMap<String, Arc<ConfiguredCommand>>,
@@ -105,12 +110,15 @@ pub(crate) struct ConfiguredCommand {
     opened: File,
     identity: (u64, u64),
     loaded: FileState,
+    /// Compiler replicas verify original-identity authority through their owner.
+    verification: Option<snapshot::ReplicaVerifier>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     needs_alias_scan: bool,
 }
 
 /// The link count, owner, group, and mode of a command file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FileState {
     links: u64,
     owner: u32,
@@ -317,6 +325,62 @@ impl ConfiguredCommands {
         None
     }
 
+    /// Judge a protected-view object against the original command identities without scanning it.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn projected_mutation_refusal(
+        &self,
+        path: &Path,
+        identity: Option<(u64, u64)>,
+    ) -> Option<CommandMutationRefusal> {
+        for command in self.protected() {
+            if identity == Some(command.identity) {
+                return Some(CommandMutationRefusal::HardLinkAlias);
+            }
+            for name in std::iter::once(&command.path)
+                .chain(&command.routes)
+                .chain(&command.links)
+            {
+                if name.starts_with(path)
+                    || identity.is_some_and(|identity| {
+                        name.ancestors()
+                            .filter_map(disk_identity)
+                            .any(|ancestor| ancestor == identity)
+                    })
+                {
+                    return Some(CommandMutationRefusal::CommandOrAncestor);
+                }
+            }
+        }
+        None
+    }
+
+    /// Validate storage generations without recursively enumerating a provider filesystem.
+    pub(crate) fn validate_storage_reach(
+        &self,
+        table: &str,
+        reach: &DirectReach,
+        roots: &[PathBuf],
+        admitted: &[PathBuf],
+    ) -> Result<(), BoxError> {
+        if roots.is_empty() {
+            return self.validate_reach(table, reach);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            storage_scan::validate(self, table, reach, roots, admitted)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = admitted;
+            Err(ConfigError::Filesystem {
+                table: table.to_string(),
+                entry: "storage.mounts".to_string(),
+                reason: "storage command protection requires Linux mount inspection".to_string(),
+            }
+            .into())
+        }
+    }
+
     pub(crate) fn validate_reach(&self, table: &str, reach: &DirectReach) -> Result<(), BoxError> {
         for grant in &reach.grants {
             if grant.operation != Operation::Write {
@@ -432,6 +496,7 @@ impl ConfiguredCommand {
             opened,
             identity: (metadata.dev(), metadata.ino()),
             loaded,
+            verification: None,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             needs_alias_scan: writable_links,
         };
@@ -461,8 +526,8 @@ impl ConfiguredCommand {
         &self.opened
     }
 
-    pub(crate) fn verify(&self) -> Result<(), BoxError> {
-        let unchanged_names = self.opened.metadata().is_ok_and(|metadata| {
+    fn unchanged_owner_state(&self) -> bool {
+        self.opened.metadata().is_ok_and(|metadata| {
             let now = FileState::of(&metadata);
             if self.loaded.links == 1 {
                 now.links == 1
@@ -474,7 +539,16 @@ impl ConfiguredCommand {
                 now == self.loaded
                     && (protected_by_reach || !writable_by_this_user(&self.opened, &self.path, now))
             }
-        });
+        })
+    }
+
+    pub(crate) fn verify(&self) -> Result<(), BoxError> {
+        let unchanged_names = if let Some(verification) = &self.verification {
+            verification.verify(&self.opened)?;
+            true
+        } else {
+            self.unchanged_owner_state()
+        };
         if unchanged_names
             && disk_identity(&self.path) == Some(self.identity)
             && self
@@ -650,6 +724,7 @@ mod tests {
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
+            storage: Default::default(),
             file_attributes: false,
             monty: true,
             gateway: Default::default(),
@@ -1481,6 +1556,7 @@ mod tests {
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 needs_alias_scan: false,
                 opened,
+                verification: None,
             }
         };
         loaded_as(&system, None)
@@ -1984,6 +2060,7 @@ mod left_out_tests {
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
+            storage: Default::default(),
             file_attributes: false,
             monty: true,
             gateway: Default::default(),

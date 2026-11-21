@@ -814,6 +814,7 @@ pub fn scratch(run: &Path, tool: &str) -> PathBuf {
 /// interpreter a `when` removed.
 pub(crate) fn compose(resolved: &mut Resolved, tools: &mut Tools, workspace: &Path, run: &Path) {
     let access = resolved.project_access();
+    let mounts = resolved.storage.mounts.clone();
     tools
         .found
         .retain(|found| resolved.tool.contains_key(&found.name));
@@ -990,19 +991,23 @@ pub(crate) fn compose(resolved: &mut Resolved, tools: &mut Tools, workspace: &Pa
             .iter()
             .map(PathBuf::as_path)
             .chain(process.filesystem.read_file.iter().map(Path::new))
+            .filter(|path| !crate::storage_mounts::depends(path, &mounts))
             .filter(|path| path.is_symlink())
             .filter_map(canonical)
             .collect();
-        kept.retain(|entry| !targets.contains(entry));
+        kept.retain(|entry| {
+            crate::storage_mounts::depends(entry, &mounts) || !targets.contains(entry)
+        });
         // A `read_file` that a kept `read` covers, as for a helper's Python.
         // A helper read names a link, so a `read_file` of its real file is the same grant.
         process.filesystem.read_file.retain(|file| {
-            !targets.iter().any(|target| target == Path::new(file))
-                && !kept.iter().any(|root| {
-                    Path::new(file) == root
-                        || (Path::new(file).starts_with(root)
-                            && crate::host::resolved(Path::new(file)).starts_with(root))
-                })
+            crate::storage_mounts::depends(Path::new(file), &mounts)
+                || !targets.iter().any(|target| target == Path::new(file))
+                    && !kept.iter().any(|root| {
+                        Path::new(file) == root
+                            || (Path::new(file).starts_with(root)
+                                && crate::host::resolved(Path::new(file)).starts_with(root))
+                    })
         });
         found.read = kept.clone();
         process.filesystem.read = kept.iter().map(|path| path.display().to_string()).collect();

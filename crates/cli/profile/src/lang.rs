@@ -82,6 +82,7 @@ const EXPERIMENTAL_FEATURES: &str = "experimental-features";
 
 /// The switch that selects native filesystem policy checks.
 const NATIVE_FILESYSTEM_POLICY: &str = "native-filesystem-policy";
+const LINUX_STORAGE_MOUNTS: &str = "linux-storage-mounts";
 
 /// The profile table that sets how much of the project a run reaches.
 pub const PROJECT: &str = "project";
@@ -206,7 +207,7 @@ const FILESYSTEM_KEYS: &[&str] = &[
 const NETWORK_KEYS: &[&str] = &["contain_egress"];
 
 /// The keys of `[storage]`.
-const STORAGE_KEYS: &[&str] = &["directories", "files", "hooks"];
+const STORAGE_KEYS: &[&str] = &["directories", "files", "hooks", "mounts"];
 
 /// The keys of `[pack]`.
 const HEADER_KEYS: &[&str] = &["name", "version", "kind", "engine"];
@@ -1022,7 +1023,7 @@ fn check_limits(table: &toml::Table) -> Result<(), Refusal> {
     }
 }
 
-/// Refuse an experimental feature other than the boolean native filesystem policy switch.
+/// Refuse unknown experimental features and nonboolean switches.
 fn check_experimental_features(table: &toml::Table) -> Result<(), Refusal> {
     let Some(value) = table.get(EXPERIMENTAL_FEATURES) else {
         return Ok(());
@@ -1036,15 +1037,17 @@ fn check_experimental_features(table: &toml::Table) -> Result<(), Refusal> {
     refuse_unknown_keys(
         table,
         &[EXPERIMENTAL_FEATURES],
-        &[NATIVE_FILESYSTEM_POLICY, "when"],
+        &[NATIVE_FILESYSTEM_POLICY, LINUX_STORAGE_MOUNTS, "when"],
     )?;
-    if let Some(value) = features.get(NATIVE_FILESYSTEM_POLICY)
-        && !unwrapped(value).is_bool()
-    {
-        return Err(Refusal::at(
-            format!("`{EXPERIMENTAL_FEATURES}.{NATIVE_FILESYSTEM_POLICY}` is `true` or `false`"),
-            &[EXPERIMENTAL_FEATURES, NATIVE_FILESYSTEM_POLICY],
-        ));
+    for feature in [NATIVE_FILESYSTEM_POLICY, LINUX_STORAGE_MOUNTS] {
+        if let Some(value) = features.get(feature)
+            && !unwrapped(value).is_bool()
+        {
+            return Err(Refusal::at(
+                format!("`{EXPERIMENTAL_FEATURES}.{feature}` is `true` or `false`"),
+                &[EXPERIMENTAL_FEATURES, feature],
+            ));
+        }
     }
     Ok(())
 }
@@ -2710,8 +2713,18 @@ fn is_agent_pack(table: &toml::Table) -> bool {
     pack_kind(table) == Some(AGENT_KIND)
 }
 
-/// Refuse native filesystem policy settings in a pack's original tables.
-fn check_native_policy_in_pack(table: &toml::Table) -> Result<(), Refusal> {
+/// Refuse profile-only filesystem settings in a pack's original tables.
+fn check_profile_settings_in_pack(table: &toml::Table) -> Result<(), Refusal> {
+    if table
+        .get("storage")
+        .and_then(|storage| storage.get("mounts"))
+        .is_some()
+    {
+        return Err(Refusal::at(
+            "a pack holds no `storage.mounts`; declare incoming mounts in `profile.toml`".into(),
+            &["storage", "mounts"],
+        ));
+    }
     if table.contains_key(EXPERIMENTAL_FEATURES) {
         return Err(Refusal::at(
             "a pack holds no `[experimental-features]`; write `[experimental-features]` in \
@@ -2819,7 +2832,7 @@ pub(crate) fn pack_layout(
         }
     };
     refuse_header_not_first(text, "pack", "a pack")?;
-    check_native_policy_in_pack(&table)?;
+    check_profile_settings_in_pack(&table)?;
     let is_table = |value: &toml::Value| match value {
         toml::Value::Table(_) => true,
         toml::Value::Array(rows) => !rows.is_empty() && rows.iter().all(toml::Value::is_table),
@@ -3809,6 +3822,8 @@ pub struct Inputs<'a> {
 pub struct Storage {
     pub root: PathBuf,
     pub directories: Vec<PathBuf>,
+    /// Incoming roots passed to Box Core; the CLI never creates these directories.
+    pub mounts: Vec<PathBuf>,
     /// Each tool's state in storage, which a tool's `storage.directories` names: a run creates
     /// it, and any write grant may reach it.
     pub tool_states: Vec<PathBuf>,
@@ -3962,6 +3977,7 @@ struct Resolver<'a, S> {
     declarations: BTreeMap<String, Declaration>,
     values: BTreeMap<String, String>,
     storage: BTreeMap<String, PathBuf>,
+    mounts: Vec<PathBuf>,
     credentials: Credentials,
     cache: BTreeMap<String, String>,
     active: Vec<String>,
@@ -4083,6 +4099,7 @@ pub(crate) fn expand(
         declarations,
         values,
         storage,
+        mounts: Vec::new(),
         credentials,
         cache: BTreeMap::new(),
         active: Vec::new(),
@@ -4117,6 +4134,47 @@ pub(crate) fn expand(
         agent_root: None,
         skipped: BTreeMap::new(),
         entries: Vec::new(),
+    };
+    let mut incoming = toml::Value::Table(toml::Table::from_iter([(
+        "storage".into(),
+        toml::Value::Table(
+            storage_section
+                .into_iter()
+                .filter(|(key, _)| key == "mounts")
+                .collect(),
+        ),
+    )]));
+    resolver
+        .walk(&mut incoming, &mut Vec::new())
+        .map_err(refused)?;
+    resolver.mounts = match incoming
+        .get("storage")
+        .and_then(|storage| storage.get("mounts"))
+    {
+        None => Vec::new(),
+        Some(toml::Value::Array(entries)) => entries
+            .iter()
+            .map(|entry| {
+                let path = entry.as_str().ok_or_else(|| {
+                    refused("`storage.mounts` is a list of absolute paths".into())
+                })?;
+                let path = match path.strip_prefix("~/") {
+                    Some(rest) => inputs.home.join(rest),
+                    None => PathBuf::from(path),
+                };
+                if !path.is_absolute() {
+                    return Err(refused(
+                        "`storage.mounts` is a list of absolute paths".into(),
+                    ));
+                }
+                Ok(path)
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => {
+            return Err(refused(
+                "`storage.mounts` is a list of absolute paths".into(),
+            ));
+        }
     };
     let mut table = resolver.fill(table).map_err(|reason| Unresolved {
         reason,
@@ -4183,6 +4241,7 @@ pub(crate) fn expand(
     let storage = Storage {
         root: inputs.storage.to_path_buf(),
         directories: resolver.storage.values().cloned().collect(),
+        mounts: resolver.mounts,
         tool_states: resolver.states.clone(),
         launcher_caches: Vec::new(),
         files,
@@ -4227,7 +4286,7 @@ fn storage_directories(
     }
     if let Some(key) = section
         .keys()
-        .find(|key| !matches!(key.as_str(), "directories" | "files" | "hooks"))
+        .find(|key| !matches!(key.as_str(), "directories" | "files" | "hooks" | "mounts"))
     {
         return Err(format!("`[storage]` holds the unknown key `{key}`"));
     }
@@ -4309,8 +4368,8 @@ pub fn write_grants(table: &toml::Table, home: &Path) -> Vec<PathBuf> {
 }
 
 /// Each link that the resolution of `path` goes through, as the real folder that holds it and the
-/// path it leads to. A part of `path` that does not exist ends the list.
-fn links(path: &Path) -> Vec<(PathBuf, PathBuf)> {
+/// path it leads to. A missing path or an incoming root ends the list.
+fn links(path: &Path, incoming: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
     let mut found = Vec::new();
     let mut remaining = path.to_path_buf();
     let mut current = PathBuf::new();
@@ -4328,6 +4387,9 @@ fn links(path: &Path) -> Vec<(PathBuf, PathBuf)> {
             }
             Component::Normal(name) => {
                 let next = current.join(name);
+                if incoming.iter().any(|root| next.starts_with(root)) {
+                    break;
+                }
                 match std::fs::read_link(&next) {
                     Ok(target) => {
                         remaining = target.join(rest);
@@ -4454,15 +4516,26 @@ impl<S: Sources> Resolver<'_, S> {
             .refusals(table)
             .roots
             .iter()
-            .map(|(root, _)| resolved(root))
+            .map(|(root, _)| {
+                if crate::storage_mounts::depends(root, &self.mounts) {
+                    root.clone()
+                } else {
+                    resolved(root)
+                }
+            })
             .collect();
         for (at, written, path) in &self.entries {
-            for (holder, target) in links(path) {
+            for (holder, target) in links(path, &self.mounts) {
                 if let Some(root) = roots.iter().find(|root| holder.starts_with(root)) {
                     return Err(format!(
                         "`{at}` = {written:?} resolves through a link to {}, inside {}, which \
                          the box can write; name a path with no link in it",
-                        canonical(path).unwrap_or(target).display(),
+                        if crate::storage_mounts::depends(path, &self.mounts) {
+                            target
+                        } else {
+                            canonical(path).unwrap_or(target)
+                        }
+                        .display(),
                         root.display()
                     ));
                 }
@@ -5593,9 +5666,10 @@ impl<S: Sources> Resolver<'_, S> {
                          `file`"
                     ));
                 }
-                let path_field = is_command(at)
-                    && (is_command_head(at)
-                        || matches!(pieces(text).ok().as_deref(), Some([Piece::Name(first), ..]) if self.is_path_name(first)));
+                let path_field = is_storage_mount(at)
+                    || (is_command(at)
+                        && (is_command_head(at)
+                            || matches!(pieces(text).ok().as_deref(), Some([Piece::Name(first), ..]) if self.is_path_name(first))));
                 self.routing = is_destination(at);
                 self.url_reach = if is_backend_url(at) {
                     Some("a route's backend url")
@@ -5646,11 +5720,14 @@ impl<S: Sources> Resolver<'_, S> {
                         .iter()
                         .filter_map(toml::Value::as_str)
                         .map(Path::new)
+                        .filter(|path| !crate::storage_mounts::depends(path, &self.mounts))
                         .filter(|path| path.is_symlink())
                         .filter_map(canonical)
                         .collect();
                     kept.retain(|entry| {
-                        !targets
+                        entry.as_str().is_some_and(|path| {
+                            crate::storage_mounts::depends(Path::new(path), &self.mounts)
+                        }) || !targets
                             .iter()
                             .any(|target| Some(target.as_path()) == entry.as_str().map(Path::new))
                     });
@@ -5842,10 +5919,23 @@ impl<S: Sources> Resolver<'_, S> {
             Some(rest) => self.inputs.home.join(rest),
             None => PathBuf::from(&path),
         };
-        let Some(tool) = tool else {
-            if optional && std::fs::metadata(&expanded).is_err() {
-                return Ok(Vec::new());
+        let pending = crate::storage_mounts::depends(&expanded, &self.mounts);
+        if optional
+            && (tool.is_none() || pending)
+            && !path.contains(WILDCARD)
+            && std::fs::metadata(&expanded).is_err()
+        {
+            return Ok(Vec::new());
+        }
+        if pending {
+            if path.contains(WILDCARD) {
+                return Err(incoming_glob(at));
             }
+            self.entries
+                .push((at.to_string(), path.clone(), expanded.clone()));
+            return Ok(vec![path]);
+        }
+        let Some(tool) = tool else {
             self.entries
                 .push((at.to_string(), path.clone(), expanded.clone()));
             if std::fs::symlink_metadata(&expanded).is_err() {
@@ -5858,7 +5948,7 @@ impl<S: Sources> Resolver<'_, S> {
         if self.states.contains(&expanded) {
             return Ok(vec![path]);
         }
-        let matches = matches(&expanded);
+        let matches = matches(&expanded, &self.mounts).map_err(|()| incoming_glob(at))?;
         if matches.is_empty() {
             self.dropped
                 .push((tool.to_string(), path.replace(WILDCARD, "*")));
@@ -5883,6 +5973,9 @@ impl<S: Sources> Resolver<'_, S> {
         at: &str,
         read_file: bool,
     ) -> Result<String, String> {
+        if crate::storage_mounts::depends(expanded, &self.mounts) {
+            return utf8(expanded).map_err(|error| error.to_string());
+        }
         let found = canonical(expanded).unwrap_or_else(|| expanded.to_path_buf());
         let spelling = if read_file && found.is_file() {
             expanded
@@ -6462,7 +6555,7 @@ impl<S: Sources> Resolver<'_, S> {
                 if !expanded.to_string_lossy().contains(WILDCARD) {
                     return Ok(vec![expanded]);
                 }
-                let mut found = matches(&expanded);
+                let mut found = matches(&expanded, &self.mounts).map_err(|()| incoming_glob(at))?;
                 found.sort_by(|a, b| newest(b).cmp(&newest(a)));
                 Ok(found)
             }
@@ -6503,9 +6596,15 @@ impl<S: Sources> Resolver<'_, S> {
 
 /// Each existing path that `pattern` names, where a `WILDCARD` matches any run of characters in one
 /// component, in name order.
-fn matches(pattern: &Path) -> Vec<PathBuf> {
+fn matches(pattern: &Path, mounts: &[PathBuf]) -> Result<Vec<PathBuf>, ()> {
     let mut found = vec![PathBuf::new()];
     for component in pattern.components() {
+        if found
+            .iter()
+            .any(|path| crate::storage_mounts::depends(path, mounts))
+        {
+            return Err(());
+        }
         let part = component.as_os_str().to_string_lossy();
         if !part.contains(WILDCARD) {
             found = found.into_iter().map(|path| path.join(&*part)).collect();
@@ -6527,10 +6626,20 @@ fn matches(pattern: &Path) -> Vec<PathBuf> {
             })
             .collect();
     }
-    found
+    if found
+        .iter()
+        .any(|path| crate::storage_mounts::depends(path, mounts))
+    {
+        return Err(());
+    }
+    Ok(found
         .into_iter()
         .filter(|path| std::fs::symlink_metadata(path).is_ok())
-        .collect()
+        .collect())
+}
+
+fn incoming_glob(at: &str) -> String {
+    format!("`{at}` names a wildcard inside incoming storage; name each required path literally")
 }
 
 /// The tool and the steps of a `tool.<name>.root` name, from the part after `tool.`.
@@ -6781,6 +6890,7 @@ fn is_backend_aws_region(at: &[String]) -> bool {
 /// Every other field is literal.
 fn takes_template(at: &[String], telemetry_kind: Option<&str>) -> bool {
     is_command(at)
+        || is_storage_mount(at)
         || is_destination(at)
         || is_backend_url(at)
         || is_backend_aws_region(at)
@@ -6789,6 +6899,11 @@ fn takes_template(at: &[String], telemetry_kind: Option<&str>) -> bool {
         || is_filesystem_list(&at[..at.len().saturating_sub(1)])
         || at.last().is_some_and(|key| key == "when")
         || is_env_value(at)
+}
+
+/// Whether `at` is an incoming mount path in the profile.
+fn is_storage_mount(at: &[String]) -> bool {
+    matches!(at, [storage, mounts, _] if storage == "storage" && mounts == "mounts")
 }
 
 /// Whether `at` is one variable of the `env` table of `[agent]`, a `[tool.<name>]`, or an

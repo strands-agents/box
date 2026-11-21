@@ -1058,7 +1058,14 @@ impl ContainmentBackend for SeatbeltBackend {
         // reaper to write a byte, and none is needed.
         _confirm_fd: Option<std::os::fd::RawFd>,
         _native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
+        storage_control_fd: Option<std::os::fd::RawFd>,
     ) -> Result<()> {
+        if storage_control_fd.is_some() {
+            return Err(ContainmentError::UnsupportedCapability {
+                capability: "storage mount handoff".to_string(),
+                backend: MECHANISM.to_string(),
+            });
+        }
         apply_validated_profile(config, apply_current_process)
     }
 

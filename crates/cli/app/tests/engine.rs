@@ -1385,7 +1385,7 @@ fn a_run_refuses_an_entry_that_became_a_link_beneath_a_write_grant() {
     scene.profile(
         "notes",
         &format!(
-            "{PROBE}filesystem.read = [\"${{{{ home }}}}/notes/out\"]\n\
+            "{PROBE}filesystem.read = [\"${{{{ home }}}}/notes\", \"${{{{ home }}}}/notes/out\"]\n\
              filesystem.write = [\"${{{{ home }}}}/notes\"]\n"
         ),
         PROBE_POLICY,
@@ -5624,3 +5624,7 @@ fn box_git_rewrites_github_ssh_remotes_to_https() {
         "https://github.com/owner/repo.git\nhttps://github.com/owner/repo.git\n"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[path = "support/storage_mounts.rs"]
+mod storage_mounts;

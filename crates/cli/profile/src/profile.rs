@@ -105,11 +105,17 @@ pub(crate) struct ExperimentalFeatures {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) native_filesystem_policy: Option<bool>,
+    #[serde(
+        default,
+        rename = "linux-storage-mounts",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) linux_storage_mounts: Option<bool>,
 }
 
 impl ExperimentalFeatures {
     fn is_empty(&self) -> bool {
-        self.native_filesystem_policy.is_none()
+        self.native_filesystem_policy.is_none() && self.linux_storage_mounts.is_none()
     }
 }
 

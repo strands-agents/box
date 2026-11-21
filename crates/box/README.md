@@ -77,9 +77,13 @@ every harness's stored credentials, through an interpreter that runs outside con
 refusal tells the operator to make a directory for the workspace and to work there, and
 `the_operator_home_is_not_a_project` pins it.
 
-The config file's complete key set is **fourteen**: `name`, `box_dir`, `policy`, `[agent]`,
+The config file's complete key set is **fifteen**: `name`, `box_dir`, `policy`, `[agent]`,
 `[tool.<label>]`, `[egress.<name>]`, `[secret-source.<scheme>]`, `[mcp.<name>]`,
-`[telemetry.<kind>]`, `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.
+`[telemetry.<kind>]`, `[experimental-features]`, `[storage]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.
+`[storage] mounts` declares storage attachment points and grants no filesystem access.
+On Linux, `[experimental-features] linux-storage-mounts = true` enables asynchronous admission
+of those mounts with each process's original filesystem restrictions. Other platforms reject the switch.
+See [storage configuration](../../docs/user/config.md#storage) for startup and failure behavior.
 `name` and `box_dir` are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
 every removed spelling is refused by its own name with its replacement.
 `four_inputs.rs::the_config_record_carries_only_the_four_inputs` pins the set, and
