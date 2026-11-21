@@ -114,7 +114,53 @@ The Box workload and Runtime continue while storage is pending. Early file opera
 3. This first version supports the initial arrival of each configured storage mount. Box trusts the external storage manager, such as AgentCore Runtime, to mount the intended filesystem. Replacing or removing an admitted mount, or adding new mounts beneath it, remains follow-up work.
 4. **P1 (deferred hardening): concurrent directory changes.** The first version assumes that paths requiring different permissions remain stable while Box checks and prepares storage. Another application or a writable alias can rename or replace those directories during preparation. Box could then apply restrictions to a different directory from the one it checked. Hardening against this edge case remains follow-up work; trusting the storage manager does not prevent other writers from changing directories.
 
-## 8. References
+## 8. Frequently asked questions
+
+### 8.1 Why not start Box after storage becomes available?
+
+That works when the application can delay sandbox startup. This proposal also supports applications that start Box before storage arrives, including sandboxes preserved in a Runtime snapshot.
+
+### 8.2 Why not propagate mounts directly, and how does forwarding reach agents and tools?
+
+Direct propagation could expose storage before Box applies its restrictions. The helper receives the mount separately, prepares the permitted filesystem view, and then exposes that view to the workload.
+
+The proposed hierarchy has one helper per box watching the configured storage sources. A box has one agent sandbox and can run multiple separate tool and local MCP server sandboxes. Forwarding serves those sandboxes independently; it does not pass storage through the agent sandbox to reach a tool.
+
+| Recipient | Filesystem rules in Box Core's `box.toml` | Application of mount forwarding |
+| --- | --- | --- |
+| Agent sandbox | `[agent.filesystem]` | Receives a view restricted by the agent's rules. |
+| Each sandboxed tool execution | `[tool.<name>.filesystem]` | Receives its own view restricted by that tool's rules. Calling a tool does not give it the agent's filesystem grants. |
+| Each local MCP server sandbox | `[mcp.<name>.filesystem]` | Receives its own view restricted by that server's rules. Remote MCP servers are outside this local mount mechanism. |
+
+One source mount can therefore supply several differently restricted views, one for each sandbox permitted to access its contents. These views reference the same stored data. For example, the agent can receive read-only access to `/mnt/data`, while a tool receives read and write access only to `/mnt/data/output`. A tool without a storage grant receives no access to that storage's contents.
+
+For an already running sandbox, Box attaches its prepared view after storage arrives. For a tool or server started after storage arrives, Box prepares the view under that recipient's rules before starting its process.
+
+### 8.3 Why does Box currently reject paths that do not exist?
+
+Box cannot inspect a missing path or apply restrictions to it. For declared storage mounts, the proposal moves those checks from startup to mount preparation. Configuration checks remain at startup, and storage must pass the deferred checks before exposure.
+
+### 8.4 What happens if the agent accesses storage too early?
+
+The storage path remains covered, so file operations may fail until preparation finishes. The agent can retry. If storage arrives but Box cannot apply the configured restrictions, Box keeps it covered and stops with an error.
+
+### 8.5 Does Box copy the filesystem or scan every S3 object?
+
+The design does not require either operation. Preparation works with mounts and paths referenced by filesystem rules. Remote lookups for those paths can still add latency; preparation cost does not depend simply on the total object count.
+
+### 8.6 What happens when files or directories appear later?
+
+Ordinary files created within an exposed directory become subject to that directory's existing protections. A configured permission exception, such as a denied subdirectory, must exist during preparation. Adding another filesystem mount underneath an exposed directory remains outside the initial scope.
+
+### 8.7 Which permissions win: Runtime's or Box's?
+
+Both must permit the operation. Box cannot make a read-only source writable or grant storage access that the underlying service refuses. Runtime manages storage authentication and mounting; Box applies the filesystem rules from `box.toml`.
+
+### 8.8 What remains experimental or requires further hardening?
+
+The feature requires an explicit Linux opt-in; macOS remains pending. The initial version supports mount arrival. Mount replacement, removal, and later nested mounts remain follow-up work. Concurrent directory renames or replacements during preparation are a documented P1 hardening item.
+
+## 9. References
 
 [Detailed design and diagrams](https://chorus.aws.dev/doc/Lfn1GdTjHZI6)
 
