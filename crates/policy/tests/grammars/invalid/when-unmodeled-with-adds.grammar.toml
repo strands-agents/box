@@ -1,0 +1,14 @@
+# expect: `<grammar>.shell.publish.options.tag`: a `when` entry with `unmodeled = true` cannot also carry `adds` or `removes`
+# A `when` entry that makes the line unmodeled and also adds an effect.
+
+name    = "pkg"
+program = "pkg"
+format  = 1
+version = 1
+
+[effects]
+network = "Contacts the registry"
+
+[shell.publish]
+usage = "pkg publish [options]"
+options.tag = { flag = "--tag", value = "required", when = [{ like = "-*", unmodeled = true, adds = ["network"] }] }
