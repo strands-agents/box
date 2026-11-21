@@ -34,7 +34,7 @@ on:
         type: boolean
         default: true
       containment_macos:
-        description: "Run the deterministic containment suite on the macOS unit-test runner, so a push holds one macOS runner. Linux runs the suite in containment-deterministic.yml."
+        description: "Run the deterministic containment suite on macOS, in the containment-macos job. Linux runs the suite in containment-deterministic.yml."
         required: false
         type: boolean
         default: false
@@ -261,7 +261,7 @@ jobs:
         env:
           RECEIPT_OUTCOME: ${{ steps.signed-receipt.outcome }}
         run: |
-          echo "Native adapter, configuration, and startup tests passed. The full signed native enforcement suite did not run." >> "$GITHUB_STEP_SUMMARY"
+          echo "Native startup-refusal tests, the native test package, and the receipt checker passed. The adapter and configuration tests run in Unit Tests (box, macos-latest). The full signed native enforcement suite did not run." >> "$GITHUB_STEP_SUMMARY"
           echo "Signed receipt freshness: ${RECEIPT_OUTCOME} (informational only)." >> "$GITHUB_STEP_SUMMARY"
 
       # History persistence: the batched default and the per-event opt-out, each built apart
