@@ -575,6 +575,7 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
                 before = self.log.read_bytes()
                 result = self.run_install(success=False, TEST_MACOS="26.1", BOX_VERSION="0.3.0")
                 self.assertIn("release v0.3.0 requires macOS 27.0 or later", result.stderr)
+                self.assertIn("set BOX_VERSION to a compatible earlier release", result.stderr)
                 self.assertEqual(self.log.read_bytes(), before)
                 self.assertEqual(self.current(), f"0.2.4-{self.target}")
 

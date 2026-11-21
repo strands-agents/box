@@ -694,7 +694,7 @@ if [ "$box_system" = Darwin ]; then
             if (host[i] + 0 > required[i] + 0) exit 0
             if (host[i] + 0 < required[i] + 0) exit 1
         }
-    }' || die "release v$box_version requires macOS $box_minimum or later; this Mac runs $box_os"
+    }' || die "release v$box_version requires macOS $box_minimum or later; this Mac runs $box_os; set BOX_VERSION to a compatible earlier release (see https://github.com/strands-agents/box/blob/main/docs/cli/install.md#requirements)"
 fi
 [ "$(metadata box_version)" = "$box_version" ] ||
     die "metadata version does not match $box_version"

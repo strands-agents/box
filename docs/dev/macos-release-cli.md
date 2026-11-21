@@ -39,10 +39,10 @@ publishing. The x86_64 Linux job keeps its baseline build, so this path does not
 native-enabled x86_64 package.
 
 macOS packages require macOS 27 or later, including when native enforcement is off. Builds and
-package checks use the `xcode-27` runner, and release binaries target macOS 27. The installer reads `macos_minimum_version`
-from the selected archive's checksum-verified `release.json` before executing its programs.
-Older archives without that field retain their macOS 15 minimum, so selecting an older
-compatible release still works on macOS 15–26. When native support is selected, both the workflow and the
+package checks use the `xcode-27` runner, and release binaries use `MACOSX_DEPLOYMENT_TARGET=27.0`.
+Both package producers write `macos_minimum_version: "27.0"` in `release.json`. See the
+[installer requirements](../cli/install.md#requirements) for version checks and older releases.
+When native support is selected, both the workflow and the
 local package script require macOS software development kit (SDK) version 27 or later before they build. They resolve
 the SDK named by `SDKROOT`, if set,
 or `macosx` from the selected developer tools otherwise. They reject a missing SDK or an invalid

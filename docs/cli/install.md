@@ -16,8 +16,17 @@ later, `libgcc`, Python 3, `curl`, and GNU utilities (`coreutils`, `diffutils`, 
 `gzip`, `awk`, `sed`, and `grep`).
 See [How Linux differs](limitations.md#how-linux-differs) for what is different from a Mac.
 The installer refuses Intel Macs, macOS versions below the selected package requirement, and
-other Linux architectures. Users on macOS 15 through 26 can still
-[select an older compatible release](#upgrade-or-choose-a-version). New CLI packages require macOS 27.
+other Linux architectures. New CLI packages require macOS 27. On macOS 15 through 26, use
+`BOX_VERSION=0.3.0-preview.1`, the existing compatible CLI pre-release, with the
+[install command](#install). See [Upgrade or choose a version](#upgrade-or-choose-a-version)
+for other version selections.
+
+After checking the archive checksum, the installer reads `macos_minimum_version` from
+`release.json` before executing a bundled program. Archives without this field retain the
+historical macOS 15 minimum. If the selected package requires a newer OS, installation stops
+and leaves the current installation unchanged. The installer does not silently select an older
+release: an explicit version must be honored, and an automatic fallback could install a version
+without fixes the user expects.
 
 The installer downloads releases from GitHub with `curl`, so you don't need a GitHub account. You
 don't need sudo, Rust, or a checkout of the source either.

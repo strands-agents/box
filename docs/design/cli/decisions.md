@@ -203,8 +203,8 @@ Security client is not this dependency.
 The CLI uses one supported macOS baseline for packages with and without native support. This
 lets its release qualification cover the OS facilities required by native policy. The cost is
 that users on macOS 15 through 26 must select an older compatible CLI release or upgrade their OS.
-The installer's `release.json` field `macos_minimum_version` states each new package's minimum;
-archives without that field retain the historical macOS 15 floor.
+The installer uses each package's declared minimum so this decision does not block older
+compatible releases. See [installer requirements](../../cli/install.md#requirements).
 
 **Rejected.** Keep the macOS 15 deployment target and add a macOS 15 launch check with native
 policy disabled. That could preserve ordinary CLI use on older systems, but would retain a
