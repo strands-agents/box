@@ -21,6 +21,9 @@ mod aliases;
 #[cfg(test)]
 pub(crate) mod snapshot;
 
+#[cfg(all(test, target_os = "linux"))]
+mod storage_scan;
+
 #[derive(Debug, Default)]
 pub(crate) struct ConfiguredCommands {
     tools: BTreeMap<String, Arc<ConfiguredCommand>>,
@@ -323,6 +326,34 @@ impl ConfiguredCommands {
             }
         }
         None
+    }
+
+    /// Validate storage generations without recursively enumerating a provider filesystem.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn validate_storage_reach(
+        &self,
+        table: &str,
+        reach: &DirectReach,
+        roots: &[PathBuf],
+        admitted: &[PathBuf],
+    ) -> Result<(), BoxError> {
+        if roots.is_empty() {
+            return self.validate_reach(table, reach);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            storage_scan::validate(self, table, reach, roots, admitted)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = admitted;
+            Err(ConfigError::Filesystem {
+                table: table.to_string(),
+                entry: "filesystem.mounts".to_string(),
+                reason: "storage command protection requires Linux mount inspection".to_string(),
+            }
+            .into())
+        }
     }
 
     pub(crate) fn validate_reach(&self, table: &str, reach: &DirectReach) -> Result<(), BoxError> {
