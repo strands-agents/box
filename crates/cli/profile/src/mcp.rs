@@ -150,6 +150,7 @@ fn writable_path(name: &str, value: &str, context: &Context<'_>) -> Option<Strin
     }
     let parts = value
         .split(|separator: char| separator.is_whitespace() || PART_SEPARATORS.contains(&separator))
+        .chain(listed.iter().copied())
         .chain([value]);
     for part in parts {
         if ["./", "../", "~/"]
@@ -7249,6 +7250,13 @@ mod tests {
                     &format!(r#"{{"NOTES": "{}"}}"#, workspace.display()),
                 ),
                 (
+                    "whole-in-a-list",
+                    &format!(
+                        r#"{{"NOTES": "/usr/lib:{}/team folder/lib"}}"#,
+                        host.home().display()
+                    ),
+                ),
+                (
                     "holds",
                     &format!(r#"{{"NOTES": "{}"}}"#, host.home().display()),
                 ),
@@ -7348,6 +7356,13 @@ mod tests {
                 ("the-root", writable("NOTES", "~/project is the workspace")),
                 (
                     "whole",
+                    writable(
+                        "NOTES",
+                        "~/team folder/lib lies in a write grant, ~/team folder"
+                    )
+                ),
+                (
+                    "whole-in-a-list",
                     writable(
                         "NOTES",
                         "~/team folder/lib lies in a write grant, ~/team folder"
