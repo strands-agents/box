@@ -93,6 +93,31 @@ The keys:
 
 An option or an operand adds effects with `adds`, and takes them away with `removes`.
 
+An option's `value` says which words it takes. Pick the one that matches how the program's own
+parser reads the option, because a line the two read differently can have the wrong effects:
+
+| `value` | What the option takes | Its field |
+|---|---|---|
+| absent | Nothing. `--x=v` is `unmodeled`. | Bool |
+| `"boolean"` | Nothing, or `true` or `false`: in the next word, or attached as `--x=false`. | Bool |
+| `"required"` | The next word, whatever it is, or an attached `--x=v` or `-xv`. | String |
+| `"optional"` | Only an attached `--x=v` or `-xv`. Otherwise its value is `""`. | String |
+| `"optional-next"` | An attached value, or the next word unless that word looks like an option, such as `-x`, `--x`, or `--`. Otherwise `""`. | String |
+| `"many"` | Each next word up to one that looks like an option, and at least one. | Set of String |
+
+A `repeated` option records a Set of String.
+
+Use `"boolean"` for a flag that also takes a following `true` or `false`, as npm and the Supabase CLI
+read their flags. `npm publish --dry-run false` publishes, so with `"boolean"` its `dry_run` field is
+`false`, and the flag's `adds` and `removes` don't apply. A following word that another parser
+reads as a boolean, such as `yes`, `no`, `on`, `off`, `y`, `n`, `t`, `f`, `1`, `0`, or `False`, makes the line `unmodeled`,
+and so does a flag given as both true and false. A flag that never takes a following word, as with Go
+programs that use pflag, has no `value`, so `--x=false` is `unmodeled`.
+
+Use `"optional-next"` for an option whose value is optional and that takes the next word when it
+isn't an option, as clap, commander, and argparse `nargs="?"` read them.
+`cargo install --bin --root /r foo` then gives `--bin` the value `""`, and `--root` its value `/r`.
+
 A command line that matches no `usage` is the action `unmodeled`. So is one with an option that its
 action doesn't declare. [A command the grammar can't read](#a-command-the-grammar-cant-read-is-unmodeled)
 says how policy decides it.

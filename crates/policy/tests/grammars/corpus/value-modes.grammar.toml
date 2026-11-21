@@ -1,0 +1,29 @@
+# A tool grammar with `boolean` flags and `optional-next` options.
+
+name    = "value_modes"
+program = "tool"
+format  = 1
+version = 1
+
+[effects]
+publish     = "Uploads the package"
+make_public = "Publishes with public access"
+force       = "Overwrites the target"
+all         = "Acts on every item"
+
+[global]
+options.debug = { flag = ["-d", "--debug"], value = "boolean", anywhere = true }
+
+[shell.publish]
+usage = "tool [global options] publish [options] [<package>]"
+adds  = ["publish"]
+options.dry_run = { flag = ["-n", "--dry-run"], value = "boolean", removes = ["publish", "make_public"] }
+options.force   = { flag = ["-f", "--force"], value = "boolean", adds = ["force"] }
+options.quiet   = { flag = ["-q"] }
+options.tag     = { flag = ["-t", "--tag"], value = "optional-next" }
+options.access  = { flag = ["--access"], value = "required", when = [{ like = "public", adds = ["make_public"] }] }
+
+[shell.install]
+usage = "tool [global options] install [options] [<target>...]"
+options.bin  = { flag = ["-b", "--bin"], value = "optional-next", when = [{ like = "", adds = ["all"] }] }
+options.root = { flag = ["--root"], value = "required" }
