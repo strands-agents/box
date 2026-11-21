@@ -20,6 +20,7 @@ pub(crate) mod production;
 mod production_tests;
 pub(crate) mod protocol;
 mod receiver;
+pub mod sources;
 mod target;
 #[cfg(test)]
 mod tests;
@@ -88,6 +89,14 @@ impl Setup {
         }
         for (path, scope) in &self.targets {
             target::PinnedTarget::capture(path, *scope)?.send(control)?;
+        }
+        if self.export_view {
+            use std::io::Read as _;
+            let mut ready = [0_u8];
+            (&*control).read_exact(&mut ready).map_err(io_failure)?;
+            if ready != *b"R" {
+                return Err(failure("storage receiver did not release workload startup"));
+            }
         }
         self.close_registration();
         Ok(())
@@ -641,4 +650,11 @@ pub mod fixture {
 /// Read one private descriptor for the cross-crate controller bridge.
 pub(crate) fn receive_descriptor(control: &UnixStream) -> Result<OwnedFd, ContainmentError> {
     transport::receive_fd(control)
+}
+
+pub(crate) fn send_descriptor(
+    control: &UnixStream,
+    descriptor: &OwnedFd,
+) -> Result<(), ContainmentError> {
+    transport::send_fd(control, descriptor)
 }

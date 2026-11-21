@@ -225,19 +225,25 @@ fn pending_receiver_processes(launcher: libc::pid_t) -> Vec<WatchedProcess> {
         &std::fs::read_to_string(format!("/proc/{receiver}/status")).unwrap(),
         MOUNT_CAPABILITIES,
     );
-    let deadline = Instant::now() + WAIT;
-    let workers = loop {
-        let children = children_of(receiver);
-        if children.len() == 2 {
-            break children;
-        }
-        assert!(
-            children.len() < 2 && Instant::now() < deadline,
-            "receiver should retain one acquisition worker per pending root: {children:?}"
-        );
-        std::thread::sleep(Duration::from_millis(2));
-    };
-    let mut watched = vec![WatchedProcess::open(receiver)];
+    assert!(
+        children_of(receiver).is_empty(),
+        "recipient must not start source acquisition workers"
+    );
+    vec![WatchedProcess::open(receiver)]
+}
+
+fn pending_source_processes(helper: libc::pid_t) -> Vec<WatchedProcess> {
+    assert_capabilities(
+        &std::fs::read_to_string(format!("/proc/{helper}/status")).unwrap(),
+        MOUNT_CAPABILITIES,
+    );
+    let workers = children_of(helper);
+    assert_eq!(
+        workers.len(),
+        2,
+        "one shared acquisition worker per distinct source"
+    );
+    let mut watched = vec![WatchedProcess::open(helper)];
     for worker in workers {
         assert_capabilities(
             &std::fs::read_to_string(format!("/proc/{worker}/status")).unwrap(),
@@ -292,6 +298,20 @@ fn two_pending_roots(controller_disappears: bool) {
         .unwrap()
         .allow(&output, Operation::Write, Scope::Root)
         .unwrap();
+    let (source_control, source_child) = UnixStream::pair().unwrap();
+    // SAFETY: this isolated fixture forks a dedicated source helper before any workload exists.
+    let source_pid = unsafe { libc::fork() };
+    assert!(source_pid >= 0);
+    if source_pid == 0 {
+        drop(source_control);
+        let result = super::sources::serve(&source_child);
+        // SAFETY: the helper never returns into the test harness.
+        unsafe { libc::_exit(if result.is_ok() { 0 } else { 21 }) };
+    }
+    drop(source_child);
+    let mut source_process = Launcher(source_pid);
+    super::sources::initialize(&source_control, &roots).unwrap();
+    let subscription = super::sources::subscribe(&source_control, &roots).unwrap();
     let (controller, inherited) = UnixStream::pair().unwrap();
     controller.set_read_timeout(Some(WAIT)).unwrap();
     controller.set_write_timeout(Some(WAIT)).unwrap();
@@ -301,11 +321,13 @@ fn two_pending_roots(controller_disappears: bool) {
         &ControllerCommand::Initialize(layout(roots.clone())),
     )
     .unwrap();
+    super::transport::send_fd(&controller, &subscription.into()).unwrap();
     // SAFETY: the fresh isolated test forks a launcher child which exits instead of returning.
     let child = unsafe { libc::fork() };
     assert!(child >= 0);
     if child == 0 {
         drop(controller);
+        drop(source_control);
         let descriptor = inherited.into_raw_fd();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             NamespaceBackend::with_probe_result(true)
@@ -345,7 +367,9 @@ fn two_pending_roots(controller_disappears: bool) {
     );
     assert_eq!(
         crate::storage::receive_event(&controller).unwrap(),
-        HelperEvent::ViewReady
+        HelperEvent::ViewReady {
+            required: Vec::new()
+        }
     );
     let view = crate::storage::receive_fd(&controller).unwrap();
     assert_ne!(
@@ -380,8 +404,10 @@ fn two_pending_roots(controller_disappears: bool) {
             "the parent must not read the nonempty ambient underlay through the view handle"
         );
     }
+    crate::storage::send_command(&controller, &ControllerCommand::ReleaseLaunch).unwrap();
     wait_marker(&output.join("started"));
     let watched = pending_receiver_processes(child);
+    let shared = pending_source_processes(source_pid);
     if controller_disappears {
         drop(controller);
         for process in &watched {
@@ -417,6 +443,24 @@ fn two_pending_roots(controller_disappears: bool) {
             b"INITIAL-BYTES-MUST-STAY-HIDDEN"
         );
         assert!(!root.join("new-file").exists());
+    }
+    for process in &shared {
+        let mut event = libc::pollfd {
+            fd: process.descriptor.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: this checks the retained process handle without waiting.
+        assert_eq!(
+            unsafe { libc::poll(&mut event, 1, 0) },
+            0,
+            "shared source process must outlive its recipient"
+        );
+    }
+    source_control.shutdown(std::net::Shutdown::Both).unwrap();
+    source_process.wait();
+    for process in shared {
+        process.wait_exit();
     }
     // SAFETY: detach only the private fixture tmpfs after every launcher descendant has exited.
     assert_eq!(
