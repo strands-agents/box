@@ -216,7 +216,7 @@ directory and copies nothing.
 
 ### Start Box Core
 
-`box` calls `strands_box::run()`. At a terminal, its `on_ready` callback captures Core's stdout and stderr,
+`box` calls `strands_box::run()`. At a terminal, its `on_ready` callback starts stderr capture,
 then writes the run report before the workload starts. Redirected runs write the report before
 the Core call:
 
@@ -230,10 +230,6 @@ A reused run prints `box: running profile claude with box ID b-5b8e3d70c92f14ab 
 If Core refuses a fresh run while its `box` directory is still empty, the CLI removes that run
 directory unless the terminal relay has started. It keeps reused runs and any run where Core has
 written state, including a workload that exits with a nonzero status.
-
-The relay appends captured output and its own diagnostics to the [run log](../../cli/files.md#profile-storage-and-runs).
-Core caps its buffered runtime messages at 32 KiB before they reach the CLI. Once the relay restores
-the terminal, it shows up to six recent errors within 1 KiB.
 
 Once `box` calls `strands_box::run()`, Box Core runs in the `box` process. It owns the signals. The
 CLI reference describes [terminal behavior](../../cli/cli.md#the-activity-banner) and
