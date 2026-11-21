@@ -11,13 +11,6 @@ Box Core's tests (`rust-test-lint.yml`) and the CLI's tests (`cli-test.yml`) bot
 The workflow stamps the selected version into the crates of both products before it builds them.
 The [CLI macOS release guide](macos-release-cli.md) describes the CLI's package, signing, and checks.
 
-The release workflow includes native filesystem policy support in the Apple Silicon macOS and
-ARM64 Linux CLI packages by default. Profiles must still enable the experimental feature before
-Box intercepts native file operations. Linux x86-64 packages do not include that support.
-Set the workflow input `native_filesystem_policy=false` to build without it. See
-[native package requirements](macos-release-cli.md#build-experimental-native-filesystem-policy-packages)
-for signing and platform prerequisites.
-
 ## Choose a version
 
 Every release, stable or prerelease, publishes macOS Apple silicon and the Amazon Linux 2023 ARM64 archives of both products.
