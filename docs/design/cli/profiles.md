@@ -228,8 +228,21 @@ box: to reuse this box run: box run claude --box-id b-5b8e3d70c92f14ab
 A reused run prints `box: running profile claude with box ID b-5b8e3d70c92f14ab again` instead.
 
 If Core refuses a fresh run while its `box` directory is still empty, the CLI removes that run
-directory. It keeps reused runs and any run where Core has written state, including a workload
-that exits with a nonzero status.
+directory unless the terminal relay has started. It keeps that run so the log path and
+reuse instructions remain valid. It also keeps reused runs and
+any run where Core has written state, including a workload that exits with a nonzero status.
+
+At a terminal, the relay writes Core's stdout and stderr, plus local banner and policy-update
+failures, to the [run log](../../cli/files.md#profile-storage-and-runs). The workload uses its
+own PTY. The file is opened through the locked run directory and must be regular, owned by the
+user, and have one hard link.
+
+The relay keeps a bounded input line and selects the existing Box error prefixes for the
+[exit preview](../../cli/cli.md#box-run). It retains up to six recent escaped error headlines
+within 1 KiB, so later warnings cannot displace them, and drops whole earlier headlines when
+the preview fills. Core separately caps buffered runtime logs at 32 KiB; the CLI cannot save
+bytes Core discards. The CLI reports after draining workload output and restoring the terminal.
+Synchronous file writes can wait on storage.
 
 Once `box` calls `strands_box::run()`, Box Core runs in the `box` process. It owns the signals. The
 CLI reference describes [terminal behavior](../../cli/cli.md#the-activity-banner) and

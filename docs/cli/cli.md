@@ -71,6 +71,11 @@ The `box:` lines before these are notes about something the run leaves out, such
 `box: skipped tool pnpm (@box/pnpm): pnpm is not on PATH`. [`box profile show`](#box-profile-show)
 prints the same notes, with `!`, before you run.
 
+At a terminal, `box` prints reuse instructions after the agent exits, with or without the
+banner, and points to the saved [Box log](files.md#profile-storage-and-runs). It also shows
+a short preview of Box errors. Warnings and the rest of each captured message stay in the file.
+If the log cannot be saved, `box` says so and keeps the run's exit status.
+
 ### The activity banner
 
 While the agent runs, a one-line banner below it shows the profile, your project, and what the

@@ -2576,8 +2576,9 @@ impl Launch {
     }
 
     fn run_inner(&self, args: &[OsString]) -> Result<ExitCode, Error> {
+        let mut keep_run = self.reused;
         let result = if terminal::attached() {
-            terminal::run(self, |options| {
+            terminal::run(self, &mut keep_run, |options| {
                 strands_box::run(self.config.clone(), args.to_vec(), options)
             })
         } else {
@@ -2588,7 +2589,7 @@ impl Launch {
                 self.run_options(),
             ))
         };
-        if !self.reused
+        if !keep_run
             && !result.as_ref().is_ok_and(|code| *code == ExitCode::SUCCESS)
             && let Some(directory) = self.config.parent()
             && std::fs::remove_dir(directory.join("box")).is_ok()
