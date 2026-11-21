@@ -189,9 +189,10 @@ You have two ways out:
 
 - **Fix the clock.** Set it right, or wait until it is within five minutes of the history. Then run
   again. A reused box keeps its history. If it happened in a running box, apply the edit again.
-- **Leave the box behind.** Remove it with `box clean <box ID>` and run again without `--box-id`.
-  The new box starts with an empty history, so rules that count over time start from zero. For a box
-  that was running, stop the run first, because `box clean` skips a run that is still going.
+- **Leave the box behind.** Remove it with `box profile clean <name> --box-id <box ID>` and run again
+  without `--box-id`. The new box starts with an empty history, so rules that count over time start
+  from zero. For a box that was running, stop the run first, because `box profile clean` refuses a
+  box that is still running.
 
 ### The agent could change what a later run trusts
 
