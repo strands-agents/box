@@ -224,14 +224,17 @@ impl Reach {
         })
     }
 
+    #[cfg(target_os = "linux")]
     pub(super) fn with_storage(
         mut self,
-        #[cfg(target_os = "linux")] storage: Option<std::sync::Arc<box_shell::StorageView>>,
+        storage: Option<std::sync::Arc<box_shell::StorageView>>,
     ) -> Self {
-        #[cfg(target_os = "linux")]
-        {
-            self.storage = storage;
-        }
+        self.storage = storage;
+        self
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(super) fn with_storage(self) -> Self {
         self
     }
 
