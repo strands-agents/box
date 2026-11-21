@@ -21,6 +21,9 @@ use crate::record::config::process::{Filesystem, Grant};
 use crate::record::config::secret_source::{ProtectedPath, Spelled};
 use crate::record::layout::{lies_within, resolved_to_its_deepest_existing_ancestor};
 
+#[cfg(test)]
+mod plan;
+
 /// One host path a process's own syscalls reach, with no policy decision in the path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DirectGrant {
@@ -124,6 +127,8 @@ pub(crate) struct Refusal {
 
 /// The device and inode pair that identifies one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(test, serde(deny_unknown_fields))]
 pub(crate) struct FileIdentity {
     pub(crate) device: u64,
     pub(crate) inode: u64,
