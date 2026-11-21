@@ -234,7 +234,7 @@ literal, so `${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}` in a Codex argument stays as
 | Template fields | A placeholder goes only in the fields that [Which fields take a placeholder](../../cli/profiles-reference.md#which-fields-take-a-placeholder) lists. For the tables that reach `box.toml`, `takes_template` decides it. Every other field is literal, and a table key never holds a placeholder. |
 | Option values | A value in `[options]` is literal. A placeholder in it stops the load. |
 | Paths | A path field is a filesystem list entry, a `[[storage.files]]` `source`, a `[[mcp-servers]]` `file`, and a `command` element that holds a placeholder and is element 0 or starts with a path name (`workspace` with or without steps, `home`, `profile`, `box`, `cache`, `storage.*`, `root` and `tool.*.root` with or without steps, `macos.developer_dir`, `macos.toolchain`, `macos.sdk_root`, or a `program` input). An `agent-args` element is never element 0, so it is a path only when it starts with a path name. In a path field, a placeholder comes first, each later placeholder fills one path component (no `/`, not `.` or `..`), and the result is absolute (or starts with `~/`, which Box Core accepts in a filesystem list) with no `..`. |
-| Grants | `box` resolves existing filesystem entries to their real paths. A `read_file` link to a file keeps its name in its real parent folder, so Box Core can make that name available. |
+| Grants | `box` resolves existing filesystem entries to their real paths. A `read_file` link to a file keeps its name in its real parent folder, so Box Core can make that name available. An entry that resolves through a link inside a place a box can write stops the run ([safety rules](#safety-rules)). |
 | Encoding | The destination encodes the value. A policy rule gets a quoted policy literal (`render::literal`). `box` never builds shell text. |
 
 Terraform's JSON syntax takes the same approach: in a plain data format, a string is a template, a
@@ -1092,8 +1092,11 @@ For each row, `box run` does this:
    - A link out of the source is followed if its target passes the step 2 checks.
    - `box` leaves out a link that fails the checks, a broken link, a link that loops back, a file
      it cannot read, and anything that is not a file or a folder.
-4. **Move it into place.** `box` builds the copy in the run directory, where no box can reach, then
-   moves it to the target. A row with `kind` copies one file: `box` parses it, keeps the `keep`
+4. **Move it into place.** `box` builds the copy in the run directory, where no box can reach. It
+   opens each folder on the way to the target's folder without following a link, makes a
+   missing folder inside the one it holds open, and moves the copy into the last one. A link on the
+   way stops the run. The move replaces nothing, so a target that appeared since step 1 is kept.
+   A row with `kind` copies one file: `box` parses it, keeps the `keep`
    paths, sets each `set` value, and writes the result.
 
 `box profile show` does steps 1 to 3 without copying anything. It lists each copy, each link it
@@ -1561,10 +1564,10 @@ wins over a `permit`. Box Core rejects duplicate `@id` values across authored an
 | A storage path escapes storage | Each storage directory name is one plain path component, and a copy's `target` starts with a declared storage directory, then plain names. |
 | A copy carries a credential into the box | Each pack names only the files its agent needs, and `box` copies only what a row names and does not judge what a file holds ([decisions.md](decisions.md#the-packs-decide-what-is-copied)). The one exception is a `reads` or `deny` path of a declared secret source. A copy row or a tool's link row whose source meets one, as written or real, stops the load. A link that a copy follows to one is left out ([What stays on the host](plugins.md#what-stays-on-the-host)). |
 | A copy reads what a box planted | A source, and each link that a copy follows, cannot reach the workspace, the run's storage, `~/.strands/box`, or a write grant, as written or real. `box`'s own packs in `~/.strands/box` are the exception, because a run cannot write them. |
-| A box redirects a later copy | A copy is built in the run directory, out of every box's reach. It never writes through a link above its target, and a target that exists, a link included, is left alone, except that a row with `set` rewrites its values and stops the run at a link or a hard link, and a row with `fill` adds what it lacks and leaves a link or a hard link alone ([copies](#copies)). |
+| A box redirects a later copy | A copy is built in the run directory, out of every box's reach. `box` opens each folder on the way to the target without following a link, and moves the copy into the folder it holds open, so a folder that a box swaps for a link receives nothing. The move replaces nothing: a target that exists, a link included, is left alone, except that a row with `set` rewrites its values and stops the run at a link or a hard link, and a row with `fill` adds what it lacks and leaves a link or a hard link alone ([copies](#copies)). |
 | A source file changes after the check | `box` copies a file only when the file it opens has the device and inode it planned. |
 | The box rewrites what a later run trusts | The policy forbids writes, deletes, and moves in `~/.strands/box` except the run's own storage, and `box run` refuses a write grant there ([decisions.md](decisions.md#a-run-cannot-write-what-a-later-run-trusts)). |
-| A grant follows a link the box planted | A filesystem entry inside the workspace or storage that resolves through a link stops the run. |
+| A grant follows a link the box planted | A filesystem entry that resolves through a link stops the run when the link is inside a place a box can write: the workspace, the run's storage, `~/.strands/box`, or a write grant of the agent, a tool, or a stdio MCP server. `box` checks each entry after it fills in the profile, and it compares the real folder that holds the link. So a link above such a place is followed, such as `/tmp` on macOS or a home folder that is a link. |
 | A box plants an MCP configuration for a later run | A `[[mcp-servers]]` `file` that is, holds, or lies in the workspace, the run's storage, `~/.strands/box`, or a write grant, as written or real, is not read ([decisions.md](decisions.md#no-file-a-box-can-write-is-an-input)). |
 | A detected server runs what a box planted | A stdio server's program, its real file, its `#!` interpreter, and each full `PATH` directory must lie outside those places, or the server is skipped. A `[mcp.<name>]` table with no `type` counts as a write grant holder, so its `write` entries join the places checked. |
 | A stdio server finds a program a box planted through `PATH` | An entry of the operator's `PATH` that is not a full path (`.`, an empty part, or one that starts with `~`) finds programs in the workspace, where each server starts. It reaches no stdio server that inherits that `PATH`, whether `box` detects the server or the profile declares it. A table whose `env.PATH` the profile writes keeps it as written. |
@@ -1576,10 +1579,11 @@ wins over a `permit`. Box Core rejects duplicate `@id` values across authored an
 
 The rows for secret sources are in [plugins.md](plugins.md#safety-rules).
 
-**Residual risk.** `box` checks storage for links by path, then creates each directory. A box of
-the same profile that is still running, in any workspace, can swap a storage directory for a link
-between the check and the run's start, and the same holds for the folder that receives a
-copy's rename. A fix opens each path part with `O_NOFOLLOW` and writes relative to the directory handle.
+**Residual risk.** `box` creates each storage directory, and moves each first copy, relative to a
+directory that it holds open, and it opens no link on the way. Box Core then takes each storage
+directory by path. A box of the same profile that is still running, in any workspace, can swap a
+storage directory for a link between that check and the run's start. `box` still makes a tool's
+link rows by path, so the same holds for the folder that receives a link.
 
 ## Box Core behavior that the packs follow
 

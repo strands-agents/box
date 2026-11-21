@@ -8997,6 +8997,229 @@ fn a_grant_through_a_link_in_the_workspace_is_refused() {
     }
 }
 
+/// A profile whose `holder` table has a write grant on `notes`, and whose agent names `entry` in
+/// `list`.
+fn beneath_a_write_grant(holder: &str, notes: &Path, list: &str, entry: &Path) -> String {
+    let mut lists = vec![(list, vec![entry])];
+    if holder == "[agent]" && list == "write" {
+        lists[0].1.push(notes);
+    } else if holder == "[agent]" {
+        lists.push(("write", vec![notes]));
+    }
+    let agent: String = lists
+        .iter()
+        .map(|(name, entries)| format!("filesystem.{name} = {entries:?}\n"))
+        .collect();
+    let holder = if holder == "[agent]" {
+        String::new()
+    } else {
+        format!("{holder}\ncommand = [\"/usr/bin/true\"]\nfilesystem.write = [{notes:?}]\n")
+    };
+    format!("[agent]\ncommand = [\"/bin/x\"]\n{agent}{holder}")
+}
+
+#[test]
+fn a_grant_through_a_link_under_a_write_grant_is_refused() {
+    let scene = Scene::new();
+    let notes = scene.home().join("notes");
+    let out = notes.join("out");
+    let outside = scene.home().join("outside");
+    std::fs::create_dir_all(&out).expect("a folder beneath the grant");
+    std::fs::create_dir_all(&outside).expect("a folder that no entry names");
+    let holders = ["[agent]", "[tool.t]", "[mcp.s]\ntype = \"stdio\""];
+    let lists = ["read", "write", "read_file", "deny"];
+    for holder in holders {
+        for list in lists {
+            let compiled = scene
+                .compile(
+                    &profile(&beneath_a_write_grant(holder, &notes, list, &out)),
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("{holder} {list}: a real folder: {error}"));
+            let granted = strings(&table(&compiled)["agent"]["filesystem"][list]);
+            // The agent's own grant on `notes` covers a second write grant beneath it.
+            assert!(
+                granted.contains(&out.display().to_string())
+                    || (holder == "[agent]" && list == "write"),
+                "{holder} {list}: {granted:?}"
+            );
+        }
+    }
+
+    std::fs::remove_dir(&out).expect("remove the folder");
+    std::os::unix::fs::symlink(&outside, &out).expect("a link where the folder was");
+    for holder in holders {
+        for list in lists {
+            let reason = scene.refusal(&beneath_a_write_grant(holder, &notes, list, &out));
+            assert!(
+                reason.contains(&format!(
+                    "resolves through a link to {}, inside {}, which the box can write",
+                    outside.display(),
+                    notes.display()
+                )),
+                "{holder} {list}: {reason}"
+            );
+        }
+    }
+    let below = scene.refusal(&beneath_a_write_grant(
+        "[agent]",
+        &notes,
+        "read",
+        &out.join("absent"),
+    ));
+    assert!(below.contains("resolves through a link"), "{below}");
+
+    std::fs::remove_file(&out).expect("remove the link");
+    let nothing = scene.home().join("nothing");
+    std::os::unix::fs::symlink(&nothing, &out).expect("a link to nothing");
+    let dangling = scene.refusal(&beneath_a_write_grant("[agent]", &notes, "read", &out));
+    assert!(
+        dangling.contains(&format!("resolves through a link to {}", nothing.display())),
+        "{dangling}"
+    );
+}
+
+#[test]
+fn a_grant_through_a_link_in_the_box_home_is_refused() {
+    let scene = Scene::new();
+    let shared = scene.home().join(".strands/box/shared");
+    let outside = scene.home().join("outside");
+    std::fs::create_dir_all(shared.join("real")).expect("a folder in the box home");
+    std::fs::create_dir_all(&outside).expect("a folder that no entry names");
+    std::os::unix::fs::symlink(&outside, shared.join("link")).expect("a link in the box home");
+    let text = |entry: &str| {
+        format!(
+            "[agent]\ncommand = [\"/bin/x\"]\nfilesystem.read = [{:?}]",
+            shared.join(entry)
+        )
+    };
+    scene
+        .resolve(&profile(&text("real")))
+        .expect("a real folder in the box home");
+    let reason = scene.resolve_refusal(&text("link"));
+    assert!(
+        reason.contains(&format!(
+            "resolves through a link to {}, inside {}, which the box can write",
+            outside.display(),
+            scene.home().join(".strands/box").display()
+        )),
+        "{reason}"
+    );
+}
+
+#[test]
+fn a_tool_entry_through_a_link_under_a_write_grant_is_refused() {
+    let scene = Scene::new();
+    let notes = scene.home().join("notes");
+    let outside = scene.home().join("outside");
+    std::fs::create_dir_all(notes.join("out-real")).expect("a folder beneath the grant");
+    std::fs::create_dir_all(&outside).expect("a folder that no entry names");
+    scene.share(
+        "rt",
+        &format!(
+            "kind = \"tool\"\n[inputs.rt.path]\ntype = \"program\"\nprogram = \"rt\"\n\
+             search = [{{ env = \"PATH\" }}]\n[run]\ncommand = [\"${{{{ inputs.rt.path }}}}\"]\n\
+             [filesystem]\nread = [{:?}]",
+            notes.join("out-*")
+        ),
+    );
+    let text = format!("packs = [\"@box/rt\"]\n{AGENT}\nfilesystem.write = [{notes:?}]");
+    let resolved = detected(&scene, &text).expect("a real folder beneath the grant");
+    let read = &resolved.tool["rt"].filesystem.read;
+    assert!(
+        read.contains(&notes.join("out-real").display().to_string()),
+        "{read:?}"
+    );
+    std::os::unix::fs::symlink(&outside, notes.join("out-link")).expect("a link beside it");
+    let refused = detected(&scene, &text).expect_err("a match that is a link");
+    assert!(
+        refused.to_string().contains(&format!(
+            "resolves through a link to {}, inside {}, which the box can write",
+            outside.display(),
+            notes.display()
+        )),
+        "{refused}"
+    );
+}
+
+#[test]
+fn a_link_above_a_write_grant_is_followed() {
+    let scene = Scene::new();
+    let real = scene.root.join("private/notes");
+    std::fs::create_dir_all(real.join("out")).expect("a folder beneath the grant");
+    let above = scene.root.join("above");
+    std::os::unix::fs::symlink(scene.root.join("private"), &above).expect("a link above");
+    let at = scene.home().join("notes");
+    std::os::unix::fs::symlink(&real, &at).expect("a link at the grant");
+    let mut grants = vec![above.join("notes"), at];
+    // On macOS, `/tmp` is a link that a box cannot write.
+    let temporary = Path::new("/tmp")
+        .is_symlink()
+        .then(|| tempfile::tempdir_in("/tmp").expect("a folder in /tmp"));
+    if let Some(temporary) = &temporary {
+        std::fs::create_dir_all(temporary.path().join("out")).expect("a folder beneath the grant");
+        grants.push(temporary.path().to_path_buf());
+    }
+    for notes in grants {
+        let real = resolved(&notes);
+        assert_ne!(real, notes, "{notes:?} holds a link");
+        let compiled = scene
+            .compile(
+                &profile(&beneath_a_write_grant(
+                    "[agent]",
+                    &notes,
+                    "read",
+                    &notes.join("out"),
+                )),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{notes:?}: a link above the grant: {error}"));
+        let filesystem = &table(&compiled)["agent"]["filesystem"];
+        let text = |path: &Path| path.display().to_string();
+        assert!(strings(&filesystem["write"]).contains(&text(&real)));
+        assert!(strings(&filesystem["read"]).contains(&text(&real.join("out"))));
+    }
+}
+
+#[test]
+fn a_home_that_is_a_link_keeps_its_grants() {
+    let scene = Scene::new();
+    let real = scene.root.join("real-home");
+    std::fs::rename(scene.home(), &real).expect("move the home");
+    std::os::unix::fs::symlink(&real, scene.home()).expect("a home that is a link");
+    let context = Context {
+        workspace: real.join("work").join(&scene.workspace),
+        os: "macos",
+    };
+    let notes = scene.home().join("notes");
+    let out = notes.join("out");
+    std::fs::create_dir_all(&out).expect("a folder beneath the grant");
+    std::fs::write(scene.home().join("settings"), "").expect("a file in the home");
+    let text = format!(
+        "{}filesystem.read_file = [{:?}]\n",
+        beneath_a_write_grant("[agent]", &notes, "read", &out),
+        scene.home().join("settings")
+    );
+    let resolved = scene
+        .resolve_with(&profile(&text), &context)
+        .expect("each entry is below a home that is a link");
+    let read = &resolved.agent.filesystem.read;
+    assert!(
+        read.contains(&real.join("notes/out").display().to_string()),
+        "{read:?}"
+    );
+
+    std::fs::remove_dir(&out).expect("remove the folder");
+    std::os::unix::fs::symlink(real.join("work"), &out).expect("a link where the folder was");
+    let refused = scene
+        .resolve_with(&profile(&text), &context)
+        .expect_err("a link beneath the grant");
+    assert!(
+        refused.to_string().contains("resolves through a link"),
+        "{refused}"
+    );
+}
+
 #[test]
 fn a_path_argument_under_a_write_grant_is_no_program() {
     let scene = Scene::new();
