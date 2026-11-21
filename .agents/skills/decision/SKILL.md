@@ -96,7 +96,7 @@ run.
 **Rejected.** One `box_dir` for each profile: Box Core locks `box_dir`, so a second run fails.
 
 **Cost.** Run directories stay after a run stops, about 2 MB each, until the operator runs
-`box clean`.
+`box profile clean`.
 ```
 
 - **The title is the decision, stated as a claim.** Never a question. Use the operator's or the

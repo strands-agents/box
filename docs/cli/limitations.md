@@ -53,7 +53,7 @@ the box's shell and Python, so they can change a program in it that a later run 
 and programs set when the run started still limit the agent.
 
 A run's records, in `~/.strands/box/r/<box ID>/`, are the box's own decisions for that run, and they
-stay until `box clean` removes the run. They're a plain file on your machine, not a tamper-proof
+stay until `box profile clean` removes the run. They're a plain file on your machine, not a tamper-proof
 audit log.
 
 ## File rules decide only the box's shell
@@ -365,7 +365,7 @@ opens:
   also run the other programs in the box. `box profile show --full <profile>` shows each server's
   grants.
 - **Keys are saved with the run.** A key in a declared server's `env` stays in
-  `~/.strands/box/r/<run>/` until you run `box clean`. The agent can't read `~/.strands/box`, but
+  `~/.strands/box/r/<run>/` until you run `box profile clean`. The agent can't read `~/.strands/box`, but
   `box profile show --full` prints the key, and so does `box profile show --format json --full`,
   so be careful where you paste the output.
 
