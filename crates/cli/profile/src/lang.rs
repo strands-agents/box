@@ -1415,8 +1415,7 @@ fn check_kind(layer: &mut Layer) -> Result<(), Refusal> {
 /// Check the `[requires]` table of `table`, a `file` ("pack", "plugin", or "profile"), against
 /// the running `box`, `version`, and take the table out, so that nothing after this reads it.
 ///
-/// `box` is checked first. A requirement that this `box` does not know is refused after that,
-/// because a later `box` added it, and this one cannot check it.
+/// `box` is checked first, and a requirement that this `box` does not know is refused after that.
 pub(crate) fn take_requires(
     table: &mut toml::Table,
     file: &str,
@@ -1448,18 +1447,8 @@ pub(crate) fn take_requires(
         .keys()
         .find(|key| !REQUIREMENTS.contains(&key.as_str()))
     {
-        // A misspelled requirement is a typo, not one that a later `box` added.
-        if locate::closest(key, REQUIREMENTS.iter().copied()).is_some() {
-            return Err(Refusal::at(
-                unknown_key(&format!("`[{REQUIRES}]`"), key, REQUIREMENTS),
-                &[REQUIRES, key],
-            ));
-        }
         return Err(Refusal::at(
-            format!(
-                "this {file} requires `{key}`, which box {version} cannot check; a later box \
-                 may, so update box or remove the requirement"
-            ),
+            unknown_key(&format!("`[{REQUIRES}]`"), key, REQUIREMENTS),
             &[REQUIRES, key],
         ));
     }
@@ -7582,9 +7571,8 @@ mod tests {
             ),
             (
                 "box = \">=7.0.0\"\nlater = true",
-                Some("this pack requires `later`, which box 7.2.0 cannot check"),
+                Some("`[requires]` holds the unknown key `later`; `[requires]` holds `box`"),
             ),
-            // A misspelled `box` is a typo, not a requirement that a later box added.
             ("bx = \">=7.0.0\"", Some("did you mean `box`?")),
         ] {
             shelf.share_raw("p", &format!("{header}[requires]\n{requires}\n"));
