@@ -901,7 +901,7 @@ placeholder that the gateway swaps, as for a remote server: a local server names
 each server would need a route first.
 
 **Cost.** The key stays in `~/.strands/box/r/<run>/box.toml`, which the agent cannot read, until
-`box clean`. The agent can plant files in the workspace, or under a `HOME` that lies in
+`box profile clean`. The agent can plant files in the workspace, or under a `HOME` that lies in
 it, that the server reads or loads at start, and so get the key.
 
 <a id="a-detected-server-reads-its-install-directory"></a>
@@ -1289,7 +1289,7 @@ timing.
 
 **Cost.** A run without `--box-id` starts each `when temporal` rule empty. A reused box carries its
 history to every workspace: a limit counts all of them, and a gate opened in one stays open in the
-next. A rule that names a path sees only events at that path. `box clean` removes kept boxes too.
+next. A rule that names a path sees only events at that path. `box profile clean` removes kept boxes too.
 
 <a id="box-core-uses-the-box-id"></a>
 ### Box Core uses the box ID that `box` mints
@@ -1874,17 +1874,16 @@ that the source answers.
 <a id="removing-state-never-starts-a-box"></a>
 ### A command that removes state never also starts a box
 
-`box clean <BOX_ID>` removes one run directory, and `box clean --all` removes every run
-directory whose box is not running. Neither starts a box or takes a profile. A running box keeps
-its run directory, because its configuration and records are in it. `box clean <BOX_ID>` refuses a
-running box before it asks. `--all` keeps each running box and names it.
+No command that removes boxes also starts one. A running box keeps its run directory, because its
+configuration and records are in it. Which boxes each command removes, and how it refuses a running
+box, is in [the removal commands](#reset-with-no-name-removes-every-profile).
 
 **Rejected.** `box run --clean-up claude`, which cleaned up and then ran: tried first. One command
 that removes old boxes and starts a new one reads as two commands. `box run --clean-up
 [--box-id <BOX_ID>]`: tried next. A flag on `run` reads as a way to run, and it removed running
 boxes.
 
-**Cost.** `box clean` cannot stop a box, so the operator exits it first. A box counts as running
+**Cost.** `box profile clean` cannot stop a box, so the operator exits it first. A box counts as running
 while its `box run` process lives, so an agent that outlives a killed `box run` is not kept.
 
 <a id="reset-with-no-name-removes-every-profile"></a>
@@ -1911,7 +1910,7 @@ folder, so an entry there that is not a profile goes too.
 
 A starter first answers what the agent's host settings decide, at a terminal and without one
 ([detection](detection.md)). `box` then asks only when stdin and stderr are terminals. With no
-terminal, `box profile reset` and `box clean` refuse unless the operator gives
+terminal, `box profile reset` and `box profile clean` refuse unless the operator gives
 `--no-ask`, and a starter takes defaults or stops with the flag that answers
 ([starters](starters.md#without-a-terminal)). The policy question has no default there, so it
 stops `box` until `--policy` answers it. A profile that runs the agent the way the host runs
