@@ -269,13 +269,13 @@ impl Filesystem {
 
 impl Profile {
     /// Read a profile from its text, refusing every key that belongs to one run. Its
-    /// `[requires]` is checked against `box` `version` first, so a profile for a later `box` gets
-    /// the version it needs before any key that the later `box` added.
+    /// `[requires]` is checked against `box` `version` first and taken out, so a profile for a
+    /// later `box` gets the version it needs before any key that the later `box` added.
     pub fn parse(text: &str, path: &Path, version: &str) -> Result<Self, Error> {
         let invalid = |refusal: Refusal| refusal.in_file(path, text);
-        let table: toml::Table =
+        let mut table: toml::Table =
             toml::from_str(text).map_err(|error| invalid(error.to_string().into()))?;
-        lang::check_requires(&table, "profile", version).map_err(invalid)?;
+        lang::take_requires(&mut table, "profile", version).map_err(invalid)?;
         if let Some(refusal) = run_key(&table, "profile") {
             return Err(invalid(refusal));
         }

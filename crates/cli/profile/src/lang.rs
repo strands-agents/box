@@ -806,8 +806,7 @@ fn visit(
         )
         .in_file(&layer.path, &layer.text));
     }
-    check_kind(&mut layer, lookup.version)
-        .map_err(|refusal| refusal.in_file(&layer.path, &layer.text))?;
+    check_kind(&mut layer).map_err(|refusal| refusal.in_file(&layer.path, &layer.text))?;
     take_grammars(&mut layer, tool_pack)?;
     let key = if layer.shared { EXTEND } else { "packs" };
     let bases = imports_of(&layer.table, key).map_err(|reason| invalid(&layer.path, reason))?;
@@ -1225,11 +1224,8 @@ fn take_grammars(layer: &mut Layer, tool_pack: bool) -> Result<(), Error> {
 }
 
 /// Refuse a key that belongs to the other kind of file or to neither, write a tool pack as its tool
-/// table, and check a pack's header against the `box` version `version`.
-fn check_kind(layer: &mut Layer, version: &str) -> Result<(), Refusal> {
-    if !layer.shared {
-        take_requires(&mut layer.table, "profile", version)?;
-    }
+/// table, and check a pack's header.
+fn check_kind(layer: &mut Layer) -> Result<(), Refusal> {
     let refused: &[&str] = if layer.shared {
         &[
             "packs",
@@ -1426,22 +1422,10 @@ pub(crate) fn take_requires(
     file: &str,
     version: &str,
 ) -> Result<(), Refusal> {
-    check_requires(table, file, version)?;
-    table.remove(REQUIRES);
-    Ok(())
-}
-
-/// Check the `[requires]` table of `table`, a `file`, against `box` `version`, as
-/// [`take_requires`] does, and leave the table where it is.
-pub(crate) fn check_requires(
-    table: &toml::Table,
-    file: &str,
-    version: &str,
-) -> Result<(), Refusal> {
-    let Some(value) = table.get(REQUIRES) else {
+    let Some(value) = table.remove(REQUIRES) else {
         return Ok(());
     };
-    let toml::Value::Table(requires) = value else {
+    let toml::Value::Table(requires) = &value else {
         return Err(Refusal::at(
             format!("`{REQUIRES}` is a table, such as `[{REQUIRES}]` with `box = \">=0.3.0\"`"),
             &[REQUIRES],
@@ -7619,13 +7603,21 @@ mod tests {
             "{reason}"
         );
         shelf.share_raw("p", header);
-        let reason = chained("packs = [\"@box/p\"]\n[requires]\nbox = \">=9.0.0\"\nlater = 1\n")
+        let path = shelf.root.join("mine/profile.toml");
+        let parsed = |text: &str| crate::profile::Profile::parse(text, &path, lookup.version);
+        let refused = parsed("packs = [\"@box/p\"]\n[requires]\nbox = \">=9.0.0\"\nlater = 1\n")
+            .map(|_| ())
+            .map_err(self::reason)
             .expect_err("a profile is checked too");
         assert!(
-            reason.contains("this profile needs box >=9.0.0, and this is box 7.2.0"),
-            "{reason}"
+            refused.contains("this profile needs box >=9.0.0, and this is box 7.2.0"),
+            "{refused}"
         );
-        chained("packs = [\"@box/p\"]\n[requires]\nbox = \">=7.2.0\"\n")
+        let profile = parsed("packs = [\"@box/p\"]\n[requires]\nbox = \">=7.2.0\"\n")
+            .expect("a profile within its floor parses");
+        assert!(!profile.table.contains_key(REQUIRES), "parse takes it out");
+        profile
+            .layers(None, &lookup)
             .expect("a profile within its floor loads");
     }
 

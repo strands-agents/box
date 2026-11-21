@@ -170,9 +170,9 @@ Every pack starts with `[pack]`. Its keys are in
 any other key in it, before it loads the packs that the pack extends: `name` must be the name that
 imports the pack. Before that, `lang::take_requires` checks the file's `[requires]` against
 `box`'s own version and takes the table out, so the merge never sees it. It does the same for a
-plugin and for the profile, and checks `box` before any other requirement. `Profile::parse` checks
-the profile's `[requires]` (`lang::check_requires`) before its own key checks, so a profile for a
-later `box` gets the version before a key of `[banner]` or `policies` that the later `box` added. The load takes
+plugin and for the profile, and checks `box` before any other requirement. `Profile::parse` takes
+the profile's `[requires]` out before its own key checks, so a profile for a later `box` gets the
+version before a key of `[banner]` or `policies` that the later `box` added. The load takes
 `extend` out of the header and keeps it at the top of the table. `box profile show` prints each
 pack's `name` and `version` in the order that `packs` and `extend` name them: a pack, then the
 packs it extends, and each pack once.
