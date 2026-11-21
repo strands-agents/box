@@ -152,10 +152,9 @@ fn writable_path(name: &str, value: &str, context: &Context<'_>) -> Option<Strin
         .split(|separator: char| separator.is_whitespace() || PART_SEPARATORS.contains(&separator))
         .chain([value]);
     for part in parts {
-        if !options
-            && ["./", "../", "~/"]
-                .iter()
-                .any(|start| part.starts_with(start))
+        if ["./", "../", "~/"]
+            .iter()
+            .any(|start| part.starts_with(start))
         {
             return Some(format!(
                 "sets {name} to a path that is not a full path, which starts from the workspace, \
@@ -7111,6 +7110,10 @@ mod tests {
                 ("here", r#"{"NOTES": "/usr/lib:."}"#),
                 ("above", r#"{"NOTES": "/usr/lib:.."}"#),
                 ("above-in-a-part", r#"{"NOTES": "site;../lib"}"#),
+                (
+                    "in-options",
+                    r#"{"JDK_JAVA_OPTIONS": "-javaagent:./agent.jar"}"#,
+                ),
                 ("empty-and-home", r#"{"NOTES": ":~/lib"}"#),
                 ("as-written", r#"{"NOTES": "/usr/lib:~/lib"}"#),
                 ("as-written-part", r#"{"NOTES": "site,~/lib"}"#),
@@ -7136,6 +7139,7 @@ mod tests {
                 ("gem-home", not_full("GEM_HOME")),
                 ("here", not_full("NOTES")),
                 ("in-a-list", not_full("NOTES")),
+                ("in-options", not_full("JDK_JAVA_OPTIONS")),
                 ("lower-case", not_full_by_name("notes_dir")),
                 ("mixed", not_full_by_name("NOTES_LIBS")),
                 ("name-dirs", not_full_by_name("NOTES_DIRS")),
@@ -7407,7 +7411,7 @@ mod tests {
             &[
                 (
                     "jdk-opts",
-                    r#"{"JDK_JAVA_OPTIONS": "-javaagent:./agent.jar"}"#,
+                    r#"{"JDK_JAVA_OPTIONS": "-javaagent:agent.jar"}"#,
                 ),
                 ("flag", r#"{"NOTES_FLAGS": "--verbose --level=2"}"#),
                 ("path-name", r#"{"NOTES_PATH": "-x lib"}"#),
@@ -7417,7 +7421,7 @@ mod tests {
         assert_eq!(reasons(&servers), Vec::<(&str, &str)>::new());
         assert_eq!(
             mcp["jdk-opts"]["env"]["JDK_JAVA_OPTIONS"].as_str(),
-            Some("-javaagent:./agent.jar")
+            Some("-javaagent:agent.jar")
         );
         assert_eq!(
             mcp["flag"]["env"]["NOTES_FLAGS"].as_str(),

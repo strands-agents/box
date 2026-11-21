@@ -1379,9 +1379,8 @@ impl Launcher {
 fn unchecked_options(variable: &str, server: &str, file: &str) -> String {
     format!(
         "did not check {variable} of MCP server {server} (from {file}): it opens as options do, \
-         and box checks only the full paths in it. An option that loads code by a path \
-         that is not a full path loads it from the workspace, where the agent can write, with \
-         the server's keys"
+         and box reads no option. A file or a folder that an option names with no path in \
+         front is loaded from the workspace, where the agent can write, with the server's keys"
     )
 }
 
@@ -2935,9 +2934,9 @@ mod tests {
             preview("name = \"probe-preview\"\n").mcp_unchecked_lines(),
             vec![
                 "did not check JDK_JAVA_OPTIONS of MCP server issues (from ~/.codex/config.toml): \
-                 it opens as options do, and box checks only the full paths in it. An option \
-                 that loads code by a path that is not a full path loads it from the \
-                 workspace, where the agent can write, with the server's keys"
+                 it opens as options do, and box reads no option. A file or a folder that an \
+                 option names with no path in front is loaded from the workspace, where the \
+                 agent can write, with the server's keys"
             ]
         );
     }

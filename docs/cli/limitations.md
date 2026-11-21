@@ -338,11 +338,12 @@ opens:
   - A plain word or a path with no `./` in front, such as `lib`, `lib/ruby`, or `@options.txt`,
     under a name that doesn't end like the name of a path. A program looks for it in your project.
   - A variable that the agent's settings don't fill in, such as `$HOME/lib`.
-  - Options. In a value that opens with `-`, `box` checks only the full paths. It declares the
-    server and names the variable:
+  - Options. In a value that opens with `-`, `box` checks each path it can see, as in any other
+    value, but it doesn't read the options. A file or a folder that an option names with no path
+    in front, such as `agent.jar`, passes. `box` declares the server and names the variable:
 
     ```text
-    box: did not check JDK_JAVA_OPTIONS of MCP server build (from ~/.claude.json): it opens as options do, and box checks only the full paths in it. An option that loads code by a path that is not a full path loads it from the workspace, where the agent can write, with the server's keys
+    box: did not check JDK_JAVA_OPTIONS of MCP server build (from ~/.claude.json): it opens as options do, and box reads no option. A file or a folder that an option names with no path in front is loaded from the workspace, where the agent can write, with the server's keys
     ```
 
   Write each file and folder in a server's `env` as a full path outside the places the agent can
