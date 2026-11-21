@@ -84,7 +84,7 @@ Each agent, tool, and local Model Context Protocol (MCP) server receives its own
 
 ### D1. Declaring a mount grants no access
 
-The proposed Box Core `box.toml` interface uses an array of absolute paths to identify storage mounts that can arrive after startup:
+The current Box Core `box.toml` interface proposal uses an array of absolute directory paths for mount sources. Each path identifies where Box expects a filesystem mount to arrive after startup:
 
 ```toml
 [experimental-features]
@@ -95,6 +95,10 @@ mounts = ["/mnt/data", "/mnt/shared"]
 ```
 
 `storage.mounts` names storage sources. Existing `read`, `write`, `exec`, file-specific grants, `deny`, and `deny_write` rules remain authoritative. Linux’s existing rule limitations still apply.
+
+The name `storage.mounts` remains provisional. Box CLI already uses `[storage]` for persistent directories, while this proposal handles filesystem mount events. Named mount entries following the pattern of `[egress.<name>]`, with a `sources` or `directories` list, remain interface options.
+
+The current proposal declares multiple sources once per box. As Section 8.2 explains, each source can supply separate views for the agent, tools, and local MCP servers, governed by each recipient's filesystem rules. Whether source selection should also be part of those per-recipient configurations remains open.
 
 A nonempty `storage.mounts` configuration requires the `linux-storage-mounts` experimental flag and Linux; otherwise Box rejects startup. Box CLI profiles expose the same Linux-only opt-in. The feature remains experimental until regression and security testing qualify the supported environments.
 
@@ -109,7 +113,7 @@ The Box workload and Runtime continue while storage is pending. Early file opera
 
 ## 7. Limitations
 
-1. Linux comes first to unblock Runtime. The macOS design remains pending.
+1. Linux is the only platform explored so far. We will focus on macOS after AgentCore Runtime is unblocked.
 2. Paths needed for permission exceptions must exist when Box prepares the mount. A missing deny target fails preparation. Files created later inside admitted directories remain subject to their existing protections.
 3. This first version supports the initial arrival of each configured storage mount. Box trusts the external storage manager, such as AgentCore Runtime, to mount the intended filesystem. Replacing or removing an admitted mount, or adding new mounts beneath it, remains follow-up work.
 4. **P1 (deferred hardening): concurrent directory changes.** The first version assumes that paths requiring different permissions remain stable while Box checks and prepares storage. Another application or a writable alias can rename or replace those directories during preparation. Box could then apply restrictions to a different directory from the one it checked. Hardening against this edge case remains follow-up work; trusting the storage manager does not prevent other writers from changing directories.
@@ -158,10 +162,14 @@ Both must permit the operation. Box cannot make a read-only source writable or g
 
 ### 8.8 What remains experimental or requires further hardening?
 
-The feature requires an explicit Linux opt-in; macOS remains pending. The initial version supports mount arrival. Mount replacement, removal, and later nested mounts remain follow-up work. Concurrent directory renames or replacements during preparation are a documented P1 hardening item.
+The feature remains experimental because testing is ongoing and we do not yet have sufficient confidence in its behavior and containment. Linux is the only platform explored so far, so the current implementation proposal requires a Linux opt-in. We will focus on macOS after AgentCore Runtime is unblocked. The initial version supports mount arrival. Mount replacement, removal, and later nested mounts remain follow-up work. Concurrent directory renames or replacements during preparation are a documented P1 hardening item.
 
 ## 9. References
 
 [Detailed design and diagrams](https://chorus.aws.dev/doc/Lfn1GdTjHZI6)
 
 [Runtime filesystem configurations](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-filesystem-configurations.html)
+
+## 10. Feedback
+
+Following feedback from siwabhi, AgentCore Runtime Principal Engineer, we clarified that ongoing testing and incomplete confidence in containment keep the feature experimental. Linux is the only platform explored so far; macOS work follows after Runtime is unblocked. Naming remains open: Box CLI already uses `[storage]`, while named mount entries with `sources` or `directories` could describe this feature and follow the named egress configuration pattern. One box can observe multiple sources and prepare separate views for its agent, tools, and local MCP servers, with access controlled by each recipient's filesystem rules. Source declarations are currently box-wide; moving source selection into per-recipient filesystem configuration remains an interface option.
