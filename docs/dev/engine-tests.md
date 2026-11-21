@@ -47,7 +47,9 @@ git in a box, so it fails every git test. The GitHub macOS runner has Homebrew g
 The four `*_downloads_into_profile_storage_and_lists_tools` tests run real `npx`, `uvx`, `bunx`,
 and `pnpx` servers. Install Node.js with npm, Python 3, uv, Bun, and pnpm, and put their programs
 on `PATH`. Missing launchers fail these tests. CI installs the same prerequisites before the
-engine suite. The tests download pinned MCP packages from the public npm registry and PyPI, so
+Linux and macOS engine suites. The Linux job installs pnpm, Bun, and uv in its temporary
+launcher directory and exports their executable directories through `GITHUB_PATH`.
+The tests download pinned MCP packages from the public npm registry and PyPI, so
 registry access is required.
 
 `an_absolute_mcp_command_imports_its_filename_and_starts_the_selected_server` selects an
@@ -120,9 +122,10 @@ cargo test --locked -p strands-box-cli --all-features --test engine \
   pnpx_downloads_into_profile_storage_and_lists_tools -- --exact --nocapture
 ```
 
-These are finite version checks. CI pins Node, npm, pnpm, and Bun; uv and Python come from
-Homebrew without version pins. Passing CI does not establish compatibility with untested
-launcher or runtime releases.
+These are finite version checks. The macOS CI job pins Node, npm, pnpm, and Bun; uv and
+Python come from Homebrew without version pins. The Linux job pins pnpm 10.34.9, Bun 1.4.4,
+and uv 0.13.7; Node, npm, and Python come from the runner. Passing CI does not establish
+compatibility with untested launcher or runtime releases.
 
 The `npx` test fails with npm 11.19.1 on Node 22.22.2 and Node 24.22.1 on macOS. Its lock
 refresh calls `utimensat`, which Box Core's write policy refuses. The same policy permits
@@ -211,8 +214,11 @@ export BOX_STORAGE_TEST_FUSE=/tmp/boxy-storage-fixture
 export BOX_STORAGE_TEST_PROBE="$CARGO_TARGET_DIR/debug/box-storage-probe"
 ```
 
-Run the Core tests, then the CLI tests. `--include-ignored` runs each suite's six FUSE cases
-and its ordinary control that distinguishes a reaped child from a live child. Run them serially:
+Run the Core tests, then the CLI tests. `--include-ignored` runs ten Core FUSE cases,
+six CLI FUSE cases, and each suite's ordinary control that distinguishes a reaped child from
+a live child. Core also starts pending storage directly as the host user, without the FUSE fixture's
+outer user namespace. That test requires a non-root user and reports a skip when run as root.
+Run the suites serially:
 
 ```sh
 cargo test --locked -p strands-box --all-features --test runtime_storage_mounts \
@@ -225,6 +231,12 @@ Each FUSE test creates its own user, mount, process, and network namespaces. The
 attach storage only after observing the original process's pending marker. The three-role case checks an
 agent, a program-resolved tool, and a local Model Context Protocol (MCP) server. The failure case
 requires all observed Box-owned processes to exit when a required denial cannot be applied.
+
+Core also tests the first storage read without retries in the agent, three sequential tool launches,
+and a local server. One source is mounted before Box starts; a second source stays absent. Another case mounts
+storage after the agent starts and before it launches its tools and server.
+The three-role test checks that concurrent recipients share one acquisition worker per distinct
+source while retaining their separate filesystem permissions.
 
 The file case checks exact-file read and write grants, a hidden subtree, a canonical-directory write
 denial, and allowed versus denied execution. A separate test requires Core to reject a mutable
