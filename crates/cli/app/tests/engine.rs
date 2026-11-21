@@ -566,13 +566,8 @@ done"#,
     assert!(!text.contains("planted"), "{text}");
 }
 
-/// Run `box run probe <flags> -- -c <script>` at a 40x200 pseudo-terminal with the banner on. Wait
-/// for each of `needles` in order on the screen, then send a line so the script can finish. Return
-/// the screen as it was when the last needle appeared.
-fn banner_run(scene: &Scene, flags: &[&str], script: &str, needles: &[&str]) -> String {
-    use std::io::{Read as _, Write as _};
+fn spawn_at_terminal(mut command: Command) -> (Child, std::fs::File) {
     use std::os::unix::process::CommandExt as _;
-    use std::sync::mpsc;
 
     let size = nix::pty::Winsize {
         ws_row: 40,
@@ -581,10 +576,7 @@ fn banner_run(scene: &Scene, flags: &[&str], script: &str, needles: &[&str]) -> 
         ws_ypixel: 0,
     };
     let pair = nix::pty::openpty(Some(&size), None).unwrap();
-    let mut input = std::fs::File::from(pair.master);
-    let mut output = input.try_clone().unwrap();
     let slave = std::fs::File::from(pair.slave);
-    let mut command = scene.command_with(&scene.workspace(), "probe", flags, &["-c", script]);
     command
         .env("TERM", "xterm-256color")
         .stdin(slave.try_clone().unwrap())
@@ -599,8 +591,19 @@ fn banner_run(scene: &Scene, flags: &[&str], script: &str, needles: &[&str]) -> 
             Ok(())
         });
     }
-    let child = command.spawn().unwrap();
-    drop(command);
+    (command.spawn().unwrap(), std::fs::File::from(pair.master))
+}
+
+/// Run `box run probe <flags> -- -c <script>` at a 40x200 pseudo-terminal with the banner on. Wait
+/// for each of `needles` in order on the screen, then send a line so the script can finish. Return
+/// the screen as it was when the last needle appeared.
+fn banner_run(scene: &Scene, flags: &[&str], script: &str, needles: &[&str]) -> String {
+    use std::io::{Read as _, Write as _};
+    use std::sync::mpsc;
+
+    let command = scene.command_with(&scene.workspace(), "probe", flags, &["-c", script]);
+    let (child, mut input) = spawn_at_terminal(command);
+    let mut output = input.try_clone().unwrap();
     let (send, received) = mpsc::channel();
     std::thread::spawn(move || {
         let mut bytes = [0; 8192];
@@ -3886,7 +3889,6 @@ fn a_new_run_refused_for_path_length_leaves_no_run_folder() {
 #[cfg(target_os = "macos")]
 fn a_startup_failure_at_a_terminal_keeps_its_log_and_reuse_id() {
     use std::io::Read as _;
-    use std::os::unix::process::CommandExt as _;
 
     let scene = Scene::new();
     let long = long_box_home(&scene, 66);
@@ -3897,31 +3899,7 @@ fn a_startup_failure_at_a_terminal_keeps_its_log_and_reuse_id() {
         &["-c", "true"],
     );
     command.env("BOX_HOME", &long);
-    let size = nix::pty::Winsize {
-        ws_row: 40,
-        ws_col: 200,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    let pair = nix::pty::openpty(Some(&size), None).unwrap();
-    let mut output = std::fs::File::from(pair.master);
-    let terminal = std::fs::File::from(pair.slave);
-    command
-        .env("TERM", "xterm-256color")
-        .stdin(terminal.try_clone().unwrap())
-        .stdout(terminal.try_clone().unwrap())
-        .stderr(terminal);
-    // SAFETY: only async-signal-safe terminal setup runs between fork and exec.
-    unsafe {
-        command.pre_exec(|| {
-            if nix::libc::setsid() < 0 || nix::libc::ioctl(0, nix::libc::TIOCSCTTY as _, 0) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let child = command.spawn().unwrap();
-    drop(command);
+    let (child, mut output) = spawn_at_terminal(command);
     let (sent, received) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut text = Vec::new();

@@ -58,8 +58,12 @@ box run [<profile>] [--box-id <box ID>] [--banner | --no-banner] [-- <agent argu
 | `--banner` | Show the banner, even when the profile or `~/.strands/box/config.toml` turns it off. |
 | `-- <agent arguments>` | Pass the rest of the line to the agent. `box run claude -- --continue` continues Claude Code's last conversation. |
 
-When the box starts, `box` prints the run's box ID. Keep it to run in the same box again or to see
-what the box denied:
+Once the terminal session starts, with or without the banner, `box` shows recent Box errors on exit,
+then the [log path](files.md#profile-storage-and-runs) and a command to reuse the box.
+If saving fails, `box` reports the failure and keeps the agent's exit status.
+
+If input or output is redirected, including stderr, or `TERM=dumb`, `box` prints the box ID and
+these commands at startup:
 
 ```text
 box: running profile claude with box ID b-5b8e3d70c92f14ab (records: /Users/you/.strands/box/r/b-5b8e3d70c92f14ab/records.jsonl)
@@ -70,11 +74,6 @@ box: policy history: box runs history b-5b8e3d70c92f14ab
 The `box:` lines before these are notes about something the run leaves out, such as
 `box: skipped tool pnpm (@box/pnpm): pnpm is not on PATH`. [`box profile show`](#box-profile-show)
 prints the same notes, with `!`, before you run.
-
-At a terminal, `box` prints reuse instructions after the agent exits, with or without the
-banner, and points to the saved [Box log](files.md#profile-storage-and-runs). It also shows
-a short preview of Box errors. Warnings and the rest of each captured message stay in the file.
-If the log cannot be saved, `box` says so and keeps the run's exit status.
 
 ### The activity banner
 
@@ -122,8 +121,8 @@ The file can list a [plugin](plugins.md), but it can't declare a secret source o
 ### Run in the same box again
 
 Each run gets a new box, so a rule such as "at most 50 model calls an hour" starts counting from
-zero. To keep counting, pass the box ID of an earlier run of the same profile, from the startup
-lines or [`box runs list`](#box-runs-list). A box ID doesn't name its profile, so match the
+zero. To keep counting, pass the box ID of an earlier run of the same profile, from the run's
+output or [`box runs list`](#box-runs-list). A box ID doesn't name its profile, so match the
 `PROFILE` column before you copy the `BOX ID`:
 
 ```sh

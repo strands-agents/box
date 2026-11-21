@@ -1556,9 +1556,8 @@ process can then read FSEvents, which discloses names of paths it cannot read
 because the disclosure reaches past the process's own grants.
 
 **Cost.** A pack that sets the key discloses names for its program in every profile that names
-the pack, and the profile does not say so. Box Core's startup line does, but a run in a terminal
-shows it only when the run fails, as for `file-attributes`. Otherwise the operator sees the key
-only in `box profile show --full`.
+the pack, and the profile does not say so. The operator can see the key in `box profile show --full`
+or read Box Core's startup line in the terminal run's [log](../../cli/files.md#profile-storage-and-runs).
 
 <a id="only-a-profile-turns-off-a-tools-network-containment"></a>
 ### Only a profile turns off a tool's network containment

@@ -1,6 +1,5 @@
 use std::fs::{File, Permissions};
 use std::io::{self, Write};
-use std::os::fd::AsFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use nix::libc;
@@ -23,7 +22,7 @@ pub(super) struct Log {
 impl Log {
     pub(super) fn open(launch: &Launch, input: File) -> Self {
         let output = (|| {
-            let directory = launch._claim.0.as_fd().try_clone_to_owned()?;
+            let directory = launch._claim.0.try_clone()?.into();
             let file = File::from(open_at(
                 &directory,
                 FILE,
@@ -66,28 +65,28 @@ impl Log {
             self.line
                 .extend_from_slice(&part[..part.len().min(remaining)]);
             if part.ends_with(b"\n") {
-                self.finish_line();
+                self.collect_error();
             }
         }
     }
 
-    fn finish_line(&mut self) {
-        if [
-            "box: error:",
-            "strands-box: error:",
-            "strands-box: shutdown failed:",
-            "policy: history flush shutdown failed:",
-            "policy: periodic history flush failed:",
-        ]
-        .iter()
-        .any(|prefix| self.line.starts_with(prefix.as_bytes()))
+    pub(super) fn message(&mut self, message: &str) {
+        // A relay message can arrive between two reads of the same Core line.
+        let partial = std::mem::take(&mut self.line);
+        self.push(message.as_bytes());
+        self.line = partial;
+    }
+
+    fn collect_error(&mut self) {
+        let line = self.line.strip_suffix(b"\n").unwrap_or(&self.line);
+        let text = String::from_utf8_lossy(line);
+        if let Some((_, message)) = text.split_once(": ")
+            && message.starts_with("error:")
         {
-            let line = self.line.strip_suffix(b"\n").unwrap_or(&self.line);
-            let mut text = escaped(line);
+            let text = super::super::banner::clean(&text);
             let end = text.floor_char_boundary(PREVIEW_BYTES - 1);
             self.truncated |= end < text.len();
-            text.truncate(end);
-            self.tail.push_str(&text);
+            self.tail.push_str(&text[..end]);
             self.tail.push('\n');
             while self.tail.len() > PREVIEW_BYTES || self.tail.lines().count() > PREVIEW_LINES {
                 let end = self.tail.find('\n').unwrap() + 1;
@@ -99,7 +98,7 @@ impl Log {
     }
 
     pub(super) fn preview(&mut self) -> String {
-        self.finish_line();
+        self.collect_error();
         if self.tail.is_empty() {
             return String::new();
         }
@@ -117,54 +116,19 @@ impl Log {
 
     pub(super) fn report(mut self, launch: &Launch) -> String {
         let path = launch.config.with_file_name(FILE);
-        let path = escaped(path.as_os_str().as_encoded_bytes());
+        let path = match path.to_str() {
+            Some(text) if super::super::banner::clean(text) == text => text.to_owned(),
+            _ => format!("{path:?}"),
+        };
         let saved = match &self.output {
             Ok(_) => format!("box: full log: {path}\n"),
             Err(error) => format!(
                 "box: could not write log {path}: {}\n",
-                escaped(error.to_string().as_bytes()),
+                error.to_string().escape_debug(),
             ),
         };
-        let reuse = if launch.policy.argument.chars().any(char::is_control) {
-            format!(
-                "repeat your command with --box-id {} before any --",
-                launch.name,
-            )
-        } else {
-            format!(
-                "box run {} --box-id {}",
-                shell_argument(&launch.policy.argument),
-                launch.name,
-            )
-        };
-        format!(
-            "\n{}{saved}\nbox: to reuse this box run: {reuse}\n\n",
-            self.preview(),
-        )
-    }
-}
-
-fn escaped(bytes: &[u8]) -> String {
-    let mut text = String::new();
-    for character in String::from_utf8_lossy(bytes).chars() {
-        if character.is_control() {
-            text.extend(character.escape_default());
-        } else {
-            text.push(character);
-        }
-    }
-    text
-}
-
-fn shell_argument(argument: &str) -> String {
-    if !argument.is_empty()
-        && argument
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"_./:-".contains(&byte))
-    {
-        argument.to_string()
-    } else {
-        format!("'{}'", argument.replace('\'', "'\\''"))
+        let reuse = launch.reuse_instruction();
+        format!("\n{}{saved}\n{reuse}\n\n", self.preview())
     }
 }
 
@@ -176,7 +140,7 @@ mod tests {
     fn the_file_keeps_the_flood_and_the_preview_only_keeps_bounded_errors() {
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut log = Log::new(File::open("/dev/null").unwrap(), file.reopen());
-        let mut bytes = b"policy: history flush shutdown failed: first failure\n".to_vec();
+        let mut bytes = b"loader: error: first failure\n".to_vec();
         bytes.extend_from_slice(&b"policy: warn: error while evaluating policy\n".repeat(2000));
         bytes.extend_from_slice(b"box: error: final failure with \x1b[2J\x00input");
         for part in bytes.chunks(7) {
@@ -188,15 +152,19 @@ mod tests {
             preview,
             concat!(
                 "box: recent log output\n",
-                "  policy: history flush shutdown failed: first failure\n",
+                "  loader: error: first failure\n",
                 "  box: error: final failure with \\u{1b}[2J\\u{0}input\n",
             ),
         );
 
-        log.push(format!("policy: warn: {}", "x".repeat(PREVIEW_BYTES * 2)).as_bytes());
+        log.push(format!("strands-box: warning: {}", "x".repeat(PREVIEW_BYTES * 2)).as_bytes());
         assert!(log.line.len() <= PREVIEW_BYTES + 1);
+        log.message("box: error: policy update failed: invalid edit\n");
         log.push(b"strands-box: error: still part of the warning\n");
-        assert_eq!(log.preview(), preview);
+        assert_eq!(
+            log.preview(),
+            format!("{preview}  box: error: policy update failed: invalid edit\n")
+        );
 
         for number in 0..20 {
             log.push(format!("box: error: failure {number}\n").as_bytes());
@@ -208,25 +176,26 @@ mod tests {
         log.push(format!("box: error: {}", "éé\0".repeat(PREVIEW_BYTES)).as_bytes());
         let preview = log.preview();
         assert!(preview.contains("  box: error: éé\\u{0}"));
-        assert!(preview.len() < PREVIEW_BYTES + 100);
-        assert!(
-            preview
-                .lines()
-                .skip(1)
-                .all(|line| line.starts_with("  box: error: "))
-        );
+        let payload: usize = preview
+            .lines()
+            .skip(1)
+            .map(|line| line.strip_prefix("  ").unwrap().len() + 1)
+            .sum();
+        assert!(payload <= PREVIEW_BYTES);
     }
 
     #[test]
     fn logs_append_privately_and_keep_the_preview_when_saving_fails() {
         let host = crate::FakeHost::new();
         let launcher = host.launcher();
+        let profile = host.home().join("quoted 'profile/profile.toml");
         crate::fixtures::write(
-            &launcher.profiles().root().join("test/profile.toml"),
-            "[agent]\ncommand = [\"/usr/bin/true\"]\n",
+            &profile,
+            "[profile]\nname = \"test\"\n[agent]\ncommand = [\"/usr/bin/true\"]\n",
         );
-        let mut launch = launcher.prepare("test", &host.project(), None).unwrap();
-        launch.policy.argument = "/quoted 'profile/profile.toml".into();
+        let mut launch = launcher
+            .prepare(profile.to_str().unwrap(), &host.project(), None)
+            .unwrap();
         let path = launch.config.with_file_name(FILE);
         std::fs::write(&path, "first run\n").unwrap();
         std::fs::set_permissions(&path, Permissions::from_mode(0o644)).unwrap();
@@ -247,7 +216,7 @@ mod tests {
         assert!(parsed.status.success());
         assert_eq!(
             String::from_utf8(parsed.stdout).unwrap(),
-            format!("{}\n--box-id\n{}\n", launch.policy.argument, launch.name),
+            format!("{}\n--box-id\n{}\n", profile.display(), launch.name),
         );
 
         let target = host.home().join("untouched");
@@ -266,12 +235,19 @@ mod tests {
         }
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
 
-        launch.policy.argument = "/control\u{9b}2J/profile.toml".into();
-        let console = Log::open(&launch, File::open("/dev/null").unwrap()).report(&launch);
-        assert!(!console.contains('\u{9b}'));
-        assert!(console.ends_with(&format!(
-            "\n\nbox: to reuse this box run: repeat your command with --box-id {} before any --\n\n",
-            launch.name,
-        )));
+        for argument in [
+            "/control\u{9b}2J",
+            "/invisible\u{202e}name",
+            "/two\\\\slashes",
+        ] {
+            launch.policy.argument = argument.into();
+            assert_eq!(
+                launch.reuse_instruction(),
+                format!(
+                    "box: to reuse this box run: repeat your command with --box-id {} before any --",
+                    launch.name
+                ),
+            );
+        }
     }
 }
