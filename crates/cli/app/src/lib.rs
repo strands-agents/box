@@ -40,7 +40,7 @@ mod telemetry;
 pub mod test_support;
 use strands_box_cli_profile::tool;
 
-/// The version of `box`, which a pack's `engine` floor names.
+/// The version of `box`, which a file's `[requires] box` names.
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use create::{CreatedProfile, NewProfile, Resolution};

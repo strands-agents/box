@@ -212,7 +212,7 @@ parses a profile and its packs, resolves them against a host, and compiles `box.
 `policy.dw`. `crates/cli/app` owns the operator: the commands, `box run` and its terminal, starters,
 `create`, `detect`, Box Core's policy check, and the call into Box Core. The profile crate names
 no CLI module, and the CLI passes in what only it knows, such as its version for a pack's
-`engine` floor (`Lookup::version`). This follows Box Core, whose `strands-box-policy` owns
+`[requires] box` floor (`Lookup::version`). This follows Box Core, whose `strands-box-policy` owns
 Dogwood end to end. Both crates link `strands-box`, because a tool grammar and a read grant are
 Box Core's rules, and the profile crate asks Box Core instead of copying them. The modules moved
 whole, so git follows each file to its new path, and the CLI imports each one it names at its old

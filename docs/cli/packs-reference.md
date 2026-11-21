@@ -19,7 +19,8 @@ of a pack is in a table, and the file starts with `[pack]`.
 
 | Key | Kinds | What it holds |
 | --- | --- | --- |
-| `[pack]` | Every pack. Required, and first. | The [header](#pack): name, version, kind, the packs it extends or includes, and the oldest `box` that reads it. |
+| `[pack]` | Every pack. Required, and first. | The [header](#pack): name, version, kind, and the packs it extends or includes. |
+| `[requires]` | Every pack. | What the pack needs of the `box` that reads it, such as its oldest version. See [`[requires]`](profiles-reference.md#requires). |
 | `[inputs.<name>]` | Every pack. | The [inputs](#inputs) the pack declares. |
 | `[run]` | Agent and tool packs. | How the program starts: an [agent pack's](#an-agent-packs-run) or a [tool pack's](#tool-packs) keys. |
 | `[env]`, `[filesystem]` | Agent and tool packs. | The program's variables and the files it can reach, as in [The `[agent]` table](profiles-reference.md#the-agent-table). |
@@ -76,7 +77,6 @@ a profile uses and each option they read, and `--full` shows everything they add
 | `kind` | Required. `"agent"`, `"tool"`, or `"support"`, as [What a pack holds](#what-a-pack-holds) states. [Pack kinds](packs.md#what-a-pack-is) says what each kind is for. |
 | `extend` | The packs this one builds on, merged before it. An agent pack extends agent and support packs, a tool pack extends tool and support packs, and a support pack extends only support packs. |
 | `include` | Tool packs to load as tools of their own beside this one, as a profile's `packs` does. Nothing of them is merged into this pack. A support pack includes a tool pack to add to its tool, such as more `hosts` in `[tool.npm]`. |
-| `engine` | The oldest version of `box` that reads this pack, as `>=X.Y.Z`. An older `box` refuses the pack. A preview build of `box`, such as `0.3.0-preview.1` or `0.3.0-linux-preview.1`, counts as its release, `0.3.0`. |
 
 The header holds no other key, and `box` refuses a pack that has no header.
 

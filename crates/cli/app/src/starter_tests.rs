@@ -967,8 +967,12 @@ fn a_question_default_is_used_only_for_a_new_unanswered_profile() {
     assert_eq!(answered, local);
     assert!(output.ends_with("3. This machine\n> [3] "), "{output}");
 
-    let saved = crate::Profile::parse(r#"packs = ["@box/agent"]"#, Path::new("profile.toml"))
-        .expect("a saved profile without a provider pack");
+    let saved = crate::Profile::parse(
+        r#"packs = ["@box/agent"]"#,
+        Path::new("profile.toml"),
+        crate::VERSION,
+    )
+    .expect("a saved profile without a provider pack");
     let (answered, output) = fixture
         .answer(Call {
             saved: Some(&saved),
@@ -2208,7 +2212,8 @@ fn a_place_that_reads_a_variable_that_a_saved_profiles_source_passes_stops_the_s
         std::fs::create_dir_all(&folder).expect("a plugin folder");
         std::fs::write(folder.join("plugin.toml"), plugin).expect("a plugin");
         fixture.agent(&DETECTING.replace("USE_CLOUD", variable));
-        let profile = crate::Profile::parse(saved, Path::new("profile.toml")).expect("a profile");
+        let profile = crate::Profile::parse(saved, Path::new("profile.toml"), crate::VERSION)
+            .expect("a profile");
         let answered = fixture.answer(Call {
             saved: Some(&profile),
             ..Call::default()
@@ -2334,6 +2339,7 @@ fn a_file_place_in_a_path_that_a_secret_source_protects_is_skipped() {
                  reads = [{reads:?}]\n"
             ),
             Path::new("profile.toml"),
+            crate::VERSION,
         )
         .expect("a profile");
         let (answered, lines) = fixture

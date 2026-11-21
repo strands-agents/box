@@ -48,7 +48,7 @@ A plugin is a `plugin.toml` in a folder of its own. Every key is in a table, the
 
 ## `[plugin]`
 
-`[plugin]` comes first, with the keys of [`[pack]`](packs-reference.md#pack): `name`, `version`, and the optional `engine`.
+`[plugin]` comes first, with the keys of [`[pack]`](packs-reference.md#pack): `name` and `version`. A plugin can also hold [`[requires]`](profiles-reference.md#requires), as a pack can.
 
 | Key | What it holds |
 | --- | --- |

@@ -64,8 +64,8 @@ Box Core checks what a source may hold, such as the form of a scheme, the `{ref}
 of a path, when the box starts, as it does for a source of the profile, because `box` keeps no
 copy of a Box Core rule ([decisions.md](decisions.md#box-runs-a-pinned-box-core-release)):
 
-- `[plugin]` comes first. It holds the keys of `[pack]`: `name`, `version`, `kind`, and the
-  optional `engine`, and `scheme`. Each shared key means what it means in `[pack]`, and
+- `[plugin]` comes first. It holds the keys of `[pack]`: `name`, `version`, and `kind`, and
+  `scheme`. A plugin can hold `[requires]`, which `lang::take_requires` checks as for a pack. Each shared key means what it means in `[pack]`, and
   `lang::check_header` checks both headers. `kind = "secret-source"` is the one kind. `scheme` is a
   string that is not empty.
 - The file holds `[plugin]`, `[inputs]`, `[run]`, `[env]`, and `[protect]`. A
