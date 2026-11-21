@@ -14,8 +14,8 @@ import unittest
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/deploy-box-artifact.yml"
 
 
-def workflow_input_default(name):
-    lines = WORKFLOW.read_text().splitlines()
+def workflow_input_default(name, path=WORKFLOW):
+    lines = path.read_text().splitlines()
     start = lines.index(f"      {name}:") + 1
     for line in lines[start:]:
         if not line.startswith("        "):
@@ -78,14 +78,15 @@ class ReleaseSourceTests(unittest.TestCase):
         ).strip()
 
     def scan_source(self, dry_run, source="", dispatch=None, version="0.1.1",
-                    publish_linux_x86="true", native_filesystem_policy="false"):
+                    publish_linux_x86="true", native_filesystem_policy=None):
         output = self.root / "output"
         output.write_text("")
         environment = {
             **os.environ,
             "NEW_VERSION": version,
             "PUBLISH_LINUX_X86": publish_linux_x86,
-            "NATIVE_FILESYSTEM_POLICY": native_filesystem_policy,
+            "NATIVE_FILESYSTEM_POLICY": (native_filesystem_policy if native_filesystem_policy is not None
+                                         else workflow_input_default("native_filesystem_policy")),
             "SHA_INPUT": source,
             "DRY_RUN": dry_run,
             "DISPATCH_SHA": dispatch or self.candidate,
@@ -193,9 +194,9 @@ class ReleaseSourceTests(unittest.TestCase):
                     self.assertIn("is not above", result.stdout)
                     self.assertEqual(output, "")
 
-    def test_native_policy_is_a_dry_run_choice(self):
+    def test_native_policy_can_be_built_for_dry_runs_and_publication(self):
         for dry_run, native, success in [("true", "true", True), ("true", "false", True),
-                                         ("false", "true", False), ("true", "yes", False)]:
+                                         ("false", "true", True), ("false", "false", True), ("true", "yes", False)]:
             with self.subTest(dry_run=dry_run, native=native):
                 result, output = self.scan_source(
                     dry_run, self.main if dry_run == "false" else "", native_filesystem_policy=native)

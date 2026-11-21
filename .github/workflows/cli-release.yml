@@ -35,9 +35,9 @@ on:
         default: false
         type: boolean
       native_filesystem_policy:
-        description: 'Compile native policy into the ARM64 packages (experimental dry run)'
+        description: 'Include native policy support in ARM64 packages; profiles opt in'
         required: false
-        default: false
+        default: true
         type: boolean
       sign:
         description: 'Sign, notarize, and check the macOS package'
