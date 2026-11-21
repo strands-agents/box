@@ -18,6 +18,8 @@ mod memory;
 mod network;
 mod program;
 mod resolve;
+#[cfg(target_os = "linux")]
+mod storage;
 
 pub use effect::{
     EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, EffectResult, FsOperation,
@@ -30,3 +32,6 @@ pub use network::Network;
 pub use program::{
     HostPrograms, HostSpawn, HostSpawnFuture, HostSpawnOutcome, HostSpawner, implements_program,
 };
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub use storage::{StoragePath, StorageView};

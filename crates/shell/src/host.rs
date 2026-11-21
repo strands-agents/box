@@ -29,11 +29,23 @@ pub(crate) struct Mount {
 
 /// Every host folder the Shell serves.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Mounts(Vec<Mount>);
+pub(crate) struct Mounts {
+    ordinary: Vec<Mount>,
+    #[cfg(target_os = "linux")]
+    storage: Option<Arc<crate::StorageView>>,
+}
 
 /// The object a resolved host path named when it was resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum HostIdentity {
+    #[cfg(target_os = "linux")]
+    Storage(crate::StoragePath),
+    #[cfg(target_os = "linux")]
+    StorageUnavailable {
+        path: PathBuf,
+        kind: io::ErrorKind,
+        reason: String,
+    },
     Present {
         path: PathBuf,
         parent: PathBuf,
@@ -66,37 +78,87 @@ pub(super) fn stale_resolution() -> io::Error {
 impl Mounts {
     /// Serve each `(source, visible)` pair, in order.
     pub(crate) fn new(binds: &[(&str, &str)]) -> Self {
-        Self(
-            binds
+        Self {
+            ordinary: binds
                 .iter()
                 .map(|(source, visible)| Mount {
                     visible: strands_shell::vfs::normalize(visible),
                     source: PathBuf::from(source),
                 })
                 .collect(),
+            #[cfg(target_os = "linux")]
+            storage: None,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_storage(mut self, storage: Arc<crate::StorageView>) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn storage_path(
+        &self,
+        path: &str,
+        follow: Follow,
+    ) -> Option<io::Result<crate::StoragePath>> {
+        let storage = self.storage.as_ref()?;
+        if !storage.contains(Path::new(path)) {
+            return None;
+        }
+        Some(
+            storage
+                .resolve(Path::new(path), follow == Follow::Yes)
+                .and_then(|held| {
+                    if storage.contains(held.logical()) {
+                        Ok(held)
+                    } else {
+                        Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "storage symlink leaves the declared protected destinations",
+                        ))
+                    }
+                }),
         )
     }
 
     /// Each `(source, visible)` pair this table serves.
     pub(crate) fn binds(&self) -> impl Iterator<Item = (&Path, &str)> {
-        self.0
+        self.ordinary
             .iter()
             .map(|mount| (mount.source.as_path(), mount.visible.as_str()))
     }
 
     /// Whether `abs` is itself a mount point.
     pub(super) fn is_mount_point(&self, abs: &str) -> bool {
-        self.0.iter().any(|mount| mount.visible == abs)
+        #[cfg(target_os = "linux")]
+        if self
+            .storage
+            .as_ref()
+            .is_some_and(|view| view.destinations().any(|(path, _)| path == Path::new(abs)))
+        {
+            return true;
+        }
+        self.ordinary.iter().any(|mount| mount.visible == abs)
     }
 
     /// Whether `abs` is at or below a mount point.
     pub(super) fn serves(&self, abs: &str) -> bool {
+        #[cfg(target_os = "linux")]
+        if self
+            .storage
+            .as_ref()
+            .is_some_and(|view| view.contains(Path::new(abs)))
+        {
+            return true;
+        }
         self.below(abs).is_some()
     }
 
     /// The mount `abs` lies at or below, and the components below its mount point.
     fn below<'a>(&self, abs: &'a str) -> Option<(&Mount, Vec<&'a str>)> {
-        self.0
+        self.ordinary
             .iter()
             .filter_map(|mount| {
                 let rest = if mount.visible == "/" {
@@ -116,6 +178,10 @@ impl Mounts {
     /// The host path and canonical mount root `abs` names, with every symlink followed, or `None`
     /// when it names nothing this table serves.
     pub(super) fn resolve_host(&self, abs: &str) -> Option<(PathBuf, PathBuf)> {
+        #[cfg(target_os = "linux")]
+        if self.storage_path(abs, Follow::Yes).is_some() {
+            return None;
+        }
         let (mount, rest) = self.below(abs)?;
         let base = std::fs::canonicalize(&mount.source).unwrap_or_else(|_| mount.source.clone());
         if rest.is_empty() {
@@ -140,6 +206,10 @@ impl Mounts {
 
     /// [`Self::resolve_host`] per `follow`; a mount point always follows.
     pub(super) fn resolve_host_for(&self, abs: &str, follow: Follow) -> Option<(PathBuf, PathBuf)> {
+        #[cfg(target_os = "linux")]
+        if self.storage_path(abs, follow).is_some() {
+            return None;
+        }
         if follow == Follow::Yes || self.is_mount_point(abs) {
             return self.resolve_host(abs);
         }
@@ -165,6 +235,10 @@ impl Mounts {
     /// `None` keeps the caller's spelling: a mount point, a missing parent, or an identity outside
     /// the mount.
     pub(super) fn canonical_spelling(&self, abs: &str, follow: Follow) -> Option<String> {
+        #[cfg(target_os = "linux")]
+        if self.storage_path(abs, follow).is_some() {
+            return None;
+        }
         if self.is_mount_point(abs) {
             return None;
         }
@@ -188,6 +262,17 @@ impl Mounts {
 
     /// Pin the object `abs` names, per `follow`.
     pub(super) fn identity(&self, abs: &str, follow: Follow) -> Option<HostIdentity> {
+        #[cfg(target_os = "linux")]
+        if let Some(held) = self.storage_path(abs, follow) {
+            return Some(match held {
+                Ok(held) => HostIdentity::Storage(held),
+                Err(error) => HostIdentity::StorageUnavailable {
+                    path: PathBuf::from(abs),
+                    kind: error.kind(),
+                    reason: error.to_string(),
+                },
+            });
+        }
         let (path, base) = self.resolve_host_for(abs, follow)?;
         let parent = path.parent()?.canonicalize().ok()?;
         let mount_point = self.is_mount_point(abs);
@@ -308,6 +393,13 @@ fn open_beneath(root: &Path, directory: &Path) -> io::Result<File> {
 /// The pinned parent of `host_path` and its leaf name, or the stale refusal.
 fn opened_parent(host_path: &Path, expected: &HostIdentity) -> io::Result<(File, CString)> {
     let (identity_path, parent, root, parent_device, parent_inode) = match expected {
+        #[cfg(target_os = "linux")]
+        HostIdentity::Storage(held) => {
+            if held.logical() != host_path {
+                return Err(stale_resolution());
+            }
+            return Ok((held.parent().try_clone()?, held.leaf().to_owned()));
+        }
         HostIdentity::Present {
             path,
             parent,
@@ -323,6 +415,10 @@ fn opened_parent(host_path: &Path, expected: &HostIdentity) -> io::Result<(File,
             parent_device,
             parent_inode,
         } => (path, parent, root, *parent_device, *parent_inode),
+        #[cfg(target_os = "linux")]
+        HostIdentity::StorageUnavailable { kind, reason, .. } => {
+            return Err(io::Error::new(*kind, reason.clone()));
+        }
         HostIdentity::Unavailable { .. } => return Err(stale_resolution()),
     };
     if identity_path != host_path {
@@ -352,6 +448,23 @@ fn open_file(
     expected: Option<&HostIdentity>,
 ) -> io::Result<File> {
     let expected = expected.ok_or_else(stale_resolution)?;
+    #[cfg(target_os = "linux")]
+    if let HostIdentity::Storage(held) = expected {
+        let mut open_flags = if flags.write && (flags.read || flags.append) {
+            libc::O_RDWR
+        } else if flags.write {
+            libc::O_WRONLY
+        } else {
+            libc::O_RDONLY
+        };
+        if flags.create {
+            open_flags |= libc::O_CREAT;
+        }
+        if flags.truncate {
+            open_flags |= libc::O_TRUNC;
+        }
+        return held.open(open_flags, 0o666);
+    }
     let (parent, leaf) = opened_parent(host_path, expected)?;
     let mut open_flags = if flags.write && (flags.read || flags.append) {
         libc::O_RDWR
@@ -365,6 +478,8 @@ fn open_file(
         open_flags |= libc::O_CREAT;
     }
     match expected {
+        #[cfg(target_os = "linux")]
+        HostIdentity::Storage(_) => unreachable!("protected files were opened above"),
         HostIdentity::Present { .. } => {}
         HostIdentity::Missing { .. } => {
             if !flags.create {
@@ -374,6 +489,10 @@ fn open_file(
                 ));
             }
             open_flags |= libc::O_EXCL;
+        }
+        #[cfg(target_os = "linux")]
+        HostIdentity::StorageUnavailable { kind, reason, .. } => {
+            return Err(io::Error::new(*kind, reason.clone()));
         }
         HostIdentity::Unavailable { .. } => return Err(stale_resolution()),
     }
@@ -487,6 +606,10 @@ pub(super) fn stat(path: &Path, follow: Follow) -> FileStat {
     let Ok(meta) = metadata else {
         return FileStat::default();
     };
+    metadata_stat(&meta)
+}
+
+pub(super) fn metadata_stat(meta: &std::fs::Metadata) -> FileStat {
     FileStat {
         exists: true,
         is_file: meta.is_file(),
@@ -640,7 +763,13 @@ pub(super) fn set_permissions(
 ) -> io::Result<()> {
     let expected = expected.ok_or_else(stale_resolution)?;
     let (expected_device, expected_inode) = match expected {
+        #[cfg(target_os = "linux")]
+        HostIdentity::Storage(held) => held.identity()?.ok_or_else(stale_resolution)?,
         HostIdentity::Present { device, inode, .. } => (*device, *inode),
+        #[cfg(target_os = "linux")]
+        HostIdentity::StorageUnavailable { kind, reason, .. } => {
+            return Err(io::Error::new(*kind, reason.clone()));
+        }
         HostIdentity::Missing { .. } | HostIdentity::Unavailable { .. } => {
             return Err(stale_resolution());
         }
@@ -706,7 +835,13 @@ pub(super) fn set_times(
 ) -> io::Result<()> {
     let expected = expected.ok_or_else(stale_resolution)?;
     let (expected_device, expected_inode) = match expected {
+        #[cfg(target_os = "linux")]
+        HostIdentity::Storage(held) => held.identity()?.ok_or_else(stale_resolution)?,
         HostIdentity::Present { device, inode, .. } => (*device, *inode),
+        #[cfg(target_os = "linux")]
+        HostIdentity::StorageUnavailable { kind, reason, .. } => {
+            return Err(io::Error::new(*kind, reason.clone()));
+        }
         HostIdentity::Missing { .. } | HostIdentity::Unavailable { .. } => {
             return Err(stale_resolution());
         }

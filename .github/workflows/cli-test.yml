@@ -94,7 +94,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Build
-        run: cargo build --locked --all-features -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline
+        run: cargo build --locked --all-features -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline --bin strands-box-storage-compiler
 
       # The CLI's packages only: Box Core's tests run in rust-test-lint.yml.
       - name: Test

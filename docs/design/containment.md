@@ -92,9 +92,11 @@ disclosed](decisions.md#direct-filesystem-reach-is-declared-and-disclosed).
 A box makes five guarantees:
 
 - Before a process starts, Box reads `box.toml`, adds the system paths the process needs, and writes
-  one set of sandbox grants. It runs no program to do this, and the grants never change while the
-  box runs. See [fixed and built without running a
-  program](decisions.md#containment-is-fixed-and-built-without-running-a-program).
+  one set of sandbox grants. The configured permissions stay fixed while the box runs. For
+  ordinary paths, Box builds those grants without running a program. Experimental Linux storage
+  mounts defer checks that require the incoming filesystem until it arrives, as described in
+  [storage that arrives after startup](#storage-that-arrives-after-startup). See
+  [fixed and built without running a program](decisions.md#containment-is-fixed-and-built-without-running-a-program).
 - The launcher, `strands-box-contain-trampoline`, applies the sandbox to itself and then starts the
   configured program. See [one trampoline spawns every contained
   process](decisions.md#one-trampoline-spawns-every-contained-process). If that step fails or Box
@@ -114,6 +116,33 @@ A box makes five guarantees:
   doesn't make the box's own contents confidential, and it doesn't govern code the agent writes and
   gets run somewhere else. See [the sandbox protects the surrounding
   system](decisions.md#box-protects-the-machine-not-the-box).
+
+## Storage that arrives after startup
+
+The experimental Linux storage feature lets an already running box access a filesystem attached
+later by a trusted storage manager. The operator declares the attachment directories in
+`box.toml`; the [configuration reference](../user/config.md) defines the feature switch and root
+list. Declaring a directory does not grant access. The agent, each configured tool, and each local
+MCP server retain their own filesystem lists.
+
+Box covers each declared directory before launching the workload. A trusted worker observes the
+source mount table outside the workload. When a filesystem arrives, the storage compiler resolves
+the original rules against a private copy of its mount view. It applies the required read-only,
+execution, and denied-path restrictions before the worker attaches the completed view to the
+recipient. Preparation follows configured permission paths and mount records; it does not list
+every object in the filesystem. A required path that cannot be protected causes preparation to
+fail, keeps the incoming storage hidden, and stops the affected box.
+
+Strands Shell and Monty use a retained reference to the agent's protected filesystem view for
+storage operations. They still require the corresponding policy permit. Pending storage has no
+fallback to the surrounding filesystem. The dedicated interpreter thread drops filesystem
+capabilities, while a separate trusted thread launches programs inside their own sandboxes.
+
+Storage becomes available asynchronously. Box does not delay invocation delivery or add a
+readiness exchange with the storage manager. This version handles the first attachment at each
+root and trusts the external mounting process. Replacement mounts, later nested mounts, and
+revocation of already open files require further qualification. macOS does not support this
+experimental feature.
 
 ## Where a box's reach comes from
 

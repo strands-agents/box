@@ -183,6 +183,32 @@ declaration and its reason. Each selected host entry remains in the configuratio
 [What Box Core receives](#what-box-core-receives)), and checks what it refuses (see
 [What `box run` refuses](#what-box-run-refuses)).
 
+### Preserve incoming storage rules
+
+For an enabled profile's `[storage] mounts`, Boxy passes the mount paths and the
+`linux-storage-mounts` feature flag to Box Core. It keeps required filesystem rules that
+cannot yet be resolved against the incoming filesystem, including program-resolved tools'
+missing literal paths and symbolic links that enter a declared mount path.
+
+Path resolution checks existing components only up to the incoming mount. Wildcard expansion
+must reject a path before entering that mount, including entry through an outer symbolic link.
+Boxy does not enumerate the incoming filesystem. Optional paths retain their ordinary semantics.
+
+An incoming write grant can reach an external denial through a symbolic link. Boxy therefore
+preserves authored `deny_write` paths that it cannot yet prove irrelevant. It keeps the same
+paths in generated Shell and Monty policy. Move and delete restrictions on their ancestors use
+exact path comparisons, so they do not prohibit operations on unrelated sibling files.
+
+Box Core owns mount detection, preparation of each process's restricted view, and publication.
+Boxy adds no mount watcher or readiness gate. The application can start while the declared
+storage is inaccessible. Failure to apply a required rule stops the affected Box.
+
+Box Core also gives hosted Shell and Python (Monty) the agent's protected incoming storage view.
+Their existing `fs:*` policy decisions remain mandatory. The broker retains a handle to the
+protected view and resolves storage operations through it, including when a declared root
+is nested beneath a home or workspace mapping. It does not reopen the host's raw storage path.
+Without an agent view, declared hosted storage remains unavailable.
+
 ### Write the run's files
 
 For a new run, `box` writes `box.toml` and `policy.dw` into the run directory. For a reused run, it
@@ -202,7 +228,7 @@ earlier files.
 
 ### Prepare storage
 
-`box` creates each storage directory and each detected launcher's cache, and refuses one that is a
+`box` creates each managed storage directory and each detected launcher's cache, and refuses one that is a
 link. It copies each `[[storage.files]]` source whose target does not exist yet, brings each
 `sync = true` copy up to date with the host, writes each
 `[[storage.files.set]]` value into a copy already in storage, and prints each link or entry that the
@@ -213,6 +239,9 @@ and existing sections (see [MCP servers](profile-language.md#mcp-servers)). When
 [Load the packs](#load-the-packs) to this one fails, `box` removes a run directory it minted, and
 keeps a reused one with its box. A policy error comes before this step, so it creates no storage
 directory and copies nothing.
+
+`[storage] mounts` names incoming host mount paths. This preparation step does not create
+those paths or their contents.
 
 ### Start Box Core
 

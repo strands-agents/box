@@ -683,6 +683,7 @@ mod tests {
         Record {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
+            storage: Default::default(),
             file_attributes: false,
             monty: true,
             gateway: Default::default(),

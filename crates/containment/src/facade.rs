@@ -17,6 +17,7 @@ impl Containment {
         egress_handoff: Option<&std::os::unix::net::UnixStream>,
         confirm_fd: Option<std::os::fd::RawFd>,
         native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
+        storage_control_fd: Option<std::os::fd::RawFd>,
     ) -> Result<(), ContainmentError> {
         apply_backend(
             Self::detect_backend,
@@ -24,6 +25,7 @@ impl Containment {
             egress_handoff,
             confirm_fd,
             native_filesystem_handoff,
+            storage_control_fd,
         )
     }
 
@@ -154,12 +156,20 @@ pub(crate) fn apply_backend<B: std::ops::Deref<Target = dyn ContainmentBackend>>
     egress_handoff: Option<&std::os::unix::net::UnixStream>,
     confirm_fd: Option<std::os::fd::RawFd>,
     native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
+    storage_control_fd: Option<std::os::fd::RawFd>,
 ) -> Result<(), ContainmentError> {
     #[cfg(not(all(target_os = "linux", feature = "native-filesystem-policy")))]
     if native_filesystem_handoff.is_some() {
         return Err(ContainmentError::UnsupportedCapability {
             capability: "native filesystem notification handoff".to_string(),
             backend: "this containment build".to_string(),
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    if storage_control_fd.is_some() {
+        return Err(ContainmentError::UnsupportedCapability {
+            capability: "storage mount handoff".to_string(),
+            backend: "this containment platform".to_string(),
         });
     }
     crate::floors::require_all(config)?;
@@ -170,6 +180,7 @@ pub(crate) fn apply_backend<B: std::ops::Deref<Target = dyn ContainmentBackend>>
         egress_handoff,
         confirm_fd,
         native_filesystem_handoff,
+        storage_control_fd,
     )
 }
 
@@ -300,6 +311,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect_err("the credential floor must refuse the request");
 
@@ -326,6 +338,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect_err("backend selection must still refuse unsupported hosts");
 
@@ -341,6 +354,31 @@ mod tests {
             "{error}"
         );
     }
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn an_unavailable_storage_handoff_refuses_before_backend_selection() {
+        let selected = std::cell::Cell::new(false);
+        let result = apply_backend(
+            || -> Result<Box<dyn ContainmentBackend>, ContainmentError> {
+                selected.set(true);
+                Err(ContainmentError::PlatformUnsupported {
+                    platform: Platform::MacOS,
+                    reason: "synthetic unavailable backend".to_string(),
+                })
+            },
+            &ContainmentConfig::new(),
+            None,
+            None,
+            None,
+            Some(3),
+        );
+        assert!(matches!(
+            result,
+            Err(ContainmentError::UnsupportedCapability { .. })
+        ));
+        assert!(!selected.get());
+    }
+
     #[cfg(not(all(target_os = "linux", feature = "native-filesystem-policy")))]
     #[test]
     fn an_unavailable_native_handoff_refuses_before_backend_selection() {
@@ -358,6 +396,7 @@ mod tests {
             None,
             None,
             Some(&handoff),
+            None,
         );
         assert!(matches!(
             result,

@@ -68,6 +68,7 @@ it, so support files remain relative to their owning pack.
 The reference sections hold every rule:
 
 - [File boundaries and merge rules](#file-boundaries-and-merge-rules)
+- [Incoming Linux storage](#incoming-linux-storage)
 - [Experimental native filesystem policy](#experimental-native-filesystem-policy)
 - [Options, commands, and environment](#options-commands-and-environment)
 - [Placeholders, paths, and conditions](#placeholders-paths-and-conditions)
@@ -405,6 +406,40 @@ extends both instead.
 Conditions apply after merging. A false `when` on a table removes everything merged into that
 table, including another file's additions. Put conditions on the narrowest entry or value that
 should change.
+
+## Incoming Linux storage
+
+Enable storage attached by a trusted Linux host after Box starts with these profile settings:
+
+```toml
+[experimental-features]
+linux-storage-mounts = true
+
+[storage]
+mounts = ["/mnt/data", "/mnt/workspace"]
+```
+
+Only a profile can declare these settings. `mounts` is a list of absolute host mount paths,
+not managed storage directories or permission grants. Boxy does not create the paths.
+Set read, write, execute, and denial lists for the agent, each tool, and each local server as usual.
+Use literal permission paths inside these mounts; Boxy rejects wildcard expansion into them.
+Existing optional-path semantics remain in effect.
+
+Boxy preserves required permission paths until Box Core can inspect the incoming filesystem.
+The application starts with storage inaccessible. Box Core applies the original restrictions
+before making storage visible. The application can retry while storage is unavailable.
+A required rule that cannot be applied stops the affected Box.
+
+Hosted Shell and Python (Monty) use the agent's protected storage view, with their existing
+`fs:*` policy rules applied as well. Source filesystem permissions still apply. If no agent
+view starts, hosted storage remains unavailable. Hosted tools reject symbolic links from
+incoming storage to paths outside the protected roots and their captured aliases.
+
+An incoming write grant can reach an external `deny_write` path through a symbolic link.
+Boxy conservatively retains that denial, even when its relationship cannot yet be proved.
+Generated Shell and Monty rules deny moving or deleting protected paths and their exact
+ancestors, without denying unrelated sibling operations. This feature does not enable
+native filesystem policy or remove restrictions imposed by the host filesystem.
 
 ## Experimental native filesystem policy
 

@@ -20,5 +20,6 @@ pub mod reference;
 pub mod render;
 pub mod storage_edit;
 pub mod storage_files;
+mod storage_mounts;
 pub mod storage_sync;
 pub mod tool;

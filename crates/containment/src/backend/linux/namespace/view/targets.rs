@@ -106,6 +106,47 @@ impl MountTarget {
         })
     }
 
+    /// Retain the exact logical leaf, including a symlink, without following any path component.
+    pub(super) fn prepare_logical_file(
+        view: &MountView,
+        entry: &MountEntry,
+        root: &Path,
+    ) -> Result<Self, ContainmentError> {
+        let staging_root = root.to_path_buf();
+        let root = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(root)
+            .map_err(|error| refusal(format!("opening logical target root: {error}")))?;
+        let relative = entry
+            .target
+            .strip_prefix("/")
+            .map_err(|_| refusal("logical file target is not absolute".into()))?
+            .to_path_buf();
+        let (target, resolved) = walk(&root, &relative, false, false, false, Some((view, None)))?;
+        let metadata = target
+            .metadata()
+            .map_err(|error| refusal(format!("inspecting logical file target: {error}")))?;
+        if !metadata.is_file() && !metadata.is_symlink() {
+            return Err(refusal(
+                "logical file target is neither a regular file nor a symlink".into(),
+            ));
+        }
+        Ok(Self {
+            root,
+            relative,
+            directory: false,
+            bind: false,
+            aliases: false,
+            location: staging_root.join(resolved),
+            target,
+        })
+    }
+
+    pub(super) fn descriptor(&self) -> &File {
+        &self.target
+    }
+
     pub(super) fn metadata(&self) -> Result<std::fs::Metadata, ContainmentError> {
         self.target
             .metadata()
@@ -359,6 +400,19 @@ fn walk(
         parent,
         prefix.strip_prefix("/").unwrap_or(&prefix).to_path_buf(),
     ))
+}
+
+/// Resolve a protected object within the scratch root, including absolute link text within it.
+pub(super) fn open_protected_object(root: &Path, path: &Path) -> Result<File, ContainmentError> {
+    let root = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root)
+        .map_err(|error| refusal(format!("opening protected view root: {error}")))?;
+    let relative = path
+        .strip_prefix("/")
+        .map_err(|_| refusal("protected file path is not absolute".into()))?;
+    walk(&root, relative, false, false, true, None).map(|(file, _)| file)
 }
 
 fn link_contents(link: &File) -> Result<PathBuf, ContainmentError> {

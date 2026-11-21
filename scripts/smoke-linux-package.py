@@ -14,7 +14,7 @@ import tarfile
 import tempfile
 
 
-BINARIES = {"box", "strands-box-sock-alias", "strands-box-contain-trampoline"}
+BINARIES = {"box", "strands-box-sock-alias", "strands-box-contain-trampoline", "strands-box-storage-compiler"}
 
 
 def unpack(archive, directory):

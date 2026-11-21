@@ -8,6 +8,8 @@ use std::path::PathBuf;
 pub(super) struct Args {
     /// Private channel that holds the workload until its parent completes launch setup.
     pub(super) launch_gate_fd: Option<i32>,
+    /// Private controller socket for admitting protected storage mounts.
+    pub(super) storage_control_fd: Option<i32>,
     /// Path to serialized [`containment::ContainmentConfig`] JSON.
     pub(super) config: PathBuf,
     /// Optional inherited descriptor for the serialized config.
@@ -16,6 +18,8 @@ pub(super) struct Args {
     pub(super) config_sha256: [u8; 32],
     /// Serialized target environment, kept inert until containment succeeds.
     pub(super) target_env_json: String,
+    /// The absolute workload directory, entered only after containment succeeds.
+    pub(super) working_directory: Option<PathBuf>,
     /// Optional inherited descriptor for compact pre-exec failure reporting.
     pub(super) setup_status_fd: Option<i32>,
     /// Optional inherited socket for returning the workload's egress listener.
@@ -40,10 +44,12 @@ impl Args {
     /// Parse an argv iterator (already skipping `argv[0]`).
     pub(super) fn parse(argv: impl IntoIterator<Item = String>) -> Result<Self, ParseError> {
         let mut launch_gate_fd = None;
+        let mut storage_control_fd = None;
         let mut config = None;
         let mut config_fd = None;
         let mut config_sha256 = None;
         let mut target_env_json = None;
+        let mut working_directory = None;
         let mut setup_status_fd = None;
         let mut relay_control_fd = None;
         let mut argv0 = None;
@@ -86,6 +92,16 @@ impl Args {
                     let value = take_value(&mut argv, "--target-env-json")?;
                     set_once(&mut target_env_json, value, "--target-env-json")?;
                 }
+                "--working-directory" => {
+                    let value = take_value(&mut argv, "--working-directory")?;
+                    let directory = PathBuf::from(&value);
+                    if !directory.is_absolute() || value.contains('\0') {
+                        return Err(ParseError::Invalid(
+                            "--working-directory must be an absolute path without NUL".into(),
+                        ));
+                    }
+                    set_once(&mut working_directory, directory, "--working-directory")?;
+                }
                 "--argv0" => {
                     let value = take_value(&mut argv, "--argv0")?;
                     set_once(&mut argv0, value, "--argv0")?;
@@ -117,6 +133,21 @@ impl Args {
                     }
                     set_once(&mut launch_gate_fd, descriptor, "--launch-gate-fd")?;
                 }
+                "--storage-control-fd" => {
+                    let value = take_value(&mut argv, "--storage-control-fd")?;
+                    let descriptor = value.parse::<i32>().map_err(|_| {
+                        ParseError::Invalid(
+                            "--storage-control-fd must be a decimal file descriptor".to_string(),
+                        )
+                    })?;
+                    if descriptor <= 2 {
+                        return Err(ParseError::Invalid(
+                            "--storage-control-fd must not collide with stdin/stdout/stderr"
+                                .to_string(),
+                        ));
+                    }
+                    set_once(&mut storage_control_fd, descriptor, "--storage-control-fd")?;
+                }
                 "--relay-control-fd" => {
                     let value = take_value(&mut argv, "--relay-control-fd")?;
                     let descriptor = value.parse::<i32>().map_err(|_| {
@@ -140,6 +171,21 @@ impl Args {
             }
         }
 
+        if let Some(storage) = storage_control_fd {
+            for (flag, other) in [
+                ("--config-fd", config_fd),
+                ("--setup-status-fd", setup_status_fd),
+                ("--relay-control-fd", relay_control_fd),
+                ("--launch-gate-fd", launch_gate_fd),
+            ] {
+                if other == Some(storage) {
+                    return Err(ParseError::Invalid(format!(
+                        "--storage-control-fd must not equal {flag}"
+                    )));
+                }
+            }
+        }
+
         if command.is_empty() {
             return Err(ParseError::Invalid(
                 "missing command after `--` (the program to contain)".to_string(),
@@ -153,10 +199,12 @@ impl Args {
             .ok_or_else(|| ParseError::Invalid("--target-env-json is required".to_string()))?;
         Ok(Args {
             launch_gate_fd,
+            storage_control_fd,
             config,
             config_fd,
             config_sha256,
             target_env_json,
+            working_directory,
             setup_status_fd,
             relay_control_fd,
             command,
@@ -217,6 +265,57 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Args, ParseError> {
         Args::parse(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn private_working_directory_is_optional_and_does_not_require_an_existing_path() {
+        let prefix = [
+            "--config",
+            "/cfg",
+            "--config-sha256",
+            DIGEST,
+            "--target-env-json",
+            "{}",
+        ];
+        let mut legacy = prefix.to_vec();
+        legacy.extend(["--", "/bin/true"]);
+        assert_eq!(parse(&legacy).unwrap().working_directory, None);
+        let mut explicit = prefix.to_vec();
+        explicit.extend([
+            "--working-directory",
+            "/storage-not-yet-attached/path with spaces",
+            "--",
+            "/bin/true",
+        ]);
+        assert_eq!(
+            parse(&explicit).unwrap().working_directory,
+            Some(PathBuf::from("/storage-not-yet-attached/path with spaces"))
+        );
+    }
+
+    #[test]
+    fn private_working_directory_rejects_relative_missing_duplicate_and_nul_values() {
+        for values in [
+            vec!["--working-directory", "relative"],
+            vec!["--working-directory", ""],
+            vec!["--working-directory", "/contains\0nul"],
+            vec!["--working-directory", "/one", "--working-directory", "/two"],
+            vec!["--working-directory"],
+        ] {
+            let mut argv = vec![
+                "--config",
+                "/cfg",
+                "--config-sha256",
+                DIGEST,
+                "--target-env-json",
+                "{}",
+            ];
+            argv.extend(values);
+            let error = parse(&argv).expect_err("invalid private directory must be refused");
+            assert!(
+                matches!(error, ParseError::Invalid(reason) if reason.contains("--working-directory"))
+            );
+        }
     }
 
     #[test]
@@ -538,12 +637,57 @@ mod tests {
     }
 
     #[test]
+    fn storage_control_refuses_duplicate_flags_and_other_private_descriptors() {
+        let invocation = |flags: &[&str]| {
+            let mut argv = vec![
+                "--config",
+                "c.json",
+                "--config-sha256",
+                DIGEST,
+                "--target-env-json",
+                "{}",
+            ];
+            argv.extend_from_slice(flags);
+            argv.extend_from_slice(&["--", "node"]);
+            parse(&argv)
+        };
+        assert_eq!(
+            invocation(&["--storage-control-fd", "7"])
+                .unwrap()
+                .storage_control_fd,
+            Some(7)
+        );
+        assert!(matches!(
+            invocation(&["--storage-control-fd", "7", "--storage-control-fd", "8"]),
+            Err(ParseError::Invalid(message)) if message.contains("specified more than once")
+        ));
+        for flag in [
+            "--config-fd",
+            "--setup-status-fd",
+            "--relay-control-fd",
+            "--launch-gate-fd",
+        ] {
+            for flags in [
+                ["--storage-control-fd", "7", flag, "7"],
+                [flag, "7", "--storage-control-fd", "7"],
+            ] {
+                assert_eq!(
+                    invocation(&flags).unwrap_err(),
+                    ParseError::Invalid(format!("--storage-control-fd must not equal {flag}")),
+                );
+            }
+            invocation(&[flag, "8", "--storage-control-fd", "7"]).unwrap();
+        }
+    }
+
+    #[test]
     fn every_descriptor_flag_refuses_standard_streams_and_invalid_numbers() {
         for flag in [
             "--config-fd",
             "--setup-status-fd",
             "--launch-gate-fd",
             "--relay-control-fd",
+            "--storage-control-fd",
         ] {
             for value in ["-1", "0", "1", "2", "2147483648", "not-a-number"] {
                 let error = parse(&[

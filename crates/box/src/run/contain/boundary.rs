@@ -25,6 +25,12 @@ use crate::run::contain::executable;
 use crate::run::contain::runtime_minimum::{self, MinimumCell};
 use crate::run::hosted::Attachment;
 
+#[allow(
+    dead_code,
+    reason = "Storage remains Linux-only and its operator switch is held closed until qualification"
+)]
+pub(crate) mod storage;
+
 /// Where a `ProcessSpec` is translated: this BoxRun's attachment, layout, record, and loaded
 /// authority sources.
 pub(crate) struct Site<'a> {
@@ -81,8 +87,11 @@ impl ApprovedReach {
         protected_sources: &[AuthoritySource],
         commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
     ) -> Result<Self, BoxError> {
-        let installation =
-            std::sync::Arc::new(crate::run::installation::TrustedInstallation::load()?);
+        let installation = std::sync::Arc::new(if stored.storage.mounts.is_empty() {
+            crate::run::installation::TrustedInstallation::load()?
+        } else {
+            crate::run::installation::TrustedInstallation::load_for_storage()?
+        });
         // The tables that the early check of a secret source program judges, so no table reaches
         // one judgement and not the other.
         let judged = stored.process_tables();
@@ -90,6 +99,41 @@ impl ApprovedReach {
             .tables
             .iter()
             .map(|(table, spec)| {
+                if !stored.storage.mounts.is_empty() {
+                    let context = storage::FrozenFilesystemContext::capture(
+                        table,
+                        &judged,
+                        protected_sources,
+                    )?;
+                    let generation = storage::compile_generation(
+                        &storage::GenerationSite {
+                            spec,
+                            table,
+                            context: &context,
+                            roots: &stored.storage.mounts,
+                            commands: &commands,
+                            installation: &installation,
+                        },
+                        &[],
+                        None,
+                    )?;
+                    let policy = std::sync::Arc::new(storage::Policy {
+                        spec: spec.clone(),
+                        table: table.clone(),
+                        context,
+                        roots: stored.storage.mounts.clone(),
+                        checkpoint: generation.checkpoint(),
+                        layout: generation.with_policy(|_, masks, targets| {
+                            storage::StorageLayout {
+                                pending_masks: masks.to_vec(),
+                                publication_targets: targets.to_vec(),
+                            }
+                        }),
+                        commands: std::sync::Arc::clone(&commands),
+                        installation: std::sync::Arc::clone(&installation),
+                    });
+                    return Ok((table.clone(), generation.into_initial_reach(policy)));
+                }
                 let mut reach = judge_lists(spec, table, &judged, protected_sources)?;
                 commands.validate_reach(table, &reach)?;
                 installation.validate_reach(table, &reach)?;
@@ -138,6 +182,24 @@ pub(crate) fn judge_lists(
     tables: &ProcessTables,
     protected_sources: &[AuthoritySource],
 ) -> Result<DirectReach, BoxError> {
+    with_filesystem_context(table, tables, protected_sources, |context| {
+        let plan = filesystem::FilesystemPlan::new(&spec.filesystem, &[], context)?;
+        match plan.judge_current_view(&[], context)? {
+            filesystem::FilesystemCompilation::Complete(reach) => Ok(reach),
+            filesystem::FilesystemCompilation::Pending(pending) => {
+                Err(pending.unavailable(context).into())
+            }
+        }
+    })
+}
+
+/// Borrow the ordinary filesystem guards for startup and captured-storage compilation.
+fn with_filesystem_context<T>(
+    table: &str,
+    tables: &ProcessTables,
+    protected_sources: &[AuthoritySource],
+    judge: impl FnOnce(&FilesystemContext<'_>) -> Result<T, BoxError>,
+) -> Result<T, BoxError> {
     let operator_home = crate::record::layout::operator_home_directory()?;
     // Canonical, because a `~/` entry resolves against it and carries the identity the kernel
     // checks.
@@ -174,7 +236,76 @@ pub(crate) fn judge_lists(
         },
         source_paths: &tables.source_paths,
     };
-    Ok(filesystem::direct_grants(&spec.filesystem, &context)?)
+    judge(&context)
+}
+
+/// Apply a process table's already judged lists through the normal containment guards.
+fn apply_filesystem_reach(
+    mut containment: ContainmentConfig,
+    reach: &DirectReach,
+    table: &str,
+    guard: &GuardedBoxState<'_>,
+    program_identity: &Path,
+    interpreter_exec_files: &[PathBuf],
+) -> Result<ContainmentConfig, BoxError> {
+    // **Every refusal the grants need, applied before the grants themselves.** macOS renders
+    // these after every allow and Linux overmounts them empty, so each subtracts from the grant
+    // rather than sitting beside it.
+    for refusal in &reach.refusals {
+        containment = containment.refuse(&refusal.path, refusal.scope)?;
+    }
+    // The box's private tree is refused beneath every grant.
+    containment = containment.refuse(guard.private, Scope::Root)?;
+    for grant in &reach.grants {
+        if grant.operation == Operation::Exec
+            && grant.scope == Scope::File
+            && (grant.resolved == program_identity
+                || interpreter_exec_files.contains(&grant.resolved))
+        {
+            continue;
+        }
+        containment = if grant.credential_store {
+            // The guards judge the canonical identity; the grant itself keeps the authored
+            // path, which the credential-store exception validates on its own terms.
+            guard.judge(&grant.resolved, grant.operation, grant.scope)?;
+            containment.allow_credential_store(&grant.lexical, grant.operation, grant.scope)?
+        } else {
+            // One lookup, compared with the approved identity and then granted as it is.
+            let prepared = grant.prepare(table)?;
+            guard.judge(prepared.resolved_path(), grant.operation, grant.scope)?;
+            containment.allow_prepared(prepared, grant.operation, grant.scope)?
+        };
+    }
+
+    for tree in &reach.write_protections {
+        containment = containment.protect_write_tree(tree)?;
+    }
+    Ok(containment)
+}
+
+/// Recheck the startup command identity before admitting another filesystem view.
+fn apply_command_identity(
+    mut containment: ContainmentConfig,
+    reach: &DirectReach,
+    table: &str,
+    program_identity: &Path,
+) -> Result<ContainmentConfig, BoxError> {
+    if let Some(command) = reach.command.as_ref() {
+        command.verify()?;
+        if command.path() != program_identity {
+            return Err(ConfigError::Process {
+                table: table.to_string(),
+                reason: "configured command identity changed before launch".to_string(),
+            }
+            .into());
+        }
+        containment = if command.has_several_names() {
+            containment.require_command_identity(command.path(), command.opened())?
+        } else {
+            containment.require_file_identity(command.path(), command.opened())?
+        };
+    }
+    Ok(containment)
 }
 
 /// The host trust the egress gateway reads this run, judged once for every table and interpreter.
@@ -287,6 +418,8 @@ pub(crate) enum ShebangInterpreters {
 
 /// The translated boundary for one process.
 pub(crate) struct Boundary {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    storage: Option<std::sync::Arc<storage::LaunchPlan>>,
     installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
@@ -721,54 +854,46 @@ impl Boundary {
             containment = containment.allow_file_watching();
         }
 
-        // **Every refusal the grants need, applied before the grants themselves.** macOS renders
-        // these after every allow and Linux overmounts them empty, so each subtracts from the grant
-        // rather than sitting beside it.
-        for refusal in &reach.refusals {
-            containment = containment.refuse(&refusal.path, refusal.scope)?;
-        }
-        // The box's private tree is refused beneath every grant.
-        containment = containment.refuse(guard.private, Scope::Root)?;
-        for grant in &reach.grants {
-            if grant.operation == Operation::Exec
-                && grant.scope == Scope::File
-                && (grant.resolved == program_identity
-                    || interpreter_exec_files.contains(&grant.resolved))
-            {
-                continue;
-            }
-            containment = if grant.credential_store {
-                // The guards judge the canonical identity; the grant itself keeps the authored
-                // path, which the credential-store exception validates on its own terms.
-                guard.judge(&grant.resolved, grant.operation, grant.scope)?;
-                containment.allow_credential_store(&grant.lexical, grant.operation, grant.scope)?
-            } else {
-                // One lookup, compared with the approved identity and then granted as it is.
-                let prepared = grant.prepare(table)?;
-                guard.judge(prepared.resolved_path(), grant.operation, grant.scope)?;
-                containment.allow_prepared(prepared, grant.operation, grant.scope)?
-            };
-        }
+        // Retain the ordinary runtime grants and authority identities before adding authored
+        // filesystem permissions. Each captured generation lowers those same original rules.
+        let storage = if let Some(policy) = &reach.storage {
+            let base = protect_authorities(
+                containment.clone(),
+                guard.private,
+                site.protected_sources
+                    .iter()
+                    .map(|source| (source.path(), source.opened())),
+            )?;
+            Some(std::sync::Arc::new(storage::LaunchPlan {
+                policy: std::sync::Arc::clone(policy),
+                input: storage::CompilationInput {
+                    spec: policy.spec.clone(),
+                    table: policy.table.clone(),
+                    context: policy.context.clone(),
+                    roots: policy.roots.clone(),
+                    previous: policy.checkpoint.clone(),
+                    admitted: Vec::new(),
+                    base_config_json: base.to_json()?,
+                    private: guard.private.to_path_buf(),
+                    box_directory: guard.box_directory.to_path_buf(),
+                    program_identity: program_identity.clone(),
+                    interpreter_exec_files: interpreter_exec_files.clone(),
+                },
+            }))
+        } else {
+            None
+        };
 
-        for tree in &reach.write_protections {
-            containment = containment.protect_write_tree(tree)?;
-        }
+        containment = apply_filesystem_reach(
+            containment,
+            reach,
+            table,
+            &guard,
+            &program_identity,
+            &interpreter_exec_files,
+        )?;
 
-        if let Some(command) = reach.command.as_ref() {
-            command.verify()?;
-            if command.path() != program_identity {
-                return Err(ConfigError::Process {
-                    table: table.to_string(),
-                    reason: "configured command identity changed before launch".to_string(),
-                }
-                .into());
-            }
-            containment = if command.has_several_names() {
-                containment.require_command_identity(command.path(), command.opened())?
-            } else {
-                containment.require_file_identity(command.path(), command.opened())?
-            };
-        }
+        containment = apply_command_identity(containment, reach, table, &program_identity)?;
 
         containment = protect_authorities(
             containment,
@@ -877,6 +1002,7 @@ impl Boundary {
             .filter(|spelled| *spelled != executable_path.as_path())
             .map(|spelled| spelled.display().to_string());
         Ok(Self {
+            storage,
             installation,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
@@ -912,6 +1038,11 @@ impl Boundary {
     ))]
     pub(crate) fn native_filesystem_policy(&self) -> bool {
         self.native_filesystem_policy
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn storage(&self) -> Option<&std::sync::Arc<storage::LaunchPlan>> {
+        self.storage.as_ref()
     }
 
     pub(crate) fn installation(&self) -> &crate::run::installation::TrustedInstallation {
@@ -1793,6 +1924,9 @@ pub(crate) mod environment {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    mod storage_tests;
+
     use crate::record::config::RECORD_VERSION;
     use crate::record::config::mcp::McpServer;
     use crate::record::config::process::{ContainedMcp, Filesystem};
@@ -2108,6 +2242,7 @@ mod tests {
             let record = Record {
                 version: RECORD_VERSION,
                 experimental_features: Default::default(),
+                storage: Default::default(),
                 file_attributes: false,
                 monty: true,
                 gateway: Default::default(),

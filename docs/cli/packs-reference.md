@@ -269,6 +269,9 @@ your project. Each profile gets one storage folder, which every project it runs 
 - `box run` creates each directory and gives the agent read and write on it, so do not add that
   access yourself.
 
+A profile can also declare `[storage] mounts` for [Incoming Linux storage](profiles-reference.md#incoming-linux-storage).
+Packs cannot set `mounts`. These paths are not managed storage directories.
+
 ### Copy files into storage
 
 A `[[storage.files]]` row copies a file or a folder of yours into storage on the profile's first

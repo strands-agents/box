@@ -276,3 +276,10 @@ pub fn generate_policy_schema(config: PathBuf, output_dir: PathBuf) -> ExitCode 
         RunOptions::default(),
     )
 }
+
+/// Private entry for the installed storage compiler executable.
+#[doc(hidden)]
+#[cfg(target_os = "linux")]
+pub fn storage_compiler_main() -> ExitCode {
+    run::contain::boundary::storage::compiler::main()
+}

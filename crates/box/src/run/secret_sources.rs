@@ -242,8 +242,18 @@ impl SecretSources {
             return Ok(());
         }
         for (table, spec) in &tables.tables {
-            let reach = judge_lists(spec, table, tables, protected_sources)?;
-            self.commands.validate_reach(table, &reach)?;
+            if tables.storage_roots.is_empty() {
+                let reach = judge_lists(spec, table, tables, protected_sources)?;
+                self.commands.validate_reach(table, &reach)?;
+            } else {
+                super::contain::boundary::storage::validate_source_preflight(
+                    spec,
+                    table,
+                    tables,
+                    protected_sources,
+                    &self.commands,
+                )?;
+            }
         }
         Ok(())
     }

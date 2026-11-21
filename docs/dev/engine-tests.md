@@ -11,6 +11,7 @@ just test-engine
 
 `just test-engine` runs `just build-cli` first. `just build-cli` puts `box`, Box Core's
 `strands-box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` in `target/debug`.
+Linux also builds `strands-box-storage-compiler` there.
 A missing helper fails the suite. `just check` runs the suite too, through `just test`.
 
 The suite runs with `PATH=/usr/bin:/bin`, so on macOS `the_agent_runs_git_through_the_git_pack`
@@ -179,3 +180,57 @@ trusted project's `shellPath` changes neither and its `shellCommandPrefix` still
 `PATH`. With none it skips with a message, unless `BOX_REQUIRE_PI` is set, and then it fails. The
 CI `macos` job sets it and installs the pi version that `resources/packs/pi/pack.toml` names. To run it, install pi
 with `npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.5.2`.
+
+## Incoming Linux storage tests
+
+The `storage_mounts` tests start real Boxy profiles before attaching a userspace filesystem
+(FUSE). They require native Linux user and mount namespaces, a usable `/dev/fuse`, `mount`,
+`umount`, `unshare`, and `ip`. They are ignored in the ordinary engine suite. Run them explicitly;
+a missing fixture is a failure rather than a skipped test.
+
+Build the trusted passthrough fixture with libfuse 3 development headers and its library:
+
+```sh
+cc -D_FILE_OFFSET_BITS=64 -std=c11 -Wall -Wextra -Werror -O2 \
+  $(pkg-config --cflags fuse3) crates/cli/app/tests/support/storage_fixture.c \
+  $(pkg-config --libs fuse3) -o /tmp/boxy-storage-fixture
+```
+
+Build `box-storage-probe` from the same Box Core source revision as the engine, with Core's
+`test-support` feature. Its source is `crates/box/tests/support/storage_probe.rs` in Core.
+Build the normal engine helpers, including the Linux-only `strands-box-storage-compiler`,
+beside the Boxy binary. Then set absolute paths to the two fixtures:
+
+```sh
+BOX_STORAGE_TEST_FUSE=/tmp/boxy-storage-fixture \
+BOX_STORAGE_TEST_PROBE=/absolute/path/to/box-storage-probe \
+  cargo test -p strands-box-cli --all-features --test engine storage_mounts:: \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+Each test creates its own user, mount, process, and network namespaces. It attaches storage
+only after observing the original process's pending marker. The three-role case checks an
+agent, a program-resolved tool, and a local Model Context Protocol (MCP) server. The failure case
+requires all observed Box-owned processes to exit when a required denial cannot be applied.
+
+The file case checks exact-file read and write grants, a hidden subtree, a canonical-directory write
+denial, and allowed versus denied execution. A separate test requires Core to reject a mutable
+symbolic link used as a write-denial target. Source-side positive controls prove that the
+filesystem itself permits the operations Box refuses. The hosted case starts one Shell before
+attachment and checks pending paths through both Shell and Monty. After native access succeeds,
+that same Shell runs allowed and denied file operations through both interpreters. Each
+interpreter also checks metadata and lists a directory containing only two granted files;
+the ungranted sibling must remain absent. A separate
+file is native-readable and native-writable but has explicit hosted policy denials; each
+interpreter must produce the corresponding recorded policy decisions. Ordinary sibling
+operations must succeed, and the exact generated rule must deny moving a protected ancestor.
+A kernel refusal to move a mount is insufficient evidence for that policy check.
+
+The hosted failure case keeps a Shell program and one Monty evaluation active before
+attachment. Both must perform pending read and write checks and acknowledge a challenge.
+The incoming source omits a required denial path. The test requires the specific rule
+compilation error, shutdown within 15 seconds, no successful read or write markers, and
+no remaining observed processes or fixture mounts. A hosted timeout does not satisfy it.
+
+The tests do not cover every storage provider, remount behavior, or macOS. Fixture output is
+captured in temporary files so a noisy FUSE request log cannot fill a process pipe.
