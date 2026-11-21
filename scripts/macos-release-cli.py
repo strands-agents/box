@@ -21,10 +21,10 @@ from urllib.parse import urlsplit
 import uuid
 import zipfile
 
-# The signing request names Box Core's application. Each program keeps the identifier in its plist.
+# The CLI and its helpers use Box Core's application identity.
 APPLICATION = "com.amazon.strands.box"
 IDENTIFIERS = {
-    "box": "com.amazon.strands.box-cli",
+    "box": APPLICATION,
     "strands-box-sock-alias": APPLICATION,
     "strands-box-contain-trampoline": APPLICATION,
 }

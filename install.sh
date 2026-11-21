@@ -699,12 +699,17 @@ fi
 for box_binary in $box_programs; do
     [ -x "$box_payload/$box_binary" ] || die "not executable: $box_binary"
     [ "$box_system" = Darwin ] && [ "$box_unsigned" -eq 0 ] || continue
-    case "$box_binary" in
-        box|Box.app) box_identifier=com.amazon.strands.box-cli ;;
-        *) box_identifier=com.amazon.strands.box ;;
-    esac
     codesign --display --verbose=4 -r- "$box_payload/$box_binary" > "$box_work/signature" 2>&1 ||
         die "cannot read signing identity: $box_binary"
+    box_identifier=com.amazon.strands.box
+    case "$box_binary" in
+        box|Box.app)
+            box_identifier=$(sed -n 's/^Identifier=//p' "$box_work/signature")
+            case "$box_identifier" in
+                com.amazon.strands.box|com.amazon.strands.box-cli) ;;
+                *) die "unexpected publisher or signing options: $box_binary" ;;
+            esac ;;
+    esac
     awk -v identifier="$box_identifier" -v team="$BOX_TEAM_ID" '
         /^Identifier=/ { identities++; if ($0 != "Identifier=" identifier) bad = 1 }
         /^Authority=/ { authorities++; if (authorities == 1 && $0 !~ /^Authority=Developer ID Application: /) bad = 1 }

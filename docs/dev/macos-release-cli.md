@@ -64,12 +64,8 @@ The record sets `runtime_qualified` to `false`: it is build evidence, not an enf
 result. It stays outside the package so the payload and `release.json` keep their existing
 format. When `sign_macos=true`, the signing receipt records the signed archive's hash separately.
 The existing signing environment and source restrictions still apply. The native signing path
-requires `CD_SIGNER_CLI_PROFILE_NAME` in that environment. It must name a distribution provisioning
-profile for the CLI's `com.amazon.strands.box-cli` application and the configured Apple team, with
-permission to use Endpoint Security. The script refuses a missing or mismatched profile. A
-profile for Box Core's different application identifier cannot authorize the CLI. Configuring and
-approving that profile remains an administrator task. This implementation does not establish
-that Apple or the signing service has granted it.
+uses the shared [distribution profile](macos-release.md#configure-access). Signing and verification
+reject a missing or mismatched profile.
 
 To build an unsigned experimental archive locally on an Apple Silicon Mac, use a new output
 directory:
@@ -173,15 +169,19 @@ permission at runtime.
 
 | Program | Identifier |
 | --- | --- |
-| `box` | `com.amazon.strands.box-cli` |
+| `box` | `com.amazon.strands.box` |
 | `strands-box-sock-alias`, `strands-box-contain-trampoline` | `com.amazon.strands.box` |
 
-For ordinary packages and the native package's helper signing step, the signing request names
-Box Core's application, `com.amazon.strands.box`. The native app signing request names
-`com.amazon.strands.box-cli` and its distribution profile. The signing service signs each program
-with the identifier in the `Info.plist` that the program holds.
-`crates/cli/app/build.rs` puts `crates/cli/app/Info.plist` into the macOS `box`. The build of Box Core puts
-its own `Info.plist` into the helpers.
+All signing requests use Box Core's application, `com.amazon.strands.box`. The native app request
+also selects its authorized distribution profile. The signing service signs each program with the
+identifier in its embedded `Info.plist`. `crates/cli/app/build.rs` embeds
+`crates/cli/app/Info.plist` in the CLI, and Box Core embeds its own plist in the helpers.
+
+New release verification requires `com.amazon.strands.box` for every program and the native app.
+For older-release support and permission effects, see
+[Upgrade or choose a version](../cli/install.md#upgrade-or-choose-a-version).
+The [signing decision](../design/cli/decisions.md#box-signs-through-box-core) records why the CLI
+shares Box Core's identity.
 
 ## What a signed run does
 
@@ -287,15 +287,14 @@ telemetry without failing the package check.
 
 ## The `macos-signing` variables
 
-The CLI's `sign-macos` job runs in the `macos-signing` environment that
-[Configure access](macos-release.md#configure-access) sets up, with the same role, bucket, team,
-and notarization secret as Box Core's signing job. It does not read `CD_SIGNER_PROFILE_NAME`,
-because an ordinary CLI package is signed for Box Core's application with no profile.
+The CLI's `sign-macos` job uses the shared environment described in
+[Configure access](macos-release.md#configure-access).
 
-`CD_SIGNER_CLI_PROFILE_NAME` is the one variable only the CLI reads, and only for an experimental
-native-policy dry run. It names a distribution profile for `com.amazon.strands.box-cli` with
-Endpoint Security authorization. Ordinary releases do not need it. Do not set it to the value of
-`CD_SIGNER_PROFILE_NAME`, because that profile authorizes only Box Core's application.
+The workflow reads the shared `CD_SIGNER_PROFILE_NAME` setting into the signing script's
+`CD_SIGNER_CLI_PROFILE_NAME` process variable and passes the same value to verification through
+its `cli_profile_name` output. The standalone script still reads `CD_SIGNER_CLI_PROFILE_NAME`.
+It requires that profile only for an experimental native-policy dry run. Ordinary CLI packages
+do not embed a provisioning profile.
 
 ## Keep the evidence
 
@@ -337,7 +336,7 @@ commit that is not a full SHA.
 
 `scripts/macos-release-cli.py` follows `scripts/macos-release.py`. Ordinary packages use a flat
 signing path. The native path follows Core's two-stage helper and app signing approach, with the
-CLI's own identifier and profile. It moves the unchanged resources and release record into the
+shared Box identifier and matching profile. It moves the unchanged resources and release record into the
 app's resource directory before sealing it. The code that reads the notarization secret and calls
 the signing service and Apple follows Box Core's script. Both jobs use the same notarization secret
 and the same signing role, so a change to either one, for example a new field in the secret, needs
@@ -352,8 +351,9 @@ installer instructions. They also check the signing jobs of the workflow and tes
 checks release refusal, unchanged payloads, and archive-bound feature records. Those controls do
 not compile Rust or prove native enforcement on macOS or Linux.
 `test_native_release_workflow.py` checks that the workflow passes the build record, receipt,
-expected source, and unsigned control to the native steps. `test_macos_release_cli.py` checks bundle
+expected source, and unsigned control to the native steps. It also checks that the shared profile
+setting reaches the signing and verification processes. `test_macos_release_cli.py` checks bundle
 construction and refusal of mismatched signing evidence. `test_check_native_macos_package.py`
 checks the runtime report assertions. These Python tests require no signing credentials or Rust
 build and do not establish that Apple authorizes a real package.
-`crates/cli/app/tests/info_plist.rs` checks that the macOS `box` holds its own identifier and version.
+`crates/cli/app/tests/info_plist.rs` checks that the macOS `box` holds the shared Box identifier and its version.

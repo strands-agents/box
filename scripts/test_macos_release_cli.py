@@ -270,7 +270,7 @@ class MacOSReleaseTests(unittest.TestCase):
     def test_verify_accepts_a_hardened_timestamped_developer_id_signature(self):
         self.binaries()
         self.assertEqual(release.IDENTIFIERS, {
-            "box": "com.amazon.strands.box-cli",
+            "box": "com.amazon.strands.box",
             "strands-box-sock-alias": "com.amazon.strands.box",
             "strands-box-contain-trampoline": "com.amazon.strands.box",
         })
@@ -291,10 +291,9 @@ class MacOSReleaseTests(unittest.TestCase):
         ]:
             with self.subTest(details=details), self.assertRaisesRegex(ValueError, message):
                 self.check(details)
-        for name, other in [("box", release.APPLICATION),
-                            ("strands-box-sock-alias", release.IDENTIFIERS["box"])]:
-            with self.subTest(swapped=name), self.assertRaisesRegex(ValueError, f"identity: {name}"):
-                self.check(identifiers={**release.IDENTIFIERS, name: other})
+        for name in release.BINARIES:
+            with self.subTest(legacy_identifier=name), self.assertRaisesRegex(ValueError, f"identity: {name}"):
+                self.check(identifiers={**release.IDENTIFIERS, name: "com.amazon.strands.box-cli"})
         with self.assertRaisesRegex(ValueError, "team ID"):
             self.check(team="ZZZ")
 
@@ -757,7 +756,7 @@ class NativeMacOSReleaseTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        self.profile = "Box CLI Developer ID"
+        self.profile = "Strands Box Developer ID - com.amazon.strands.box"
         self.source = "a" * 40
         self.environment = {"CD_SIGNER_TEAM_ID": TEAM, "CD_SIGNER_CLI_PROFILE_NAME": self.profile}
         self.record = {"box_version": "0.1.0", "box_commit": self.source,
@@ -812,16 +811,19 @@ class NativeMacOSReleaseTests(unittest.TestCase):
         release.unpack_build(self.input, programs, kept)
         return release.prepare_native_bundle(programs, kept, self.root / "app-input", "0.1.0")
 
-    def test_native_manifest_and_bundle_keep_cli_identity_helpers_and_resources(self):
+    def test_native_manifest_and_bundle_use_box_identity_and_preserve_payload(self):
         app = self.bundle()
         self.assertEqual(release.manifest(TEAM, self.profile), {
             "type": "app", "os": "osx", "name": "Box",
             "outputs": [{"label": "macos", "path": "Box.app"}],
-            "app": {"identifier": "com.amazon.strands.box-cli", "signing_requirements": {
+            "app": {"identifier": "com.amazon.strands.box", "signing_requirements": {
                 "team_id": TEAM, "profile_name": self.profile, "profile_type": "distribution",
                 "signing_args": {"entitlements_path": "SIGNING_METADATA/Box.entitlements"}}}})
         self.assertEqual(plistlib.loads((app / "Contents/Info.plist").read_bytes())["CFBundleIdentifier"],
-                         "com.amazon.strands.box-cli")
+                         "com.amazon.strands.box")
+        embedded = Path(__file__).resolve().parents[1] / "crates/cli/app/Info.plist"
+        self.assertEqual(plistlib.loads(embedded.read_bytes())["CFBundleIdentifier"],
+                         "com.amazon.strands.box")
         for name in release.BINARIES:
             self.assertEqual((app / "Contents/MacOS" / name).read_bytes(), b"code")
         for name, body in self.files.items():
@@ -870,7 +872,7 @@ class NativeMacOSReleaseTests(unittest.TestCase):
 
     def profile_checks(self, app, mutate=None):
         entitlements = {"com.apple.developer.endpoint-security.client": True,
-                        "com.apple.application-identifier": TEAM + ".com.amazon.strands.box-cli",
+                        "com.apple.application-identifier": TEAM + ".com.amazon.strands.box",
                         "com.apple.developer.team-identifier": TEAM}
         profile = {"Name": self.profile, "UUID": SUBMISSION, "TeamIdentifier": [TEAM],
                    "ExpirationDate": datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
@@ -902,15 +904,18 @@ class NativeMacOSReleaseTests(unittest.TestCase):
         calls = self.profile_checks(self.bundle())
         requirements = [command[command.index("-R") + 1] for command in calls
                         if command[:2] == ["codesign", "--verify"]]
-        self.assertEqual(requirements.count(requirement("com.amazon.strands.box-cli")), 2)
-        self.assertEqual(requirements.count(requirement("com.amazon.strands.box")), 2)
+        self.assertEqual(requirements, [requirement("com.amazon.strands.box")] * 4)
+        verified = [Path(command[-1]).relative_to(self.root / "app-input").as_posix()
+                    for command in calls if command[:2] == ["codesign", "--verify"]]
+        self.assertEqual(set(verified), {"Box.app", *(f"Box.app/Contents/MacOS/{name}"
+                                                   for name in release.BINARIES)})
 
     def test_native_verification_refuses_each_missing_or_wrong_authorization(self):
         app = self.bundle()
         cases = [
             (lambda e, p: e.pop("com.apple.developer.endpoint-security.client"), "Endpoint Security"),
-            (lambda e, p: p["Entitlements"].update({"com.apple.application-identifier": TEAM + ".com.amazon.strands.box"}), "Application identifier"),
-            (lambda e, p: p.update(Name="Core profile"), "provisioning profile"),
+            (lambda e, p: p["Entitlements"].update({"com.apple.application-identifier": TEAM + ".com.amazon.strands.box-cli"}), "Application identifier"),
+            (lambda e, p: p.update(Name="Unselected profile"), "provisioning profile"),
             (lambda e, p: p.update(TeamIdentifier=["ZZZZZ99999"]), "provisioning profile"),
             (lambda e, p: p.update(ExpirationDate=datetime.datetime(2020, 1, 1)), "Expired"),
             (lambda e, p: p.update(ProvisionsAllDevices=False, ProvisionedDevices=["one Mac"]), "distribution"),
