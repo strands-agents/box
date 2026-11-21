@@ -46,12 +46,14 @@ pub fn create_real_directory(path: &Path, base: &Path) -> Result<(), Error> {
 }
 
 /// Create `path` as [`create_real_directory`] does and open it: each directory below `base` is
-/// made and opened relative to the open directory above it, never through a link.
+/// made and opened relative to the open directory above it, never through a link. A `path` that is
+/// not `base` or below it is refused.
 pub fn open_real_directory(path: &Path, base: &Path) -> Result<OwnedFd, Error> {
-    let (start, below) = match path.strip_prefix(base) {
-        Ok(below) => (base, below),
-        Err(_) => (path, Path::new("")),
-    };
+    let start = base;
+    let below = path.strip_prefix(base).map_err(|_| {
+        let invalid = std::io::Error::from(std::io::ErrorKind::InvalidInput);
+        io_error("create", path, invalid)
+    })?;
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -408,6 +410,10 @@ mod tests {
         create_real_directory(&path, &root.join("base")).expect("a folder that exists");
         create_real_directory(&root.join("new/base"), &root.join("new/base")).expect("a base");
         assert!(root.join("new/base").is_dir());
+        let error = create_real_directory(&root.join("beside/a"), &root.join("base"))
+            .expect_err("a path that is not below the base");
+        assert!(matches!(error, Error::Io { .. }), "{error}");
+        assert!(!root.join("beside").exists());
     }
 
     #[test]
