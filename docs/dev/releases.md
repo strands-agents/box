@@ -7,7 +7,7 @@ The source must belong to `main` history for publication.
 ## Choose a version
 
 Every release, in both channels, publishes macOS Apple silicon and the Amazon Linux 2023 ARM64 archive.
-To add the x86-64 archive after target qualification, set the workflow input `publish_linux_x86=true`. This input defaults to `false`.
+The workflow also publishes the Linux x86-64 archive by default. Set `publish_linux_x86=false` to omit it.
 
 | Version input | GitHub release | Latest stable release |
 |---|---|---|
@@ -25,7 +25,7 @@ A Linux preview also includes the macOS archive. There is no separate macOS prev
 Run the workflow with the selected `version` and `sha`, and these inputs:
 
 - `dry_run=true`
-- `publish_linux_x86=true` to include the qualified x86-64 package, or `false` (the default) to omit it
+- `publish_linux_x86=true` (the default) to include the qualified x86-64 package, or `false` to omit it
 - `sign_macos=true`
 - `premerge_signing_test=false`
 - `skip_tests=false`
@@ -46,11 +46,17 @@ from the repository root on a Linux host with Python 3 and `readelf` installed:
 python3 scripts/check-linux-package.py stage/box-core --target x86_64-unknown-linux-gnu
 ```
 
-Omit `--target` to check ARM64. These checks do not run workloads or qualify an installed x86-64 release.
+Omit `--target` to check ARM64. This command checks binary metadata only.
 
 Before the x86-64 package check, the workflow removes the retired `EXPERIMENTAL_LINUX_SUPPORT` and `EXPERIMENTAL_X86_SUPPORT` variables from the environment.
 It requires the staged executable to reject a missing configuration, which catches a selected source that still requires an opt-in.
 This startup check does not run a workload.
+
+Each Linux build then runs `scripts/smoke-linux-package.py` against its packaged archive on a runner
+with the matching CPU architecture. The checks run as a non-root user in the Amazon Linux 2023
+container. They start a contained workload and verify file-access and process restrictions without
+an experimental opt-in. A failed check stops the build and prevents publication. These checks do not
+replace target qualification or verification of the published download.
 
 ## Publish
 
@@ -61,14 +67,16 @@ Approve the protected signing environment when requested, then approve `release-
 The workflow creates the tag and publishes the verified bundle from that run.
 A new run rebuilds the package. Keep the hashes from the publication run.
 
-With `publish_linux_x86=false`, both channels publish these files, with the selected tag in place of `<tag>`:
+By default, both channels publish these files, with the selected tag in place of `<tag>`:
 
 - `box-<tag>-aarch64-apple-darwin.tar.gz`
 - `box-<tag>-linux-arm64.tar.gz`
+- `box-<tag>-linux-x86_64.tar.gz`
 - `SHA256SUMS.txt`
 
-Setting `publish_linux_x86=true` adds `box-<tag>-linux-x86_64.tar.gz` and its checksum entry.
-With the default `false`, the x86-64 package remains a workflow artifact.
+Setting `publish_linux_x86=false` omits `box-<tag>-linux-x86_64.tar.gz` and its checksum entry.
+The x86-64 package then remains a workflow artifact.
+The x86-64 build and package checks run for either setting. A failure blocks publication of every selected archive.
 
 The Linux release archives use `linux-arm64` and `linux-x86_64` in their names.
 Compilation and intermediate workflow artifacts retain the Rust targets `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu`, respectively.

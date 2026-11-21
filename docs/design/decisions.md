@@ -85,8 +85,8 @@ invalid configuration still fails before a workload starts.
 Every release, stable or Linux preview, includes macOS and Linux ARM64. The release workflow has no
 input that omits Linux ARM64, and only the Linux x86-64 archive is optional, through `publish_linux_x86`. An input
 that omits ARM64 would let a release drop a supported platform by accident.
-`test_stable_and_preview_publish_arm64_with_x86_off_by_default` pins the release contents. The
-release owner must establish Linux readiness before each release. Linux previews leave the latest
+The x86-64 archive is selected by default and can be omitted with `publish_linux_x86=false`.
+The release owner must establish Linux readiness before each release. Linux previews leave the latest
 stable release unchanged. Removing the startup flag does not authorize a release or establish security
 acceptance. The native filesystem policy experiment retains its separate configuration and Cargo
 feature controls.

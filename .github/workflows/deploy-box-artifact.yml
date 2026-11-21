@@ -33,10 +33,9 @@ on:
         required: true
         type: string
       publish_linux_x86:
-        # Set true only after x86-64 qualification.
         description: 'Also publish the Linux x86-64 archive'
         required: true
-        default: false
+        default: true
         type: boolean
       sha:
         # Releases require main history. Dry runs also accept the dispatched
@@ -267,7 +266,7 @@ jobs:
         target:
           - triple: x86_64-unknown-linux-gnu
             label: Linux x86_64
-            runner: ubuntu-22.04
+            runner: ubuntu-24.04
           - triple: aarch64-unknown-linux-gnu
             label: Linux ARM64
             runner: ubuntu-24.04-arm
@@ -381,6 +380,8 @@ jobs:
 
       - name: Check the x86-64 Linux package
         if: matrix.target.triple == 'x86_64-unknown-linux-gnu'
+        env:
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
         run: |
           set -euo pipefail
           # Reject a selected source that still requires either retired opt-in.
@@ -399,6 +400,24 @@ jobs:
             box-linux-release \
             python3 scripts/check-linux-package.py stage/box-core \
               --target x86_64-unknown-linux-gnu
+          # This named profile permits user namespaces for the disposable test container.
+          cat > "$RUNNER_TEMP/box-package-smoke.apparmor" <<'EOF'
+          abi <abi/4.0>,
+          profile box-package-smoke flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r "$RUNNER_TEMP/box-package-smoke.apparmor"
+          # Namespace setup needs a fresh proc mount, without Docker's masked system paths.
+          docker run --rm --cap-drop ALL --user 1000:1000 \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=box-package-smoke \
+            --security-opt systempaths=unconfined \
+            --env HOME=/home/box-test \
+            --mount "type=bind,source=$PWD,target=/src,readonly" \
+            box-linux-release \
+            python3 scripts/smoke-linux-package.py \
+              "dist/box-${NEW_TAG}-x86_64-unknown-linux-gnu.tar.gz"
 
       - name: Check and run the ARM64 Linux package
         if: matrix.target.triple == 'aarch64-unknown-linux-gnu'
