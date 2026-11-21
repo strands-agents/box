@@ -107,7 +107,6 @@ impl MountTarget {
     }
 
     /// Retain the exact logical leaf, including a symlink, without following any path component.
-    #[cfg(test)]
     pub(super) fn prepare_logical_file(
         view: &MountView,
         entry: &MountEntry,
@@ -144,7 +143,6 @@ impl MountTarget {
         })
     }
 
-    #[cfg(test)]
     pub(super) fn descriptor(&self) -> &File {
         &self.target
     }
@@ -405,7 +403,6 @@ fn walk(
 }
 
 /// Resolve a protected object within the scratch root, including absolute link text within it.
-#[cfg(test)]
 pub(super) fn open_protected_object(root: &Path, path: &Path) -> Result<File, ContainmentError> {
     let root = std::fs::OpenOptions::new()
         .read(true)

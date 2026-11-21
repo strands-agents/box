@@ -7,6 +7,10 @@ use crate::error::ContainmentError;
 use crate::platform::{Platform, PlatformInfo};
 use std::sync::{Arc, Mutex};
 
+#[cfg(target_os = "linux")]
+/// Fixture-only access to automatic storage admission through the real namespace launcher.
+pub use crate::backend::linux::namespace::storage::fixture as storage;
+
 /// Render a Seatbelt profile without applying or live-validating it.
 pub fn generate_seatbelt_profile(config: &ContainmentConfig) -> Result<String, ContainmentError> {
     // The floors first, in the order `apply` runs them: they refuse a grant *set* that combines into
@@ -115,6 +119,7 @@ impl ContainmentBackend for MockBackend {
         _egress_handoff: Option<&std::os::unix::net::UnixStream>,
         _confirm_fd: Option<std::os::fd::RawFd>,
         _native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
+        _storage_control_fd: Option<std::os::fd::RawFd>,
     ) -> Result<(), ContainmentError> {
         self.inner
             .records
@@ -166,7 +171,7 @@ impl MockContainment {
     pub fn apply(&self, config: &ContainmentConfig) -> Result<(), ContainmentError> {
         // Test harnesses do not exercise the egress handoff (the transport is proven in
         // `backend::linux::namespace::netns`'s own kernel test) nor the exec-confirm fd.
-        crate::facade::apply_backend(|| Ok(self.backend.as_ref()), config, None, None, None)
+        crate::facade::apply_backend(|| Ok(self.backend.as_ref()), config, None, None, None, None)
     }
 
     /// Snapshot every backend apply call in order.

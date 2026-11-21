@@ -4,7 +4,7 @@
 //! ```text
 //! strands-box-contain-trampoline --config <containment-config.json> [--config-fd <fd>] \
 //!   --config-sha256 <digest> --target-env-json <json> [--argv0 <spelling>] \
-//!   [--setup-status-fd <fd>] [--relay-control-fd <fd>] [--launch-gate-fd <fd>] -- <interp> [args...]
+//!   [--setup-status-fd <fd>] [--relay-control-fd <fd>] [--launch-gate-fd <fd>] [--storage-control-fd <fd>] -- <interp> [args...]
 //! ```
 
 use std::process::ExitCode;
@@ -29,7 +29,7 @@ static EXECUTABLE_IDENTITY_MARKER: [u8; 72] =
 const USAGE: &str = "usage: strands-box-contain-trampoline --config <containment-config.json> \
      [--config-fd <fd>] \
      --config-sha256 <64-lowercase-hex> --target-env-json <json-object> \
-     [--argv0 <spelling>] [--setup-status-fd <fd>] [--relay-control-fd <fd>] [--launch-gate-fd <fd>] \
+     [--working-directory <absolute-path>] [--argv0 <spelling>] [--setup-status-fd <fd>] [--relay-control-fd <fd>] [--launch-gate-fd <fd>] [--storage-control-fd <fd>] \
      -- <command> [args...]\n\
      \n\
      Verifies and applies <containment-config.json>, then installs only the target\n\
@@ -84,6 +84,7 @@ fn run(args: &Args) -> ExitCode {
         args.relay_control_fd,
         args.config_fd,
         args.launch_gate_fd,
+        args.storage_control_fd,
     ]
     .into_iter()
     .flatten()
@@ -93,6 +94,15 @@ fn run(args: &Args) -> ExitCode {
             SetupStage::ConfigRead,
             2,
             format_args!("cannot close inherited descriptors: {error}"),
+        );
+    }
+    if let Some(descriptor) = args.storage_control_fd
+        && let Err(error) = arm_storage_control(descriptor)
+    {
+        return setup_status.fail(
+            SetupStage::ConfigRead,
+            2,
+            format_args!("cannot arm storage control channel: {error}"),
         );
     }
     if let Some(descriptor) = args.launch_gate_fd
@@ -111,6 +121,57 @@ fn run(args: &Args) -> ExitCode {
     // Phase 2: hand off — `exec` replaces this (now-contained) image with the
     // command, which is therefore born contained. On success this never returns.
     exec_command(args, &setup_status)
+}
+
+/// Validate the private connected Unix stream and prevent inheritance through an unexpected exec.
+#[cfg(unix)]
+fn arm_storage_control(descriptor: i32) -> std::io::Result<()> {
+    let mut kind: libc::c_int = 0;
+    let mut kind_length = std::mem::size_of_val(&kind) as libc::socklen_t;
+    // SAFETY: getsockopt writes into the sized local integer for this inherited descriptor.
+    if unsafe {
+        libc::getsockopt(
+            descriptor,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            std::ptr::from_mut(&mut kind).cast(),
+            &mut kind_length,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    if kind != libc::SOCK_STREAM {
+        return Err(std::io::Error::other(
+            "storage control must be a Unix stream",
+        ));
+    }
+    // SAFETY: zeroed sockaddr_storage supplies a correctly sized writable address buffer.
+    let mut peer: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut peer_length = std::mem::size_of_val(&peer) as libc::socklen_t;
+    // SAFETY: getpeername writes only within the supplied address buffer.
+    if unsafe {
+        libc::getpeername(
+            descriptor,
+            std::ptr::from_mut(&mut peer).cast(),
+            &mut peer_length,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    if i32::from(peer.ss_family) != libc::AF_UNIX {
+        return Err(std::io::Error::other(
+            "storage control must be a Unix stream",
+        ));
+    }
+    // SAFETY: fcntl inspects and updates descriptor flags without taking ownership.
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+    if flags < 0 || unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// The parent must acknowledge setup before any workload code can execute.
@@ -281,6 +342,7 @@ fn apply_containment(args: &Args, setup_status: &SetupStatus) -> Result<(), Exit
         egress_handoff.as_deref(),
         args.setup_status_fd,
         native_filesystem_handoff.as_ref(),
+        args.storage_control_fd,
     )
     .map_err(|error| match error {
         error @ ContainmentError::PlatformUnsupported { .. } => {
@@ -342,8 +404,13 @@ fn exec_command(args: &Args, setup_status: &SetupStatus) -> ExitCode {
         }
     };
 
-    // The working directory, restored **after** apply and before exec.
-    if let Some(directory) = target_env.get("PWD")
+    // The trusted launcher starts outside provider storage. Resolve the workload's directory
+    // only after containment; older private callers can still supply it through target PWD.
+    let directory = args
+        .working_directory
+        .as_deref()
+        .or_else(|| target_env.get("PWD").map(std::path::Path::new));
+    if let Some(directory) = directory
         && let Err(error) = std::env::set_current_dir(directory)
     {
         return setup_status.fail(
@@ -609,12 +676,39 @@ mod tests {
             config_fd: None,
             config_sha256: [0; 32],
             target_env_json: "{}".into(),
+            working_directory: None,
             setup_status_fd: None,
             relay_control_fd: None,
             launch_gate_fd: None,
+            storage_control_fd: None,
             command: vec!["/containment-test-no-such-program".into()],
             argv0: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn storage_control_arms_only_connected_unix_streams_without_consuming_them() {
+        use std::os::fd::AsRawFd as _;
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let descriptor = stream.as_raw_fd();
+        // SAFETY: this fixture owns the descriptor and simulates its inherited non-CLOEXEC state.
+        assert_eq!(unsafe { libc::fcntl(descriptor, libc::F_SETFD, 0) }, 0);
+        super::arm_storage_control(descriptor).unwrap();
+        assert_ne!(
+            unsafe { libc::fcntl(descriptor, libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        assert!(stream.peer_addr().is_ok());
+
+        let (datagram, _peer) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        assert!(super::arm_storage_control(datagram.as_raw_fd()).is_err());
+        let ordinary = tempfile::tempfile().unwrap();
+        assert!(super::arm_storage_control(ordinary.as_raw_fd()).is_err());
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_accepted, _) = listener.accept().unwrap();
+        assert!(super::arm_storage_control(client.as_raw_fd()).is_err());
     }
 
     #[test]
@@ -670,6 +764,123 @@ mod tests {
             Err(super::ConfigFileError::Read(_))
         ));
         assert_eq!(std::fs::read(path).unwrap(), b"");
+    }
+
+    #[test]
+    fn private_working_directory_wins_and_legacy_callers_keep_pwd_behavior() {
+        const CHILD: &str = "BOX_UNIT_TRAMPOLINE_WORKING_DIRECTORY";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = std::path::PathBuf::from(root);
+            let selected = root.join("selected directory");
+            let fallback = root.join("environment-directory");
+            let mut args = request_at(&root.join("missing-config"));
+            args.target_env_json = serde_json::json!({"PWD": fallback}).to_string();
+            args.working_directory = Some(selected.clone());
+            assert_eq!(
+                super::exec_command(&args, &super::SetupStatus::arm(None).unwrap()),
+                std::process::ExitCode::from(4)
+            );
+            assert_eq!(std::env::current_dir().unwrap(), selected);
+            args.working_directory = None;
+            assert_eq!(
+                super::exec_command(&args, &super::SetupStatus::arm(None).unwrap()),
+                std::process::ExitCode::from(4)
+            );
+            assert_eq!(std::env::current_dir().unwrap(), fallback);
+            args.target_env_json = "{}".into();
+            assert_eq!(
+                super::exec_command(&args, &super::SetupStatus::arm(None).unwrap()),
+                std::process::ExitCode::from(4)
+            );
+            assert_eq!(std::env::current_dir().unwrap(), fallback);
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("selected directory")).unwrap();
+        std::fs::create_dir(root.join("environment-directory")).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::private_working_directory_wins_and_legacy_callers_keep_pwd_behavior",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, &root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+            "{output:?}"
+        );
+    }
+
+    #[test]
+    fn private_working_directory_reaches_the_executed_program() {
+        const CHILD: &str = "BOX_UNIT_TRAMPOLINE_EXEC_CWD";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let mut args = request_at(std::path::Path::new("/absent-test-config"));
+            args.working_directory = Some(std::path::PathBuf::from(path));
+            args.target_env_json = r#"{"PWD":"/"}"#.into();
+            args.command = vec!["/bin/pwd".into(), "-P".into()];
+            let _ = super::exec_command(&args, &super::SetupStatus::arm(None).unwrap());
+            std::process::exit(99);
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().canonicalize().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::private_working_directory_reaches_the_executed_program",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, &target)
+            .current_dir("/")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.ends_with(target.to_str().unwrap())),
+            "{output:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_config_is_reported_before_private_directory_access() {
+        const CHILD: &str = "BOX_UNIT_TRAMPOLINE_CWD_BEFORE_APPLY";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let before = std::env::current_dir().unwrap();
+            let mut args = request_at(std::path::Path::new(&path));
+            args.working_directory = Some(std::path::PathBuf::from(&path).join("absent-directory"));
+            let result = super::run(&args);
+            let unchanged = std::env::current_dir().unwrap() == before;
+            std::process::exit(if result == std::process::ExitCode::from(2) && unchanged {
+                0
+            } else {
+                99
+            });
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::invalid_config_is_reported_before_private_directory_access",
+                "--nocapture",
+            ])
+            .env(CHILD, directory.path().join("absent-config"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("cannot read config file"), "{stderr}");
+        assert!(
+            !stderr.contains("cannot enter the working directory"),
+            "{stderr}"
+        );
     }
 
     #[test]
@@ -817,10 +1028,12 @@ mod tests {
         std::fs::write(&path, expected).expect("write config");
         let args = Args {
             launch_gate_fd: None,
+            storage_control_fd: None,
             config: path.clone(),
             config_fd: None,
             config_sha256: [0; 32],
             target_env_json: "{}".to_string(),
+            working_directory: None,
             setup_status_fd: None,
             relay_control_fd: None,
             command: vec!["true".to_string()],
@@ -843,10 +1056,12 @@ mod tests {
         std::fs::write(&path, b"replacement").expect("replacement config");
         let args = Args {
             launch_gate_fd: None,
+            storage_control_fd: None,
             config: path.clone(),
             config_fd: Some(descriptor),
             config_sha256: [0; 32],
             target_env_json: "{}".to_string(),
+            working_directory: None,
             setup_status_fd: None,
             relay_control_fd: None,
             command: vec!["true".to_string()],

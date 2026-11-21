@@ -17,7 +17,6 @@ use crate::backend::dependencies::{
 };
 
 mod dependency_permissions;
-#[cfg(test)]
 mod storage;
 mod targets;
 
@@ -52,7 +51,6 @@ pub(crate) enum MountOrigin {
     /// A path the caller refused, overmounted empty and read-only so a grant above it stops here.
     Refusal,
     /// A pending logical file name, masked without following an existing final symlink.
-    #[cfg(test)]
     PendingFile,
     /// An exact write-protected object, with the identity the caller opened.
     Protection { device: u64, inode: u64 },
@@ -620,7 +618,6 @@ impl MountView {
     /// The target walker creates placeholders only in the private scaffold. File masks attach to
     /// retained regular-file or symlink objects without following a link. A missing child through
     /// a host bind is refused during view construction, before any workload starts.
-    #[cfg(test)]
     pub(crate) fn with_pending_masks(
         mut self,
         masks: &[(PathBuf, Scope)],
@@ -903,7 +900,6 @@ impl MountView {
                 pinned.require_new_mount(&target, &previous)?;
             }
             MountKind::EmptyFile => {
-                #[cfg(test)]
                 if entry.origin == MountOrigin::PendingFile {
                     return self.establish_pending_file(entry, root);
                 }

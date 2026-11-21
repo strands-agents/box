@@ -12,9 +12,12 @@ mod model;
 mod os_paths;
 mod platform;
 
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub mod storage;
+
 #[cfg(any(test, feature = "test-support"))]
-/// Test doubles (gated by the `test-support` cargo feature). Exposes
-/// test support utilities for driving containment without kernel-level enforcement.
+/// Test fixtures and doubles, gated by the `test-support` Cargo feature.
 pub mod test_support;
 
 // Public API surface
