@@ -7,6 +7,8 @@ mod native_filesystem;
 pub(crate) mod netns;
 pub(crate) mod probe;
 pub(crate) mod reaper;
+#[cfg(test)]
+mod storage;
 pub(crate) mod syscall;
 pub(crate) mod view;
 
