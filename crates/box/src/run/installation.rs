@@ -14,6 +14,9 @@ use crate::record::layout::{disk_identity, lies_within};
 #[path = "installation_mounts.rs"]
 mod mounts;
 
+#[cfg(test)]
+pub(crate) mod snapshot;
+
 #[cfg(target_os = "linux")]
 pub(super) use mounts::inspect_single_mount;
 
@@ -60,6 +63,8 @@ pub(super) fn directory(executable: &Path) -> Option<&Path> {
 pub(crate) struct TrustedInstallation {
     binaries: Vec<InstalledBinary>,
     preparation: std::sync::Mutex<()>,
+    #[cfg(test)]
+    compiler_index: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -68,6 +73,8 @@ struct InstalledBinary {
     names: Vec<PathBuf>,
     opened: File,
     identity: (u64, u64),
+    #[cfg(test)]
+    verification: Option<super::commands::snapshot::ReplicaVerifier>,
 }
 
 impl TrustedInstallation {
@@ -75,6 +82,33 @@ impl TrustedInstallation {
         let current = executable().map_err(|source| InstallationError::Locate { source })?;
         let helper = super::contain::trampoline::locate()?;
         Self::open(current, helper)
+    }
+
+    #[cfg(test)]
+    fn open_for_storage(current: PathBuf, helper: PathBuf) -> Result<Self, BoxError> {
+        let mut installation = Self::open(current, helper.clone())?;
+        let directory = helper.parent().expect("open already validated the parent");
+        let compiler =
+            InstalledBinary::open(directory.join("strands-box-storage-compiler"), directory)?;
+        installation.compiler_index = Some(installation.binaries.len());
+        installation.binaries.push(compiler);
+        installation.verify()?;
+        Ok(installation)
+    }
+
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "The storage compiler executable is launched only on Linux"
+        )
+    )]
+    #[cfg(test)]
+    pub(crate) fn storage_compiler(&self) -> Option<(&Path, &File)> {
+        self.compiler_index.map(|index| {
+            let compiler = &self.binaries[index];
+            (compiler.path.as_path(), &compiler.opened)
+        })
     }
 
     fn open(current: PathBuf, helper: PathBuf) -> Result<Self, BoxError> {
@@ -114,6 +148,8 @@ impl TrustedInstallation {
         let installation = Self {
             binaries,
             preparation: std::sync::Mutex::new(()),
+            #[cfg(test)]
+            compiler_index: None,
         };
         installation.verify()?;
         Ok(installation)
@@ -314,14 +350,21 @@ impl InstalledBinary {
             names,
             opened,
             identity,
+            #[cfg(test)]
+            verification: None,
         })
     }
 
     fn verify(&self) -> Result<(), BoxError> {
-        let unchanged = self
-            .opened
-            .metadata()
-            .is_ok_and(|metadata| metadata.nlink() == self.names.len() as u64)
+        let unchanged_descriptor = self.unchanged_owner_state();
+        #[cfg(test)]
+        let unchanged_descriptor = if let Some(verification) = &self.verification {
+            verification.verify(&self.opened)?;
+            true
+        } else {
+            unchanged_descriptor
+        };
+        let unchanged = unchanged_descriptor
             && self.names.iter().all(|name| {
                 std::fs::symlink_metadata(name).is_ok_and(|metadata| {
                     metadata.is_file() && (metadata.dev(), metadata.ino()) == self.identity
@@ -335,6 +378,12 @@ impl InstalledBinary {
             }
             .into())
         }
+    }
+
+    fn unchanged_owner_state(&self) -> bool {
+        self.opened
+            .metadata()
+            .is_ok_and(|metadata| metadata.nlink() == self.names.len() as u64)
     }
 
     fn names(&self, path: &Path) -> bool {
