@@ -44,9 +44,13 @@ and MCP call. So what the box allows is what the agent does. Keep that small:
   program in the box can use each route.
 - Leave MCP import and hook import off unless the work needs them.
 
-With the activity banner on, **Ctrl+\\** turns policy off until you press it again. Then the box
-allows every operation, and only the folders and programs set when the run started still limit
-the agent.
+With the activity banner on, **Ctrl+\\** turns off what you add to the policy until you press it
+again: the rules in your policy files, and the shell and Python limits of your profile's
+`[filesystem] deny` and `deny_write`. Then the box allows every operation except what `box` forbids
+for every box, such as changes to the box home, your profile, and `.box`
+([Generated policy](policies-reference.md#generated-policy)). A `deny_write` folder is then open to
+the box's shell and Python, so they can change a program in it that a later run runs. The folders
+and programs set when the run started still limit the agent.
 
 A run's records, in `~/.strands/box/r/<box ID>/`, are the box's own decisions for that run, and they
 stay until `box clean` removes the run. They're a plain file on your machine, not a tamper-proof

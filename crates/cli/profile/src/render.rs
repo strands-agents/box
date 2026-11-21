@@ -10,27 +10,47 @@ pub(crate) const SIGNAL_GROUPS: [&str; 4] = ["deny", "permit", "trace", "logs"];
 // Bare tool hosts receive connection permission on the standard HTTPS port.
 const DEFAULT_TOOL_HOST_PORT: u16 = 443;
 
+/// Whether a rule permits or forbids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Effect {
+    Permit,
+    Forbid,
+}
+
 /// Policy rules that `box` writes, one per line, and the `@id` of each.
 #[derive(Debug, Clone, Default)]
 pub struct Rules {
     lines: Vec<String>,
     pub(crate) ids: Vec<String>,
+    forbids: Vec<String>,
 }
 
 impl Rules {
-    /// Add the rule `rule` with the `@id` `id`.
-    pub(crate) fn add(&mut self, id: &str, rule: &str) {
-        self.lines.push(format!("@id({id:?}) {rule}"));
-        self.ids.push(id.to_string());
+    /// Add the permit with the `@id` `id`, and `rule`, the text after `permit`.
+    pub(crate) fn permit(&mut self, id: &str, rule: &str) {
+        self.push(Effect::Permit, format!("@id({id:?}) permit {rule}"), id);
     }
 
-    /// Add the rule `rule` with the `@id` `id` and the `@description` `description`, which a denial
-    /// prints after the rule's id.
-    pub(crate) fn add_described(&mut self, id: &str, description: &str, rule: &str) {
-        self.lines.push(format!(
-            "@id({id:?}) @description({}) {rule}",
+    /// Add the forbid with the `@id` `id`, and `rule`, the text after `forbid`.
+    pub(crate) fn forbid(&mut self, id: &str, rule: &str) {
+        self.push(Effect::Forbid, format!("@id({id:?}) forbid {rule}"), id);
+    }
+
+    /// Add the forbid with the `@id` `id`, the `@description` `description`, which a denial prints
+    /// after the rule's id, and `rule`, the text after `forbid`.
+    pub(crate) fn forbid_described(&mut self, id: &str, description: &str, rule: &str) {
+        let line = format!(
+            "@id({id:?}) @description({}) forbid {rule}",
             literal(description)
-        ));
+        );
+        self.push(Effect::Forbid, line, id);
+    }
+
+    fn push(&mut self, effect: Effect, line: String, id: &str) {
+        if effect == Effect::Forbid {
+            self.forbids.push(line.clone());
+        }
+        self.lines.push(line);
         self.ids.push(id.to_string());
     }
 
@@ -46,6 +66,11 @@ impl Rules {
         }
         self.lines.join("\n") + "\n"
     }
+
+    /// The forbids among the rules, one per line.
+    pub(crate) fn forbids(&self) -> impl Iterator<Item = &str> {
+        self.forbids.iter().map(String::as_str)
+    }
 }
 
 /// The permits that start each tool, decide each action of its grammar, and reach each host its
@@ -53,19 +78,19 @@ impl Rules {
 pub fn tool_rules(tools: &[Found], host: &Host) -> Rules {
     let mut rules = Rules::default();
     for tool in tools {
-        rules.add(
+        rules.permit(
             &format!("spawn_{}", tool.name),
             &format!(
-                r#"permit (principal, action == Box::Action::"shell:spawn", resource) when {{ context.input.program_path == {path} && context.input.program == {program} }};"#,
+                r#"(principal, action == Box::Action::"shell:spawn", resource) when {{ context.input.program_path == {path} && context.input.program == {program} }};"#,
                 path = literal(&host.tilde(&tool.identity)),
                 program = literal(&tool.program),
             ),
         );
         if let Some(namespace) = &tool.grammar {
-            rules.add(
+            rules.permit(
                 &format!("tool_{}", tool.name),
                 &format!(
-                    r#"permit (principal, action in [{namespace}::Action::"*", {namespace}::Action::"unmodeled"], resource);"#
+                    r#"(principal, action in [{namespace}::Action::"*", {namespace}::Action::"unmodeled"], resource);"#
                 ),
             );
         }
@@ -84,16 +109,16 @@ pub fn tool_rules(tools: &[Found], host: &Host) -> Rules {
                 .collect::<Vec<_>>(),
         );
         rules.gap();
-        rules.add(
+        rules.permit(
             "package_hosts_connect",
             &format!(
-                r#"permit (principal, action == Box::Action::"net:connect", resource) when {{ ({condition}) && context.input.port == {DEFAULT_TOOL_HOST_PORT} }};"#
+                r#"(principal, action == Box::Action::"net:connect", resource) when {{ ({condition}) && context.input.port == {DEFAULT_TOOL_HOST_PORT} }};"#
             ),
         );
-        rules.add(
+        rules.permit(
             "package_hosts_request",
             &format!(
-                r#"permit (principal, action == Box::Action::"http:request", resource) when {{ {condition} }};"#
+                r#"(principal, action == Box::Action::"http:request", resource) when {{ {condition} }};"#
             ),
         );
     }
