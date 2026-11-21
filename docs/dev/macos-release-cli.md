@@ -66,8 +66,7 @@ and SHA-256 hash of the unsigned build archive. The macOS record also includes
 `macos_sdk_version`, the SDK version checked and selected for the build. The x86_64 record has an
 empty feature list.
 The record sets `runtime_qualified` to `false`: it is build evidence, not an enforcement test
-result. It stays outside the package so the payload and `release.json` keep their existing
-format. When `sign_macos=true`, the signing receipt records the signed archive's hash separately.
+result. It stays outside the package, separate from the installation metadata in `release.json`. When `sign_macos=true`, the signing receipt records the signed archive's hash separately.
 The existing signing environment and source restrictions still apply. The native signing path
 uses the shared [distribution profile](macos-release.md#configure-access). Signing and verification
 reject a missing or mismatched profile.
