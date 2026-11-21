@@ -22,9 +22,11 @@ use crate::record::config::secret_source::{ProtectedPath, Spelled};
 use crate::record::layout::{lies_within, resolved_to_its_deepest_existing_ancestor};
 
 mod plan;
+#[cfg(target_os = "linux")]
+pub(crate) use plan::FilesystemTargetKind;
 pub(crate) use plan::{
-    FilesystemCheckpoint, FilesystemCompilation, FilesystemGeneration, FilesystemPlan,
-    FilesystemTargetKind, PendingMask, PublicationTarget,
+    FilesystemCheckpoint, FilesystemCompilation, FilesystemGeneration, FilesystemPlan, PendingMask,
+    PublicationTarget,
 };
 
 /// One host path a process's own syscalls reach, with no policy decision in the path.

@@ -832,14 +832,15 @@ fn perform_rename(
 const STALE_DESTINATION: &str = "filesystem identity changed during effect admission";
 
 fn rename_reached(
-    reach: &Reach,
+    _reach: &Reach,
     source: &Path,
     destination: &Path,
     judged: RenameDestination,
 ) -> io::Result<()> {
     let held = |path: &Path| {
         #[cfg(target_os = "linux")]
-        if let Some(protected) = reach.approve_storage(path, &path.to_string_lossy(), true, false) {
+        if let Some(protected) = _reach.approve_storage(path, &path.to_string_lossy(), true, false)
+        {
             return protected
                 .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error.to_string()))
                 .and_then(HeldPath::protected);
