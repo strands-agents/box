@@ -1257,7 +1257,7 @@ fn the_claude_and_codex_starters_ask_how_the_box_signs_in_to_bedrock() {
 }
 
 #[test]
-fn the_kiro_starter_asks_for_the_sign_in_and_adds_no_pack() {
+fn the_kiro_starter_asks_for_the_sign_in_and_mcp_import_and_adds_no_pack() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let lookup = Lookup {
         vendored: Some(crate::resources::source_tree().join("packs")),
@@ -1268,7 +1268,7 @@ fn the_kiro_starter_asks_for_the_sign_in_and_adds_no_pack() {
     let starter = Starter::load("@box/kiro", &lookup).expect("the Kiro starter");
     assert_eq!(starter.label, "Kiro CLI");
     assert!(starter.questions.is_empty());
-    assert_eq!(starter.ask, ["kiro.sign-in"]);
+    assert_eq!(starter.ask, ["kiro.sign-in", "kiro.import-mcp"]);
 }
 
 #[test]
@@ -1289,6 +1289,7 @@ fn each_shipped_starter_that_imports_mcp_servers_asks_for_it_off_by_default_and_
     for (pack, input) in [
         ("@box/claude", "claude.import-mcp"),
         ("@box/codex", "codex.import-mcp"),
+        ("@box/kiro", "kiro.import-mcp"),
     ] {
         let starter = Starter::load(pack, &lookup).expect("a shipped starter");
         assert!(starter.ask.iter().any(|name| name == input), "{pack}");

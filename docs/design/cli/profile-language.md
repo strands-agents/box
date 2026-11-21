@@ -1064,8 +1064,11 @@ The row's keys, their values, and their defaults are in
 directory, or more than one name, stops the load. `Resolver::edit` reads `kind`, `keep`, `set`,
 and `fill` together: `kind` comes with `keep`, `set`, or `fill`, and never without one of them,
 and the file name selects no format. `keep` paths and `set` keys are key paths, as in
-`[[mcp-servers]] key`. `sync` is refused beside any of them for now. An agent row with a link
-`mode` stops the load ([Tool storage](#tool-storage)).
+`[[mcp-servers]] key`. `sync` is refused beside any of them for now, and so is `exclude`, which
+names entries of a folder by file name. `exclude` also needs `sync = true`: only a `sync` update
+checks the copy against it on each run, so on a row without `sync` an `exclude` added after the
+first copy would leave the named file in the box with no line. An agent row with a link `mode` stops the load
+([Tool storage](#tool-storage)).
 
 An optional row whose source uses an environment-sourced input as a directory prefix first
 checks that root.
@@ -1092,7 +1095,27 @@ For each row, `box run` does this:
    - A link out of the source is followed if its target passes the step 2 checks.
    - `box` leaves out a link that fails the checks, a broken link, a link that loops back, a file
      it cannot read, and anything that is not a file or a folder.
-4. **Move it into place.** `box` builds the copy in the run directory, where no box can reach. It
+   - `box` leaves out each entry, at any depth, whose name the row's `exclude` lists, before it
+     follows a link of that name. A name matches whole and without regard to case, because macOS
+     file systems usually ignore case, so `MCP.json` is read as `mcp.json`. `exclude` takes no
+     pattern, and a name with `*`, `?`, or `[` stops the load. The walk that a `sync` update makes
+     of the host is the same walk, so an entry that `exclude` names never comes in. A copy from an
+     earlier run that a later `exclude` names stays in storage, because `box` deletes nothing the
+     box may hold. Each run and `box profile show` name it in a `kept` line, not as gone from the
+     host, until the operator deletes it. A
+     source that is one file, with `exclude`, stops the run.
+4. **Check that nothing changed.** `box` notes each host file's device, inode, size, and
+   modification and change times when it plans the copy. It compares them when it opens the file,
+   and again for every file once the whole copy is made. A file that changed or went in that time
+   fails the copy, so a copy of a database and its journal comes from one moment. `box` then plans
+   the row again and tries again, three times in all. When the files still change, the run stops
+   with `Error::Unsettled`, which names the file, before the box starts. Going on without the copy
+   would let the agent make the target itself, and the copy would then never be made. This is a
+   check that the files held still, not a database snapshot: `box` reads no file's format. Only a
+   first copy makes it. A `sync` update keeps its device and inode check, so a run does not stop
+   each time the host agent writes a synced file, and a file written during an update is fixed
+   by the next one.
+5. **Move it into place.** `box` builds the copy in the run directory, where no box can reach. It
    opens each folder on the way to the target's folder without following a link, makes a
    missing folder inside the one it holds open, and moves the copy into the last one. A link on the
    way stops the run. The move replaces nothing, so a target that appeared since step 1 is kept.
@@ -1565,7 +1588,7 @@ wins over a `permit`. Box Core rejects duplicate `@id` values across authored an
 | A copy carries a credential into the box | Each pack names only the files its agent needs, and `box` copies only what a row names and does not judge what a file holds ([decisions.md](decisions.md#the-packs-decide-what-is-copied)). The one exception is a `reads` or `deny` path of a declared secret source. A copy row or a tool's link row whose source meets one, as written or real, stops the load. A link that a copy follows to one is left out ([What stays on the host](plugins.md#what-stays-on-the-host)). |
 | A copy reads what a box planted | A source, and each link that a copy follows, cannot reach the workspace, the run's storage, `~/.strands/box`, or a write grant, as written or real. `box`'s own packs in `~/.strands/box` are the exception, because a run cannot write them. |
 | A box redirects a later copy | A copy is built in the run directory, out of every box's reach. `box` opens each folder on the way to the target without following a link, and moves the copy into the folder it holds open, so a folder that a box swaps for a link receives nothing. The move replaces nothing: a target that exists, a link included, is left alone, except that a row with `set` rewrites its values and stops the run at a link or a hard link, and a row with `fill` adds what it lacks and leaves a link or a hard link alone ([copies](#copies)). |
-| A source file changes after the check | `box` copies a file only when the file it opens has the device and inode it planned. |
+| A source file changes after the check | A first copy takes a file only when the file it opens has the device, inode, size, and times it planned, and reaches storage only when every file still has them once the copy is made ([copies](#copies)). A `sync` update reads a file only when it has the device and inode it planned. |
 | The box rewrites what a later run trusts | The policy forbids writes, deletes, and moves in `~/.strands/box` except the run's own storage, and `box run` refuses a write grant there ([decisions.md](decisions.md#a-run-cannot-write-what-a-later-run-trusts)). |
 | A grant follows a link the box planted | A filesystem entry that resolves through a link stops the run when the link is inside a place a box can write: the workspace, the run's storage, `~/.strands/box`, or a write grant of the agent, a tool, or a stdio MCP server. `box` checks each entry after it fills in the profile, and it compares the real folder that holds the link. So a link above such a place is followed, such as `/tmp` on macOS or a home folder that is a link. |
 | A box plants an MCP configuration for a later run | A `[[mcp-servers]]` `file` that is, holds, or lies in the workspace, the run's storage, `~/.strands/box`, or a write grant, as written or real, is not read ([decisions.md](decisions.md#no-file-a-box-can-write-is-an-input)). |

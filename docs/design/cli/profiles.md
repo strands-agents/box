@@ -457,13 +457,13 @@ work in this order:
    `env` holds the operator's value of a variable that a `pass-secret-env` entry covers, or sets
    such a variable, and it loses `args` when an argument, as written, holds that value, even when a declaration matches, so the agent starts no declared server with it. A profile table with a `type`
    that replaces an entry that keeps environment fields and does not match it adds that to the skip line.
-2. **Check each server.** `box` reads `type`, `command`, `args`, `env`, `url`, `enabled`, and
-   each field the row's `env-var-locations` gives a role. Every other field passes through: it
-   stays in the agent's configuration, `box.toml` never holds it, and it keeps no server out
-   ([decisions.md](decisions.md#a-pack-names-where-its-agents-mcp-servers-are)). An explicit
-   `type` of `stdio` or `http` wins, else `command` means stdio and `url` means http. A server
-   with `enabled = false`, or with a field of the other transport (`url` on stdio, `command`,
-   `args`, or `env` on http), is skipped. A field with a local role on a remote server also
+2. **Check each server.** `box` reads `type`, `command`, `args`, `env`, `url`, `enabled`,
+   `disabled`, and each field the row's `env-var-locations` gives a role. Every other field passes
+   through: it stays in the agent's configuration, `box.toml` never holds it, and it keeps no
+   server out ([decisions.md](decisions.md#a-pack-names-where-its-agents-mcp-servers-are)). An
+   explicit `type` of `stdio` or `http` wins, else `command` means stdio and `url` means http. A
+   server with `enabled = false` or `disabled = true`, or with a field of the other transport
+   (`url` on stdio, `command`, `args`, or `env` on http), is skipped. A field with a local role on a remote server also
    skips it. `Role::is_local` identifies local roles. A field with a remote role on a stdio
    server skips it when `mcp::keys` reads a variable in that field or cannot read it. A field
    with a remote role and no variable passes through
@@ -553,7 +553,7 @@ work in this order:
    must contain only letters, digits, and `-`, and must not be empty. A
    `header-references` value with a variable must end in one variable written in the
    row's `env-var-syntax`
-   (`${NAME}` for `@box/claude`, `${NAME}` or `$NAME` for `@box/pi`), and the text before it becomes
+   (`${NAME}` for `@box/claude` and `@box/kiro`, `${NAME}` or `$NAME` for `@box/pi`), and the text before it becomes
    `secret.prefix`. A reference can
    include a literal `:-default`, except in a form with no closing text, such as `$NAME`. If the variable is unset, the reference creates no credential
    binding; the harness uses the fallback in its own configuration. A variable that a route or a

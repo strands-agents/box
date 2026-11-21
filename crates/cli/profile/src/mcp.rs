@@ -17,7 +17,9 @@ use crate::storage_files::Refusals;
 
 /// The server fields `box` reads, besides the fields a row's `env-var-locations` names. Every other
 /// field passes through: it stays in the agent's own configuration, and it keeps no server out.
-pub(crate) const KNOWN_FIELDS: &[&str] = &["type", "command", "args", "env", "url", "enabled"];
+pub(crate) const KNOWN_FIELDS: &[&str] = &[
+    "type", "command", "args", "env", "url", "enabled", "disabled",
+];
 
 /// The known stdio fields that accept the `references` role.
 pub(crate) const EXPANDED_FIELDS: &[&str] = &["command", "args", "env"];
@@ -1578,6 +1580,11 @@ fn convert(
         None | Some(Value::Bool(true)) => {}
         Some(Value::Bool(false)) => return Err("is turned off (enabled = false)".into()),
         Some(_) => return Err("`enabled` is not true or false".into()),
+    }
+    match fields.get("disabled") {
+        None | Some(Value::Bool(false)) => {}
+        Some(Value::Bool(true)) => return Err("is turned off (disabled = true)".into()),
+        Some(_) => return Err("`disabled` is not true or false".into()),
     }
     let transport = transport_of(fields)?;
     if let Some(syntax) = syntax
@@ -4178,6 +4185,7 @@ mod tests {
             ".claude.json",
             r#"{"mcpServers": {
             "off": {"command": "tool", "enabled": false},
+            "resting": {"command": "tool", "disabled": true},
             "sse": {"type": "sse", "url": "https://x.example.com"},
             "launched": {"command": "npx", "args": ["-y", "server"]},
             "shell": {"command": "bash"},
@@ -4214,6 +4222,7 @@ mod tests {
                 ),
             ),
             ("remote-env", "uses env".to_string()),
+            ("resting", "is turned off (disabled = true)".to_string()),
             ("shell", "runs bash, which the box does not start as a server".to_string()),
             ("sse", "uses type sse".to_string()),
         ];
