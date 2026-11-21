@@ -20,18 +20,18 @@ neither.
 
 ## Install
 
-The first release of `box` is a pre-release, so name it in `BOX_VERSION`:
+Download the installer and run it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | BOX_VERSION=0.3.0-preview.1 sh
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | sh
 ```
 
 Example output on a Mac:
 
 ```text
-Downloading box-cli-v0.3.0-preview.1-aarch64-apple-darwin.tar.gz...
+Downloading box-cli-v0.3.0-aarch64-apple-darwin.tar.gz...
 Verified checksum, archive, and Apple signature
-Installed box 0.3.0-preview.1.
+Installed box 0.3.0.
 Added box to $PATH in /Users/you/.zshrc
 Open a new terminal, or run: export PATH="$HOME/.local/bin:$PATH"
 
@@ -57,7 +57,7 @@ Open a new terminal as it says, and check that `box` runs:
 
 ```console
 $ box --version
-box 0.3.0-preview.1
+box 0.3.0
 ```
 
 The installer checks the download before it changes your installed release. If a check fails,
@@ -86,20 +86,20 @@ on Linux.
 
 ## Upgrade or choose a version
 
-To install another release, run the installer again with its number in `BOX_VERSION`:
+To upgrade to the latest release, run the installer again. To install a particular release, name it
+in `BOX_VERSION`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | BOX_VERSION=0.3.0-preview.2 sh
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | BOX_VERSION=0.3.0 sh
 ```
 
-It switches `current` to that release and prints `Updated box 0.3.0-preview.1 to 0.3.0-preview.2.`,
-or `box 0.3.0-preview.2 is already installed.` when you have it already. If you installed with any
-of the other [installer variables](#installer-variables), set them again.
+It switches `current` to that release and prints `Updated box 0.3.0-preview.1 to 0.3.0.`, or
+`box 0.3.0 is already installed.` when you have it already. If you installed with any of the other
+[installer variables](#installer-variables), set them again.
 
 Without `BOX_VERSION`, the installer takes the latest stable release. A pre-release, such as
 `0.3.0-preview.1` or `0.3.0-linux-preview.1`, is never the latest, so the installer picks one only
-when `BOX_VERSION` names it. Until a stable release includes `box`, the installer can't find one on
-its own, and it stops and tells you to set `BOX_VERSION`.
+when `BOX_VERSION` names it.
 
 A release with no `box` archive for your computer stops the installer, which names the archive it
 couldn't find. Releases before `0.3.0-preview.1` have no `box` archive at all.
@@ -120,7 +120,7 @@ macOS, a release that isn't signed by the Box publisher, such as a fork's own bu
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh |
-  BOX_GITHUB_REPO=your-account/box BOX_ALLOW_UNSIGNED=1 BOX_VERSION=0.3.0-preview.1 sh
+  BOX_GITHUB_REPO=your-account/box BOX_ALLOW_UNSIGNED=1 sh
 ```
 
 `BOX_ALLOW_UNSIGNED=1` skips Apple's signature and Gatekeeper checks, and the installer says so
@@ -132,7 +132,7 @@ binary version.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh |
-  BOX_NO_MODIFY_PATH=1 BOX_VERSION=0.3.0-preview.1 sh
+  BOX_NO_MODIFY_PATH=1 sh
 ```
 
 This leaves your shell's startup files alone, so put `~/.local/bin` on your `PATH` in your own
@@ -175,7 +175,7 @@ from `# >>> Box PATH >>>` to `# <<< Box PATH <<<`. For fish, delete
 
 | Variable | What it does |
 | --- | --- |
-| `BOX_VERSION` | The release to install, such as `0.3.0-preview.1` or its tag `v0.3.0-preview.1`. Without it, the latest stable release. |
+| `BOX_VERSION` | The release to install, such as `0.3.0` or its tag `v0.3.0`. Without it, the latest stable release. |
 | `BOX_GITHUB_REPO` | The public GitHub repository that supplies releases, as `owner/repo`. Without it, `strands-agents/box`. |
 | `BOX_ALLOW_UNSIGNED` | `1` skips Apple's signature and Gatekeeper checks on macOS. It has no effect on Linux. |
 | `BOX_NO_MODIFY_PATH` | `1` leaves your shell's startup files alone. |
