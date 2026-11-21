@@ -28,9 +28,7 @@ neither.
 The first release of `box` is a pre-release, so name it in `BOX_VERSION`:
 
 ```sh
-gh api 'repos/strands-agents/box/contents/install.sh?ref=main' \
-  -H 'Accept: application/vnd.github.raw' > install.sh &&
-BOX_VERSION=0.3.0-preview.1 sh ./install.sh
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | BOX_VERSION=0.3.0-preview.1 sh
 ```
 
 Example output on a Mac:

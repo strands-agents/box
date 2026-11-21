@@ -181,6 +181,18 @@ class ReleaseSourceTests(unittest.TestCase):
         self.assertIn("already exists", result.stdout)
         self.assertEqual(output, "")
 
+    def test_a_preview_number_must_exceed_each_earlier_preview_of_its_channel(self):
+        self.git("tag", "v0.1.1-preview.3", self.main)
+        self.git("tag", "v0.1.1-linux-preview.5", self.main)
+        for version, success in [("0.1.1-preview.2", False), ("0.1.1-preview.4", True),
+                                 ("0.1.1-linux-preview.4", False), ("0.1.1-linux-preview.6", True)]:
+            with self.subTest(version=version):
+                result, output = self.scan_source("true", version=version)
+                self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
+                if not success:
+                    self.assertIn("is not above", result.stdout)
+                    self.assertEqual(output, "")
+
     def test_native_policy_is_a_dry_run_choice(self):
         for dry_run, native, success in [("true", "true", True), ("true", "false", True),
                                          ("false", "true", False), ("true", "yes", False)]:
@@ -334,6 +346,7 @@ class ReleaseBundleTests(unittest.TestCase):
                     env={
                         **os.environ, "PATH": f"{root}:{os.environ['PATH']}",
                         "NEW_TAG": tag, "PRERELEASE": str(preview).lower(),
+                        "LINUX_PREVIEW": "false",
                         "PUBLISH_LINUX_X86": str(publish_x86).lower(),
                         "GITHUB_REPOSITORY": "example/box",
                         "FAKE_NAMES": "\n".join(names),
@@ -363,7 +376,7 @@ class ReleaseBundleTests(unittest.TestCase):
                      workflow_command("Poll the release for its tag and assets")],
                     cwd=root, capture_output=True, text=True,
                     env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}", "NEW_TAG": tag,
-                         "PRERELEASE": "false", "PUBLISH_LINUX_X86": "true",
+                         "PRERELEASE": "false", "LINUX_PREVIEW": "false", "PUBLISH_LINUX_X86": "true",
                          "GITHUB_REPOSITORY": "example/box",
                          "FAKE_NAMES": "\n".join(name for name in complete if name != missing)},
                 )

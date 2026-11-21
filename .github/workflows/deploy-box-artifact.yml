@@ -215,6 +215,16 @@ jobs:
             echo "::error::tag $NEW_TAG already exists."
             exit 1
           fi
+          # A preview's number rises within its channel, so preview.2 never follows preview.3.
+          if [ "$PRERELEASE" = "true" ]; then
+            CHANNEL="${NEW_TAG%.*}."
+            LAST_TAG=$(git tag --list "${CHANNEL}*" --sort=-v:refname |
+              awk -v channel="$CHANNEL" 'index($0, channel) == 1 && substr($0, length(channel) + 1) ~ /^[1-9][0-9]*$/ {print; exit}')
+            if [ -n "$LAST_TAG" ] && [ "${NEW_TAG##*.}" -le "${LAST_TAG##*.}" ]; then
+              echo "::error::version $NEW_VERSION is not above the earlier preview $LAST_TAG."
+              exit 1
+            fi
+          fi
 
           # 5. Sanity-check: at least one commit since prev tag.
           COUNT=$(git rev-list --count "$PREV_TAG..$RELEASE_SHA")
@@ -958,7 +968,7 @@ jobs:
           if [ "$PUBLISH_LINUX_X86" = "true" ]; then
             platforms="macOS 15 or later on Apple silicon, ARM64 Linux, and x86-64 Linux"
           fi
-          installer="gh api 'repos/${GITHUB_REPOSITORY}/contents/install.sh?ref=main' -H 'Accept: application/vnd.github.raw' |"
+          installer="curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh |"
           cat > body.md <<EOF
           ## Install box
 
@@ -969,7 +979,7 @@ jobs:
           # never a prerelease, so a prerelease page offers only the pinned commands.
           if [ "$PRERELEASE" != "true" ]; then
             cat >> body.md <<EOF
-          Install the latest release with an authenticated [GitHub CLI](https://cli.github.com/):
+          Install the latest release:
 
           \`\`\`sh
           ${installer}
@@ -979,14 +989,14 @@ jobs:
           EOF
           fi
           cat >> body.md <<EOF
-          Install this exact release with an authenticated [GitHub CLI](https://cli.github.com/):
+          Install this exact release:
 
           \`\`\`sh
           ${installer}
             BOX_GITHUB_REPO=${GITHUB_REPOSITORY} BOX_VERSION=${NEW_TAG#v} sh
           \`\`\`
 
-          The installer verifies the \`box-cli-\` archive for your platform against \`SHA256SUMS.txt\`, and on macOS its Apple signature, then puts \`box\` on your \`PATH\`.
+          The installer verifies the \`box-cli-\` archive for your platform against \`SHA256SUMS.txt\`, and on macOS its Apple signature, then puts \`box\` on your \`PATH\`. It downloads through an authenticated [GitHub CLI](https://cli.github.com/), so run \`gh auth login\` first.
 
           ## Download Box Core
 

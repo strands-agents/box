@@ -1402,22 +1402,22 @@ class WorkflowGateTests(unittest.TestCase):
                 installer.write_text(
                     'printf "%s\\n" "${BOX_GITHUB_REPO-}" "${BOX_VERSION-}" '
                     '"${BOX_ALLOW_UNSIGNED-0}" > "$INSTALL_OPTIONS"\n')
-                gh = bin_dir / "gh"
-                gh.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$GH_ARGS"\ncat "$INSTALLER"\n')
-                gh.chmod(0o755)
+                curl = bin_dir / "curl"
+                curl.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CURL_ARGS"\ncat "$INSTALLER"\n')
+                curl.chmod(0o755)
                 environment.update(PATH=str(bin_dir) + os.pathsep + os.environ["PATH"],
-                                   INSTALLER=str(installer), GH_ARGS=str(root / "gh-args"),
+                                   INSTALLER=str(installer), CURL_ARGS=str(root / "curl-args"),
                                    INSTALL_OPTIONS=str(root / "install-options"))
                 for command, version in zip(commands, versions):
                     with self.subTest(version=version or "latest"):
-                        for name in ("gh-args", "install-options"):
+                        for name in ("curl-args", "install-options"):
                             (root / name).unlink(missing_ok=True)
                         result = subprocess.run(["sh", "-c", command], cwd=root, env=environment,
                                                 capture_output=True, text=True, timeout=10)
                         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                        self.assertEqual((root / "gh-args").read_text().splitlines(), [
-                            "api", "repos/strands-agents/box/contents/install.sh?ref=main",
-                            "-H", "Accept: application/vnd.github.raw"])
+                        self.assertEqual((root / "curl-args").read_text().splitlines(), [
+                            "-fsSL",
+                            "https://raw.githubusercontent.com/strands-agents/box/main/install.sh"])
                         self.assertEqual((root / "install-options").read_text().splitlines(),
                                          ["strands-agents/box", version, "0"])
 
