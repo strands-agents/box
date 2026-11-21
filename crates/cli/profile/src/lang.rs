@@ -4346,6 +4346,37 @@ fn fills_beside(file: &StorageFile, target: &crate::mcp_config::Target) -> bool 
         })
 }
 
+/// The names in the `exclude` of a `[[storage.files]]` row: each one name of an entry, with no
+/// `/`, not `.` or `..`, and no `*`, `?`, or `[`, because a name is matched whole and not as a
+/// pattern.
+fn exclude_names(row: &toml::Table, at: &str) -> Result<Vec<String>, String> {
+    let wanted =
+        || format!("`{at} exclude` is a list of one or more file names, such as [\"mcp.json\"]");
+    let names = match row.get("exclude") {
+        None => return Ok(Vec::new()),
+        Some(toml::Value::Array(names)) if !names.is_empty() => names,
+        Some(_) => return Err(wanted()),
+    };
+    let mut excluded = Vec::new();
+    for (place, name) in names.iter().enumerate() {
+        let name = name.as_str().ok_or_else(wanted)?;
+        if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
+            return Err(format!(
+                "`{at} exclude[{place}]` = {name:?} is not one file name; it names an entry by \
+                 its name, such as \"mcp.json\", with no `/`"
+            ));
+        }
+        if name.contains(['*', '?', '[']) {
+            return Err(format!(
+                "`{at} exclude[{place}]` = {name:?} is a pattern; `exclude` matches each name \
+                 whole, so name each file, such as \"mcp.json\""
+            ));
+        }
+        excluded.push(name.to_string());
+    }
+    Ok(excluded)
+}
+
 fn string_field(table: &toml::Table, key: &str, owner: &str) -> Result<Option<String>, String> {
     match table.get(key) {
         None => Ok(None),
@@ -5017,12 +5048,14 @@ impl<S: Sources> Resolver<'_, S> {
                         | "set"
                         | "fill"
                         | "sync"
+                        | "exclude"
                         | "mode"
                 )
             }) {
                 return Err(format!(
                     "`{at}` holds the unknown key `{key}`; a row holds `source`, `target`, \
-                     `optional`, `when`, `kind`, `keep`, `set`, `fill`, `sync`, and `mode`"
+                     `optional`, `when`, `kind`, `keep`, `set`, `fill`, `sync`, `exclude`, and \
+                     `mode`"
                 ));
             }
             match row.get("mode") {
@@ -5086,6 +5119,21 @@ impl<S: Sources> Resolver<'_, S> {
                      `fill` for now"
                 ));
             }
+            let exclude = exclude_names(row, &at)?;
+            if !exclude.is_empty() && edit.is_some() {
+                return Err(format!(
+                    "`{at} exclude` works only on a whole copy of a folder, not on a row with \
+                     `kind`, `keep`, `set`, or `fill`"
+                ));
+            }
+            // Only a `sync` update checks a copy against `exclude` on each run. Without `sync`, an
+            // `exclude` added after the first copy would leave the named file in the box unseen.
+            if !exclude.is_empty() && !sync {
+                return Err(format!(
+                    "`{at} exclude` works only on a row with `sync = true`, which checks the copy \
+                     against it on each run"
+                ));
+            }
             let gate = row
                 .get("when")
                 .and_then(|when| when.get("variable"))
@@ -5125,6 +5173,7 @@ impl<S: Sources> Resolver<'_, S> {
                 at,
                 edit,
                 sync,
+                exclude,
             });
         }
         Ok(files)

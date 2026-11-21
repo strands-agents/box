@@ -1,5 +1,7 @@
-# Kiro CLI in a box, tested with kiro-cli 3.1.0 on macOS. kiro.sign-in picks a login inside the box
-# or a Kiro API key. Only Kiro's V3 engine is supported: not `--v2`, and not your MCP servers yet.
+# Kiro CLI in a box, tested with kiro-cli 3.5.0 on macOS, and its powers with 3.4.0. kiro.sign-in
+# picks a login inside the box or a Kiro API key. Only Kiro's V3 engine is supported, not `--v2`.
+# kiro.import-mcp brings in the MCP servers of your ~/.kiro/settings/mcp.json, and your powers'
+# MCP servers stay out. kiro.import-memory reads the memory layout of kiro-cli 3.4.0 and 3.5.0.
 [pack]
 name = "@box/kiro"
 version = 1
@@ -49,11 +51,53 @@ description = "The folder that holds Kiro CLI's unpacked runtime. The box reads 
 from = "env:KIRO_RUNTIME_DIR"
 default = "${{ home }}/.kiro-runtime"
 
+# A power's mcp.json names programs that Kiro starts, and its env and headers can hold keys. The
+# box's checks of MCP servers ([[mcp-servers]]) read one file at a known key, not a folder of
+# powers, so the copy leaves each mcp.json out until that import can route a power's servers.
+[inputs.kiro.import-powers]
+description = "Copy and update your installed Kiro powers in ~/.kiro/powers in the box: each power's POWER.md or plugin.json, steering, and skills. Each power's MCP servers stay out."
+type = "bool"
+default = false
+warning = """Choosing true lets the agent read each power's POWER.md or plugin.json, steering, and skills, as it reads your own steering.
+Each power's mcp.json stays out, so a power's MCP servers do not start in the box."""
+
+[inputs.kiro.import-mcp]
+description = "Import your MCP servers from ~/.kiro/settings/mcp.json?"
+type = "bool"
+default = false
+warning = """Includes servers you add later.
+Local servers run in the box with keys from their settings and your environment.
+Remote servers' hosts become reachable.
+Copied settings can expose keys to the agent, even for servers Box skips."""
+
+# Your MCP servers. box declares each one the box can run, and lists each one it skips. Kiro CLI
+# 3.5.0 fills in ${NAME} in command, args, and env, and passes $NAME and ${env:NAME} as text.
+# A server with disabled = true is skipped. autoApprove and timeout pass through. A project's
+# .kiro/settings/mcp.json stays out.
+[[mcp-servers]]
+file = "${{ home }}/.kiro/settings/mcp.json"
+kind = "json"
+target = "home/.kiro/settings/mcp.json"
+target-key = "mcpServers"
+key = ["mcpServers"]
+env-var-locations = { command = "references", args = "references", env = "references", headers = "header-references" }
+env-var-syntax = "${NAME}"
+when = { variable = "inputs.kiro.import-mcp", equals = "true" }
+
 [inputs.kiro.sign-in]
 description = "How Kiro CLI signs in: login inside the box, or api-key from KIRO_API_KEY."
 type = "string"
 values = ["login", "api-key"]
 default = "login"
+
+# Off by default: Kiro keeps the memories of every project in one database, so the box gets all
+# of them, not only this project's.
+[inputs.kiro.import-memory]
+description = "Copy Kiro CLI's memory into the box once, on the profile's first run."
+type = "bool"
+default = false
+warning = """The box gets every memory Kiro CLI keeps on this machine: your Global memories, each project's memories, and anything you told Kiro to remember.
+Box copies them once, on the profile's first run, and writes nothing back to your machine."""
 
 # ~/.strands/box/storage/<profile>/default/agent/, shared by every project the profile runs in. With HOME
 # here, Kiro keeps its settings, its sessions, and a login made in the box in storage.
@@ -68,9 +112,9 @@ source = "${{ pack }}/box.md"
 target = "home/.kiro/steering/box.md"
 sync = true
 
-# Your own instructions, skills, and prompts, copied into storage on the profile's first run and
-# brought up to date with the host on each run after it. A box's edit stays until the host's file
-# changes.
+# Your own instructions, skills, prompts, and agents, copied into storage on the profile's first
+# run and brought up to date with the host on each run after it. A box's edit stays until the
+# host's file changes.
 [[storage.files]]
 source = "${{ home }}/.kiro/steering"
 target = "home/.kiro/steering/host"
@@ -89,14 +133,62 @@ target = "home/.kiro/prompts"
 optional = true
 sync = true
 
-# Your model. Not chat.agentEngine: the command names V3. Not chat.defaultAgent: a custom agent in
-# ~/.kiro/agents can name hooks and MCP servers, and the box copies no agent.
+# Kiro's memory, copied on the profile's first run only. No sync: the box adds its own memories,
+# and a host copy would replace them. Each folder holds a live SQLite database with its -wal and
+# -shm files, and box copies a folder only when none of its files changed during the copy.
+# Without a login, or with an API key, Kiro reads the shared memories/. With a login, it reads
+# identities/<hash of the user>/memories/, and fills it from memories/ the first time. Under
+# identities/, Kiro writes only that folder and settings/kiro-agent.json, which holds the memory
+# settings and Kiro's own migrations.
+[[storage.files]]
+source = "${{ home }}/.kiro/memories"
+target = "home/.kiro/memories"
+optional = true
+when = { variable = "inputs.kiro.import-memory", equals = "true" }
+
+[[storage.files]]
+source = "${{ home }}/.kiro/identities"
+target = "home/.kiro/identities"
+optional = true
+when = { variable = "inputs.kiro.import-memory", equals = "true" }
+
+# Your installed powers. installed.json holds only each power's name: Kiro writes { "name" } for
+# each power it installs and reads only the name. Each power's folder comes in without its mcp.json
+# (see kiro.import-powers). Not powers/data, which a power's MCP server fills with its own state,
+# and not powers/registries, which Kiro CLI does not read.
+[[storage.files]]
+source = "${{ home }}/.kiro/powers/installed.json"
+target = "home/.kiro/powers/installed.json"
+optional = true
+sync = true
+when = { variable = "inputs.kiro.import-powers", equals = "true" }
+
+[[storage.files]]
+source = "${{ home }}/.kiro/powers/installed"
+target = "home/.kiro/powers/installed"
+optional = true
+sync = true
+exclude = ["mcp.json"]
+when = { variable = "inputs.kiro.import-powers", equals = "true" }
+
+# Each agent's file comes in whole, as Claude Code's and Codex's agent folders do. Its `hooks` and
+# `mcpServers` come in unchecked: [[storage.hooks]] and [[mcp-servers]] read one file, and Kiro
+# keeps one file per agent. Kiro starts a hook through /bin/sh, which the box does not run, so no
+# hook runs. A local MCP server runs in the box with its policy, and a remote one's host stays
+# closed until a route opens it.
+[[storage.files]]
+source = "${{ home }}/.kiro/agents"
+target = "home/.kiro/agents"
+optional = true
+sync = true
+
+# Your model and your default agent. Not chat.agentEngine: the command names V3.
 [[storage.files]]
 source = "${{ home }}/.kiro/settings/cli.json"
 target = "home/.kiro/settings/cli.json"
 kind = "json"
 optional = true
-keep = [["chat.defaultModel"], ["chat.enableContextUsageIndicator"]]
+keep = [["chat.defaultModel"], ["chat.enableContextUsageIndicator"], ["chat.defaultAgent"]]
 
 # An update in the box cannot replace the host's kiro-cli.
 [[storage.files.set]]
