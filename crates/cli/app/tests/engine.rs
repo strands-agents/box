@@ -476,6 +476,96 @@ done"#;
     );
 }
 
+/// **Policy off keeps the rules `box` writes**: with a profile policy that permits everything, the
+/// box's shell cannot append to the profile's `policy.dw` with policy on or off, so a run cannot
+/// plant rules that the next run loads.
+#[test]
+fn policy_off_still_refuses_a_write_to_the_profiles_policy() {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::process::CommandExt as _;
+    use std::sync::mpsc;
+
+    let scene = Scene::new();
+    let target = scene.home().join(".strands/box/profiles/probe/policy.dw");
+    scene.profile("probe", PROBE, "permit (principal, action, resource);");
+    let script = format!(
+        r#"printf 'READY\n'
+while IFS= read -r request; do
+  [ "$request" = quit ] && break
+  if bash -c 'printf "\n// planted\n" >> {}' >/dev/null 2>&1; then result=WROTE; else result=REFUSED; fi
+  printf '%s %s\n' "$result" "$request"
+done"#,
+        target.display()
+    );
+    let size = nix::pty::Winsize {
+        ws_row: 40,
+        ws_col: 120,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let pair = nix::pty::openpty(Some(&size), None).unwrap();
+    let mut input = std::fs::File::from(pair.master);
+    let mut output = input.try_clone().unwrap();
+    let slave = std::fs::File::from(pair.slave);
+    let mut command = scene.command(&scene.workspace(), "probe", &["-c", &script]);
+    command
+        .env("TERM", "xterm-256color")
+        .stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave);
+    // SAFETY: only async-signal-safe terminal setup runs between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            if nix::libc::setsid() < 0 || nix::libc::ioctl(0, nix::libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn().unwrap();
+    drop(command);
+    let (send, received) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = [0; 8192];
+        while let Ok(count) = output.read(&mut bytes) {
+            if count == 0 || send.send(bytes[..count].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut screen = vt100::Parser::new(40, 120, 0);
+        let mut wait = |needle: &str| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                let text = screen.screen().contents();
+                if text.contains(needle) {
+                    return;
+                }
+                let bytes = received
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap_or_else(|error| panic!("{error}: missing {needle:?}\n{text}"));
+                screen.process(&bytes);
+            }
+        };
+        wait("READY");
+        writeln!(input, "1").unwrap();
+        wait("REFUSED 1");
+        input.write_all(b"\x1c").unwrap();
+        wait("POLICY OFF");
+        writeln!(input, "2").unwrap();
+        wait("REFUSED 2");
+    }));
+    let _ = input.write_all(b"quit\n");
+    let output = wait_for_output(child);
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+    succeeded(&output);
+    let text = std::fs::read_to_string(&target).unwrap();
+    assert!(!text.contains("planted"), "{text}");
+}
+
 /// Run `box run probe <flags> -- -c <script>` at a 40x200 pseudo-terminal with the banner on. Wait
 /// for each of `needles` in order on the screen, then send a line so the script can finish. Return
 /// the screen as it was when the last needle appeared.

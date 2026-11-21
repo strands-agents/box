@@ -379,6 +379,7 @@ impl StalledResponse {
                 Err(error) => panic!("accept the gateway request: {error}"),
             }
         };
+        origin.set_nonblocking(false).unwrap();
         origin.set_read_timeout(Some(SHUTDOWN)).unwrap();
         origin.set_write_timeout(Some(SHUTDOWN)).unwrap();
         let request = read_http_head(&mut origin);

@@ -309,7 +309,7 @@ cargo test --locked -p strands-box --no-default-features --test box_killed_run -
 ```
 
 On Linux, follow the namespace and launcher-image setup in the
-[`history-persistence` workflow job](.github/workflows/rust-test-lint.yml) before running the tests.
+history persistence steps of the [`unit-test` workflow job](.github/workflows/rust-test-lint.yml) before running the tests.
 
 In pull-request CI, changes to `docs/site-manifest.json`,
 `docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` run the focused

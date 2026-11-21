@@ -1452,10 +1452,7 @@ pub(crate) fn check_header(
     }
     if let Some(requirement) = string_field(header, "engine", &owner)? {
         let needed = floor(&requirement)?;
-        let release = version
-            .split_once('-')
-            .map_or(version, |(release, _)| release);
-        let this = parse_version(release).unwrap_or_default();
+        let this = release_of(version).unwrap_or_default();
         if this < needed {
             return Err(Refusal::at(
                 format!("this {section} needs box {requirement}, and this is box {version}"),
@@ -3757,6 +3754,14 @@ fn parse_version(text: &str) -> Option<Vec<u64>> {
     let text = text.trim().trim_start_matches('v');
     let parts: Option<Vec<u64>> = text.split('.').map(|part| part.parse().ok()).collect();
     parts.filter(|parts| !parts.is_empty())
+}
+
+/// The release a `box` build counts as: a preview build such as `0.3.0-linux-preview.1` is `0.3.0`.
+fn release_of(version: &str) -> Option<Vec<u64>> {
+    let release = version
+        .split_once('-')
+        .map_or(version, |(release, _)| release);
+    parse_version(release)
 }
 
 /// The namespace of a profile's storage that every run uses.
@@ -7497,34 +7502,6 @@ mod tests {
     }
 
     #[test]
-    fn a_pre_release_meets_the_engine_floor_of_its_release() {
-        let shelf = Shelf::new();
-        let text = "packs = [\"@box/p\"]";
-        for (floor, refused) in [(">=7.2.0", false), (">=7.2.1", true)] {
-            shelf.share_raw(
-                "p",
-                &format!(
-                    "[pack]\nname = \"@box/p\"\nversion = 1\nkind = \"support\"\nengine = \"{floor}\"\n"
-                ),
-            );
-            let lookup = Lookup {
-                vendored: Some(shelf.root.join("packs")),
-                operator: shelf.root.join("operator"),
-                collections: Vec::new(),
-                version: "7.2.0-preview.1",
-            };
-            let chained = chain(
-                &toml::from_str(text).expect("TOML"),
-                text,
-                &shelf.root.join("mine/profile.toml"),
-                None,
-                &lookup,
-            );
-            assert_eq!(chained.is_err(), refused, "{floor} for box 7.2.0-preview.1");
-        }
-    }
-
-    #[test]
     fn an_engine_floor_is_checked_against_the_version_of_the_lookup() {
         let shelf = Shelf::new();
         let text = "packs = [\"@box/p\"]";
@@ -7559,6 +7536,94 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    fn engine_outcome(version: &str, floor: &str) -> Result<(), String> {
+        let shelf = Shelf::new();
+        let text = "packs = [\"@box/p\"]";
+        shelf.share_raw(
+            "p",
+            &format!(
+                "[pack]\nname = \"@box/p\"\nversion = 1\nkind = \"support\"\nengine = \"{floor}\"\n"
+            ),
+        );
+        let lookup = Lookup {
+            vendored: Some(shelf.root.join("packs")),
+            operator: shelf.root.join("operator"),
+            collections: Vec::new(),
+            version: Box::leak(version.to_owned().into_boxed_str()),
+        };
+        chain(
+            &toml::from_str(text).expect("TOML"),
+            text,
+            &shelf.root.join("mine/profile.toml"),
+            None,
+            &lookup,
+        )
+        .map(|_| ())
+        .map_err(reason)
+    }
+
+    #[test]
+    fn a_preview_version_counts_as_its_release_for_an_engine_floor() {
+        for (version, floor, refused) in [
+            ("0.3.0-linux-preview.1", ">=0.1.0", false),
+            ("0.3.0-linux-preview.1", ">=0.3.0", false),
+            ("0.3.0-linux-preview.1", ">=0.3.1", true),
+            ("0.3.0-linux-preview.1", ">=0.4.0", true),
+            ("7.2.0-linux-preview.1", ">=7.2.0", false),
+            ("7.2.0-linux-preview.1", ">=7.2.1", true),
+            ("v0.3.0-linux-preview.2", ">=0.3.0", false),
+        ] {
+            let expected = if refused {
+                Err(format!(
+                    "this pack needs box {floor}, and this is box {version}"
+                ))
+            } else {
+                Ok(())
+            };
+            assert_eq!(
+                engine_outcome(version, floor),
+                expected,
+                "box {version} against {floor}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_box_version_is_refused_and_named() {
+        for version in [
+            "",
+            "linux-preview",
+            "0-linux-preview",
+            "0.x.0",
+            "0.x.0-linux-preview.1",
+            "-linux-preview.1",
+            "0.3.0+build.5",
+        ] {
+            let reason = engine_outcome(version, ">=0.1.0").expect_err("a malformed version");
+            assert!(
+                reason.contains("needs box >=0.1.0")
+                    && reason.contains(&format!("this is box {version}")),
+                "{version:?}: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_engine_floor_is_refused_and_named() {
+        for floor in [
+            ">=",
+            ">=abc",
+            ">=0.x.0",
+            ">=0.3.0-linux-preview.1",
+            ">=0.3.0+build.5",
+            "0.3.0",
+            "^0.3.0",
+        ] {
+            let reason = engine_outcome("0.3.0", floor).expect_err("a malformed floor");
+            assert!(reason.contains("is not `>=X.Y.Z`"), "{floor}: {reason}");
         }
     }
 
