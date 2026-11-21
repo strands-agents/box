@@ -729,6 +729,33 @@ fn read_pack(path: &Path, name: &str, lookup: &Lookup) -> Result<(String, PackLo
     })
 }
 
+/// The layers that declare each `egress`, `mcp`, and `tool` table, and `storage`, `project`, and
+/// `filesystem`, by key.
+pub fn table_owners(layers: &[Layer]) -> BTreeMap<String, Vec<String>> {
+    let mut owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut own = |key: String, layer: &Layer| {
+        let names = owners.entry(key).or_default();
+        if !names.contains(&layer.name) {
+            names.push(layer.name.clone());
+        }
+    };
+    for layer in layers {
+        for kind in ["egress", "mcp", "tool"] {
+            if let Some(toml::Value::Table(tables)) = layer.table.get(kind) {
+                for name in tables.keys() {
+                    own(format!("{kind}.{name}"), layer);
+                }
+            }
+        }
+        for key in ["storage", "project", "filesystem"] {
+            if layer.table.contains_key(key) {
+                own(key.to_string(), layer);
+            }
+        }
+    }
+    owners
+}
+
 /// Each pack of a chain with its `[pack] version`, in the order `packs` and `extend` name them.
 pub fn pack_versions(layers: &[Layer]) -> Vec<(String, String)> {
     fn walk<'a>(

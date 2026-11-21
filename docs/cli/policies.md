@@ -103,6 +103,23 @@ changes to `~/.strands/box` outside the run's storage directories and its tools'
 [Generated policy](policies-reference.md#generated-policy) lists each rule, what it allows or
 forbids, and the setting that writes it.
 
+To see the rules `box` adds for one profile, open `policy.generated.dw` beside its `policy.dw`:
+
+```console
+$ box profile show claude
+  ...
+  rules     41 that box adds, in ~/.strands/box/profiles/claude/policy.generated.dw
+```
+
+Each group of rules starts with a comment that says where it comes from, such as
+`// From [egress.anthropic] in @box/anthropic: reach api.anthropic.com.`, so you know which pack or
+table to change. `box` rewrites the file on each `box profile show` and `box run`, so an edit to it
+is lost: change the profile, or add your own rule to `policy.dw`. The file names the project folder
+as `${{ workspace }}`, so it reads the same in every project. When the profile imports MCP servers
+from your agent's settings, the file says which file they come from and what each server gets,
+because the servers can differ from one project to the next. `box profile show` in a project lists
+the servers a run there gets.
+
 The box's shell runs two kinds of command, and each has its own rule. A program on your machine
 that a tool declares, such as `git`, starts through the `spawn_<tool>` rule that `box` writes. The
 commands the shell has built in, such as `cd`, `echo`, and `cat`, run through the `shell_commands`

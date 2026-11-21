@@ -320,6 +320,43 @@ pub(crate) struct CompiledRun {
     /// Each declared secret source, as `(scheme, program, the plugin that declares it)`, with no
     /// plugin for a source of the profile.
     pub(crate) sources: Vec<(String, String, Option<String>)>,
+    /// The profile's `policy.generated.dw`, when `box` wrote or kept it for this compile.
+    pub(crate) generated_policy: Option<PathBuf>,
+}
+
+/// The file in a profile's folder that shows the rules `box` adds to its policy.
+pub(crate) const GENERATED_POLICY: &str = "policy.generated.dw";
+
+/// Write `text` to `policy.generated.dw` in `folder`, unless it already holds it, and return its
+/// path. A write that fails warns and leaves the run alone.
+fn write_generated_policy(folder: &Path, text: &str) -> Option<PathBuf> {
+    let path = folder.join(GENERATED_POLICY);
+    if crate::files::holds(&path, text) {
+        return Some(path);
+    }
+    if std::fs::symlink_metadata(&path).is_ok_and(|metadata| !metadata.is_file()) {
+        eprintln!(
+            "box: warning: did not write {}: it is not a regular file",
+            path.display()
+        );
+        return None;
+    }
+    let staged = folder.join(format!(".{GENERATED_POLICY}.{}", std::process::id()));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&staged)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
+        .and_then(|()| std::fs::rename(&staged, &path));
+    match written {
+        Ok(()) => Some(path),
+        Err(error) => {
+            let _ = std::fs::remove_file(&staged);
+            eprintln!("box: warning: did not write {}: {error}", path.display());
+            None
+        }
+    }
 }
 
 pub(crate) struct RunSettings<'a> {
@@ -403,6 +440,7 @@ pub(crate) fn compile_run(
             ("COLORTERM".into(), "truecolor".into()),
         ]);
     }
+    resolved.table_owners = lang::table_owners(&layers);
     let hooks = import_hooks(&mut resolved, &host.home);
     let declared = plugin::sources(&layers)
         .into_iter()
@@ -439,10 +477,14 @@ pub(crate) fn compile_run(
         resolve: &resolved_path,
         root: host.root,
     })?;
+    let generated_policy = (!source.by_path)
+        .then(|| write_generated_policy(&profile_folder, &compiled.generated_policy))
+        .flatten();
     Ok(CompiledRun {
         compiled,
         resolved,
         hooks,
+        generated_policy,
         #[cfg(any(test, feature = "test-support"))]
         discovery: sources.discovery,
         packs,
@@ -1690,6 +1732,10 @@ pub struct Preview {
     pub warnings: Vec<String>,
     /// Each route with no secret, which only opens its hosts, as `(route, destinations)`.
     pub open_routes: Vec<(String, Vec<String>)>,
+    /// The profile's `policy.generated.dw`, as the operator writes its path, when `box` wrote it.
+    pub generated_policy: Option<String>,
+    /// How many rules `box` adds to the profile's policy.
+    pub generated_rules: usize,
 }
 
 impl Preview {
@@ -1776,6 +1822,10 @@ impl Preview {
                 }),
             },
             "warnings": self.warnings,
+            "generated_policy": {
+                "path": self.generated_policy,
+                "rules": self.generated_rules,
+            },
         });
         if full {
             let box_toml =
@@ -1803,6 +1853,12 @@ impl Preview {
         }
         lines.push(("storage", self.storage.display().to_string()));
         lines.push(("project", self.project_row().to_string()));
+        if let Some(path) = &self.generated_policy {
+            lines.push((
+                "rules",
+                format!("{} that box adds, in {path}", self.generated_rules),
+            ));
+        }
         lines
     }
 }
@@ -1882,6 +1938,7 @@ impl Launcher {
             packs,
             plugins,
             sources,
+            generated_policy,
             ..
         } = compile_run(
             Loaded {
@@ -1911,6 +1968,12 @@ impl Launcher {
         let home = &self.host.home;
         let warnings = self.check_in_scratch(&compiled, &resolved)?;
         Ok(Preview {
+            generated_rules: compiled
+                .generated_policy
+                .lines()
+                .filter(|line| line.starts_with("@id("))
+                .count(),
+            generated_policy: generated_policy.map(|path| tilde(home, &path)),
             warnings,
             open_routes: crate::compile::open_routes(&resolved.egress),
             mcp_unstarted: compiled.unstarted.clone(),
@@ -2831,6 +2894,8 @@ mod tests {
     fn preview(box_toml: &str) -> Preview {
         let text = |text: &str| text.to_string();
         Preview {
+            generated_policy: None,
+            generated_rules: 0,
             box_toml: text(box_toml),
             policy: text("@id(\"own\") permit (principal, action, resource);\n"),
             inputs: vec![(text("terminal.term"), text("vt100"), text("your profile"))],

@@ -10,7 +10,7 @@ use crate::host::{expand_home, find_on, is_executable_file, tilde, utf8, within}
 use crate::lang::Storage;
 use crate::mcp::Servers;
 use crate::profile::{PROJECT_CONFIGURATION, Process, ProjectAccess, RECORDS, Resolved};
-use crate::render::{Rules, SIGNAL_GROUPS, any_of, literal, pattern_below};
+use crate::render::{Rules, SIGNAL_GROUPS, any_of, literal, owner_name, pattern_below};
 
 /// The names and directories of one run.
 #[derive(Debug, Clone)]
@@ -58,6 +58,9 @@ pub struct Compiled {
     /// Each entry of the operator's `PATH` that is not a full path, which `box` drops from each
     /// stdio server that inherits that `PATH`, as the end of its `dropped` line.
     pub path_dropped: Vec<String>,
+    /// The rules `box` adds for this profile, with each per-run path as a placeholder and the
+    /// imported MCP servers described rather than listed, which `policy.generated.dw` holds.
+    pub generated_policy: String,
 }
 
 /// The profile's limits with `shell.timeout = false` (no Shell timeout) when the profile leaves it out.
@@ -298,6 +301,13 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
         ])),
     );
     let (generated, unstarted) = generated_policy(&profile, run)?;
+    let shown = {
+        let mut shown = profile.clone();
+        for server in &profile.servers.detected {
+            shown.mcp.remove(&server.name);
+        }
+        generated_policy(&shown, run)?.0
+    };
     let path_dropped = inherit_path(&mut profile.mcp, &profile.servers, run.search_path);
     let around = project_rules(&tilde(run.home, run.workspace), access);
     let with_parents = |entry: &String| {
@@ -404,6 +414,16 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
         .flat_map(Rules::forbids)
         .map(|line| format!("{line}\n"))
         .collect();
+    let generated_text_file = generated_file(
+        &join(&[
+            tool_text.trim_end(),
+            shown.text().trim_end(),
+            around.text().trim_end(),
+            closed.text().trim_end(),
+        ]),
+        &profile.servers,
+        run,
+    )?;
     let mut generated_ids = run.tool_rules.ids.clone();
     generated_ids.extend(generated.ids);
     generated_ids.extend(around.ids);
@@ -421,7 +441,143 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
         storage: profile.storage.clone(),
         unstarted,
         path_dropped,
+        generated_policy: generated_text_file,
     })
+}
+
+/// `rules` with each commented block in the order an operator reads them: what the agent reaches
+/// first, and the forbids that protect `box` itself last. A block with no comment stays with the
+/// block before it.
+fn in_reading_order(rules: &str) -> String {
+    let mut blocks: Vec<String> = Vec::new();
+    for block in rules.split("\n\n").filter(|block| !block.trim().is_empty()) {
+        match blocks.last_mut() {
+            Some(last) if !block.starts_with("//") => {
+                last.push('\n');
+                last.push_str(block);
+            }
+            _ => blocks.push(block.to_string()),
+        }
+    }
+    let rank = |block: &str| {
+        let first = block.lines().next().unwrap_or_default();
+        [
+            "// From [project]",
+            "// From [egress.",
+            "// From [mcp.",
+            "// MCP servers imported",
+            "// From [tool.",
+            "// From the package registries",
+            "// From @",
+            "// From [storage]",
+            "// From [[storage.hooks]]",
+            "// From [filesystem]",
+            "// From deny_write",
+        ]
+        .iter()
+        .position(|prefix| first.starts_with(prefix))
+        .unwrap_or(usize::MAX)
+    };
+    blocks.sort_by_key(|block| rank(block));
+    blocks.join("\n\n")
+}
+
+/// The header of `policy.generated.dw`.
+const GENERATED_HEADER: &str = "\
+// The rules box adds to your policy for this profile.
+//
+// box writes this file from profile.toml and its packs, and rewrites it on every
+// `box profile show` and `box run`. Do not edit it. To change a rule, change the table or the pack
+// that its comment names, or write your own rule in policy.dw. A forbid here wins over any permit
+// in policy.dw, and a permit here holds unless policy.dw forbids it.
+";
+
+/// `rules` as `policy.generated.dw` holds them: with the header, each path of this one run as a
+/// placeholder, and a note on the imported MCP servers in place of their rules.
+fn generated_file(rules: &str, servers: &Servers, run: &Run<'_>) -> Result<String, Error> {
+    let mut text = rules.to_string();
+    let mut places: Vec<(String, &str)> = Vec::new();
+    for (path, placeholder) in [
+        (&run.instance.box_directory, "${{ box_dir }}"),
+        (&run.instance.directory, "${{ box_dir }}/.."),
+        (&run.workspace.to_path_buf(), "${{ workspace }}"),
+    ] {
+        places.push((utf8(path)?, placeholder));
+        places.push((tilde(run.home, path), placeholder));
+    }
+    places.sort_by_key(|(path, _)| std::cmp::Reverse(path.len()));
+    for (path, placeholder) in places {
+        for end in ['"', '/'] {
+            text = text.replace(&format!("\"{path}{end}"), &format!("\"{placeholder}{end}"));
+        }
+    }
+    let mut sources: Vec<String> = Vec::new();
+    for source in servers
+        .sources
+        .iter()
+        .map(|(path, _)| path)
+        .chain(servers.detected.iter().map(|server| &server.source))
+    {
+        let source = tilde(run.home, source);
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+    if !sources.is_empty() {
+        text.push_str(&format!(
+            "\n\n\
+// MCP servers imported from your agent's settings.
+//
+// This profile imports each MCP server that {} lists, for every project and for
+// the project you run in. box reads it again on every run, so a server you add there reaches the
+// box without a change here. For each server that box can check, a run adds:
+//
+//   @id(\"mcp_<server>_call\")   permit mcp:call on the server
+//   @id(\"mcp_<server>_spawn\")  permit shell:spawn of its program, by its real path
+//   @id(\"mcp_<server>_connect\"), @id(\"mcp_<server>_request\")  reach a remote server's host
+//
+// A server that a launcher such as npx or uvx starts also lets every process in the box reach
+// that launcher's package registry.
+//
+// To see the servers that a run in a project gets, run `box profile show` in that project.
+",
+            sources.join(" and ")
+        ));
+    }
+    let text = in_reading_order(&text);
+    let mut header = GENERATED_HEADER.to_string();
+    let mut named = Vec::new();
+    if text.contains("${{ workspace }}") {
+        named.push("${{ workspace }} is the project folder you run in");
+    }
+    if text.contains("${{ box_dir }}") {
+        named.push("${{ box_dir }} is the run's own folder");
+    }
+    named.push("Each run's folder keeps the exact policy that run got, with real paths");
+    header.push_str("//\n");
+    for sentence in named {
+        header.push_str(&format!("// {sentence}.\n"));
+    }
+    let mut previous_rule = false;
+    let laid_out: Vec<String> = text
+        .lines()
+        .map(|line| {
+            let rule = line.starts_with("@id(");
+            let gap = if rule && previous_rule { "\n" } else { "" };
+            previous_rule = rule;
+            if !rule {
+                return line.to_string();
+            }
+            let line = format!("{gap}{line}");
+            let line = line.replacen(") permit (", ")\npermit (", 1).replacen(
+                ") forbid (",
+                ")\nforbid (",
+                1,
+            );
+            line.replacen(" when { ", "\nwhen { ", 1)
+        })
+        .collect();
+    Ok(format!("{header}\n{}\n", laid_out.join("\n").trim_end()))
 }
 
 /// The permits each route, each MCP server, each storage directory, and each imported hook's
@@ -443,6 +599,16 @@ fn generated_policy(
         if is_open_route(route) {
             refuse_open_destinations(name, &destinations)?;
         }
+        let open = if is_open_route(route) {
+            " It carries no credential, so every process in the box can reach these hosts."
+        } else {
+            ""
+        };
+        rules.note(&format!(
+            "From [egress.{name}] in {}: reach {}.{open}",
+            owners(profile, &format!("egress.{name}")),
+            destinations.join(", ")
+        ));
         for (id, rule) in reach_rules(
             &format!("[egress.{name}]"),
             &format!("route_{name}"),
@@ -456,6 +622,18 @@ fn generated_policy(
             continue;
         };
         let id = |kind: &str| format!("mcp_{name}_{kind}");
+        let origin = match profile
+            .servers
+            .detected
+            .iter()
+            .find(|server| server.name == *name)
+        {
+            Some(server) => format!("imported from {}", tilde(home, &server.source)),
+            None => format!("in {}", owners(profile, &format!("mcp.{name}"))),
+        };
+        rules.note(&format!(
+            "From [mcp.{name}] {origin}: start the server and call its tools."
+        ));
         rules.permit(
             &id("call"),
             &format!(
@@ -515,6 +693,11 @@ fn generated_policy(
                 );
                 if let Some(launcher) = profile.servers.launcher(name) {
                     let hosts: Vec<&str> = launcher.hosts.iter().map(String::as_str).collect();
+                    rules.note(&format!(
+                        "From {}, which starts [mcp.{name}]: reach its package registry. Every \
+                         process in the box can reach these hosts.",
+                        launcher.pack
+                    ));
                     for (id, rule) in
                         reach_rules(&launcher.pack, &format!("launcher_{name}_registry"), &hosts)?
                     {
@@ -547,6 +730,12 @@ fn generated_policy(
         .iter()
         .map(|directory| tilde(home, directory))
         .collect();
+    if !storage.is_empty() {
+        rules.note(&format!(
+            "From [storage] in {}: the agent reads and writes its own storage.",
+            owners(profile, "storage")
+        ));
+    }
     for (index, directory) in storage.iter().enumerate() {
         for (action, verb) in [
             ("fs:read", "read"),
@@ -562,6 +751,9 @@ fn generated_policy(
                 ),
             );
         }
+    }
+    if !profile.storage.hook_scripts.is_empty() {
+        rules.note("From [[storage.hooks]]: read each script an imported hook runs.");
     }
     for (index, script) in profile.storage.hook_scripts.iter().enumerate() {
         rules.permit(
@@ -584,6 +776,14 @@ fn generated_policy(
     } else {
         format!(" && !({})", any_of(&writable))
     };
+    if !run.box_homes.is_empty() {
+        rules.note(if writable.is_empty() {
+            "From box itself, in every profile: nothing in the box changes box's own files."
+        } else {
+            "From box itself, in every profile: nothing in the box changes box's own files, \
+             except the storage above."
+        });
+    }
     for (index, box_home) in run.box_homes.iter().enumerate() {
         let box_home = tilde(home, box_home);
         let prefix = match index {
@@ -615,6 +815,10 @@ fn generated_policy(
 /// `protected_<n>_*`. A box home, the resources directory, and a trusted file have rules of their
 /// own, and a root that resolves into a box home keeps only the rules on the links to it.
 fn protected_root_rules(rules: &mut Rules, run: &Run<'_>) {
+    rules.note(
+        "From box itself, in every profile: nothing in the box changes a pack, a policy \
+         starter, a profile, or a program a later run trusts.",
+    );
     if let Some(resources) = run.resources {
         directory_rules(rules, run, "resources", resources);
     }
@@ -775,6 +979,22 @@ fn trusted_file_rules(rules: &mut Rules, run: &Run<'_>) {
                 exactly(&parents)
             ),
         );
+    }
+}
+
+/// The layers that declare `key`, as a generated rule's comment names them.
+fn owners(profile: &Resolved, key: &str) -> String {
+    match profile.table_owners.get(key).map(Vec::as_slice) {
+        None | Some([]) => "your profile".to_string(),
+        Some([only]) => owner_name(only),
+        Some([first, rest @ ..]) => format!(
+            "{}, changed by {}",
+            owner_name(first),
+            rest.iter()
+                .map(|name| owner_name(name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 
@@ -1500,6 +1720,15 @@ fn project_rules(workspace: &str, access: ProjectAccess) -> Rules {
     };
     let configuration = format!("{workspace}/{PROJECT_CONFIGURATION}");
     let mut rules = Rules::default();
+    let described = match access {
+        ProjectAccess::None => "no access",
+        ProjectAccess::Read => "access = \"read\"",
+        ProjectAccess::Write => "access = \"write\"",
+    };
+    rules.note(&format!(
+        "From [project] {described}: the agent's reach into the project you run in. Its .box \
+         folder stays read-only."
+    ));
     let permits: &[(&str, &str)] = match access {
         ProjectAccess::None => &[],
         ProjectAccess::Read => &[("fs:read", "project_read")],
@@ -1518,9 +1747,6 @@ fn project_rules(workspace: &str, access: ProjectAccess) -> Rules {
                 within(workspace)
             ),
         );
-    }
-    if !permits.is_empty() {
-        rules.gap();
     }
     for (action, id) in [
         ("fs:write", "project_configuration_write"),
@@ -1577,7 +1803,7 @@ fn deny_write_rules(rules: &mut Rules, folders: &[(String, Vec<String>)]) {
             literal(folder),
             pattern_below(folder),
         );
-        rules.gap();
+        rules.note(&format!("From deny_write: {folder} stays read-only."));
         for (action, id) in [
             ("fs:write", "deny_write_write"),
             ("fs:delete", "deny_write_delete"),
@@ -1623,7 +1849,9 @@ fn deny_rules(rules: &mut Rules, paths: &[(String, Vec<String>)]) {
             literal(path),
             pattern_below(path),
         );
-        rules.gap();
+        rules.note(&format!(
+            "From [filesystem] deny: nothing in the box touches {path}."
+        ));
         for (action, id) in [
             ("fs:read", "filesystem_deny_read"),
             ("fs:write", "filesystem_deny_write"),

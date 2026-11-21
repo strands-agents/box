@@ -89,6 +89,9 @@ pub struct Resolved {
     /// The plugin, or `the profile`, that declares each secret source, by scheme.
     #[serde(skip)]
     pub(crate) source_owners: BTreeMap<String, String>,
+    /// The layers that declare each table, such as `egress.github`, in the order they apply.
+    #[serde(skip)]
+    pub table_owners: BTreeMap<String, Vec<String>>,
     #[serde(skip)]
     pub servers: crate::mcp::Servers,
     #[serde(skip)]
