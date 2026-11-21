@@ -1,22 +1,25 @@
 name: Release Box
 
-# GitHub-native release path for the box binaries. A manual dispatch names the
+# GitHub-native release path for Box Core and the box CLI. A manual dispatch names the
 # version and a commit; the workflow builds strands-box for each target below on
 # hosted runners, packages each binary set as a versioned tarball, and attaches
-# the macOS and Linux tarballs with SHA256SUMS.txt to a GitHub Release.
-# Every release publishes macOS and Linux ARM64. The x86-64 archive is optional.
-# That naming and layout is what download.sh (curl | sh) and a Homebrew tap both
-# consume:
+# the macOS and Linux tarballs with SHA256SUMS.txt to a GitHub Release. The
+# reusable cli-release.yml builds, signs, and bundles the CLI's archives, and
+# they go into the same release.
+# Every release publishes macOS and Linux ARM64. The x86-64 archives are optional.
+# That naming and layout is what download.sh (curl | sh), install.sh, and a
+# Homebrew tap consume:
 #
-#   box-<version>-<triple>.tar.gz     e.g. box-v0.1.0-aarch64-apple-darwin.tar.gz
-#   SHA256SUMS.txt                    one aggregate file, `<sha256>  <asset>` per line
+#   box-<version>-<triple>.tar.gz       Box Core, e.g. box-v0.1.0-aarch64-apple-darwin.tar.gz
+#   box-cli-<version>-<triple>.tar.gz   the CLI, e.g. box-cli-v0.1.0-aarch64-apple-darwin.tar.gz
+#   SHA256SUMS.txt                      one aggregate file, `<sha256>  <asset>` per line
 #
 # Three targets build: macOS on Apple Silicon, and Linux (glibc) on x86_64 and
 # aarch64. Both Linux targets build against Amazon Linux 2023.
 # musl and native distro packages are not built here.
 #
 # Shape (mirrors the harness-sdk release workflows, retargeted to a binary
-# release): scan -> test-lint / build -> inspect -> approve ->
+# release): scan -> test-lint + cli-test / build / cli -> inspect -> approve ->
 #           tag + release -> verify.
 #
 # Dry runs build and inspect without credentials by default. An upstream main
@@ -28,7 +31,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        # Stable: 0.1.1. Linux preview: 0.1.1-linux-preview.1. The workflow adds the v.
+        # Stable: 0.1.1. Pre-release: 0.1.1-preview.1. Linux preview:
+        # 0.1.1-linux-preview.1. The workflow adds the v.
         description: 'Version, e.g. 0.1.1 (no v)'
         required: true
         type: string
@@ -65,6 +69,12 @@ on:
         required: true
         default: false
         type: boolean
+      native_filesystem_policy:
+        # Compile native policy into the CLI's ARM64 packages. Dry run only.
+        description: 'Experimental native filesystem policy (dry run only; ARM64)'
+        required: false
+        default: false
+        type: boolean
       skip_tests:
         # Fork testing only: skip the test and lint job so the release pipeline
         # runs without waiting on it. Inert on the upstream repo.
@@ -93,6 +103,7 @@ jobs:
       prev_tag: ${{ steps.scan.outputs.prev_tag }}
       new_tag: ${{ steps.scan.outputs.new_tag }}
       linux_preview: ${{ steps.scan.outputs.linux_preview }}
+      prerelease: ${{ steps.scan.outputs.prerelease }}
       publish_linux_x86: ${{ steps.scan.outputs.publish_linux_x86 }}
     steps:
       - name: Checkout code
@@ -110,17 +121,33 @@ jobs:
           SHA_INPUT: ${{ inputs.sha }}
           DRY_RUN: ${{ inputs.dry_run }}
           DISPATCH_SHA: ${{ github.sha }}
+          NATIVE_FILESYSTEM_POLICY: ${{ inputs.native_filesystem_policy }}
         run: |
           set -euo pipefail
 
-          # 1. Derive the release channel from a strict version format.
-          if ! [[ "$NEW_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-linux-preview\.[1-9][0-9]*)?$ ]]; then
-            echo "::error::expected MAJOR.MINOR.PATCH, optionally followed by -linux-preview.N with N greater than zero."
+          case "${NATIVE_FILESYSTEM_POLICY:-false}" in
+            true|false) ;;
+            *) echo "::error::native_filesystem_policy must be true or false"; exit 1 ;;
+          esac
+          if [ "${NATIVE_FILESYSTEM_POLICY:-false}" = true ] && [ "$DRY_RUN" != true ]; then
+            echo "::error::native_filesystem_policy requires dry_run=true"
             exit 1
           fi
-          BASE_VERSION="${NEW_VERSION%%-linux-preview.*}"
+
+          # 1. Derive the release channel from a strict version format. A pre-release
+          #    (-preview.N) and a Linux preview (-linux-preview.N) publish as GitHub
+          #    prereleases, which never become the latest release.
+          if ! [[ "$NEW_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(linux-)?preview\.[1-9][0-9]*)?$ ]]; then
+            echo "::error::expected MAJOR.MINOR.PATCH, optionally followed by -preview.N or -linux-preview.N with N greater than zero."
+            exit 1
+          fi
+          BASE_VERSION="${NEW_VERSION%%-*}"
           LINUX_PREVIEW=false
+          PRERELEASE=false
           if [ "$BASE_VERSION" != "$NEW_VERSION" ]; then
+            PRERELEASE=true
+          fi
+          if [ "${NEW_VERSION#*-linux-preview.}" != "$NEW_VERSION" ]; then
             LINUX_PREVIEW=true
           fi
 
@@ -188,6 +215,16 @@ jobs:
             echo "::error::tag $NEW_TAG already exists."
             exit 1
           fi
+          # A preview's number rises within its channel, so preview.2 never follows preview.3.
+          if [ "$PRERELEASE" = "true" ]; then
+            CHANNEL="${NEW_TAG%.*}."
+            LAST_TAG=$(git tag --list "${CHANNEL}*" --sort=-v:refname |
+              awk -v channel="$CHANNEL" 'index($0, channel) == 1 && substr($0, length(channel) + 1) ~ /^[1-9][0-9]*$/ {print; exit}')
+            if [ -n "$LAST_TAG" ] && [ "${NEW_TAG##*.}" -le "${LAST_TAG##*.}" ]; then
+              echo "::error::version $NEW_VERSION is not above the earlier preview $LAST_TAG."
+              exit 1
+            fi
+          fi
 
           # 5. Sanity-check: at least one commit since prev tag.
           COUNT=$(git rev-list --count "$PREV_TAG..$RELEASE_SHA")
@@ -201,6 +238,7 @@ jobs:
             echo "prev_tag=$PREV_TAG"
             echo "new_tag=$NEW_TAG"
             echo "linux_preview=$LINUX_PREVIEW"
+            echo "prerelease=$PRERELEASE"
             echo "publish_linux_x86=$PUBLISH_LINUX_X86"
           } >> "$GITHUB_OUTPUT"
 
@@ -211,7 +249,8 @@ jobs:
             echo "|---|---|"
             echo "| Previous tag | \`$PREV_TAG\` |"
             echo "| Proposed tag | \`$NEW_TAG\` |"
-            echo "| Linux preview prerelease | $LINUX_PREVIEW |"
+            echo "| Prerelease | $PRERELEASE |"
+            echo "| Linux preview | $LINUX_PREVIEW |"
             echo "| Publish Linux x86-64 | $PUBLISH_LINUX_X86 |"
             echo "| Pinned SHA | \`$RELEASE_SHA\` |"
             echo "| Commits since prev tag | **$COUNT** |"
@@ -252,6 +291,49 @@ jobs:
       contents: read
     with:
       ref: ${{ needs.scan.outputs.release_sha }}
+
+  # ── The CLI's tests, the second release gate ───────────────────────────
+  # The same skip rule as the test job: only a fork run may skip it.
+  cli-test:
+    name: CLI test
+    needs: scan
+    if: ${{ !(inputs.skip_tests == true && github.event.repository.fork == true) }}
+    uses: ./.github/workflows/cli-test.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ needs.scan.outputs.release_sha }}
+      suite: all
+      macos: true
+      package: true
+
+  # ── Build, sign, and check the CLI, in the reusable CLI release workflow ─
+  # Real releases always sign. A dry run signs only with sign_macos=true, and a pre-merge
+  # signing test signs only Box Core. Signing waits for the tests, so the build waits for them
+  # too. A fork run may skip the tests (see the test job).
+  cli:
+    name: CLI
+    needs: [scan, test, cli-test]
+    if: |
+      always() &&
+      needs.scan.result == 'success' &&
+      ((needs.test.result == 'success' && needs.cli-test.result == 'success') ||
+        (needs.test.result == 'skipped' && needs.cli-test.result == 'skipped' &&
+          inputs.skip_tests == true && github.event.repository.fork == true))
+    uses: ./.github/workflows/cli-release.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      version: ${{ inputs.version }}
+      tag: ${{ needs.scan.outputs.new_tag }}
+      sha: ${{ needs.scan.outputs.release_sha }}
+      publish_linux_x86: ${{ needs.scan.outputs.publish_linux_x86 == 'true' }}
+      native_filesystem_policy: ${{ inputs.native_filesystem_policy }}
+      sign: >-
+        ${{ github.repository == 'strands-agents/box' && github.ref == 'refs/heads/main' &&
+        inputs.premerge_signing_test != true &&
+        (inputs.dry_run != true || inputs.sign_macos == true) }}
 
   build:
     name: Build ${{ matrix.target.label }}
@@ -654,11 +736,15 @@ jobs:
   # page are the bytes attached to the release.
   inspect:
     name: Inspect release tarballs
-    needs: [scan, build, sign-macos, verify-macos]
+    needs: [scan, build, sign-macos, verify-macos, cli]
+    # A dry run without sign_macos inspects the unsigned builds. Anything else needs Box Core's
+    # signed, checked package, and the CLI's too, except in a pre-merge signing test.
     if: >-
       always() && needs.scan.result == 'success' && needs.build.result == 'success' &&
+      needs.cli.result == 'success' &&
       ((inputs.dry_run == true && inputs.sign_macos != true) ||
-       (needs.sign-macos.result == 'success' && needs.verify-macos.result == 'success'))
+       (needs.sign-macos.result == 'success' && needs.verify-macos.result == 'success' &&
+        (needs.cli.outputs.signed == 'true' || inputs.premerge_signing_test == true)))
     runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 15
     permissions:
@@ -676,6 +762,13 @@ jobs:
         with:
           name: macos-signed-package
           path: assets/box-${{ needs.scan.outputs.new_tag }}-aarch64-apple-darwin
+
+      # Its artifacts start with cli-, so the box-* download above leaves them out.
+      - name: Download the CLI release bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: cli-release-bundle
+          path: cli-release
 
       - name: Collect tarballs and compute SHA256SUMS.txt
         # Every target lands in built/. Only qualified architectures enter release/.
@@ -707,6 +800,8 @@ jobs:
           if [ "$PUBLISH_LINUX_X86" = "true" ]; then
             cp "$linux_x86" "release/box-${NEW_TAG}-linux-x86_64.tar.gz"
           fi
+          # The CLI's bundle holds only the archives it qualified for this release.
+          cp cli-release/box-cli-"${NEW_TAG}"-*.tar.gz release/
           (cd release && sha256sum -- *.tar.gz | sort -k 2 > SHA256SUMS.txt)
           echo "Built tarballs:"
           ls -la built
@@ -750,13 +845,23 @@ jobs:
           release_assets=(
             "box-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
             "box-${NEW_TAG}-linux-arm64.tar.gz"
+            "box-cli-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+            "box-cli-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
           )
           if [ "$PUBLISH_LINUX_X86" = "true" ]; then
-            release_assets+=("box-${NEW_TAG}-linux-x86_64.tar.gz")
+            release_assets+=(
+              "box-${NEW_TAG}-linux-x86_64.tar.gz"
+              "box-cli-${NEW_TAG}-x86_64-unknown-linux-gnu.tar.gz"
+            )
           fi
           expected_release=$(printf '%s\n' "${release_assets[@]}" | sort)
           if [ "$released" != "$expected_release" ]; then
             echo "::error::release bundle has an unexpected asset set: $released"
+            exit 1
+          fi
+          listed=$(awk '{print $2}' release/SHA256SUMS.txt | sort)
+          if [ "$listed" != "$expected_release" ]; then
+            echo "::error::SHA256SUMS.txt lists an unexpected asset set: $listed"
             exit 1
           fi
 
@@ -788,15 +893,17 @@ jobs:
   # the gate only on a fork, so the upstream repo always runs it.
   approve-release:
     name: Wait for reviewer approvals
-    needs: [scan, test, build, inspect]
+    needs: [scan, test, cli-test, build, cli, inspect]
     if: |
       always() &&
       inputs.dry_run != true &&
       inputs.premerge_signing_test != true &&
       needs.scan.result == 'success' &&
-      (needs.test.result == 'success' ||
-        (needs.test.result == 'skipped' && inputs.skip_tests == true && github.event.repository.fork == true)) &&
+      ((needs.test.result == 'success' && needs.cli-test.result == 'success') ||
+        (needs.test.result == 'skipped' && needs.cli-test.result == 'skipped' &&
+          inputs.skip_tests == true && github.event.repository.fork == true)) &&
       needs.build.result == 'success' &&
+      needs.cli.result == 'success' &&
       needs.inspect.result == 'success'
     runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 30
@@ -853,6 +960,7 @@ jobs:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
           RELEASE_SHA: ${{ needs.scan.outputs.release_sha }}
           LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
+          PRERELEASE: ${{ needs.scan.outputs.prerelease }}
           PUBLISH_LINUX_X86: ${{ needs.scan.outputs.publish_linux_x86 }}
         run: |
           set -euo pipefail
@@ -860,15 +968,42 @@ jobs:
           if [ "$PUBLISH_LINUX_X86" = "true" ]; then
             platforms="macOS 15 or later on Apple silicon, ARM64 Linux, and x86-64 Linux"
           fi
+          installer="curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh |"
           cat > body.md <<EOF
-          ## Download
+          ## Install box
 
-          This release supports ${platforms}. Download Box Core into a local directory:
+          \`box\` runs coding agents such as Claude Code and Codex in a Strands Box, using profiles for your model provider and tools. This release supports ${platforms}.
 
           EOF
-          # The unpinned downloader resolves releases/latest, which never returns
-          # a prerelease, so a preview page offers only the pinned command.
-          if [ "$LINUX_PREVIEW" = "true" ]; then
+          # The installer and the downloader both resolve the latest release, which is
+          # never a prerelease, so a prerelease page offers only the pinned commands.
+          if [ "$PRERELEASE" != "true" ]; then
+            cat >> body.md <<EOF
+          Install the latest release:
+
+          \`\`\`sh
+          ${installer}
+            BOX_GITHUB_REPO=${GITHUB_REPOSITORY} sh
+          \`\`\`
+
+          EOF
+          fi
+          cat >> body.md <<EOF
+          Install this exact release:
+
+          \`\`\`sh
+          ${installer}
+            BOX_GITHUB_REPO=${GITHUB_REPOSITORY} BOX_VERSION=${NEW_TAG#v} sh
+          \`\`\`
+
+          The installer verifies the \`box-cli-\` archive for your platform against \`SHA256SUMS.txt\`, and on macOS its Apple signature, then puts \`box\` on your \`PATH\`.
+
+          ## Download Box Core
+
+          Download Box Core into a local directory:
+
+          EOF
+          if [ "$PRERELEASE" = "true" ]; then
             cat >> body.md <<EOF
           \`\`\`sh
           curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | BOX_VERSION=${NEW_TAG} sh
@@ -937,7 +1072,7 @@ jobs:
           cat >> body.md <<EOF
           ## Assets
 
-          The macOS archive contains \`Box.app\`, a \`box\` launcher, and helper links into its signed and notarized bundle. Keep that directory intact. Linux archives contain \`box\` beside its helpers. \`SHA256SUMS.txt\` contains each archive's checksum.
+          The macOS archive contains \`Box.app\`, a \`box\` launcher, and helper links into its signed and notarized bundle. Keep that directory intact. Linux archives contain \`box\` beside its helpers. Each \`box-cli-\` archive contains the \`box\` command, both Box Core helpers, bundled packs, and \`release.json\`, and its macOS programs are signed and notarized. \`SHA256SUMS.txt\` contains each archive's checksum.
           EOF
 
       - name: Tag the pinned SHA
@@ -962,8 +1097,8 @@ jobs:
           name: ${{ needs.scan.outputs.new_tag }}
           target_commitish: ${{ needs.scan.outputs.release_sha }}
           draft: false
-          prerelease: ${{ needs.scan.outputs.linux_preview == 'true' }}
-          make_latest: ${{ needs.scan.outputs.linux_preview == 'true' && 'false' || 'true' }}
+          prerelease: ${{ needs.scan.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.scan.outputs.prerelease == 'true' && 'false' || 'true' }}
           fail_on_unmatched_files: true
           files: release/*
           body_path: body.md
@@ -1002,17 +1137,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
-          LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
+          PRERELEASE: ${{ needs.scan.outputs.prerelease }}
           PUBLISH_LINUX_X86: ${{ needs.scan.outputs.publish_linux_x86 }}
         run: |
           set -euo pipefail
           expected=(
             "box-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
             "box-${NEW_TAG}-linux-arm64.tar.gz"
+            "box-cli-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+            "box-cli-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
             "SHA256SUMS.txt"
           )
           if [ "$PUBLISH_LINUX_X86" = "true" ]; then
-            expected+=("box-${NEW_TAG}-linux-x86_64.tar.gz")
+            expected+=(
+              "box-${NEW_TAG}-linux-x86_64.tar.gz"
+              "box-cli-${NEW_TAG}-x86_64-unknown-linux-gnu.tar.gz"
+            )
           fi
           for i in $(seq 1 30); do
             if names=$(gh release view "$NEW_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null); then
@@ -1022,7 +1162,7 @@ jobs:
               done
               if [ "$missing" = "0" ]; then
                 actual_preview=$(gh release view "$NEW_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq '.isPrerelease')
-                if [ "$actual_preview" != "$LINUX_PREVIEW" ]; then
+                if [ "$actual_preview" != "$PRERELEASE" ]; then
                   echo "::error::$NEW_TAG has an incorrect prerelease setting."
                   exit 1
                 fi

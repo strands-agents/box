@@ -56,8 +56,7 @@ and no credentials, and bypasses HTTP proxies. A missing or invalid value disabl
 Production builds ignore the variable. The CLI dev dependency enables this feature during
 Cargo tests. CI checks, the corpus, and the nightly agent workloads build with the production
 transport and set `BOX_TELEMETRY=0`; downloadable trial builds send events, and so does a
-package built for release, though no workflow in this repository releases `box` yet. Local
-package smoke checks use the
+package that `Release Box` builds. Local package smoke checks use the
 [caller's installation identity](decisions.md#smoke-telemetry-follows-the-callers-identity).
 Their temporary homes receive the developer's saved metadata.
 See [manual testing](../../dev/manual-testing.md#check-telemetry-delivery) for a local receiver.
