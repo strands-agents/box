@@ -198,12 +198,16 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `a_datetime_union_member_is_placed_and_its_rule_cannot_be_bypassed`.
 - An MCP `$defs` definition that refers to itself, directly or through other definitions, is cut
   where it repeats: `make_definition_cycles_opaque` makes the reference that closes the cycle an
-  opaque `Unknown`. A rule that reads below it does not validate, unless a `has` guard makes it an
-  impossible policy that loads and never matches; Dogwood evaluates the raw input, so a `forbid`
-  there still fires on a value of that shape. A plain object below the cut fails the request gate.
+  opaque `Unknown`, an entity type with no attributes. A rule that compares the cut field with a
+  string or a number does not validate. A rule that reads a field inside it validates only behind
+  `has` tests, and the inner test is always false, so it never matches. The request gate refuses
+  an ordinary value at the cut field (an object, a string, a number, `null`, a list) as
+  `InternalFault`.
   Renamed definitions and array elements change only generated type names. `outputSchema` `$defs`
-  stay as the server wrote them, so a server that generated before generates the same schema and an
-  output that needs a fix is dropped as before. A server definition named `Action` is still
+  stay as the server wrote them, so a server that generated before generates the same schema. An
+  output whose `$defs` name is not an identifier, or is an array of objects, is dropped as before.
+  An output whose `$defs` refer to themselves generates and then fails composition with a cycle in
+  common types, so the whole server is refused. A server definition named `Action` is still
   refused, and so is one named `Unknown` or `Null` beside a field the generator types that way. When
   a cut or a moved array element leaves any definition deeper than `MAXIMUM_DEFINITION_DEPTH` schema
   steps (about 32 object definitions), the list stays unchanged and is refused as before: Cedar

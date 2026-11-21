@@ -238,8 +238,9 @@ name isn't a plain name, such as `zone-id`, keeps it, and a rule reads it as
 `context.input["zone-id"]`. A `temporal` clause can't name such an argument; it reads only
 arguments with plain names. An argument typed by a definition in the server's `$defs` reads the
 same way whatever the definition is called. A definition that refers to itself has a type only down
-to the point where it repeats, so a rule that reads below that point doesn't load or never matches.
-Run the `policy generate-schema` verb to see the exact names:
+to the field where it repeats. A rule that compares that field with a value doesn't load, and a rule
+that reads a field inside it loads only behind `has` tests and never matches. Run the
+`policy generate-schema` verb to see the exact names:
 
 ```sh
 ./box-core/box policy generate-schema --config my-box/box.toml --output-dir ./schema

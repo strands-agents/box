@@ -1105,9 +1105,6 @@ fn make_definitions_generable_in(response: &mut serde_json::Value) -> Definition
         for definitions in tool.definitions_mut() {
             names.taken.extend(definitions.keys().cloned());
         }
-        if let Some(definitions) = schema_definitions(tool.output.as_deref_mut()) {
-            names.taken.extend(definitions.keys().cloned());
-        }
     }
     names.taken.extend(server_names.iter().cloned());
     if let Some(definitions) = server
@@ -1168,12 +1165,11 @@ fn make_definitions_generable_in(response: &mut serde_json::Value) -> Definition
     }
 }
 
-/// The schemas of one tool whose `$defs` the generator reads.
+/// The schemas of one tool whose `$defs` [`make_definitions_generable`] fixes.
 struct ToolDefinitions<'a> {
     name: String,
     definitions: Option<&'a mut serde_json::Value>,
     input: Option<&'a mut serde_json::Value>,
-    output: Option<&'a mut serde_json::Value>,
 }
 
 impl ToolDefinitions<'_> {
@@ -1236,12 +1232,10 @@ fn definition_scopes(
                 name,
                 definitions: None,
                 input: None,
-                output: None,
             };
             for (key, value) in tool.iter_mut() {
                 match key.as_str() {
                     "$defs" => definitions.definitions = Some(value),
-                    "outputSchema" => definitions.output = Some(value),
                     key if key == input_key => definitions.input = Some(value),
                     _ => {}
                 }
@@ -1252,7 +1246,7 @@ fn definition_scopes(
     (server, tools)
 }
 
-/// The `$defs` map of an input or output schema, inside its `json` wrapper when it has one.
+/// The `$defs` map of an input schema, inside its `json` wrapper when it has one.
 fn schema_definitions(
     schema: Option<&mut serde_json::Value>,
 ) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
@@ -1298,7 +1292,7 @@ struct DefinitionScope {
 
 impl DefinitionScope {
     /// Rename each definition the generator refuses, or that `refused` names, to a name that no
-    /// definition or reference in the server uses.
+    /// server, tool, or input definition and no reference in the server uses.
     fn rename(
         definitions: Option<&mut serde_json::Map<String, serde_json::Value>>,
         names: &mut ArgumentNames,
@@ -3612,6 +3606,7 @@ namespace Box {
                 "tilde": {"$ref": "#/$defs/a~0b"},
                 "space": {"$ref": "#/$defs/zone%20record"},
                 "literal": {"$ref": "#/$defs/x~1y"},
+                "ordered": {"$ref": "#/$defs/p~01q"},
                 "nested": {"$ref": "#/$defs/outer-def"}
             }}}],
             "$defs": {
@@ -3620,6 +3615,8 @@ namespace Box {
                 "zone record": {"type": "object", "properties": {"z": {"type": "boolean"}}},
                 "x~1y": {"type": "object", "properties": {"w": {"type": "string"}}},
                 "x/y": {"type": "object", "properties": {"w": {"type": "integer"}}},
+                "p~1q": {"type": "object", "properties": {"u": {"type": "string"}}},
+                "p/q": {"type": "object", "properties": {"u": {"type": "integer"}}},
                 "outer-def": {"type": "object", "properties": {"inner": {"$ref": "#/$defs/inner-def"}}},
                 "inner-def": {"type": "object", "properties": {"leaf": {"$ref": "#/$defs/a~1b"}}}
             }
@@ -3631,6 +3628,7 @@ namespace Box {
             "context.input has tilde && context.input.tilde has y && context.input.tilde.y == 1",
             "context.input has space && context.input.space has z && context.input.space.z",
             r#"context.input has literal && context.input.literal has w && context.input.literal.w == "v""#,
+            r#"context.input has ordered && context.input.ordered has u && context.input.ordered.u == "v""#,
             r#"context.input has nested && context.input.nested has inner && context.input.nested.inner has leaf && context.input.nested.inner.leaf has x && context.input.nested.inner.leaf.x == "v""#,
         ] {
             assert!(
@@ -3789,6 +3787,7 @@ namespace Box {
             serde_json::json!({"A": {"type": "string", "$ref": "#/$defs/A"}}),
             serde_json::json!({"A": {"anyOf": [{"type": "string"}], "oneOf": [{"$ref": "#/$defs/A"}]}}),
             serde_json::json!({"A": {"type": "array", "prefixItems": [{"$ref": "#/$defs/A"}], "items": {"type": "string"}}}),
+            serde_json::json!({"A": {"type": "array", "prefixItems": [{"type": "string"}], "items": {"$ref": "#/$defs/A"}}}),
         ] {
             let tools = referring_tools("A", definitions.clone()).to_string();
             assert!(
