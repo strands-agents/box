@@ -207,12 +207,13 @@ impl StorageView {
             ancestors.push(identity(&metadata));
             directories.push(object);
         }
+        let current = Arc::clone(directories.last().expect("root retained"));
         Ok(StoragePath {
-            logical: PathBuf::from("/"),
+            logical: logical(&names),
             original: path.to_path_buf(),
-            parent: Arc::clone(&root),
+            parent: Arc::clone(&current),
             leaf: CString::new(".").expect("literal"),
-            object: Some(root),
+            object: Some(current),
             ancestors,
         })
     }
@@ -749,6 +750,78 @@ mod tests {
             let allowed = shell.run("cat /workspace/incoming/allowed").await;
             assert_eq!(allowed.status, 0, "{}", allowed.stderr);
             assert_eq!(allowed.stdout, "SOURCE-ALLOWED");
+        });
+    }
+    #[test]
+    fn terminal_directory_symlinks_preserve_the_resolved_directory() {
+        let (directory, view) = fixture();
+        std::fs::create_dir(directory.path().join("incoming/child")).unwrap();
+        for (name, target, expected) in [
+            ("self", ".", "/incoming"),
+            ("child/up", "..", "/incoming"),
+            ("roundtrip", "child/..", "/incoming"),
+            ("normal", "child", "/incoming/child"),
+        ] {
+            std::os::unix::fs::symlink(target, directory.path().join("incoming").join(name))
+                .unwrap();
+            let result = view
+                .resolve(&Path::new("/incoming").join(name), true)
+                .unwrap();
+            assert_eq!(
+                result.logical(),
+                Path::new(expected),
+                "link {name} -> {target}"
+            );
+            let direct = view.resolve(Path::new(expected), true).unwrap();
+            assert_eq!(result.identity().unwrap(), direct.identity().unwrap());
+        }
+        let direct = view.resolve(Path::new("/incoming"), true).unwrap();
+        let linked = view.resolve(Path::new("/incoming/self"), true).unwrap();
+        assert_eq!(linked.logical(), direct.logical());
+        assert_eq!(linked.identity().unwrap(), direct.identity().unwrap());
+    }
+
+    #[test]
+    fn hosted_shell_directory_symlink_matches_ordinary_serving() {
+        let ambient = tempfile::tempdir().unwrap();
+        let protected = tempfile::tempdir().unwrap();
+        for incoming in [
+            ambient.path().join("incoming"),
+            protected.path().join("workspace/incoming"),
+        ] {
+            std::fs::create_dir_all(incoming.join("child")).unwrap();
+            std::fs::write(incoming.join("marker"), "MARKER").unwrap();
+            std::os::unix::fs::symlink(".", incoming.join("self")).unwrap();
+            std::os::unix::fs::symlink("..", incoming.join("child/up")).unwrap();
+            std::os::unix::fs::symlink("child", incoming.join("normal")).unwrap();
+        }
+        let view =
+            Arc::new(StorageView::new(vec![(PathBuf::from("/workspace/incoming"), true)]).unwrap());
+        view.state.write().unwrap().root = Some(open_test_root(protected.path()));
+        let vfs = strands_shell::vfs_config::build_vfs(&Default::default()).unwrap();
+        let ordinary = crate::ShellKernel::over(
+            Arc::new(
+                crate::Filesystem::serving(
+                    vfs,
+                    &[(ambient.path().to_str().unwrap(), "/workspace")],
+                )
+                .unwrap(),
+            ),
+            Arc::new(ServingPolicy),
+        );
+        let mut ordinary = ordinary.shell();
+        let mut storage = serving_kernel(ambient.path(), view).shell();
+        run(async {
+            for suffix in ["", "/normal", "/self", "/child/up"] {
+                let command = format!("cd /workspace/incoming{suffix} && pwd");
+                let baseline = ordinary.run(&command).await;
+                let proposed = storage.run(&command).await;
+                assert_eq!(baseline.status, 0, "ordinary success control failed");
+                assert_eq!(proposed.status, 0, "{command}: {}", proposed.stderr);
+                assert_eq!(proposed.stdout, baseline.stdout, "{command}");
+            }
+            let result = storage.run("cd /workspace/incoming/self && pwd").await;
+            assert_eq!(result.status, 0, "{}", result.stderr);
         });
     }
 }

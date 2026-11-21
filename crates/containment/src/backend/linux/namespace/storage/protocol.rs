@@ -9,7 +9,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 /// Version of the private storage handoff.
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 
 /// One immutable publication or pending-mask destination.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,6 +58,8 @@ pub enum ControllerCommand {
         /// Identifier returned by the prepared event.
         generation: u64,
     },
+    /// Release workload execution after the required initial sources are protected.
+    ReleaseLaunch,
     /// Stop this receiver and every pending admission worker.
     Abort,
 }
@@ -120,7 +122,10 @@ pub enum HelperEvent {
         version: u16,
     },
     /// Followed by the sealed workload root descriptor used for protected hosted access.
-    ViewReady,
+    ViewReady {
+        /// Sources already present when this recipient subscribed.
+        required: Vec<u32>,
+    },
     /// A source is retained; compiler descriptors arrive only in a snapshot event.
     Captured {
         /// Index of the source in the immutable launch-time root layout.
