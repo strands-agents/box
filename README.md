@@ -27,11 +27,8 @@
 
 `box` runs a coding agent, such as Claude Code, Codex, Kiro CLI, or pi, in a box on your machine.
 The agent works in your project and reaches only what you allow, so your other files, your keys,
-and the services that listen only on localhost stay out of its reach. By default, Box checks the
-agent's shell commands, network requests, and MCP tool calls against a policy written in
-[Dogwood](https://dogwood-policy.github.io/dogwood/) before they happen. The check runs outside the
-model, so nothing the agent reads can change the answer
-([How Box works](docs/cli/how-box-works.md)).
+and the services that listen only on localhost stay out of its reach. You use the agent the way
+you always do, with its permission prompts off if you like.
 
 Strands Box has two parts, and both live in this repository: `box`, the command you run, and
 [Box Core](#box-core), the engine under it, which you can also run directly or embed in a Rust
@@ -78,6 +75,29 @@ box run claude
 
 [Get started](docs/cli/getting-started.md) walks through each step and what you see along the way.
 
+## How Box works
+
+![The agent runs in an OS sandbox inside the box. Its requests go to Box, which checks each one against your policy before it reaches files, commands, the network, or MCP tools. Denied requests stop there.](docs/cli/images/how-box-works.png)
+
+The agent runs inside an operating system sandbox, so its own file reads and writes reach only the
+files and folders its profile grants. By default, everything else goes through Box: each shell
+command and the files that command touches, each network request, and each MCP tool call. Box
+checks each one against your policy before it happens. The check runs outside the model, so nothing
+the agent reads can change the answer, and the agent can't change its own policy.
+
+Rules are written in [Dogwood](https://dogwood-policy.github.io/dogwood/). Each rule is about
+something the agent does, such as running a command, reading or changing a file from its shell,
+sending a request to a host, or calling an MCP tool. A rule can also look back at what the agent
+already did, such as allowing at most 60 calls to a server in an hour.
+
+The agent's keys stay outside the box. The agent sees a placeholder, and Box swaps in the real key
+as the request leaves, so the agent can't leak a key it never holds. While the agent runs, the
+[activity banner](docs/cli/cli.md#the-activity-banner) shows what the box allows and denies, and
+`box runs history` lists every decision afterward.
+
+[How Box works](docs/cli/how-box-works.md) explains profiles, packs, and policy in more detail, and
+[Box architecture](docs/design/architecture.md) shows how the parts fit together inside.
+
 ## Learn more
 
 - [Box CLI guide](docs/cli/README.md): every page for people who run `box`, starting with common
@@ -91,215 +111,22 @@ box run claude
 - [Limitations](docs/cli/limitations.md): what a box doesn't protect you from. Read this before you
   trust a run with work that matters.
 
-## Key capabilities
-
-- **File, program, and network restrictions.** The agent's sandbox limits its
-  direct access. Box reports the configured grants at startup.
-- **Semantic and temporal policies.** Dogwood rules can depend on the requested
-  operation, its arguments, earlier actions, and elapsed time. Operations checked
-  by the policy engine are denied unless a rule permits them.
-- **Policy across code and tools.** Strands Shell, Monty for Python, the egress
-  gateway, and the MCP broker use one policy engine and event history. A file read
-  through one interpreter can affect whether a later network request is allowed.
-- **Request and tool-call checks.** The egress gateway checks connections and
-  HTTP requests, including their method and path. The MCP integration checks
-  configured tool calls and their arguments.
-- **Credential injection.** The gateway authenticates permitted requests with
-  configured API credentials or AWS SigV4 signing. The agent does not receive the
-  underlying secrets.
-- **Decision records.** Box records policy decisions in OTLP JSON, and `box runs history` lists
-  what a run allowed and denied.
-
-## Architecture
-
-Box runs the Dogwood Local Engine and its enforcement components outside the
-agent's sandbox, in either the Box command's process or the calling Rust
-application's process. Strands Shell, Monty, the egress gateway, and the MCP broker
-check operations with the engine before allowing them.
-They also record events that later policy decisions can use.
-
-```mermaid
-flowchart LR
-    subgraph sandbox["Agent OS sandbox"]
-        agent["Agent application"]
-    end
-
-    net["network requests"]:::label
-    py["Python code"]:::label
-    sh["shell commands"]:::label
-    mc["local MCP calls"]:::label
-
-    subgraph trusted["The box's trusted process (outside the agent sandbox)"]
-        proxy["Egress gateway"]
-        monty["Monty for Python"]
-        shell["Strands Shell"]
-        mcp["MCP broker"]
-        policy[["Dogwood Local Engine and event history"]]
-    end
-
-    agent --- net --> proxy
-    agent --- py --> monty
-    agent --- sh --> shell
-    agent --- mc --> mcp
-    proxy -->|"policy checks"| policy
-    monty -->|"policy checks"| policy
-    shell -->|"policy checks"| policy
-    mcp -->|"policy checks"| policy
-
-    classDef label fill:none,stroke:none;
-```
-
-When the agent uses a program such as `git` or `cargo`, or a local MCP server,
-Box checks the launch against policy and runs the program in its own sandbox.
-You configure which files each program can read or change. The agent can send
-requests to Box's interpreters, but external programs and local MCP servers
-cannot. Box receives their output and exit status, and their
-network traffic goes through Box's gateway by default. See the
-[security model](docs/user/security.md) for details.
-
-For each part, where it runs, what it decides, and how one request moves through them, read
-[Box architecture](docs/design/architecture.md).
-
 ## Box Core
 
 Box Core is the engine under `box`. Use it directly to run a program of your choice under a
-policy, to deploy a box to a cloud host, or to embed a box in a Rust application. Box Core is
-harness-agnostic: you choose the agent program or binary to run, configure its access in
-`box.toml`, and write its policies in `policy.dw`. These two files are Box Core's stable interface.
-`box` writes both for each run from your profile and its packs, so you write `box.toml` yourself
-only when you use Box Core directly. The [Box Core guide](docs/user/README.md) covers both files.
-
-The host OS enforces the direct access restrictions in `box.toml`. Strands Shell,
-Monty for Python, the egress gateway, and the MCP broker send the operations
-they handle to the embedded Dogwood Local Engine, which evaluates the rules in
-`policy.dw`. Box enforces its allow or deny decisions outside the agent process.
-
-Dogwood uses `permit` and `forbid` rules. Operations checked by the engine are
-denied by default: a matching `permit` must allow the operation, and a matching
-`forbid` overrides that permission.
-
-Box's interpreters and gateways share an event history, so rules can use earlier
-actions and elapsed time to decide what is allowed next. For example, a file read
-through Shell or Python can cause the gateway to deny a later outbound HTTP request.
-
-Direct filesystem grants in `box.toml` are enforced by the OS and do not produce
-individual Dogwood decisions. To apply a policy to file operations, use the
-interpreters and keep those files out of the agent's direct grants. See
-[filesystem access](docs/user/security.md) and [policy](docs/user/policy.md).
-
-By default, Box Core writes its decision records to
-`<box_dir>/private/telemetry/records.jsonl`.
-
-Box Core supports local execution on Linux ARM64, Linux x86-64, and macOS with Apple
-silicon. See the [Linux download instructions](docs/user/getting-started.md#linux) for release
-selection and the [Linux requirements](docs/user/linux-requirements.md) for tested configurations.
-
-### Download Box Core
-
-Follow [Run an agent with box.toml](docs/user/getting-started.md) to download Box Core for macOS, Linux ARM64, or Linux x86-64.
-The Strands CLI walkthrough uses macOS.
-For that walkthrough, you need macOS 15 or later on Apple silicon and Node.js 22.21 or later from Homebrew.
-You also need access to Claude Opus 5 on Amazon Bedrock in `us-west-2`.
-
-The download script checks the release checksum and unpacks the binaries into
-`./box-core`. It does not change your `PATH` or system directories:
+policy, to deploy a box to a cloud host, or to embed a box in a Rust application. You describe the
+box in `box.toml` and its rules in `policy.dw`, which are Box Core's stable interface, and `box`
+writes both for each run from your profile and its packs. To download Box Core into `./box-core`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
 ./box-core/box --version
 ```
 
-The downloader selects the archive for your operating system and CPU architecture. For Linux, select a release
-that includes `box-<tag>-linux-arm64.tar.gz` or `box-<tag>-linux-x86_64.tar.gz` for your CPU, with its `SHA256SUMS.txt` entry.
-Set `BOX_VERSION` to that release tag when running the script. Set `BOX_DOWNLOAD_DIR` to change
-the destination. A release can omit Linux or x86-64 assets. If the x86-64 archive or its checksum is missing,
-the download stops; the script does not substitute an ARM64 archive.
-
-The script verifies the checksum and extracts into temporary storage before changing destination files.
-Linux packages must contain executable `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` files.
-The [Linux requirements](docs/user/linux-requirements.md) list the libraries, operating system permissions, and checks needed to run a workload.
-Before replacing files, the downloader runs the candidate's `box --version` in a private directory inside an existing destination.
-For a new destination, it uses the parent directory. This staging location must be writable and allow execution.
-Temporary download storage can prohibit execution (`noexec`).
-A failed version check reports the loader error and leaves existing destination files unchanged.
-The final extraction can partially update the destination if it fails. Use a fresh `BOX_DOWNLOAD_DIR`
-to retain a previous installation.
-
-Keep the entire download together in `./box-core`, including `Box.app` in signed macOS packages.
-The [macOS requirements](docs/user/macos-requirements.md) list the package requirements, workload dependencies, and startup checks.
-You can also [build from source](#build-from-source). Then follow the guide to
-write `box.toml` and `policy.dw`, and run the box.
-
-### Change what the box allows
-
-Edit `box.toml` to change the agent's environment and direct access grants. Edit
-`policy.dw` to change the rules for operations Box checks through its interpreters
-and gateways. You can give your coding agent the policy-authoring skill for help
-with Dogwood syntax and Box's supported actions:
-
-```
-https://raw.githubusercontent.com/strands-agents/box/main/.agents/skills/authoring-box-policy/SKILL.md
-```
-
-### Use Box Core as a Rust library
-
-Link the `strands-box` package in `crates/box`, then call:
-
-```rust,no_run
-let exit_code = strands_box::run("/absolute/box.toml".into(), Vec::new(), Default::default());
-```
-
-This runs the existing Box command in the calling process and waits until it finishes.
-By default, it uses the process's terminal and returns its exit
-code. The second argument appends arguments to `[agent] command`.
-Use `RunOptions::terminal` to supply the workload's terminal and `RunOptions::on_ready`
-to start host threads after hardening and signal registration, before workload setup.
-Use `RunOptions::policy_decisions` to receive each policy decision in memory as the box makes it
-(see [the library section](crates/box/README.md#policy-decisions-for-a-library-caller)).
-Use `RunOptions::box_id` to give a new box your own ID, such as
-`my-app-3f9a1c0e7b2d4a6f`: a prefix of 1 to 15 letters, digits, `.`, `_`, or `-`, then `-` and 16
-lowercase hexadecimal digits. Box stores it, prints it, and labels telemetry with it. A box that
-already has an ID refuses a different one. Without `box_id`, Box generates `box-` and 16
-hexadecimal digits.
-Call it before starting application threads or loading secrets, and use one Box workload
-per host process. Later `run` calls fail, even if the first call failed, unless `run` refused a
-malformed `box_id`.
-Ship the matching Box helper binaries beside the host application.
-
-To replace the running box's policy from a host thread:
-
-```rust,no_run
-strands_box::reload(&[strands_box::Policy {
-    origin: "policy.dw".into(),
-    text: new_policy_text,
-}])?;
-```
-
-`reload` waits until the change takes effect. Invalid policy returns `ReloadRefused` and leaves
-the current policy in place. An empty list denies all policy requests. Policy files and the
-OS sandbox stay unchanged. A box must be open; `on_ready` runs too early.
-Use `ReloadRefused::is_not_running()` to distinguish that case from a rejected policy.
-A rule for an MCP tool can reload only after Box loads that server's tool definitions.
-Without them, even reloading the unchanged policy is refused. If policy blocks discovery,
-waiting will not help. The current policy stays in place.
-
-To generate policy schemas:
-
-```rust,no_run
-let exit_code = strands_box::generate_policy_schema(
-    "/absolute/box.toml".into(),
-    "/absolute/schemas".into(),
-);
-```
-
-### Examples
-
-These examples run Box Core directly.
-
-Run the [Strands Python SDK example](examples/strands-box/strands-sdk-agent/) for a small
-agent whose three tools use Shell.
-
-See the [example index](examples/README.md) for dependencies and run instructions.
+Then follow [Run an agent with box.toml](docs/user/getting-started.md). The
+[Box Core guide](docs/user/README.md) covers `box.toml`, policy, and cloud deployments, the
+[`strands-box` README](crates/box/README.md#use-box-as-a-rust-library) covers the Rust library, and
+the [examples](examples/README.md) run Box Core directly.
 
 ## Build from source
 
