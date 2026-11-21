@@ -26,6 +26,7 @@ fn capture(root: &Path) {
         .unwrap()
         .0;
     let mut tables = ProcessTables {
+        storage_roots: Vec::new(),
         tables: Vec::new(),
         policy: Some(root.join("policy-link/policy.dw")),
         declares_stdio_mcp: true,

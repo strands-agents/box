@@ -82,6 +82,9 @@ pub(crate) fn uses_native_filesystem<'a>(
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Filesystem {
+    /// Storage sources forwarded to this process without granting filesystem access.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) mounts: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) read: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -153,7 +156,7 @@ impl Grant {
 
 impl Filesystem {
     pub(crate) fn is_empty(&self) -> bool {
-        Grant::ALL.iter().all(|kind| self.list(*kind).is_empty())
+        self.mounts.is_empty() && Grant::ALL.iter().all(|kind| self.list(*kind).is_empty())
     }
 
     /// One list, by kind.

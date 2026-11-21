@@ -42,13 +42,6 @@ On Linux ARM64 and x86-64, neither verb requires an environment opt-in. The Rust
 library functions `run` and `generate_policy_schema` follow the same startup behavior.
 Configuration validation and sandbox requirements still apply.
 
-Linux packages also include `strands-box-storage-compiler`, a private executable that
-compiles filesystem permissions in a separate process using captured mount descriptors.
-Its Rust entry, `strands_box::storage_compiler_main()`, serves that executable and is not
-an operator command. The executable requires an inherited controller channel. This
-compiler foundation does not enable mount configuration or start a storage controller
-during an ordinary run.
-
 There are two verbs. The caller that created `box_dir` owns its lifecycle: it holds the path, so it
 stops a box by ending the `run` process and deletes one by removing the directory.
 
@@ -87,6 +80,15 @@ refusal tells the operator to make a directory for the workspace and to work the
 The config file's complete key set is **fourteen**: `name`, `box_dir`, `policy`, `[agent]`,
 `[tool.<label>]`, `[egress.<name>]`, `[secret-source.<scheme>]`, `[mcp.<name>]`,
 `[telemetry.<kind>]`, `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.
+Each process's `filesystem.mounts` lists its storage attachment points and grants no filesystem access.
+On Linux, `[experimental-features] linux-storage-mounts = true` enables asynchronous admission
+of those mounts with each process's original filesystem restrictions. Other platforms reject the switch.
+See [storage configuration](../../docs/user/config.md#filesystemmounts) for startup and failure behavior.
+
+Linux packages include `strands-box-storage-compiler`, a private executable that compiles
+permissions for captured storage mounts. Its Rust entry, `strands_box::storage_compiler_main()`,
+serves that executable and is not an operator command. Box invokes it for configured storage
+admission through an inherited controller channel.
 `name` and `box_dir` are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
 every removed spelling is refused by its own name with its replacement.
 `four_inputs.rs::the_config_record_carries_only_the_four_inputs` pins the set, and

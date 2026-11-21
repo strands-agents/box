@@ -4,7 +4,6 @@
 //! masks that keep unresolved rules from exposing placeholder contents or alias destinations.
 
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
 use containment::Scope;
@@ -15,8 +14,8 @@ use super::{FilesystemCompilation, FilesystemPlan};
 use crate::error::ConfigError;
 use crate::record::config::process::Grant;
 use crate::record::layout::{resolved_through_links, resolved_to_its_deepest_existing_ancestor};
-#[cfg(target_os = "linux")]
-use crate::run::{commands::ConfiguredCommand, installation::TrustedInstallation};
+use crate::run::commands::ConfiguredCommand;
+use crate::run::installation::TrustedInstallation;
 
 /// The object a private target placeholder must be able to receive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,6 +336,15 @@ impl FilesystemCheckpoint {
 }
 
 impl FilesystemGeneration {
+    /// Bind mandatory storage masks to the reach consumed by the normal launcher.
+    pub(crate) fn into_initial_reach(
+        mut self,
+        policy: Arc<crate::run::contain::boundary::storage::Policy>,
+    ) -> DirectReach {
+        self.reach.storage = Some(policy);
+        self.reach
+    }
+
     /// The caller must carry the masks into both initial startup and protected staging.
     /// There is deliberately no getter for the partial reach alone.
     pub(crate) fn with_policy<T>(
@@ -352,7 +360,6 @@ impl FilesystemGeneration {
     }
 
     /// Add already-opened runtime bindings after the normal command/installation guards pass.
-    #[cfg(target_os = "linux")]
     pub(crate) fn with_runtime_bindings(
         mut self,
         command: Option<Arc<ConfiguredCommand>>,
@@ -364,7 +371,13 @@ impl FilesystemGeneration {
     }
 
     /// Recompile in a view containing every admitted capture, preserving prior identities.
-    #[cfg(test)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Tests recompile this view directly; production admission compiles retained checkpoints"
+        )
+    )]
     pub(crate) fn recompile(
         self,
         admitted: &[PathBuf],

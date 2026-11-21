@@ -104,6 +104,21 @@ impl StorageOwner {
             .clone()
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn install_hosted(&self, root: std::fs::File) -> Result<(), BoxError> {
+        self.admit(|| {
+            let view = self.hosted_view().ok_or_else(|| SuperviseError::Control {
+                reason: "agent storage view has no registered hosted layout".into(),
+            })?;
+            view.install(root).map_err(|source| {
+                SuperviseError::Control {
+                    reason: format!("invalid agent storage view: {source}"),
+                }
+                .into()
+            })
+        })
+    }
+
     fn close_hosted(&self) {
         #[cfg(target_os = "linux")]
         {
@@ -322,6 +337,12 @@ impl StorageOwner {
             Some(_) => Err(refusal(&admission)),
             None => Ok(()),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn testing() -> Self {
+        let (fatal, _) = tokio::sync::mpsc::unbounded_channel();
+        Self::new(fatal)
     }
 }
 

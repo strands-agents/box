@@ -18,7 +18,6 @@ use crate::record::layout::{
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod aliases;
 
-#[cfg(any(test, target_os = "linux"))]
 pub(crate) mod snapshot;
 
 #[cfg(target_os = "linux")]
@@ -112,19 +111,14 @@ pub(crate) struct ConfiguredCommand {
     identity: (u64, u64),
     loaded: FileState,
     /// Compiler replicas verify original-identity authority through their owner.
-    #[cfg(any(test, target_os = "linux"))]
     verification: Option<snapshot::ReplicaVerifier>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     needs_alias_scan: bool,
 }
 
 /// The link count, owner, group, and mode of a command file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    any(test, target_os = "linux"),
-    derive(serde::Serialize, serde::Deserialize)
-)]
-#[cfg_attr(any(test, target_os = "linux"), serde(deny_unknown_fields))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FileState {
     links: u64,
     owner: u32,
@@ -331,8 +325,36 @@ impl ConfiguredCommands {
         None
     }
 
-    /// Validate storage generations without recursively enumerating a provider filesystem.
+    /// Judge a protected-view object against the original command identities without scanning it.
     #[cfg(target_os = "linux")]
+    pub(crate) fn projected_mutation_refusal(
+        &self,
+        path: &Path,
+        identity: Option<(u64, u64)>,
+    ) -> Option<CommandMutationRefusal> {
+        for command in self.protected() {
+            if identity == Some(command.identity) {
+                return Some(CommandMutationRefusal::HardLinkAlias);
+            }
+            for name in std::iter::once(&command.path)
+                .chain(&command.routes)
+                .chain(&command.links)
+            {
+                if name.starts_with(path)
+                    || identity.is_some_and(|identity| {
+                        name.ancestors()
+                            .filter_map(disk_identity)
+                            .any(|ancestor| ancestor == identity)
+                    })
+                {
+                    return Some(CommandMutationRefusal::CommandOrAncestor);
+                }
+            }
+        }
+        None
+    }
+
+    /// Validate storage generations without recursively enumerating a provider filesystem.
     pub(crate) fn validate_storage_reach(
         &self,
         table: &str,
@@ -474,7 +496,6 @@ impl ConfiguredCommand {
             opened,
             identity: (metadata.dev(), metadata.ino()),
             loaded,
-            #[cfg(any(test, target_os = "linux"))]
             verification: None,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             needs_alias_scan: writable_links,
@@ -522,13 +543,11 @@ impl ConfiguredCommand {
     }
 
     pub(crate) fn verify(&self) -> Result<(), BoxError> {
-        let unchanged_names = self.unchanged_owner_state();
-        #[cfg(any(test, target_os = "linux"))]
         let unchanged_names = if let Some(verification) = &self.verification {
             verification.verify(&self.opened)?;
             true
         } else {
-            unchanged_names
+            self.unchanged_owner_state()
         };
         if unchanged_names
             && disk_identity(&self.path) == Some(self.identity)
@@ -1536,7 +1555,6 @@ mod tests {
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 needs_alias_scan: false,
                 opened,
-                #[cfg(test)]
                 verification: None,
             }
         };

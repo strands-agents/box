@@ -82,7 +82,7 @@ The file carries fourteen keys. `name` and `box_dir` are required.
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
-| `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, ingress, and secret sources. Each is disabled by default. |
+| `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, ingress, secret sources, and Linux storage mounts. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
 | `monty` | boolean | Whether a bare `python3` or `python` in the Shell runs Monty, Box's built-in Python subset. `true` by default. With `false`, both names resolve like any other program: a `[tool.python3]` or `[tool.python]`, else the host's `PATH`. |
 | `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
@@ -338,6 +338,81 @@ default.
 
 `secret-sources = true` turns on [`[secret-source.<scheme>]`](#secret-sourcescheme) and the
 `secret.env` key of a route or a remote MCP server, which are experimental and off by default.
+
+<a id="storage"></a>
+
+## `filesystem.mounts`
+
+In Box Core's `box.toml`, each process's `filesystem.mounts` array lists absolute storage
+attachment paths that may receive filesystems after Box starts. Enable this experimental
+Linux feature explicitly:
+
+```toml
+[experimental-features]
+linux-storage-mounts = true
+
+[agent.filesystem]
+mounts = ["/mnt/data", "/mnt/shared"]
+read = ["/mnt/data", "/mnt/shared"]
+
+[tool.indexer.filesystem]
+mounts = ["/mnt/data"]
+read = ["/mnt/data"]
+write = ["/mnt/data/output"]
+```
+
+Add these filesystem tables beneath processes with their own configured `command`.
+The agent, each tool, and each local MCP server declare their mount paths independently.
+Use `[mcp.<name>.filesystem] mounts` for a local MCP server. Remote MCP servers do not
+participate. A missing or empty `mounts` array selects no asynchronous forwarding for that
+process. It does not change ordinary access to storage mounted before the process starts.
+
+Declaring a mount grants no read, write, or execute access. Keep permissions in that
+process's existing filesystem lists. Each process receives only its declared sources,
+restricted by its own permissions and any stronger restrictions from the mounted source.
+No process inherits another process's mount list or permission lists.
+
+Box starts the workload while storage is pending. It hides pending storage behind an
+empty, read-only view, so early file operations can fail. When a source arrives, Box
+prepares its protected view privately and then makes that view visible to the process.
+Request handling does not wait for storage, and Box exposes no readiness callback.
+Applications that need a file must handle an unavailable path until admission finishes.
+
+Hosted Shell and Monty filesystem operations beneath these storage destinations also
+use the agent's protected view. Both the agent's filesystem grants and each operation's
+existing `fs:*` policy permission must allow access. A hosted policy permit cannot bypass
+`deny`, `deny_write`, exact-file boundaries, or stronger source permissions. A native
+filesystem grant does not grant a hosted policy permission. Pending destinations remain
+unavailable even when they lie beneath a normal Shell home or workspace mapping. Only the agent's `mounts` array selects these protected hosted destinations; a tool or
+local MCP server declaration does not create a hosted storage mapping.
+
+A hosted operation can follow a storage symbolic link only when its resolved destination
+is also within a declared protected destination. Links between protected destinations
+work; a link that leaves them fails with `storage symlink leaves the declared protected
+destinations`. Box does not retry the operation through the surrounding filesystem.
+These restrictions do not add support for the native Linux `list` grant or broaden the
+existing `metadata` grant. Listing or inspecting the protected view reveals only what
+that view exposes, including exact-file boundaries.
+
+Hosted storage access requires matching real, effective, and filesystem user IDs, and
+matching real, effective, and filesystem group IDs in the invoking process. Box rejects
+hosted storage setup when they differ. The thread that serves hosted storage drops its capabilities before
+starting its worker threads or direct child processes; supplementary groups remain unchanged.
+Contained tools and local MCP servers use the original caller's authority for namespace
+setup. Their workloads still drop capabilities before execution. This separate launch
+step allows a caller with user ID zero to create the required child user namespace
+without giving hosted file operations that caller's capabilities.
+
+The configured command, interpreter, and initial working directory must already be
+available outside pending storage. Box checks rules beneath a pending root when the
+source arrives. If it cannot resolve or enforce a required rule, it stops the Box instance,
+including its tools and local MCP servers. A mount that has not arrived is not itself
+an admission failure.
+
+This experiment trusts the privileged storage manager. It does not guarantee preservation
+of Box permissions across later mount replacement, removal, or new mounts beneath an
+admitted root. The switch is rejected on other operating systems. Selecting it requires
+record version 42; older Box binaries reject that record.
 
 ## `[agent]` and `[tool.<name>]`
 
@@ -644,7 +719,7 @@ exec = ["/work/project/.venv"]
 deny_write = ["/work/project/.venv"]
 ```
 
-The agent cannot create, change, rename, link, or remove anything below the directory. Like the other lists, `deny_write` governs the agent's own processes. A Shell or Python request through Box is decided by policy, so pair the entry with `forbid` rules on `fs:write`, `fs:delete`, and `fs:move` for the directory. A file below it that also has a hard link in a writable directory can still be changed through that link. Install with copies, such as `UV_LINK_MODE=copy`, or keep the installer's cache outside every write grant. The box does not
+The agent cannot create, change, rename, link, or remove anything below the directory. Like the other lists, `deny_write` governs the agent's own processes. A Shell or Python request through Box is decided by policy, so pair the entry with `forbid` rules on `fs:write`, `fs:delete`, and `fs:move` for the directory. For [incoming Linux storage](#filesystemmounts), hosted operations additionally use the agent's protected view; both that view and the hosted policy must allow the operation. A file below it that also has a hard link in a writable directory can still be changed through that link. Install with copies, such as `UV_LINK_MODE=copy`, or keep the installer's cache outside every write grant. The box does not
 warn that a program below a `deny_write` directory is writable. The startup disclosure lists each
 entry as `deny_write  <path>  (read-only)`. A `[tool.<name>] command` below a `deny_write`
 directory is still refused, as every tool command inside a write grant is.

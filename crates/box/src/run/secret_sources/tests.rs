@@ -115,6 +115,7 @@ impl RouteSecrets {
 /// The process tables of a configuration that declares no process.
 fn no_tables() -> ProcessTables {
     ProcessTables {
+        storage_roots: Vec::new(),
         tables: Vec::new(),
         policy: None,
         declares_stdio_mcp: false,
@@ -759,6 +760,7 @@ fn agent_writes(folder: &Path) -> ProcessTables {
     ))
     .expect("the agent table parses");
     ProcessTables {
+        storage_roots: Vec::new(),
         tables: vec![("[agent]".to_string(), agent)],
         policy: None,
         declares_stdio_mcp: false,
@@ -891,6 +893,7 @@ fn agent_beside(body: &str, entries: &BTreeMap<String, SecretSourceEntry>) -> Pr
     let agent = toml::from_str(&format!("command = [\"/bin/bash\"]\n{body}"))
         .expect("the agent table parses");
     ProcessTables {
+        storage_roots: Vec::new(),
         tables: vec![("[agent]".to_string(), agent)],
         policy: None,
         declares_stdio_mcp: false,

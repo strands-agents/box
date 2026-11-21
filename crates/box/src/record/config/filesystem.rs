@@ -21,11 +21,10 @@ use crate::record::config::process::{Filesystem, Grant};
 use crate::record::config::secret_source::{ProtectedPath, Spelled};
 use crate::record::layout::{lies_within, resolved_to_its_deepest_existing_ancestor};
 
-#[cfg(any(test, target_os = "linux"))]
 mod plan;
-#[cfg(target_os = "linux")]
 pub(crate) use plan::{
-    FilesystemCheckpoint, FilesystemGeneration, FilesystemPlan, PendingMask, PublicationTarget,
+    FilesystemCheckpoint, FilesystemCompilation, FilesystemGeneration, FilesystemPlan,
+    FilesystemTargetKind, PendingMask, PublicationTarget,
 };
 
 /// One host path a process's own syscalls reach, with no policy decision in the path.
@@ -130,12 +129,8 @@ pub(crate) struct Refusal {
 }
 
 /// The device and inode pair that identifies one file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    any(test, target_os = "linux"),
-    derive(serde::Serialize, serde::Deserialize)
-)]
-#[cfg_attr(any(test, target_os = "linux"), serde(deny_unknown_fields))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct FileIdentity {
     pub(crate) device: u64,
     pub(crate) inode: u64,
@@ -157,6 +152,8 @@ impl FileIdentity {
 /// the grant without them is the configuration these keys must never produce.
 #[derive(Debug)]
 pub(crate) struct DirectReach {
+    /// Storage rules and masks travel with the partial reach until the launch owns a receiver.
+    pub(crate) storage: Option<std::sync::Arc<crate::run::contain::boundary::storage::Policy>>,
     pub(crate) command: Option<std::sync::Arc<crate::run::commands::ConfiguredCommand>>,
     pub(crate) installation: Option<std::sync::Arc<crate::run::installation::TrustedInstallation>>,
     /// What the process's own syscalls reach.
@@ -304,6 +301,7 @@ pub(crate) fn direct_grants(
         }
     }
     Ok(DirectReach {
+        storage: None,
         grants,
         refusals,
         write_protections,

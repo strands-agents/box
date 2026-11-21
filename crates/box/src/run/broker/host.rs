@@ -173,6 +173,7 @@ impl BrokerHost {
         protected_sources: &[AuthoritySource],
         commands: Arc<crate::run::commands::ConfiguredCommands>,
         installation: Arc<crate::run::installation::TrustedInstallation>,
+        #[cfg(target_os = "linux")] storage: Option<Arc<box_shell::StorageView>>,
     ) -> Result<Self, BoxError> {
         let host_programs = commands
             .bare_names(record, &crate::run::contain::executable::host_search_path())
@@ -190,7 +191,11 @@ impl BrokerHost {
             .map_err(|source| ShellError::Serve { source })?
             .with_commands(commands)
             .with_installation(installation)
-            .with_upstream_trust(crate::run::contain::boundary::upstream_trust()),
+            .with_upstream_trust(crate::run::contain::boundary::upstream_trust())
+            .with_storage(
+                #[cfg(target_os = "linux")]
+                storage,
+            ),
         );
         // The declared MCP servers, from the same record.
         let declared_mcp = Arc::new(record.mcp.clone());
@@ -519,7 +524,16 @@ fn host(
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
 ) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if reach.storage().is_some()
+        && let Err(error) = containment::storage::drop_hosted_capabilities()
+    {
+        let message = format!("prepare protected hosted storage credentials: {error}");
+        let _ = ready.send(Err(io::Error::other(message.clone())));
+        return Err(io::Error::other(message));
+    }
     let runtime = match tokio::runtime::Builder::new_current_thread()
+        .thread_name("box-hosted-io")
         .enable_all()
         .build()
     {
