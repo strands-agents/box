@@ -324,6 +324,20 @@ impl CreatedProfile {
         }
         let _ = writeln!(out, "\n{}", paint.section("Policy"));
         let _ = writeln!(out, "  {}", paint.wrap(self.policy_summary().trim(), 2));
+        let generated = self.folder.join(crate::run::GENERATED_POLICY);
+        if generated.is_file() {
+            let _ = writeln!(
+                out,
+                "  {}",
+                paint.wrap(
+                    &format!(
+                        "The rules box adds from your packs are in {}.",
+                        shown(&self.home, &generated)
+                    ),
+                    2
+                )
+            );
+        }
         let mut notes = Vec::new();
         if let Some((program, _)) = self.missing() {
             notes.push(format!(
@@ -445,6 +459,16 @@ impl CreatedProfile {
                 "  {} {}",
                 paint.dim(&format!("{:<LABEL$}", "policy")),
                 shown(&self.home, &copy)
+            );
+        }
+        let generated = self.folder.join(crate::run::GENERATED_POLICY);
+        if generated.is_file() {
+            let _ = writeln!(
+                out,
+                "  {} {} {}",
+                paint.dim(&format!("{:<LABEL$}", "rules")),
+                shown(&self.home, &generated),
+                paint.dim("(what box adds from your packs; read-only)")
             );
         }
         for (pack, path) in &self.shadowing {
