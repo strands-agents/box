@@ -72,6 +72,8 @@ pub(super) struct Reach {
 
     /// The directory a relative path means: the workspace, when the box has one.
     working: Option<String>,
+    #[cfg(target_os = "linux")]
+    storage: Option<std::sync::Arc<box_shell::StorageView>>,
 }
 
 impl Reach {
@@ -217,7 +219,28 @@ impl Reach {
                 .map(|home| utf8(&home, "the operator home"))
                 .transpose()?,
             working: working_text,
+            #[cfg(target_os = "linux")]
+            storage: None,
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn with_storage(
+        mut self,
+        storage: Option<std::sync::Arc<box_shell::StorageView>>,
+    ) -> Self {
+        self.storage = storage;
+        self
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(super) fn with_storage(self) -> Self {
+        self
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn storage(&self) -> Option<&std::sync::Arc<box_shell::StorageView>> {
+        self.storage.as_ref()
     }
 
     pub(super) fn with_commands(
@@ -351,6 +374,10 @@ impl Reach {
         reported_as: &str,
         mutates: bool,
     ) -> Result<PathBuf, Refused> {
+        #[cfg(target_os = "linux")]
+        if let Some(protected) = self.approve_storage(named, reported_as, mutates, true) {
+            return protected.map(|held| held.logical().to_path_buf());
+        }
         if mutates
             && self
                 .installation
@@ -386,6 +413,105 @@ impl Reach {
         //
         self.refuse_forbidden(&approved, reported_as, mutates)?;
         Ok(approved)
+    }
+
+    /// Canonical logical spelling for policy; failures keep the authored name for a refusal.
+    #[cfg(target_os = "linux")]
+    pub(super) fn storage_policy_path(&self, path: &Path, follow: bool) -> PathBuf {
+        self.storage
+            .as_ref()
+            .filter(|storage| storage.contains(path))
+            .and_then(|storage| {
+                storage
+                    .resolve(path, follow)
+                    .ok()
+                    .filter(|held| storage.contains(held.logical()))
+            })
+            .map_or_else(|| path.to_path_buf(), |held| held.logical().to_path_buf())
+    }
+
+    /// Resolve and floor an incoming path using the exact protected object identity.
+    #[cfg(target_os = "linux")]
+    pub(super) fn approve_storage(
+        &self,
+        named: &Path,
+        reported_as: &str,
+        mutates: bool,
+        follow: bool,
+    ) -> Option<Result<box_shell::StoragePath, Refused>> {
+        let storage = self.storage.as_ref()?;
+        if !storage.contains(named) {
+            return None;
+        }
+        Some((|| {
+            let held = storage.resolve(named, follow).map_err(|error| {
+                let mut refused = Refused::new(
+                    reported_as,
+                    format!("protected storage is unavailable: {error}"),
+                );
+                refused.unresolved = error.kind() == io::ErrorKind::NotFound;
+                refused
+            })?;
+            if !storage.contains(held.logical()) {
+                return Err(Refused::new(
+                    reported_as,
+                    "storage symlink leaves the declared protected destinations",
+                ));
+            }
+            held.require_policy_name(named)
+                .map_err(|error| Refused::new(reported_as, error.to_string()))?;
+            let identity = held
+                .identity()
+                .map_err(|error| Refused::new(reported_as, error.to_string()))?;
+            let approved = held.logical();
+            if mutates
+                && self.installation.as_ref().is_some_and(|installation| {
+                    installation.refuses_projected_mutation(approved, identity)
+                })
+            {
+                return Err(Refused::new(reported_as, TRUSTED_EXECUTABLE));
+            }
+            if mutates
+                && let Some(refusal) = self.commands.projected_mutation_refusal(approved, identity)
+            {
+                return Err(Refused::new(reported_as, command_mutation_reason(refusal)));
+            }
+            for source in &self.forbidden_exactly {
+                use std::os::unix::fs::MetadataExt as _;
+                let source_identity = source
+                    .opened()
+                    .metadata()
+                    .map(|metadata| (metadata.dev(), metadata.ino()))
+                    .map_err(|error| Refused::new(reported_as, error.to_string()))?;
+                if source.path() == approved
+                    || identity == Some(source_identity)
+                    || (mutates
+                        && (source.path().starts_with(approved)
+                            || identity.is_some_and(|identity| {
+                                source
+                                    .path()
+                                    .ancestors()
+                                    .filter_map(disk_identity)
+                                    .any(|ancestor| ancestor == identity)
+                            })))
+                {
+                    return Err(Refused::new(reported_as, AUTHORITY_SOURCE));
+                }
+            }
+            if self.forbidden.iter().any(|root| approved.starts_with(root))
+                || held
+                    .ancestors()
+                    .iter()
+                    .chain(identity.iter())
+                    .any(|identity| self.forbidden_identities.contains(identity))
+            {
+                return Err(Refused::new(reported_as, BENEATH_THE_FLOOR));
+            }
+            if mutates && self.forbidden.iter().any(|root| root.starts_with(approved)) {
+                return Err(Refused::new(reported_as, ENCLOSES_BOX_STATE));
+            }
+            Ok(held)
+        })())
     }
 
     /// Refuse a canonical path that resolves into a root no policy may open.
@@ -467,6 +593,14 @@ impl Reach {
 
     /// Whether `named` lies under a root of this box's reachable set.
     fn is_inside_the_set(&self, named: &Path) -> bool {
+        #[cfg(target_os = "linux")]
+        if self
+            .storage
+            .as_ref()
+            .is_some_and(|storage| storage.contains(named))
+        {
+            return true;
+        }
         [
             Some(self.home.as_str()),
             self.shared.as_deref(),

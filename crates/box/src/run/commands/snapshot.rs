@@ -1,4 +1,12 @@
 //! Original command pins exported to a fresh, trusted compiler without reloading authority.
+#![cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "Captured-storage authority transport is enabled only on Linux"
+    )
+)]
+
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::os::fd::AsRawFd as _;
@@ -41,7 +49,6 @@ pub(crate) struct DescriptorSnapshot {
 }
 
 impl DescriptorSnapshot {
-    #[cfg(test)]
     pub(crate) fn capture(index: u32, file: &File) -> Result<Self, BoxError> {
         let metadata = file
             .metadata()
@@ -90,7 +97,6 @@ impl DescriptorSnapshot {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) fn verify_owner(&self, file: &File) -> Result<(), BoxError> {
         self.verify_replica(file)?;
         let metadata = file
@@ -230,21 +236,18 @@ pub(crate) struct Manifest {
     commands: Vec<CommandSnapshot>,
 }
 
-#[cfg(test)]
 pub(crate) struct Export {
     pub(crate) manifest: Manifest,
     pub(crate) descriptors: Vec<File>,
     pub(crate) owner: Arc<Owner>,
 }
 
-#[cfg(test)]
 pub(crate) struct Owner {
     objects: Vec<Arc<ConfiguredCommand>>,
     descriptors: Vec<DescriptorSnapshot>,
     manifest_digest: [u8; 32],
 }
 
-#[cfg(test)]
 impl Owner {
     pub(crate) fn verify(
         &self,
@@ -273,14 +276,12 @@ impl Owner {
     }
 }
 
-#[cfg(test)]
 impl OwnerVerifier for Owner {
     fn verify(&self, descriptor: u32, manifest_digest: [u8; 32]) -> Result<(), BoxError> {
         Self::verify(self, descriptor, manifest_digest)
     }
 }
 
-#[cfg(test)]
 impl ConfiguredCommands {
     pub(crate) fn export_snapshot(self: &Arc<Self>) -> Result<Export, BoxError> {
         let mut commands = Vec::new();

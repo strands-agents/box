@@ -6,33 +6,27 @@ use std::io::{Read as _, Write as _};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, RawFd};
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
-#[cfg(test)]
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-#[cfg(test)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{CompilationInput, CompilationOutput};
-use crate::error::BoxError;
-#[cfg(test)]
-use crate::error::SuperviseError;
-use crate::run::commands::snapshot as commands;
-#[cfg(test)]
+use crate::error::{BoxError, SuperviseError};
+use crate::run::commands::{ConfiguredCommands, snapshot as commands};
 use crate::run::hosted::storage::Cancellation;
-use crate::run::installation::snapshot as installation;
+use crate::run::installation::{TrustedInstallation, snapshot as installation};
 
 const VERSION: u32 = 1;
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
 const MAX_TREES: usize = 4096;
 const MAX_DESCRIPTORS: usize = 2 * 4096 + 6;
+const MAX_CALLBACKS: usize = 65536;
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(10);
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(test)]
 const EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,23 +139,148 @@ enum OwnerReply {
     Refused { message: String },
 }
 
-#[cfg(test)]
+/// Compile using new detached clones; the parent never joins or changes a mount namespace.
+pub(crate) fn execute(
+    input: CompilationInput,
+    user_namespace: &File,
+    trees: Vec<File>,
+    configured: &Arc<ConfiguredCommands>,
+    trusted: &Arc<TrustedInstallation>,
+    cancel: &Arc<Cancellation>,
+) -> Result<CompilationOutput, BoxError> {
+    if cancel.is_cancelled() {
+        return Err(cancelled());
+    }
+    if input.admitted.len() != trees.len() {
+        return Err(failure("captured source count differs from admitted roots"));
+    }
+    let command_export = configured.export_snapshot()?;
+    let installation_export = trusted.export_snapshot_for_storage()?;
+    let (compiler_path, compiler_pin) = trusted
+        .storage_compiler()
+        .ok_or_else(|| failure("storage compiler was not pinned at initial setup"))?;
+    let request = Request {
+        version: VERSION,
+        input: serde_json::to_string(&input).map_err(json_error)?,
+        namespace: ObjectIdentity::capture(user_namespace)?,
+        // Source metadata can issue a provider request. Only the disposable worker inspects it.
+        trees: input
+            .admitted
+            .iter()
+            .map(|path| Tree { path: path.clone() })
+            .collect(),
+        commands: command_export.manifest,
+        installation: installation_export.manifest,
+    };
+    request.validate()?;
+    let (control, child_control) = UnixStream::pair().map_err(io_error)?;
+    control
+        .set_write_timeout(Some(TRANSFER_TIMEOUT))
+        .map_err(io_error)?;
+    let registration = cancel
+        .track(&control)
+        .map_err(|error| owner_error(TransportError::Io(error), cancel))?;
+    let _registration = CancellationRegistration {
+        cancel,
+        registration,
+    };
+    let mut command = Command::new(format!("/proc/self/fd/{}", compiler_pin.as_raw_fd()));
+    command
+        .arg0(compiler_path)
+        .args(["--control-fd", &child_control.as_raw_fd().to_string()])
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    let inherited = child_control.as_raw_fd();
+    // SAFETY: this post-fork closure only adjusts one dedicated descriptor's flags.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fcntl(inherited, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    trusted.verify()?;
+    let mut child = ChildGuard::new(command.spawn().map_err(io_error)?);
+    drop(child_control);
+    send_json(&control, &request).map_err(|error| owner_error(error, cancel))?;
+    for file in std::iter::once(user_namespace)
+        .chain(&trees)
+        .chain(&command_export.descriptors)
+        .chain(&installation_export.descriptors)
+    {
+        send_fd(&control, file).map_err(|error| owner_error(error, cancel))?;
+    }
+    // A pending provider has no readiness deadline. Once captured, cancellation still interrupts
+    // this wait and the child guard reaps its disposable compiler before propagating failure.
+    control.set_read_timeout(None).map_err(io_error)?;
+    let mut callbacks = 0;
+    loop {
+        if cancel.is_cancelled() {
+            return Err(cancelled());
+        }
+        match receive_json::<WorkerMessage>(&control).map_err(|error| owner_error(error, cancel))? {
+            WorkerMessage::Verify {
+                authority,
+                descriptor,
+                digest,
+            } => {
+                callbacks += 1;
+                if callbacks > MAX_CALLBACKS {
+                    return Err(failure(
+                        "compiler exceeded its authority-verification limit",
+                    ));
+                }
+                let result = match authority {
+                    Authority::Commands => command_export.owner.verify(descriptor, digest),
+                    Authority::Installation => installation_export.owner.verify(descriptor, digest),
+                };
+                match result {
+                    Ok(()) => send_json(&control, &OwnerReply::Verified {})
+                        .map_err(|error| owner_error(error, cancel))?,
+                    Err(error) => {
+                        let _ = send_json(
+                            &control,
+                            &OwnerReply::Refused {
+                                message: error.to_string(),
+                            },
+                        );
+                        return Err(error);
+                    }
+                }
+            }
+            WorkerMessage::Complete { output } => {
+                if cancel.is_cancelled() {
+                    return Err(cancelled());
+                }
+                child.finish()?;
+                return Ok(*output);
+            }
+            WorkerMessage::Failed { message } => {
+                return Err(failure(format!(
+                    "captured filesystem compilation failed: {message}"
+                )));
+            }
+        }
+    }
+}
+
 struct CancellationRegistration<'a> {
     cancel: &'a Cancellation,
     registration: u64,
 }
 
-#[cfg(test)]
 impl Drop for CancellationRegistration<'_> {
     fn drop(&mut self) {
         self.cancel.untrack(self.registration);
     }
 }
 
-#[cfg(test)]
 struct ChildGuard(Option<Child>);
 
-#[cfg(test)]
 impl ChildGuard {
     fn new(child: Child) -> Self {
         Self(Some(child))
@@ -193,7 +312,6 @@ impl ChildGuard {
     }
 }
 
-#[cfg(test)]
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         if let Some(mut child) = self.0.take() {
@@ -519,7 +637,6 @@ fn receive_json<T: DeserializeOwned>(control: &UnixStream) -> Result<T, Transpor
     serde_json::from_slice(&bytes).map_err(|error| TransportError::Invalid(json_error(error)))
 }
 
-#[cfg(test)]
 fn send_fd(control: &UnixStream, file: &File) -> Result<(), TransportError> {
     let byte = *b"F";
     let mut vector = libc::iovec {
@@ -577,7 +694,6 @@ impl From<TransportError> for BoxError {
     }
 }
 
-#[cfg(test)]
 fn owner_error(error: TransportError, cancel: &Cancellation) -> BoxError {
     if let TransportError::Io(ref source) = error
         && cancel.is_cancelled()
@@ -596,7 +712,6 @@ fn owner_error(error: TransportError, cancel: &Cancellation) -> BoxError {
     error.into()
 }
 
-#[cfg(test)]
 fn cancelled() -> BoxError {
     SuperviseError::StorageCancelled.into()
 }

@@ -51,10 +51,9 @@ pub(crate) struct RunningMcpServer {
     #[cfg(test)]
     stop_and_wait_completion: Option<tokio::sync::oneshot::Sender<()>>,
 
-    /// What a contained server must keep alive for its lifetime: the leaf's boundary (open
-    /// containment-config descriptor) and its netns relays (Linux). `child` and `process_group`
-    /// are the leaf's own child and leader, so every kill, wait, and drop path is identical to the
-    /// uncontained case; this retention just rides along. `None` for an uncontained server.
+    /// Resources held for a contained server: its launch controller, boundary, and Linux relays.
+    /// Intentional shutdown cancels storage admission before signaling the leaf's process group;
+    /// the remaining resources stay retained until cleanup. `None` for an uncontained server.
     #[cfg(unix)]
     _leaf_retention: Option<crate::run::contain::supervise::StreamingLeafRetention>,
 }
@@ -841,6 +840,7 @@ impl RunningMcpServer {
 
     /// Stop the server and reap its child.
     pub(crate) async fn stop_and_wait(&mut self) -> io::Result<()> {
+        self.begin_shutdown();
         #[cfg(test)]
         let output = {
             let output = self.output.take();
@@ -872,6 +872,13 @@ impl RunningMcpServer {
             let _ = completion.send(());
         }
         Ok(())
+    }
+
+    fn begin_shutdown(&mut self) {
+        #[cfg(unix)]
+        if let Some(retention) = &mut self._leaf_retention {
+            retention.begin_shutdown();
+        }
     }
 
     #[cfg(unix)]
@@ -932,6 +939,7 @@ fn signal_process_group(process_group: libc::pid_t, signal: libc::c_int) {
 
 impl Drop for RunningMcpServer {
     fn drop(&mut self) {
+        self.begin_shutdown();
         self.stdin.take();
         self.signal_process_group(libc::SIGKILL);
         let _ = self.child.start_kill();

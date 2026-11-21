@@ -1,4 +1,12 @@
 //! Transfer the run's original installation inventory, without locating or reopening executables.
+#![cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "Captured-storage authority transport is enabled only on Linux"
+    )
+)]
+
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::PathBuf;
@@ -41,21 +49,18 @@ pub(crate) struct Manifest {
     binaries: Vec<BinarySnapshot>,
 }
 
-#[cfg(test)]
 pub(crate) struct Export {
     pub(crate) manifest: Manifest,
     pub(crate) descriptors: Vec<File>,
     pub(crate) owner: Arc<Owner>,
 }
 
-#[cfg(test)]
 pub(crate) struct Owner {
     original: Arc<TrustedInstallation>,
     descriptors: Vec<DescriptorSnapshot>,
     manifest_digest: [u8; 32],
 }
 
-#[cfg(test)]
 impl Owner {
     pub(crate) fn verify(
         &self,
@@ -83,14 +88,12 @@ impl Owner {
     }
 }
 
-#[cfg(test)]
 impl OwnerVerifier for Owner {
     fn verify(&self, descriptor: u32, manifest_digest: [u8; 32]) -> Result<(), BoxError> {
         Self::verify(self, descriptor, manifest_digest)
     }
 }
 
-#[cfg(test)]
 impl TrustedInstallation {
     /// Export all original roles. Ordinary installations need only the existing three roles.
     pub(crate) fn export_snapshot(self: &Arc<Self>) -> Result<Export, BoxError> {

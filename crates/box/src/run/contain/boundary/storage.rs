@@ -2,7 +2,7 @@
 //!
 //! The caller owns that view and supplies the run's frozen filesystem context and original
 //! command and installation pins.
-//! Compiler requests preserve the original rules and receive captured mounts by descriptor.
+//! The normal launcher retains the original rules and passes private compiler requests by descriptor.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -10,9 +10,9 @@ use std::sync::Arc;
 use containment::ContainmentConfig;
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-use super::with_filesystem_context;
-use super::{GuardedBoxState, apply_command_identity, apply_filesystem_reach};
+use super::{
+    GuardedBoxState, apply_command_identity, apply_filesystem_reach, with_filesystem_context,
+};
 use crate::error::{BoxError, ConfigError};
 use crate::record::config::filesystem::{
     FilesystemCheckpoint, FilesystemContext, FilesystemGeneration, FilesystemPlan, PendingMask,
@@ -20,7 +20,6 @@ use crate::record::config::filesystem::{
 };
 use crate::record::config::process::ProcessSpec;
 use crate::record::config::secret_source::ProtectedPath;
-#[cfg(test)]
 use crate::record::config::{AuthoritySource, ProcessTables};
 use crate::run::commands::ConfiguredCommands;
 use crate::run::installation::TrustedInstallation;
@@ -75,7 +74,6 @@ impl SourceList {
 
 impl FrozenFilesystemContext {
     /// Capture exactly the context used by the ordinary startup compiler, in the owner's view.
-    #[cfg(test)]
     pub(crate) fn capture(
         table: &str,
         tables: &ProcessTables,
@@ -253,6 +251,19 @@ pub(crate) fn apply_generation(
     })
 }
 
+/// The original process scope retained beside its mandatory initial masks.
+#[derive(Debug)]
+pub(crate) struct Policy {
+    pub(crate) spec: ProcessSpec,
+    pub(crate) table: String,
+    pub(crate) context: FrozenFilesystemContext,
+    pub(crate) roots: Vec<PathBuf>,
+    pub(crate) checkpoint: FilesystemCheckpoint,
+    pub(crate) layout: StorageLayout,
+    pub(crate) commands: Arc<ConfiguredCommands>,
+    pub(crate) installation: Arc<TrustedInstallation>,
+}
+
 /// The immutable part of each fresh compiler request. It contains no environment lookup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -277,6 +288,13 @@ pub(crate) struct CompilationOutput {
     pub(crate) checkpoint: FilesystemCheckpoint,
     pub(crate) layout: StorageLayout,
     pub(crate) config_json: String,
+}
+
+/// Everything one normal process launch retains for its independent receiver.
+#[derive(Debug)]
+pub(crate) struct LaunchPlan {
+    pub(crate) policy: Arc<Policy>,
+    pub(crate) input: CompilationInput,
 }
 
 /// Run in a fresh worker after every named capture occupies its original logical path.
@@ -316,7 +334,28 @@ pub(crate) fn compile(
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) mod controller;
+
+#[cfg(target_os = "linux")]
 pub(crate) mod compiler;
 
 #[cfg(test)]
 mod tests;
+
+/// Validate currently available rules before invoking a credential source. This does not launch
+/// a workload; normal execution must still own the complete policy and its pending masks.
+pub(crate) fn validate_source_preflight(
+    spec: &ProcessSpec,
+    table: &str,
+    tables: &ProcessTables,
+    protected_sources: &[AuthoritySource],
+    commands: &ConfiguredCommands,
+) -> Result<(), BoxError> {
+    with_filesystem_context(table, tables, protected_sources, |context| {
+        let generation = FilesystemPlan::new(&spec.filesystem, &spec.filesystem.mounts, context)?
+            .compile_generation(&[], context)?;
+        generation.with_policy(|reach, _, _| {
+            commands.validate_storage_reach(table, reach, &spec.filesystem.mounts, &[])
+        })
+    })
+}

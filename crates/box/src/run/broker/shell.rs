@@ -117,10 +117,13 @@ impl ShellSpec {
 
     /// One Program's filesystem: the Shell's own, with each reachable root served from the host.
     pub(super) fn backend(&self) -> io::Result<Arc<Filesystem>> {
-        Ok(Arc::new(Filesystem::serving(
-            shell_filesystem()?,
-            &self.reach.shell_binds(),
-        )?))
+        let filesystem = Filesystem::serving(shell_filesystem()?, &self.reach.shell_binds())?;
+        #[cfg(target_os = "linux")]
+        let filesystem = match self.reach.storage() {
+            Some(storage) => filesystem.with_storage(Arc::clone(storage))?,
+            None => filesystem,
+        };
+        Ok(Arc::new(filesystem))
     }
 
     pub(super) fn build_on(

@@ -36,6 +36,7 @@ pub(crate) mod limits;
 pub(crate) mod mcp;
 pub(crate) mod process;
 pub(crate) mod secret_source;
+pub(crate) mod storage;
 pub(crate) mod telemetry;
 
 use std::collections::BTreeMap;
@@ -167,6 +168,8 @@ pub(crate) fn read_remote_mcp_servers(path: &Path) -> Result<Vec<RemoteMcpServer
 
 /// Each process table of one configuration, with what judges its filesystem lists.
 pub(crate) struct ProcessTables {
+    /// Provider roots whose filesystem rules are compiled when storage arrives.
+    pub(crate) storage_roots: Vec<PathBuf>,
     /// `[agent]`, each `[tool.<name>]`, and each stdio `[mcp.<name>]`, by table name.
     pub(crate) tables: Vec<(String, ProcessSpec)>,
     /// The policy file of the configuration.
@@ -193,12 +196,20 @@ impl ProcessTables {
         let servers = contained_mcp
             .iter()
             .map(|(label, server)| (format!("[mcp.{label}]"), &server.spec));
+        let tables: Vec<_> = agent
+            .chain(tools)
+            .chain(servers)
+            .map(|(table, spec)| (table, spec.clone()))
+            .collect();
+        let storage_roots = tables
+            .iter()
+            .flat_map(|(_, spec)| spec.filesystem.mounts.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
         Self {
-            tables: agent
-                .chain(tools)
-                .chain(servers)
-                .map(|(table, spec)| (table, spec.clone()))
-                .collect(),
+            storage_roots,
+            tables,
             policy,
             declares_stdio_mcp,
             source_paths: secret_source::protected_paths(secret_source),
@@ -820,6 +831,9 @@ fn is_true(value: &bool) -> bool {
 /// refuses the box rather than resuming it with those records dropped.
 const TOOL_CALLS_RECORD_VERSION: u32 = 40;
 
+/// Storage admission declarations must never be ignored by an older Box build.
+const STORAGE_MOUNTS_RECORD_VERSION: u32 = 42;
+
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -832,6 +846,8 @@ pub(crate) struct ExperimentalFeatures {
     pub(crate) ingress: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) secret_sources: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) linux_storage_mounts: bool,
 }
 
 impl ExperimentalFeatures {
@@ -840,6 +856,7 @@ impl ExperimentalFeatures {
             && !self.tool_grammars
             && !self.ingress
             && !self.secret_sources
+            && !self.linux_storage_mounts
     }
 
     fn record_version(&self) -> u32 {
@@ -851,6 +868,9 @@ impl ExperimentalFeatures {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.linux_storage_mounts && !cfg!(target_os = "linux") {
+            return Err(ConfigError::StorageUnavailable);
+        }
         if self.native_filesystem_policy
             && !cfg!(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
@@ -886,7 +906,9 @@ fn record_version<'a>(
     secret_source_keys: bool,
 ) -> u32 {
     let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
-    if telemetry::names_tool_calls(targets) {
+    if features.linux_storage_mounts {
+        STORAGE_MOUNTS_RECORD_VERSION
+    } else if telemetry::names_tool_calls(targets) {
         TOOL_CALLS_RECORD_VERSION
     } else if secret_source_keys {
         SECRET_SOURCE_RECORD_VERSION
@@ -1213,6 +1235,7 @@ impl Record {
             DENY_WRITE_RECORD_VERSION,
             SECRET_SOURCE_RECORD_VERSION,
             TOOL_CALLS_RECORD_VERSION,
+            STORAGE_MOUNTS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1257,6 +1280,9 @@ impl Record {
         }
         BoxName::parse(&record.name)?;
         record.gateway.validate()?;
+        if record.experimental_features.linux_storage_mounts && !cfg!(target_os = "linux") {
+            return Err(ConfigError::StorageUnavailable);
+        }
         record.validate_processes()?;
         record.declared_sources()?;
         Ok(record)
@@ -1265,6 +1291,11 @@ impl Record {
     /// Every process table, judged on its own shape.
     fn validate_processes(&self) -> Result<(), ConfigError> {
         if let Some(agent) = &self.agent {
+            storage::validate(
+                &agent.filesystem.mounts,
+                &self.experimental_features,
+                &self.box_dir,
+            )?;
             agent.validate("[agent]")?;
             agent.validate_native_policy(
                 "[agent]",
@@ -1273,6 +1304,11 @@ impl Record {
             agent.validate_ingress_selection("[agent]", self.experimental_features.ingress)?;
         }
         for (label, tool) in &self.tool {
+            storage::validate(
+                &tool.filesystem.mounts,
+                &self.experimental_features,
+                &self.box_dir,
+            )?;
             tool.validate(&format!("[tool.{label}]"))?;
             tool.validate_native_policy(
                 &format!("[tool.{label}]"),
@@ -1284,6 +1320,11 @@ impl Record {
             )?;
         }
         for (name, contained) in &self.contained_mcp {
+            storage::validate(
+                &contained.spec.filesystem.mounts,
+                &self.experimental_features,
+                &self.box_dir,
+            )?;
             contained.spec.validate(&format!("[mcp.{name}]"))?;
             contained.spec.validate_native_policy(
                 &format!("[mcp.{name}]"),
@@ -1683,6 +1724,11 @@ impl ConfigFile {
         BoxName::parse(&self.name)?;
         self.gateway.validate()?;
         if let Some(agent) = &self.agent {
+            storage::validate(
+                &agent.filesystem.mounts,
+                &self.experimental_features,
+                &self.box_dir,
+            )?;
             agent.validate("[agent]")?;
             agent.validate_native_policy(
                 "[agent]",
@@ -1692,6 +1738,11 @@ impl ConfigFile {
         }
         for (label, tool) in &self.tool {
             validate_tool_label(label)?;
+            storage::validate(
+                &tool.filesystem.mounts,
+                &self.experimental_features,
+                &self.box_dir,
+            )?;
             tool.validate(&format!("[tool.{label}]"))?;
             tool.validate_native_policy(
                 &format!("[tool.{label}]"),
@@ -1703,6 +1754,11 @@ impl ConfigFile {
             )?;
         }
         for (name, contained) in crate::record::config::mcp::contained_specs(&self.mcp) {
+            storage::validate(
+                &contained.spec.filesystem.mounts,
+                &self.experimental_features,
+                &self.box_dir,
+            )?;
             contained.spec.validate(&format!("[mcp.{name}]"))?;
             contained.spec.validate_native_policy(
                 &format!("[mcp.{name}]"),
@@ -1765,6 +1821,7 @@ fn validate_tool_label(label: &str) -> Result<(), ConfigError> {
 
 #[cfg(test)]
 mod tests {
+    use super::process::Filesystem;
     use super::*;
 
     #[test]
@@ -2262,6 +2319,7 @@ native-filesystem-policy = false
                         tool_grammars: true,
                         ingress: false,
                         secret_sources: false,
+                        linux_storage_mounts: false,
                     };
                     for override_value in [None, Some(false)] {
                         spec.native_filesystem_policy = override_value;
@@ -3421,10 +3479,236 @@ env = {}
         assert_eq!(version(false), RECORD_VERSION);
     }
 
+    #[test]
+    fn storage_selection_cannot_silently_enter_an_ordinary_record() {
+        let mut stored = record(None, BTreeMap::new());
+        let ordinary = toml::to_string(&stored).unwrap();
+        assert!(!ordinary.contains("[storage]"));
+        assert!(!ordinary.contains("linux-storage-mounts"));
+        assert_eq!(
+            Record::parse(&ordinary, Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.experimental_features.linux_storage_mounts = true;
+        stored.agent = Some(ProcessSpec {
+            command: vec!["/bin/echo".into()],
+            filesystem: Filesystem {
+                mounts: vec![PathBuf::from("/mnt/data"), PathBuf::from("/mnt/shared")],
+                ..Default::default()
+            },
+            ..agent(&["/bin/echo"])
+        });
+        let expected = record_version(
+            &stored.box_id,
+            stored.file_attributes,
+            stored.monty,
+            &stored.experimental_features,
+            &stored.limits,
+            stored.agent.iter().chain(stored.tool.values()),
+            &stored.mcp,
+            stored.agent.as_ref(),
+            false,
+            &stored.gateway,
+            &stored.telemetry,
+            false,
+        );
+        assert_eq!(expected, STORAGE_MOUNTS_RECORD_VERSION);
+        let wrong_version = toml::to_string(&stored).unwrap();
+        assert!(matches!(
+            Record::parse(&wrong_version, Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                expected: STORAGE_MOUNTS_RECORD_VERSION,
+                ..
+            })
+        ));
+        stored.version = STORAGE_MOUNTS_RECORD_VERSION;
+        let selected = toml::to_string(&stored).unwrap();
+        assert!(selected.contains("linux-storage-mounts = true"));
+        assert!(selected.contains("/mnt/data"));
+        let parsed = Record::parse(&selected, Path::new("record.toml"));
+        if cfg!(target_os = "linux") {
+            assert_eq!(parsed.unwrap(), stored);
+        } else {
+            assert!(matches!(parsed, Err(ConfigError::StorageUnavailable)));
+        }
+    }
+
+    #[test]
+    fn storage_mounts_are_selected_per_process_without_inheritance() {
+        let text = r#"name = "storage"
+box_dir = "/var/lib/box"
+[experimental-features]
+linux-storage-mounts = true
+[agent]
+command = ["/bin/echo"]
+[agent.filesystem]
+mounts = ["/mnt/shared", "/mnt/agent"]
+[tool.reader]
+command = ["/bin/echo"]
+[tool.reader.filesystem]
+mounts = ["/mnt/shared"]
+[tool.ordinary]
+command = ["/bin/echo"]
+[mcp.server]
+type = "stdio"
+command = ["/bin/echo"]
+[mcp.server.filesystem]
+mounts = ["/mnt/server"]
+"#;
+        let parsed = ConfigFile::parse(text, Path::new("box.toml"));
+        if !cfg!(target_os = "linux") {
+            assert!(matches!(parsed, Err(ConfigError::StorageUnavailable)));
+            return;
+        }
+        let file = parsed.unwrap();
+        let mut stored = record(file.agent, BTreeMap::new());
+        stored.experimental_features = file.experimental_features;
+        stored.tool = file.tool;
+        stored.contained_mcp = mcp::contained_specs(&file.mcp);
+        stored.version = STORAGE_MOUNTS_RECORD_VERSION;
+        let text = toml::to_string(&stored).unwrap();
+        assert!(!text.contains("[storage]"));
+        let stored = Record::parse(&text, Path::new("record.toml")).unwrap();
+        let tables = stored.process_tables();
+        assert_eq!(
+            tables.storage_roots,
+            ["/mnt/agent", "/mnt/server", "/mnt/shared"].map(PathBuf::from)
+        );
+        for (table, expected) in [
+            ("[agent]", vec!["/mnt/shared", "/mnt/agent"]),
+            ("[tool.reader]", vec!["/mnt/shared"]),
+            ("[tool.ordinary]", vec![]),
+            ("[mcp.server]", vec!["/mnt/server"]),
+        ] {
+            let spec = &tables
+                .tables
+                .iter()
+                .find(|(name, _)| name == table)
+                .unwrap()
+                .1;
+            assert_eq!(
+                spec.filesystem.mounts,
+                expected.into_iter().map(PathBuf::from).collect::<Vec<_>>()
+            );
+            assert!(
+                spec.filesystem.entries().next().is_none(),
+                "declaring mounts grants no access"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn storage_preflight_defers_only_the_recipient_mounts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().canonicalize().unwrap().join("source");
+        let selected_agent = ProcessSpec {
+            command: vec!["/bin/echo".into()],
+            filesystem: Filesystem {
+                mounts: vec![source.clone()],
+                ..Default::default()
+            },
+            ..agent(&["/bin/echo"])
+        };
+        let tool = ProcessSpec {
+            command: vec!["/bin/echo".into()],
+            filesystem: Filesystem {
+                read: vec![source.join("required")],
+                ..Default::default()
+            },
+            ..agent(&["/bin/echo"])
+        };
+        let mut stored = record(Some(selected_agent), BTreeMap::new());
+        stored.tool.insert("reader".into(), tool.clone());
+        let commands = crate::run::commands::ConfiguredCommands::load(&stored).unwrap();
+        let tables = stored.process_tables();
+        assert_eq!(tables.storage_roots, vec![source.clone()]);
+        let check = |spec: &ProcessSpec| {
+            crate::run::contain::boundary::storage::validate_source_preflight(
+                spec,
+                "[tool.reader]",
+                &tables,
+                &[],
+                &commands,
+            )
+        };
+        let error =
+            check(&tool).expect_err("the agent declaration must not defer a tool's missing path");
+        assert!(error.to_string().contains("does not exist"), "{error}");
+        let mut selected = tool;
+        selected.filesystem.mounts.push(source);
+        check(&selected).expect("the tool's own declaration defers its missing path");
+    }
+
+    #[test]
+    fn storage_mounts_on_each_recipient_require_the_experimental_flag() {
+        for (table, fields) in [
+            ("agent", "command = [\"/bin/echo\"]"),
+            ("tool.reader", "command = [\"/bin/echo\"]"),
+            ("mcp.server", "type = \"stdio\"\ncommand = [\"/bin/echo\"]"),
+        ] {
+            let text = format!(
+                "name = \"storage\"\nbox_dir = \"/var/lib/box\"\n[{table}]\n{fields}\n[{table}.filesystem]\nmounts = [\"/mnt/data\"]\n"
+            );
+            assert!(
+                matches!(
+                    ConfigFile::parse(&text, Path::new("box.toml")),
+                    Err(ConfigError::Storage { .. })
+                ),
+                "{table}"
+            );
+            let empty = text.replace("[\"/mnt/data\"]", "[]");
+            ConfigFile::parse(&empty, Path::new("box.toml")).unwrap();
+        }
+    }
+
+    #[test]
+    fn storage_mounts_reject_the_removed_global_table_and_old_record_version() {
+        let text =
+            "name = \"storage\"\nbox_dir = \"/var/lib/box\"\n[storage]\nmounts = [\"/mnt/data\"]\n";
+        assert!(matches!(
+            ConfigFile::parse(text, Path::new("box.toml")),
+            Err(ConfigError::Parse { .. })
+        ));
+        let mut stored = record(None, BTreeMap::new());
+        stored.experimental_features.linux_storage_mounts = true;
+        stored.version = 41;
+        assert!(matches!(
+            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion { found: 41, .. })
+        ));
+    }
+
+    #[test]
+    fn storage_config_requires_selection_and_a_linux_build() {
+        let text = "name = \"storage\"\nbox_dir = \"/var/lib/box\"\n[agent]\ncommand = [\"/bin/echo\"]\n[agent.filesystem]\nmounts = [\"/mnt/data\"]\n";
+        assert!(matches!(
+            ConfigFile::parse(text, Path::new("box.toml")),
+            Err(ConfigError::Storage { .. })
+        ));
+        let selected = format!("{text}[experimental-features]\nlinux-storage-mounts = true\n");
+        let parsed = ConfigFile::parse(&selected, Path::new("box.toml"));
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                parsed.unwrap().agent.unwrap().filesystem.mounts,
+                vec![PathBuf::from("/mnt/data")]
+            );
+        } else {
+            assert!(matches!(parsed, Err(ConfigError::StorageUnavailable)));
+        }
+        assert!(
+            ConfigFile::parse(
+                &selected.replace("linux-storage-mounts", "linux-storage-mount"),
+                Path::new("box.toml")
+            )
+            .is_err()
+        );
+    }
+
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, TOOL_CALLS_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, STORAGE_MOUNTS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

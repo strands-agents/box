@@ -7,8 +7,8 @@ use std::path::PathBuf;
 pub(crate) struct BoxError(Internal);
 
 impl BoxError {
-    #[cfg(test)]
     /// Expected interruption of a private storage controller during owned shutdown.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn is_storage_cancelled(&self) -> bool {
         matches!(
             self.0,
@@ -226,6 +226,12 @@ pub(crate) enum RelayError {
 /// The four inputs could not be read, parsed, or validated.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigError {
+    #[error("invalid filesystem `mounts` list: {reason}")]
+    Storage { reason: String },
+
+    #[error("experimental `linux-storage-mounts` requires a Linux build")]
+    StorageUnavailable,
+
     #[error(
         "experimental feature `{feature}` requires a supported macOS or Linux ARM64 build with `native-filesystem-policy`"
     )]
@@ -593,7 +599,6 @@ pub(crate) enum ShellError {
 /// The child could not be spawned, supervised, or reaped.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SuperviseError {
-    #[cfg(test)]
     #[error("storage admission cancelled: the Box is stopping")]
     StorageCancelled,
 

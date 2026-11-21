@@ -104,6 +104,21 @@ impl StorageOwner {
             .clone()
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn install_hosted(&self, root: std::fs::File) -> Result<(), BoxError> {
+        self.admit(|| {
+            let view = self.hosted_view().ok_or_else(|| SuperviseError::Control {
+                reason: "agent storage view has no registered hosted layout".into(),
+            })?;
+            view.install(root).map_err(|source| {
+                SuperviseError::Control {
+                    reason: format!("invalid agent storage view: {source}"),
+                }
+                .into()
+            })
+        })
+    }
+
     fn close_hosted(&self) {
         #[cfg(target_os = "linux")]
         {
@@ -233,6 +248,7 @@ impl StorageOwner {
     }
 
     /// Own one blocking controller until normal shutdown has joined it.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn spawn_worker(
         &self,
         cancel: Arc<Cancellation>,
@@ -263,6 +279,7 @@ impl StorageOwner {
         })
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn reap_finished(&self) {
         let completed = {
             let mut workers = self
@@ -323,6 +340,12 @@ impl StorageOwner {
             None => Ok(()),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn testing() -> Self {
+        let (fatal, _) = tokio::sync::mpsc::unbounded_channel();
+        Self::new(fatal)
+    }
 }
 
 struct Worker {
@@ -335,14 +358,17 @@ struct Worker {
 pub(crate) struct Cancellation {
     cancelled: std::sync::atomic::AtomicBool,
     sockets: Mutex<Vec<(u64, std::os::unix::net::UnixStream)>>,
+    #[cfg(any(target_os = "linux", test))]
     next_socket: std::sync::atomic::AtomicU64,
 }
 
 impl Cancellation {
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn track(&self, socket: &std::os::unix::net::UnixStream) -> std::io::Result<u64> {
         let mut sockets = self
             .sockets
