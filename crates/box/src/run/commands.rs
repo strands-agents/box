@@ -18,10 +18,10 @@ use crate::record::layout::{
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod aliases;
 
-#[cfg(test)]
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) mod snapshot;
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(target_os = "linux")]
 mod storage_scan;
 
 #[derive(Debug, Default)]
@@ -112,7 +112,7 @@ pub(crate) struct ConfiguredCommand {
     identity: (u64, u64),
     loaded: FileState,
     /// Compiler replicas verify original-identity authority through their owner.
-    #[cfg(test)]
+    #[cfg(any(test, target_os = "linux"))]
     verification: Option<snapshot::ReplicaVerifier>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     needs_alias_scan: bool,
@@ -120,8 +120,11 @@ pub(crate) struct ConfiguredCommand {
 
 /// The link count, owner, group, and mode of a command file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(test, serde(deny_unknown_fields))]
+#[cfg_attr(
+    any(test, target_os = "linux"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
+#[cfg_attr(any(test, target_os = "linux"), serde(deny_unknown_fields))]
 struct FileState {
     links: u64,
     owner: u32,
@@ -329,7 +332,7 @@ impl ConfiguredCommands {
     }
 
     /// Validate storage generations without recursively enumerating a provider filesystem.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     pub(crate) fn validate_storage_reach(
         &self,
         table: &str,
@@ -471,7 +474,7 @@ impl ConfiguredCommand {
             opened,
             identity: (metadata.dev(), metadata.ino()),
             loaded,
-            #[cfg(test)]
+            #[cfg(any(test, target_os = "linux"))]
             verification: None,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             needs_alias_scan: writable_links,
@@ -520,7 +523,7 @@ impl ConfiguredCommand {
 
     pub(crate) fn verify(&self) -> Result<(), BoxError> {
         let unchanged_names = self.unchanged_owner_state();
-        #[cfg(test)]
+        #[cfg(any(test, target_os = "linux"))]
         let unchanged_names = if let Some(verification) = &self.verification {
             verification.verify(&self.opened)?;
             true

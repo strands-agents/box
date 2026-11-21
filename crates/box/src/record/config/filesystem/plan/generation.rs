@@ -4,6 +4,8 @@
 //! masks that keep unresolved rules from exposing placeholder contents or alias destinations.
 
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 
 use containment::Scope;
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,8 @@ use super::{FilesystemCompilation, FilesystemPlan};
 use crate::error::ConfigError;
 use crate::record::config::process::Grant;
 use crate::record::layout::{resolved_through_links, resolved_to_its_deepest_existing_ancestor};
+#[cfg(target_os = "linux")]
+use crate::run::{commands::ConfiguredCommand, installation::TrustedInstallation};
 
 /// The object a private target placeholder must be able to receive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,14 +351,20 @@ impl FilesystemGeneration {
         self.checkpoint.clone()
     }
 
+    /// Add already-opened runtime bindings after the normal command/installation guards pass.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_runtime_bindings(
+        mut self,
+        command: Option<Arc<ConfiguredCommand>>,
+        installation: Arc<TrustedInstallation>,
+    ) -> Self {
+        self.reach.command = command;
+        self.reach.installation = Some(installation);
+        self
+    }
+
     /// Recompile in a view containing every admitted capture, preserving prior identities.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Normal storage compiler handoff is not connected yet"
-        )
-    )]
+    #[cfg(test)]
     pub(crate) fn recompile(
         self,
         admitted: &[PathBuf],

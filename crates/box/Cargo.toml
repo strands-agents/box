@@ -18,6 +18,12 @@ path = "src/main.rs"
 name = "strands-box-sock-alias"
 path = "src/bin/strands-box-sock-alias.rs"
 
+# Private compiler process for Linux storage admission. It exposes no operator command.
+[[bin]]
+name = "strands-box-storage-compiler"
+path = "src/storage_compiler_main.rs"
+test = false
+
 [dependencies]
 async-trait = "0.1"
 containment = { package = "strands-box-containment", path = "../containment" }

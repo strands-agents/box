@@ -366,6 +366,13 @@ impl Cancellation {
         Ok(id)
     }
 
+    pub(crate) fn untrack(&self, id: u64) {
+        self.sockets
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|(candidate, _)| *candidate != id);
+    }
+
     pub(crate) fn cancel(&self) {
         self.cancelled
             .store(true, std::sync::atomic::Ordering::Release);

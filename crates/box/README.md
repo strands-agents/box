@@ -42,6 +42,13 @@ On Linux ARM64 and x86-64, neither verb requires an environment opt-in. The Rust
 library functions `run` and `generate_policy_schema` follow the same startup behavior.
 Configuration validation and sandbox requirements still apply.
 
+Linux packages also include `strands-box-storage-compiler`, a private executable that
+compiles filesystem permissions in a separate process using captured mount descriptors.
+Its Rust entry, `strands_box::storage_compiler_main()`, serves that executable and is not
+an operator command. The executable requires an inherited controller channel. This
+compiler foundation does not enable mount configuration or start a storage controller
+during an ordinary run.
+
 There are two verbs. The caller that created `box_dir` owns its lifecycle: it holds the path, so it
 stops a box by ending the `run` process and deletes one by removing the directory.
 

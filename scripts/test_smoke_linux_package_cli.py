@@ -1,6 +1,7 @@
 """Check the Box archive boundary used by the Linux package smoke test."""
 import importlib.util
 import io
+import json
 from pathlib import Path
 import tarfile
 import tempfile
@@ -26,9 +27,10 @@ class LinuxSmokeArchiveTests(unittest.TestCase):
         self.package.mkdir()
         self.entries = [
             (name, b"executable", 0o755, tarfile.REGTYPE)
-            for name in ("box", "strands-box-sock-alias", "strands-box-contain-trampoline")
+            for name in ("box", "strands-box-sock-alias", "strands-box-contain-trampoline",
+                         "strands-box-storage-compiler")
         ] + [
-            ("release.json", b"{}", 0o644, tarfile.REGTYPE),
+            ("release.json", b'{"storage_compiler": true}', 0o644, tarfile.REGTYPE),
             ("resources/config.toml", b"[starters]\n", 0o644, tarfile.REGTYPE),
             ("resources/editing-box-profile.md", b"# Guide\n", 0o644, tarfile.REGTYPE),
             ("resources/packs/base/pack.toml", b"[pack]\n", 0o644, tarfile.REGTYPE),
@@ -49,6 +51,27 @@ class LinuxSmokeArchiveTests(unittest.TestCase):
         self.unpack()
         self.assertEqual((self.package / "resources/packs/base/pack.toml").read_bytes(), b"[pack]\n")
         self.assertEqual((self.package / "box").stat().st_mode & 0o7777, 0o755)
+
+    def test_missing_storage_compiler_is_refused(self):
+        self.entries = [entry for entry in self.entries if entry[0] != "strands-box-storage-compiler"]
+        with self.assertRaisesRegex(ValueError, "missing package files.*strands-box-storage-compiler"):
+            self.unpack()
+
+    def test_storage_compiler_must_be_executable(self):
+        self.entries = [(name, contents, 0o644 if name == "strands-box-storage-compiler" else mode, kind)
+                        for name, contents, mode, kind in self.entries]
+        with self.assertRaisesRegex(ValueError, "strands-box-storage-compiler: expected executable mode"):
+            self.unpack()
+
+    def test_storage_compiler_metadata_must_be_true(self):
+        for record in ({}, {"storage_compiler": False}, {"storage_compiler": "true"},
+                       {"storage_compiler": 1}, {"storage_compiler": None}, []):
+            with self.subTest(record=record), tempfile.TemporaryDirectory() as temporary:
+                self.package = Path(temporary)
+                self.entries = [(name, json.dumps(record).encode() if name == "release.json" else contents,
+                                 mode, kind) for name, contents, mode, kind in self.entries]
+                with self.assertRaisesRegex(ValueError, "storage_compiler must be true"):
+                    self.unpack()
 
     def test_missing_metadata_or_resources_is_refused(self):
         for name in ("release.json", "resources/config.toml", "resources/editing-box-profile.md",
