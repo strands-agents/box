@@ -97,6 +97,8 @@ pub(crate) enum GrammarRefusal {
         spelling: String,
         other: Box<Place>,
     },
+    #[error("{place}: has a usage with no command word, and so does {other}")]
+    SecondBareAction { place: Place, other: Box<Place> },
     #[error("{place} {fault}")]
     BadUsage { place: Place, fault: UsageFault },
     #[error("{place}: declares `options`, but its usage has no `[options]`")]
@@ -236,7 +238,8 @@ impl GrammarRefusal {
             Self::FlagTaken { place, other, .. }
             | Self::SpellingTaken { place, other, .. }
             | Self::PlusBesideToolchain { place, other, .. }
-            | Self::BadOverride { place, other } => {
+            | Self::BadOverride { place, other }
+            | Self::SecondBareAction { place, other } => {
                 place.under(table);
                 other.under(table);
             }
