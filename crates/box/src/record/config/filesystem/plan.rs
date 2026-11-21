@@ -5,9 +5,10 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 mod generation;
+#[cfg(target_os = "linux")]
+pub(crate) use generation::FilesystemTargetKind;
 pub(crate) use generation::{
-    FilesystemCheckpoint, FilesystemGeneration, FilesystemTargetKind, PendingMask,
-    PublicationTarget,
+    FilesystemCheckpoint, FilesystemGeneration, PendingMask, PublicationTarget,
 };
 
 use super::{DirectReach, FilesystemContext, direct_grants, expand_home, refuse};
