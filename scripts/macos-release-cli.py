@@ -190,9 +190,9 @@ def verify(directory, team, evidence, identifiers=None):
 
 
 def native_profile():
-    profile = os.environ.get("CD_SIGNER_CLI_PROFILE_NAME", "")
+    profile = os.environ.get("CD_SIGNER_PROFILE_NAME", "")
     require(bool(profile.strip()) and profile == profile.strip(),
-            "Native signing requires CD_SIGNER_CLI_PROFILE_NAME for the CLI application")
+            "Native signing and verification require CD_SIGNER_PROFILE_NAME for the shared Box application")
     require(re.fullmatch(r"[A-Z0-9]{10}", os.environ.get("CD_SIGNER_TEAM_ID", "")),
             "Invalid Apple team ID")
     return profile

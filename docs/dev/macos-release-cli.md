@@ -290,11 +290,12 @@ telemetry without failing the package check.
 The CLI's `sign-macos` job uses the shared environment described in
 [Configure access](macos-release.md#configure-access).
 
-The workflow reads the shared `CD_SIGNER_PROFILE_NAME` setting into the signing script's
-`CD_SIGNER_CLI_PROFILE_NAME` process variable and passes the same value to verification through
-its `cli_profile_name` output. The standalone script still reads `CD_SIGNER_CLI_PROFILE_NAME`.
-It requires that profile only for an experimental native-policy dry run. Ordinary CLI packages
-do not embed a provisioning profile.
+The signing script reads `CD_SIGNER_PROFILE_NAME` for an experimental native-policy dry run.
+The workflow passes the selected value to verification through its `cli_profile_name` output.
+Ordinary CLI packages do not embed a provisioning profile.
+
+For manual native signing or verification, replace `CD_SIGNER_CLI_PROFILE_NAME` with
+`CD_SIGNER_PROFILE_NAME` in the process environment. The script no longer reads the legacy variable.
 
 ## Keep the evidence
 

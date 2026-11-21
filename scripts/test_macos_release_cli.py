@@ -758,7 +758,7 @@ class NativeMacOSReleaseTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.profile = "Strands Box Developer ID - com.amazon.strands.box"
         self.source = "a" * 40
-        self.environment = {"CD_SIGNER_TEAM_ID": TEAM, "CD_SIGNER_CLI_PROFILE_NAME": self.profile}
+        self.environment = {"CD_SIGNER_TEAM_ID": TEAM, "CD_SIGNER_PROFILE_NAME": self.profile}
         self.record = {"box_version": "0.1.0", "box_commit": self.source,
                        "core_version": "0.2.5", "core_commit": "b" * 40,
                        "target": "aarch64-apple-darwin"}
@@ -780,7 +780,7 @@ class NativeMacOSReleaseTests(unittest.TestCase):
                                        native_filesystem_policy=True, build_metadata=self.metadata)
 
     def test_native_preflight_refuses_missing_profile_or_mismatched_build_before_aws(self):
-        cases = [("profile", None, "CLI_PROFILE_NAME"), ("metadata", None, "build metadata"),
+        cases = [("profile", None, "CD_SIGNER_PROFILE_NAME"), ("metadata", None, "build metadata"),
                  ("box_commit", "c" * 40, "source"),
                  ("archive_sha256", "0" * 64, "SHA-256"),
                  ("cargo_features", [], "native-filesystem-policy"),
@@ -792,7 +792,7 @@ class NativeMacOSReleaseTests(unittest.TestCase):
                 args = argparse.Namespace(**vars(self.args))
                 record = self.features.copy()
                 if field == "profile":
-                    environment.pop("CD_SIGNER_CLI_PROFILE_NAME")
+                    environment.pop("CD_SIGNER_PROFILE_NAME")
                 elif field == "metadata":
                     args.build_metadata = None
                 else:
@@ -957,13 +957,52 @@ class NativeMacOSReleaseTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, "",
                 signature(release.IDENTIFIERS.get(Path(command[-1]).name, release.IDENTIFIERS["box"])))
 
-        with patch.dict(release.os.environ, self.environment), patch.object(release, "Signer", Signer), \
+        with patch.dict(release.os.environ, self.environment, clear=True), patch.object(release, "Signer", Signer), \
                 patch.object(release, "notarytool", return_value=subprocess.CompletedProcess([], 0, "", "")), \
                 patch.object(release, "verify_native"), patch.object(release, "notarize", return_value=SUBMISSION), \
                 patch.object(release, "verify_native_notarization"), \
                 patch.object(release.subprocess, "run", side_effect=run):
             release.release(self.args)
         return phases, json.loads((self.args.work / "receipt.json").read_text())
+
+    def test_native_manual_signing_uses_the_shared_profile(self):
+        self.environment = {"CD_SIGNER_TEAM_ID": TEAM, "CD_SIGNER_PROFILE_NAME": self.profile}
+        phases, receipt = self.run_native_release()
+        self.assertEqual(phases[-1], ("application", release.manifest(TEAM, self.profile)))
+        self.assertEqual(receipt["profile"], self.profile)
+
+    def test_native_manual_verification_uses_the_shared_profile(self):
+        self.run_native_release()
+        self.environment = {"CD_SIGNER_TEAM_ID": TEAM, "CD_SIGNER_PROFILE_NAME": self.profile}
+        args = argparse.Namespace(package=self.args.work / "package", evidence=self.root / "verification",
+                                  native_filesystem_policy=True, archive=self.args.output,
+                                  receipt=self.args.work / "receipt.json", source_sha=self.source)
+        with patch.dict(release.os.environ, self.environment, clear=True), \
+                patch.object(release, "verify_native") as check, \
+                patch.object(release, "verify_native_notarization") as ticket:
+            release.verify_package(args)
+        check.assert_called_once_with(args.package / "Box.app", TEAM, self.profile, args.evidence)
+        ticket.assert_called_once_with(args.package / "Box.app", args.evidence)
+
+    def test_native_manual_calls_refuse_a_legacy_only_profile(self):
+        environment = {"CD_SIGNER_TEAM_ID": TEAM, "CD_SIGNER_CLI_PROFILE_NAME": self.profile}
+        verification = argparse.Namespace(package=self.root / "package", evidence=self.root / "verification",
+                                          native_filesystem_policy=True, archive=self.args.output,
+                                          receipt=self.root / "receipt.json", source_sha=self.source)
+        bypassed = AssertionError("Shared profile preflight was bypassed")
+        for operation, args in ((release.release, self.args), (release.verify_package, verification)):
+            with self.subTest(operation=operation.__name__):
+                with patch.dict(release.os.environ, environment, clear=True), \
+                        patch.object(release, "Signer", side_effect=bypassed) as signer, \
+                        patch.object(release, "verify_native_binding", side_effect=bypassed) as binding, \
+                        patch.object(release, "verify_native") as check, \
+                        self.assertRaisesRegex(ValueError, "CD_SIGNER_PROFILE_NAME"):
+                    operation(args)
+                signer.assert_not_called()
+                binding.assert_not_called()
+                check.assert_not_called()
+                self.assertFalse(self.args.work.exists())
+                self.assertFalse(self.args.output.exists())
 
     def test_native_release_signs_helpers_then_app_and_records_the_actual_package(self):
         phases, receipt = self.run_native_release()
