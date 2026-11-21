@@ -91,7 +91,8 @@ for version in (box["version"], core["version"]):
     if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version):
         sys.exit("package_macos.sh: release versions must use x.y.z")
 record = dict(box_version=box["version"], box_commit=sys.argv[2],
-              core_version=core["version"], core_commit=core_commit, target="aarch64-apple-darwin")
+              core_version=core["version"], core_commit=core_commit, target="aarch64-apple-darwin",
+              macos_minimum_version="27.0")
 (work / "payload/release.json").write_text(json.dumps(record, indent=2) + "\n")
 (work / "version").write_text(box["version"])
 (work / "target").write_text(metadata["target_directory"])

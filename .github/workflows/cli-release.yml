@@ -196,7 +196,8 @@ jobs:
                else error("Core must be a locked public Core revision") end) as $core_commit |
               {box_version: $version, box_commit: $commit,
                core_version: ($core[] | select(.name == "strands-box") | .version),
-               core_commit: $core_commit, target: $target}
+               core_commit: $core_commit, target: $target} +
+              (if $target == "aarch64-apple-darwin" then {macos_minimum_version: "27.0"} else {} end)
             ' > "$stage/release.json"
           # Without this, macOS tar adds a ._ file for each extended attribute.
           COPYFILE_DISABLE=1 tar -C "$stage" -czf "dist/${asset}" .
