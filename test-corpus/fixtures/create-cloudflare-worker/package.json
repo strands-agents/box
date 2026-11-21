@@ -1,0 +1,13 @@
+{
+  "name": "hello-worker",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "start": "wrangler dev"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "wrangler": "4.156.1"
+  }
+}

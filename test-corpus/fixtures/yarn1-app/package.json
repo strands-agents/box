@@ -1,0 +1,11 @@
+{
+  "name": "yarn1-app",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "check": "node check.js"
+  },
+  "dependencies": {
+    "is-number": "7.0.0"
+  }
+}

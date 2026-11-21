@@ -1,0 +1,30 @@
+# The profile the GitHub cells run under: @box/git and @box/gh, with bash in place of a model
+# agent, as in the corpus profile. Its two routes put a GitHub token on the box's requests,
+# and the agent holds only a stand-in. The bench sets both variables from its read-only job token;
+# test-corpus/README.md says how to run these cells with a token of your own.
+packs = ["@box/git", "@box/gh"]
+# A copy of the @box/scoped policy starter, which lets the box's shell run.
+policies = ["policy.dw"]
+
+[agent]
+command = ["/bin/bash", "--noprofile", "--norc"]
+env.PATH = "/usr/bin:/bin"
+env.TMPDIR = "${{ workspace }}"
+
+# gh sends `Authorization: token <value>` to the API.
+[egress.github]
+destinations = ["api.github.com"]
+secret.ref = "env://GH_TOKEN"
+secret.prefix = "token "
+
+# git over HTTPS gets no stand-in to send, so the box adds the token as Basic auth to every request
+# to github.com. GIT_GITHUB holds `x-access-token:<token>`.
+[egress.github_git]
+destinations = ["github.com"]
+secret.ref = "env://GIT_GITHUB"
+secret.placement = "basic_auth"
+secret.inject = "always"
+
+# The project access that `box profile create --policy scoped` writes.
+[project]
+access = "write"
