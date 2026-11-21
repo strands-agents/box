@@ -209,7 +209,15 @@ const NETWORK_KEYS: &[&str] = &["contain_egress"];
 const STORAGE_KEYS: &[&str] = &["directories", "files", "hooks"];
 
 /// The keys of `[pack]`.
-const HEADER_KEYS: &[&str] = &["name", "version", "kind", "engine"];
+const HEADER_KEYS: &[&str] = &["name", "version", "kind"];
+
+/// The table of a pack, a plugin, or a profile that names what the file needs of the `box` that
+/// reads it. `box` checks it and refuses the file when it does not hold. It loads nothing.
+pub(crate) const REQUIRES: &str = "requires";
+
+/// The requirements that `[requires]` can name. `box` is checked first, so a file written for a
+/// later `box` names the version it needs, not a requirement that the later `box` added.
+const REQUIREMENTS: &[&str] = &["box"];
 
 /// The name of the profile's own layer.
 pub(crate) const THE_PROFILE: &str = "the profile";
@@ -453,7 +461,7 @@ pub struct Lookup {
     pub operator: PathBuf,
     /// The collections in the box home's `external/`, in folder-name order.
     pub collections: Vec<Collection>,
-    /// The version of `box` that a pack's `engine` floor is checked against.
+    /// The version of `box` that each file's `[requires] box` is checked against.
     pub version: &'static str,
 }
 
@@ -661,8 +669,10 @@ impl Lookup {
         let path = self.folder(name)?.join(PACK_FILE);
         let text = crate::files::read_regular(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        let table =
+        let mut table =
             toml::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+        take_requires(&mut table, "pack", self.version)
+            .map_err(|refusal| refusal.in_file(&path, &text).to_string())?;
         pack_layout(table, &text)
             .map(|(table, _)| table)
             .map_err(|refusal| refusal.in_file(&path, &text).to_string())
@@ -796,8 +806,7 @@ fn visit(
         )
         .in_file(&layer.path, &layer.text));
     }
-    check_kind(&mut layer, lookup.version)
-        .map_err(|refusal| refusal.in_file(&layer.path, &layer.text))?;
+    check_kind(&mut layer).map_err(|refusal| refusal.in_file(&layer.path, &layer.text))?;
     take_grammars(&mut layer, tool_pack)?;
     let key = if layer.shared { EXTEND } else { "packs" };
     let bases = imports_of(&layer.table, key).map_err(|reason| invalid(&layer.path, reason))?;
@@ -826,8 +835,10 @@ fn visit(
         })?;
         let path = folder.join(PACK_FILE);
         let (text, location) = read_pack(&path, &base, lookup)?;
-        let table: toml::Table =
+        let mut table: toml::Table =
             toml::from_str(&text).map_err(|error| invalid(&path, error.to_string()))?;
+        take_requires(&mut table, "pack", lookup.version)
+            .map_err(|refusal| refusal.in_file(&path, &text))?;
         let (table, program_input) =
             pack_layout(table, &text).map_err(|refusal| refusal.in_file(&path, &text))?;
         let policy = None;
@@ -1213,8 +1224,8 @@ fn take_grammars(layer: &mut Layer, tool_pack: bool) -> Result<(), Error> {
 }
 
 /// Refuse a key that belongs to the other kind of file or to neither, write a tool pack as its tool
-/// table, and check a pack's header against the `box` version `version`.
-fn check_kind(layer: &mut Layer, version: &str) -> Result<(), Refusal> {
+/// table, and check a pack's header.
+fn check_kind(layer: &mut Layer) -> Result<(), Refusal> {
     let refused: &[&str] = if layer.shared {
         &[
             "packs",
@@ -1398,17 +1409,58 @@ fn check_kind(layer: &mut Layer, version: &str) -> Result<(), Refusal> {
         .get("pack")
         .and_then(toml::Value::as_table)
         .ok_or("a pack needs a `[pack]` header with `name` and `version`")?;
-    check_header(header, "pack", &layer.name, version)
+    check_header(header, "pack", &layer.name)
+}
+
+/// Check the `[requires]` table of `table`, a `file` ("pack", "plugin", or "profile"), against
+/// the running `box`, `version`, and take the table out, so that nothing after this reads it.
+///
+/// `box` is checked first, and a requirement that this `box` does not know is refused after that.
+pub(crate) fn take_requires(
+    table: &mut toml::Table,
+    file: &str,
+    version: &str,
+) -> Result<(), Refusal> {
+    let Some(value) = table.remove(REQUIRES) else {
+        return Ok(());
+    };
+    let toml::Value::Table(requires) = &value else {
+        return Err(Refusal::at(
+            format!("`{REQUIRES}` is a table, such as `[{REQUIRES}]` with `box = \">=0.3.0\"`"),
+            &[REQUIRES],
+        ));
+    };
+    if let Some(requirement) = string_field(requires, "box", &format!("[{REQUIRES}]"))
+        .map_err(|reason| Refusal::at(reason, &[REQUIRES, "box"]))?
+    {
+        let needed =
+            floor(&requirement).map_err(|reason| Refusal::at(reason, &[REQUIRES, "box"]))?;
+        let this = release_of(version).unwrap_or_default();
+        if this < needed {
+            return Err(Refusal::at(
+                format!("this {file} needs box {requirement}, and this is box {version}"),
+                &[REQUIRES, "box"],
+            ));
+        }
+    }
+    if let Some(key) = requires
+        .keys()
+        .find(|key| !REQUIREMENTS.contains(&key.as_str()))
+    {
+        return Err(Refusal::at(
+            unknown_key(&format!("`[{REQUIRES}]`"), key, REQUIREMENTS),
+            &[REQUIRES, key],
+        ));
+    }
+    Ok(())
 }
 
 /// Refuse a `[pack]` or `[plugin]` header `header`, named `section`, that holds an unknown key,
-/// lacks `name` or `version`, names another file than `imported_as`, or needs a later `box` than
-/// `version`.
+/// lacks `name` or `version`, or names another file than `imported_as`.
 pub(crate) fn check_header(
     header: &toml::Table,
     section: &str,
     imported_as: &str,
-    version: &str,
 ) -> Result<(), Refusal> {
     let known = if section == plugin::HEADER {
         plugin::HEADER_KEYS
@@ -1449,16 +1501,6 @@ pub(crate) fn check_header(
             ),
             &[section, "name"],
         ));
-    }
-    if let Some(requirement) = string_field(header, "engine", &owner)? {
-        let needed = floor(&requirement)?;
-        let this = release_of(version).unwrap_or_default();
-        if this < needed {
-            return Err(Refusal::at(
-                format!("this {section} needs box {requirement}, and this is box {version}"),
-                &[section, "engine"],
-            ));
-        }
     }
     Ok(())
 }
@@ -7502,50 +7544,86 @@ mod tests {
     }
 
     #[test]
-    fn an_engine_floor_is_checked_against_the_version_of_the_lookup() {
+    fn requires_is_checked_against_the_version_of_the_lookup_box_first() {
         let shelf = Shelf::new();
-        let text = "packs = [\"@box/p\"]";
-        for (floor, refused) in [(">=7.2.0", false), (">=7.2.1", true)] {
-            shelf.share_raw(
-                "p",
-                &format!(
-                    "[pack]\nname = \"@box/p\"\nversion = 1\nkind = \"support\"\nengine = \"{floor}\"\n"
-                ),
-            );
-            let lookup = Lookup {
-                vendored: Some(shelf.root.join("packs")),
-                operator: shelf.root.join("operator"),
-                collections: Vec::new(),
-                version: "7.2.0",
-            };
-            let chained = chain(
-                &toml::from_str(text).expect("TOML"),
-                text,
+        let lookup = Lookup {
+            vendored: Some(shelf.root.join("packs")),
+            operator: shelf.root.join("operator"),
+            collections: Vec::new(),
+            version: "7.2.0",
+        };
+        let chained = |profile: &str| {
+            chain(
+                &toml::from_str(profile).expect("TOML"),
+                profile,
                 &shelf.root.join("mine/profile.toml"),
                 None,
                 &lookup,
-            );
-            match chained {
-                Ok(_) => assert!(!refused, "{floor} is refused for box 7.2.0"),
-                Err(error) => {
-                    let reason = reason(error);
-                    assert!(refused, "{floor}: {reason}");
-                    assert!(
-                        reason.contains("and this is box 7.2.0"),
-                        "{floor}: {reason}"
-                    );
+            )
+            .map(|_| ())
+            .map_err(reason)
+        };
+        let header = "[pack]\nname = \"@box/p\"\nversion = 1\nkind = \"support\"\n";
+        let profile = "packs = [\"@box/p\"]";
+        for (requires, wanted) in [
+            ("box = \">=7.2.0\"", None),
+            (
+                "box = \">=7.2.1\"",
+                Some("this pack needs box >=7.2.1, and this is box 7.2.0"),
+            ),
+            ("box = \"7.2\"", Some("is not `>=X.Y.Z`")),
+            // A requirement that a later box added comes after the floor.
+            (
+                "box = \">=8.0.0\"\nlater = true",
+                Some("this pack needs box >=8.0.0, and this is box 7.2.0"),
+            ),
+            (
+                "box = \">=7.0.0\"\nlater = true",
+                Some("`[requires]` holds the unknown key `later`; `[requires]` holds `box`"),
+            ),
+            ("bx = \">=7.0.0\"", Some("did you mean `box`?")),
+        ] {
+            shelf.share_raw("p", &format!("{header}[requires]\n{requires}\n"));
+            match (chained(profile), wanted) {
+                (Ok(()), None) => {}
+                (Err(reason), Some(wanted)) => {
+                    assert!(reason.contains(wanted), "{requires}: {reason}")
                 }
+                (got, wanted) => panic!("{requires}: got {got:?}, wanted {wanted:?}"),
             }
         }
+        shelf.share_raw("p", &format!("{header}engine = \">=7.0.0\"\n"));
+        let reason = chained(profile).expect_err("the old key is refused");
+        assert!(
+            reason.contains("`[pack]` holds the unknown key `engine`"),
+            "{reason}"
+        );
+        shelf.share_raw("p", header);
+        let path = shelf.root.join("mine/profile.toml");
+        let parsed = |text: &str| crate::profile::Profile::parse(text, &path, lookup.version);
+        let refused = parsed("packs = [\"@box/p\"]\n[requires]\nbox = \">=9.0.0\"\nlater = 1\n")
+            .map(|_| ())
+            .map_err(self::reason)
+            .expect_err("a profile is checked too");
+        assert!(
+            refused.contains("this profile needs box >=9.0.0, and this is box 7.2.0"),
+            "{refused}"
+        );
+        let profile = parsed("packs = [\"@box/p\"]\n[requires]\nbox = \">=7.2.0\"\n")
+            .expect("a profile within its floor parses");
+        assert!(!profile.table.contains_key(REQUIRES), "parse takes it out");
+        profile
+            .layers(None, &lookup)
+            .expect("a profile within its floor loads");
     }
 
-    fn engine_outcome(version: &str, floor: &str) -> Result<(), String> {
+    fn floor_outcome(version: &str, floor: &str) -> Result<(), String> {
         let shelf = Shelf::new();
         let text = "packs = [\"@box/p\"]";
         shelf.share_raw(
             "p",
             &format!(
-                "[pack]\nname = \"@box/p\"\nversion = 1\nkind = \"support\"\nengine = \"{floor}\"\n"
+                "[pack]\nname = \"@box/p\"\nversion = 1\nkind = \"support\"\n[requires]\nbox = \"{floor}\"\n"
             ),
         );
         let lookup = Lookup {
@@ -7566,7 +7644,7 @@ mod tests {
     }
 
     #[test]
-    fn a_preview_version_counts_as_its_release_for_an_engine_floor() {
+    fn a_preview_version_counts_as_its_release_for_a_box_floor() {
         for (version, floor, refused) in [
             ("0.3.0-linux-preview.1", ">=0.1.0", false),
             ("0.3.0-linux-preview.1", ">=0.3.0", false),
@@ -7584,7 +7662,7 @@ mod tests {
                 Ok(())
             };
             assert_eq!(
-                engine_outcome(version, floor),
+                floor_outcome(version, floor),
                 expected,
                 "box {version} against {floor}"
             );
@@ -7602,7 +7680,7 @@ mod tests {
             "-linux-preview.1",
             "0.3.0+build.5",
         ] {
-            let reason = engine_outcome(version, ">=0.1.0").expect_err("a malformed version");
+            let reason = floor_outcome(version, ">=0.1.0").expect_err("a malformed version");
             assert!(
                 reason.contains("needs box >=0.1.0")
                     && reason.contains(&format!("this is box {version}")),
@@ -7612,7 +7690,7 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_engine_floor_is_refused_and_named() {
+    fn a_malformed_box_floor_is_refused_and_named() {
         for floor in [
             ">=",
             ">=abc",
@@ -7622,7 +7700,7 @@ mod tests {
             "0.3.0",
             "^0.3.0",
         ] {
-            let reason = engine_outcome("0.3.0", floor).expect_err("a malformed floor");
+            let reason = floor_outcome("0.3.0", floor).expect_err("a malformed floor");
             assert!(reason.contains("is not `>=X.Y.Z`"), "{floor}: {reason}");
         }
     }

@@ -65,7 +65,9 @@ name = "team-agent"
 version = 1              # raise it when the pack changes
 kind = "agent"           # a profile that uses it names one model provider and no other agent
 extend = ["@box/base"]   # the settings and tools that every shipped agent pack uses
-engine = ">=0.1.0"       # the oldest box that reads this pack
+
+[requires]
+box = ">=0.1.0"          # the oldest box that reads this pack
 
 [run]
 command = [

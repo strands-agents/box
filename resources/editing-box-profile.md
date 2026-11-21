@@ -337,11 +337,11 @@ has no top-level keys: every key is in a table, and the file starts with `[pack]
 
 | File | Accepted contents |
 | --- | --- |
-| Profile | `packs`, `plugins`, `policies`, `agent-args`, `file-attributes`; `[profile]`, `[options]`, `[limits]`, `[project]`, `[filesystem]` with only `deny` and `deny_write`, `[banner]`, `[experimental-features]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[mcp.<name>]`, `[storage]`, `[telemetry]`, `[secret-source.<scheme>]` |
-| Agent pack | `[pack]`, `[inputs.<name>]`, `[run]` with `command`, `dependency`, `file-watching`, and `when`, then `[env]` and `[filesystem]` for the agent, which `box` reads as `[agent]`, plus `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, and `[[mcp-servers]]`. It writes no `[agent]` table. |
-| Support pack | `[pack]`, `[inputs.<name>]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, `[[mcp-servers]]`; `[mcp.<name>]` may add only `filesystem` and `network` grants. No `[run]`, `[env]`, or `[filesystem]`. |
-| Tool pack | `[pack]`, `[inputs.<name>]` with the program input, `[run]` with `command` and the tool's other keys, then the tool's tables, such as `[env]` and `[filesystem]`. See [Tools](#tools-and-program-trust). |
-| Plugin | `[plugin]` with `name`, `version`, `kind = "secret-source"`, `scheme`, and optional `engine`; `[inputs.<name>]`; `[run]` with `command` and optional `output`; `[env]`, where each entry is `NAME = { from = "env:NAME" }` and nothing else; `[protect]` with only `env`, a list of names of `[env]`, and `paths`, a list of path strings. Nothing else: no `[filesystem]` and no `[secret-source.<scheme>]` table. |
+| Profile | `packs`, `plugins`, `policies`, `agent-args`, `file-attributes`; `[profile]`, `[requires]`, `[options]`, `[limits]`, `[project]`, `[filesystem]` with only `deny` and `deny_write`, `[banner]`, `[experimental-features]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[mcp.<name>]`, `[storage]`, `[telemetry]`, `[secret-source.<scheme>]` |
+| Agent pack | `[pack]`, `[requires]`, `[inputs.<name>]`, `[run]` with `command`, `dependency`, `file-watching`, and `when`, then `[env]` and `[filesystem]` for the agent, which `box` reads as `[agent]`, plus `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, and `[[mcp-servers]]`. It writes no `[agent]` table. |
+| Support pack | `[pack]`, `[requires]`, `[inputs.<name>]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, `[[mcp-servers]]`; `[mcp.<name>]` may add only `filesystem` and `network` grants. No `[run]`, `[env]`, or `[filesystem]`. |
+| Tool pack | `[pack]`, `[requires]`, `[inputs.<name>]` with the program input, `[run]` with `command` and the tool's other keys, then the tool's tables, such as `[env]` and `[filesystem]`. See [Tools](#tools-and-program-trust). |
+| Plugin | `[plugin]` with `name`, `version`, `kind = "secret-source"`, and `scheme`; optional `[requires]`; `[inputs.<name>]`; `[run]` with `command` and optional `output`; `[env]`, where each entry is `NAME = { from = "env:NAME" }` and nothing else; `[protect]` with only `env`, a list of names of `[env]`, and `paths`, a list of path strings. Nothing else: no `[filesystem]` and no `[secret-source.<scheme>]` table. |
 
 A profile has no `[pack]`, `[inputs]`, `extend`, `include`, `[run]`, or `[[mcp-servers]]`. Packs have no `packs`,
 `plugins`, `policies`, `[profile]`, `[options]`, `agent-args`, `file-attributes`, `[limits]`, `[project]`,
@@ -376,8 +376,8 @@ and support packs, support packs extend support packs; a tool pack that extends 
 that tool's env, filesystem with writes, and program folder on `PATH` into its own tool, its own env
 wins, not `PATH` or `TMPDIR`, a skipped base gives nothing, and the base is not a tool of its own
 unless the profile or a support pack sets its `[tool.<name>] program`),
-optional `include` lists tool packs to load as tools of their own (nothing merged), and optional `engine = ">=X.Y.Z"` names the oldest Box CLI it needs.
-The header accepts only these keys.
+and optional `include` lists tool packs to load as tools of their own (nothing merged).
+The header accepts only these keys. A separate optional `[requires]` table with `box = ">=X.Y.Z"` names the oldest Box CLI that the pack, plugin, or profile needs.
 
 `kind` decides what `[run]` holds. A `tool` pack's `[run]` sets `command` to its program input alone, and the pack extends
 tool and support packs. An `agent` pack's `[run]` sets `command`, or the pack extends an agent pack

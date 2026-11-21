@@ -167,7 +167,7 @@ pub(crate) fn refuse_owned_name(box_home: &Path, name: &str) -> Result<(), Error
 /// Whether the profile file `owner` still declares `name`.
 fn still_owns(owner: &Path, name: &str) -> bool {
     std::fs::read_to_string(owner).is_ok_and(|text| {
-        Profile::parse(&text, owner)
+        Profile::parse(&text, owner, crate::VERSION)
             .map(|profile| profile.declared_name() == Some(name))
             .unwrap_or(true)
     })
@@ -749,7 +749,7 @@ impl Launcher {
         let file = std::fs::canonicalize(argument).map_err(unreadable)?;
         let text = std::fs::read_to_string(&file).map_err(unreadable)?;
         observe(text.as_bytes());
-        let profile = Profile::parse(&text, &file)?;
+        let profile = Profile::parse(&text, &file, crate::VERSION)?;
         let name = profile
             .declared_name()
             .ok_or_else(|| Error::ProfileFileUnnamed { path: file.clone() })?
@@ -803,7 +803,7 @@ impl Launcher {
 
     /// The operator's profiles.
     pub fn profiles(&self) -> Profiles {
-        Profiles::at(profiles_root(&self.host.box_home))
+        Profiles::at(profiles_root(&self.host.box_home), crate::VERSION)
     }
 
     /// The text of `box help agent`, which names the guide that ships with this `box`.
@@ -2786,6 +2786,7 @@ mod tests {
             KEEP = "profile-value"
         "#,
             &home.join(".strands/box/profiles/test/profile.toml"),
+            crate::VERSION,
         )
         .unwrap();
         let make = |display| {

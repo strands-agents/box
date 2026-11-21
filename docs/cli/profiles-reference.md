@@ -21,6 +21,7 @@ writes. `packs`, `plugins`, `policies`, `agent-args`, and `file-attributes` go a
 
 | Key | What it does |
 | --- | --- |
+| `[requires]` | What the profile needs of the `box` that runs it, such as its oldest version. See [`[requires]`](#requires). |
 | `[profile] name` | The profile's name, for a profile file that you run by its path ([Run a profile file](cli.md#run-a-profile-file)). A profile in `~/.strands/box/profiles/` can leave it out, and if it sets it, it matches the folder name. |
 | `packs` | The packs to use, as a list of names, in [merge order](#merge-order). `@box/<name>` is a pack that ships with `box`, and a plain name is a folder in `~/.strands/box/packs/`. |
 | `plugins` | The [plugins](plugins.md) to use, as a list of names, such as `plugins = ["@box/1password"]`. `@box/<name>` is a plugin that ships with `box`, and a plain name is a folder in `~/.strands/box/plugins/`. |
@@ -286,6 +287,25 @@ placeholder in `when` that gives anything other than `true` or `false` is an err
 `box` applies `when` after the merge, so a table that drops out takes with it what every pack and
 your profile put there. A `when` on `[agent.env]` removes all of the agent's variables, for
 example.
+
+## `[requires]`
+
+`[requires]` says what a file needs of the `box` that reads it. A profile, a pack, and a plugin
+each can hold one, and `box` checks each file's own table when it reads the file, before the
+merge. When a requirement does not hold, `box` refuses the file and names it. `[requires]` only
+checks: it loads nothing, and it is not merged into the profile.
+
+```toml
+[requires]
+box = ">=0.3.0"
+```
+
+| Key | What it does |
+| --- | --- |
+| `box` | The oldest version of `box` that reads this file, as `>=X.Y.Z`. An older `box` refuses the file with `this pack needs box >=0.3.0, and this is box 0.2.3`. A preview build of `box`, such as `0.3.0-preview.1` or `0.3.0-linux-preview.1`, counts as its release, `0.3.0`. |
+
+`box` checks `box` first. So when a later `box` adds a requirement, an older `box` that reads it
+names the version to update to. A requirement that this `box` does not know is refused.
 
 ## Merge order
 
