@@ -68,6 +68,7 @@ it, so support files remain relative to their owning pack.
 The reference sections hold every rule:
 
 - [File boundaries and merge rules](#file-boundaries-and-merge-rules)
+- [Incoming Linux storage](#incoming-linux-storage)
 - [Experimental native filesystem policy](#experimental-native-filesystem-policy)
 - [Options, commands, and environment](#options-commands-and-environment)
 - [Placeholders, paths, and conditions](#placeholders-paths-and-conditions)
@@ -405,6 +406,57 @@ extends both instead.
 Conditions apply after merging. A false `when` on a table removes everything merged into that
 table, including another file's additions. Put conditions on the narrowest entry or value that
 should change.
+
+## Incoming Linux storage
+
+Enable filesystems attached by a trusted Linux storage manager after Box starts. In
+`profile.toml`, list mount sources separately for each recipient:
+
+```toml
+[experimental-features]
+linux-storage-mounts = true
+
+[agent.filesystem]
+mounts = ["/mnt/data", "/mnt/workspace"]
+read = ["/mnt/data", "/mnt/workspace"]
+
+[tool.indexer.filesystem]
+mounts = ["/mnt/data"]
+read = ["/mnt/data"]
+
+[mcp.files.filesystem]
+mounts = ["/mnt/workspace"]
+read = ["/mnt/workspace"]
+```
+
+The tool and local MCP server must already be declared. Each recipient's `mounts` array
+contains absolute paths and grants no permissions. A recipient inherits no other recipient's
+list. With no paths declared for a recipient, forwarding stays disabled. Lists from packs and
+profiles append and deduplicate within the same recipient; an empty profile list does not
+remove a pack's paths for that recipient. Only a profile can set the experimental flag.
+Mount declarations require both Linux and the enabled flag.
+
+The CLI keeps `[storage]` for managed directories, files, and hooks; it does not accept
+`storage.mounts`. The external manager owns the incoming mount paths and their contents.
+Set each recipient's read, write, execute, and denial lists separately. Use literal permission
+paths inside incoming mounts, because wildcard expansion into them is rejected. Existing
+optional-path semantics remain in effect.
+
+Boxy preserves required permission paths until Box Core can inspect the incoming filesystem.
+The application starts with storage inaccessible. Box Core applies the original restrictions
+before making storage visible. The application can retry while storage is unavailable.
+A required rule that cannot be applied stops the affected Box.
+
+Hosted Shell and Python (Monty) use the agent's protected storage view, with their existing
+`fs:*` policy rules applied as well. Source filesystem permissions still apply. If no agent
+view starts, hosted storage remains unavailable. Hosted tools reject symbolic links from
+incoming storage to paths outside the protected roots and their captured aliases.
+
+An incoming write grant can reach an external `deny_write` path through a symbolic link.
+Boxy conservatively retains that denial, even when its relationship cannot yet be proved.
+Generated Shell and Monty rules deny moving or deleting protected paths and their exact
+ancestors, without denying unrelated sibling operations. This feature does not enable
+native filesystem policy or remove restrictions imposed by the host filesystem.
 
 ## Experimental native filesystem policy
 
