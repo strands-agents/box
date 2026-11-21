@@ -6,8 +6,7 @@ files, so every read, write, and delete goes through its Bash tool, where the
 [box's shell](../../docs/user/shell.md) asks the policy about every command and every file. The
 task comes from the command line.
 
-[The tutorial](../../docs/user/tutorials/claude-code.md) walks through this example step by step,
-with the output of each run.
+To run Claude Code in a box day to day, use the `box` CLI instead: see [Get started](../../docs/cli/getting-started.md).
 
 ## Files
 

@@ -26,15 +26,6 @@ Box runs an agent, or another command, under an operator's policy, with operatin
   CLI's own traces and metrics to the records file from getting started, and read both together.
 - [`tutorials/strands-sdk-agent.md`](./tutorials/strands-sdk-agent.md): put an agent you wrote with
   the Strands Agents SDK in a box, and watch the policy permit two tasks and refuse two.
-- [`tutorials/claude-code.md`](./tutorials/claude-code.md): put Claude Code in a box with none of
-  the project's files in its own reach, and watch its Bash tool route every read, write, and delete
-  through the policy.
-- [`tutorials/codex-cli.md`](./tutorials/codex-cli.md): put Codex CLI in a box with the project out
-  of its own reach, so its shell tool is its only way to a project file, and watch the policy permit
-  three tasks and refuse two.
-- [`tutorials/pi.md`](./tutorials/pi.md): put pi in a box with the project out of its own reach,
-  so its `bash` tool is its only way to a project file, and watch the policy permit three tasks and
-  refuse two.
 
 - [`tutorials/eks.md`](./tutorials/eks.md): build and run a Box coding workload on Amazon EKS, then inspect its permitted operations and refusals.
 - [`tutorials/agentcore-runtime.md`](./tutorials/agentcore-runtime.md): deploy a Strands or LangChain shipment agent to AgentCore Runtime with Box.

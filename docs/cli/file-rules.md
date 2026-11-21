@@ -1,8 +1,3 @@
----
-reader: Someone who wants the details of why a file rule in their policy doesn't stop the agent's own file tools, the tools the box starts, or MCP servers, and what the plans are for that limit.
-belongs: What a file rule decides and what it doesn't, how to keep a file from every process with filesystem lists, the rules that no list can match, how to try native filesystem policy, and the plan for making it the baseline. A key's full meaning goes to profiles-reference.md, how to write a rule goes to policies.md, and a fix after an error goes to troubleshooting.md.
----
-
 # Where file rules apply
 
 A file rule in your policy, such as one that forbids reading `.env`, applies only to the box's

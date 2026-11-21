@@ -1,8 +1,3 @@
----
-reader: Someone who wants to install Box, upgrade it, pick another release, or remove it, usually before or after Get started.
-belongs: Installing, upgrading, pinning, and removing box, what the installer puts on the computer, and the installer's variables. Creating a profile and the first run go to getting-started.md, the rest of ~/.strands/box to files.md, the BOX_* variables that box itself reads to cli.md, and how Linux differs from a Mac to limitations.md.
----
-
 # Install Box
 
 Until a release of `box` is published from this repository, build it from source, as

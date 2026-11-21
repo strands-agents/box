@@ -1,8 +1,3 @@
----
-reader: Someone who writes or reads a plugin, knows the key or rule they want, and needs what it does.
-belongs: A key of plugin.toml, and each rule that a plugin, a profile that lists one, and a pack follow. A task goes to plugins.md, the plugins and [secret-source.<scheme>] keys of a profile go to profiles-reference.md, and a fix after an error goes to troubleshooting.md.
----
-
 # Plugin reference
 
 This page lists every key that a `plugin.toml` can hold, and the rules for plugins. To use or write a plugin, start with [Plugins](plugins.md).

@@ -14,6 +14,6 @@ reasoning behind those same topics belongs in the design guide.
 
 ## External site publication
 
-[`site-manifest.json`](./site-manifest.json) selects the user pages that an external
-documentation site publishes. The [site manifest contract](./dev/site-manifest.md) defines its
+[`site-manifest.json`](./site-manifest.json) selects the pages in [`user/`](./user/) and
+[`cli/`](./cli/) that an external documentation site publishes. The [site manifest contract](./dev/site-manifest.md) defines its
 fields, compatibility rules, stable identities and routes, and link handling.

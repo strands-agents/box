@@ -1,4 +1,4 @@
-# Getting started with Box
+# Run an agent with box.toml
 
 Box runs an agent on Linux or macOS under a policy.
 The agent can reach only the files, programs, and network destinations you allow. You describe a box in two files:

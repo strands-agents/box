@@ -171,8 +171,9 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
      is a Claude Code fact that `getting-started.md` needs to finish the walkthrough.
    - Do not report a behavior change as a regression when the change is the intent of the diff or
      the behavior is in flux. Report it only when it fails `engine.rs` or breaks a safety rule.
-   - A section that a diff adds to a `docs/cli/` page with front matter, and that fails the page's
-     `belongs` test, is a `DOCS` finding. Name the page that the test sends it to.
+   - A section that a diff adds to a `docs/cli/` page with an entry in
+     [`user-page-tests.md`](../user-page-tests.md), and that fails the page's `belongs` test, is a
+     `DOCS` finding. Name the page that the test sends it to.
    - A `docs/cli/` page may link a page in `docs/design/cli/` for background. It still states
      each fact the operator needs to act.
    - A `docs/cli/` or pack `README.md` change that adds implementation detail, an edge case the
