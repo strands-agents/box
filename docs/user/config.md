@@ -375,8 +375,10 @@ No process inherits another process's mount list or permission lists.
 Box starts the workload while storage is pending. It hides pending storage behind an
 empty, read-only view, so early file operations can fail. When a source arrives, Box
 prepares its protected view privately and then makes that view visible to the process.
-Request handling does not wait for storage, and Box exposes no readiness callback.
-Applications that need a file must handle an unavailable path until admission finishes.
+If a source is already present when Box checks storage for a new process, that process waits
+for the source's protected view before its code runs. Other declared sources that have not arrived do not delay that launch.
+Box exposes no readiness callback to the storage manager. Applications already running when a
+source arrives must handle an unavailable path until preparation finishes.
 
 Hosted Shell and Monty filesystem operations beneath these storage destinations also
 use the agent's protected view. Both the agent's filesystem grants and each operation's

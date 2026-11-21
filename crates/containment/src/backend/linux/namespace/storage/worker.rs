@@ -66,7 +66,6 @@ pub(super) struct Worker {
     _child: Child,
     pub(super) control: UnixStream,
     pub(super) source: Option<(SourceIdentity, String)>,
-    pub(super) reported: bool,
 }
 
 impl Worker {
@@ -136,7 +135,6 @@ impl Worker {
             _child: Child::new(pid),
             control,
             source: None,
-            reported: false,
         };
         if !reaper::confirm_parent_death(&worker.control) {
             return Err(failure(

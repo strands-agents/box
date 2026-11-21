@@ -162,6 +162,17 @@ impl ApprovedReach {
         &self.installation
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn storage_roots(&self) -> Vec<std::path::PathBuf> {
+        self.tables
+            .values()
+            .filter_map(|reach| reach.storage.as_ref())
+            .flat_map(|policy| policy.roots.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     /// The reach approved for one process table, named as a refusal names it.
     pub(crate) fn table(&self, table: &str) -> Option<&DirectReach> {
         self.tables.get(table)

@@ -125,8 +125,11 @@ later by a trusted storage manager. The operator declares the attachment directo
 list. Declaring a directory does not grant access. The agent, each configured tool, and each local
 MCP server retain their own filesystem lists.
 
-Box covers each declared directory before launching the workload. A trusted worker observes the
-source mount table outside the workload. When a filesystem arrives, the storage compiler resolves
+Box covers each declared directory before launching the workload. One Box-owned helper observes
+the distinct source paths across all recipients. It retains one source cache per path, with an
+independent acquisition worker so one blocked provider does not stop the others. Recipient exit
+does not discard those caches. Each compilation and preparation receives a fresh private mount
+clone; recipient permissions and publication remain separate. When a filesystem arrives, the storage compiler resolves
 the original rules against a private copy of its mount view. It applies the required read-only,
 execution, and denied-path restrictions before the worker attaches the completed view to the
 recipient. Preparation follows configured permission paths and mount records; it does not list
@@ -138,9 +141,13 @@ storage operations. They still require the corresponding policy permit. Pending 
 fallback to the surrounding filesystem. The dedicated interpreter thread drops filesystem
 capabilities, while a separate trusted thread launches programs inside their own sandboxes.
 
-Storage becomes available asynchronously. Box does not delay invocation delivery or add a
-readiness exchange with the storage manager. This version handles the first attachment at each
-root and trusts the external mounting process. Replacement mounts, later nested mounts, and
+At subscription, the helper identifies sources already captured or present in its mount table.
+The recipient's launcher waits until those sources have completed rule compilation and protected
+publication. A completed compilation that needs no new publication also satisfies this check.
+The private launch receipt precedes workload creation. Sources absent at subscription remain
+asynchronous, and Box adds no readiness exchange with the storage manager.
+
+This version handles the first attachment at each root and trusts the external mounting process. Replacement mounts, later nested mounts, and
 revocation of already open files require further qualification. macOS does not support this
 experimental feature.
 
