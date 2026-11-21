@@ -45,7 +45,8 @@ $ cargo fetch --locked
 $ just check
 ```
 
-That runs `just fmt-check`, `just clippy`, and `just test`. Use the recipes rather than
+That runs `just fmt-check`, `just clippy`, `just prose`, and `just test`. `just test` runs
+`just build-cli` first, because the CLI's tests run the built binaries. Use the recipes rather than
 writing the `cargo` calls yourself.
 `just --list` shows every recipe.
 
@@ -78,12 +79,44 @@ links.
 
 ### `strands-box` is interface-frozen
 
-The CLI verbs and flags, the `box.toml` keys, the broker protocol, and each mechanism crate's
-public surface need explicit approval before they change, and a rename or an addition counts.
+The `strands-box` verbs and flags, the `box.toml` keys, the broker protocol, and each mechanism
+crate's public surface need explicit approval before they change, and a rename or an addition counts.
 [AGENTS.md](AGENTS.md) lists every frozen surface and states what to do instead. If your change
 needs one of them to move, say so in the pull request and name what breaks.
+
+The box CLI under `crates/cli/` is not frozen.
+[crates/cli/AGENTS.md](crates/cli/AGENTS.md#the-cli-is-not-interface-frozen) states what it
+must not break.
 
 ## Reporting a problem
 
 Open an issue on this repository. For a suspected security problem, read
 [SECURITY.md](SECURITY.md) first and report it the way that file states.
+
+## Working on the box CLI
+
+The box CLI lives under `crates/cli/`, with its shipped packs, policies, and starters under
+`resources/`. Read [crates/cli/AGENTS.md](crates/cli/AGENTS.md) before you change it. It holds
+the rules for that area.
+
+To build `box` from source, you need [Rust](https://rustup.rs/) and
+[`just`](https://github.com/casey/just):
+
+```sh
+just build-cli    # box and the Box Core helpers, in target/debug
+```
+
+Keep the helpers in the same directory as `box`.
+[docs/dev/manual-testing.md](docs/dev/manual-testing.md) shows how to run the build with a real
+agent and model.
+
+`just test-engine` builds the CLI and runs its suite that drives a real engine. `just prose`
+checks the prose of the CLI's docs, and `just check` runs it.
+
+Title the pull request as a conventional commit with a lowercase subject, such as
+`fix(cli): refuse a profile with no agent`. The title becomes the commit on `main`.
+[crates/cli/AGENTS.md](crates/cli/AGENTS.md#pull-request-title) lists the types and scopes.
+
+A change ships with its docs. [crates/cli/AGENTS.md](crates/cli/AGENTS.md#docs) says which change updates which doc,
+and [.agents/references/writing.md](.agents/references/writing.md) says how to write each one: plain
+English for a person in `docs/cli/`, and precise engineering prose everywhere else. No em-dashes.

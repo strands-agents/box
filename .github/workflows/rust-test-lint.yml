@@ -50,6 +50,9 @@ env:
   # locations disappear from backtraces; panic message and test name still
   # identify the failure.
   RUSTFLAGS: "-C debuginfo=0"
+  # The box CLI's packages. Their tests run in cli-test.yml, which installs the launchers they
+  # need; the lint job below still lints them.
+  EXCLUDE_CLI: "--exclude strands-box-cli --exclude strands-box-cli-pack-tests --exclude strands-box-cli-profile --exclude strands-box-cli-telemetry"
 
 jobs:
   history-persistence:
@@ -259,7 +262,7 @@ jobs:
           node-version: '22'
 
       - name: Build
-        run: cargo build --workspace --locked --all-targets --all-features --verbose
+        run: cargo build --workspace $EXCLUDE_CLI --locked --all-targets --all-features --verbose
 
       - name: Install launcher images beside unit-test binaries
         if: runner.os == 'Linux'
@@ -280,7 +283,7 @@ jobs:
         run: |
           set -o pipefail
           set +e
-          cargo test --workspace --locked --all-features $FAIL_FAST_FLAG --verbose ${FILTER:+"$FILTER"} \
+          cargo test --workspace $EXCLUDE_CLI --locked --all-features $FAIL_FAST_FLAG --verbose ${FILTER:+"$FILTER"} \
             -- --show-output 2>&1 | tee linux-workspace-tests.log
           test_status=$?
           set -e
@@ -316,7 +319,7 @@ jobs:
           FAIL_FAST_FLAG: ${{ !inputs.fail_fast && '--no-fail-fast' || '' }}
           FILTER: ${{ inputs.filter }}
         run: |
-          cargo test --workspace --locked --all-features $FAIL_FAST_FLAG --verbose ${FILTER:+"$FILTER"}
+          cargo test --workspace $EXCLUDE_CLI --locked --all-features $FAIL_FAST_FLAG --verbose ${FILTER:+"$FILTER"}
 
       # The native filesystem checks the workspace run above does not cover: the
       # standalone signed test package, startup refusal without the Cargo feature,

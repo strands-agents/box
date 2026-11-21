@@ -1,0 +1,13 @@
+# The Anthropic API as the model provider.
+[pack]
+name = "@box/anthropic"
+version = 1
+kind = "support"
+
+# The box adds your API key to each request. The agent gets a stand-in value that starts with
+# sk-ant-, so a harness that checks the key's format accepts it.
+[egress.anthropic]
+destinations = ["api.anthropic.com"]
+secret.ref = "env://ANTHROPIC_API_KEY"
+secret.header = "x-api-key"
+secret.phantom_prefix = "sk-ant-"

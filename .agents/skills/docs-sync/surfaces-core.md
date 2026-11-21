@@ -1,6 +1,8 @@
 # docs-sync: Core area
 
-Paths: every path in this repository.
+Paths: each crate under `crates/` outside `crates/cli/`, `test-integ/`, `test-native-filesystem/`,
+`test-common/`, `test-workload/`, and `examples/`. The [CLI area](surfaces-cli.md) covers
+`crates/cli/`.
 
 Read [`SKILL.md`](SKILL.md) first. This file adds the surfaces and checks for Box Core.
 

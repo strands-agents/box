@@ -1,0 +1,30 @@
+[package]
+name = "strands-box-cli-profile"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Packs and profiles for the Strands Box CLI: parse, resolve against a host, and compile box.toml and policy.dw."
+
+[lib]
+name = "strands_box_cli_profile"
+path = "src/lib.rs"
+
+[dependencies]
+nix = { version = "0.28", features = ["user"] }
+regex = "1"
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+strands-box = { path = "../../box" }
+strands-box-cli-telemetry = { path = "../telemetry" }
+tempfile = "3"
+thiserror = "2"
+toml = "1"
+toml_edit = "0.25"
+
+[features]
+# Exposes the test fixtures and the test-only items that the CLI's tests use.
+test-support = []
+
+[lints.rust]
+unused_must_use = "deny"

@@ -37,6 +37,17 @@ After approval, bump `RECORD_VERSION`, `LIVE_VERSION`, or `PROTOCOL_VERSION` whe
 An approved interface change carries its reference page in the same commit; apply
 [What a change updates](#what-a-change-updates).
 
+## The `box` CLI
+
+`crates/cli/`, `resources/`, and `test-corpus/` hold the `box` CLI. A change there follows
+[`crates/cli/AGENTS.md`](crates/cli/AGENTS.md), and the freeze above does not cover it. Its user
+docs are in `docs/cli/`, written to [`writing.md`](.agents/references/writing.md), and its design
+pages and decision log are in `docs/design/cli/`. For those paths, the critics apply the CLI area
+files: `review-cli.md`, `axes-cli.md`, `surfaces-cli.md`, and the
+[CLI area](.agents/agents/test-critic.md#cli-area) of `test-critic`. The Core area files cover the
+rest of `crates/`, `test-integ/`, `test-native-filesystem/`, `test-common/`, `test-workload/`, and
+`examples/`.
+
 ## Foundational premises
 
 Preserve these premises and the tests that enforce them. Do not delete or `#[ignore]` a security

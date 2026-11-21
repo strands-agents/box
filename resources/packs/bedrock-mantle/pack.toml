@@ -1,0 +1,36 @@
+# Amazon Bedrock's OpenAI-compatible endpoint as the model provider, for Codex.
+[pack]
+name = "@box/bedrock-mantle"
+version = 1
+kind = "support"
+
+[inputs.bedrock.region]
+description = "The AWS region that serves the model."
+type = "string"
+pattern = "[a-z]{2}(-[a-z]+)?-(central|north|south|east|west)+-[0-9]+"
+default = "us-west-2"
+
+[inputs.bedrock.sign-in]
+description = "How the box signs in to Bedrock: with your AWS credentials, or with a Bedrock API key in AWS_BEARER_TOKEN_BEDROCK."
+type = "string"
+values = ["aws", "api-key"]
+default = "aws"
+# The warning makes `box profile create` save the answer, so a later default does not move the profile.
+warning = """Choosing aws signs each Bedrock request with your default AWS identity, outside the box. On a cloud machine that can be the machine's own role.
+It also runs any credential_process in your AWS configuration. Keep a file that AWS_CONFIG_FILE or AWS_SHARED_CREDENTIALS_FILE names out of the project."""
+
+[agent.env]
+AWS_REGION = "${{ inputs.bedrock.region }}"
+
+# The box signs each request with your default AWS identity, outside the box. A route's secret
+# takes no `when`, so each sign-in is its own route.
+[egress.bedrock]
+destinations = ["bedrock-mantle.${{ inputs.bedrock.region }}.api.aws"]
+secret.ref = "aws://"
+when = { variable = "inputs.bedrock.sign-in", equals = "aws" }
+
+# The box adds your Bedrock API key to each request. The agent gets a stand-in value.
+[egress.bedrock-api-key]
+destinations = ["bedrock-mantle.${{ inputs.bedrock.region }}.api.aws"]
+secret.ref = "env://AWS_BEARER_TOKEN_BEDROCK"
+when = { variable = "inputs.bedrock.sign-in", equals = "api-key" }

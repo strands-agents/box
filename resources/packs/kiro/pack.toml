@@ -1,0 +1,164 @@
+# Kiro CLI in a box, tested with kiro-cli 3.1.0 on macOS. kiro.sign-in picks a login inside the box
+# or a Kiro API key. Only Kiro's V3 engine is supported: not `--v2`, and not your MCP servers yet.
+[pack]
+name = "@box/kiro"
+version = 1
+kind = "agent"
+extend = ["@box/base"]
+
+[run]
+# --v3: a headless run, or a host's saved chat.agentEngine, would otherwise pick V2. Kiro's trust
+# switch is an option of `chat` only, so with agent.skip-permissions on, the agent arguments go to
+# `chat`.
+command = [
+    "${{ inputs.kiro.path }}",
+    "--v3",
+    { value = "chat", when = { variable = "inputs.agent.skip-permissions", equals = "true" } },
+    { value = "--trust-all-tools", when = { variable = "inputs.agent.skip-permissions", equals = "true" } },
+    { slot = "agent-args" },
+]
+
+# Kiro's installer puts kiro-cli in ~/.local/bin.
+[inputs.kiro.path]
+description = "The Kiro CLI program."
+type = "program"
+program = "kiro-cli"
+search = [{ env = "PATH" }, "${{ home }}/.local/bin"]
+
+[inputs.agent.skip-permissions]
+description = "Start Kiro CLI's chat with --trust-all-tools, so it runs each tool without asking. The box still allows or refuses each action."
+type = "bool"
+default = false
+
+# Kiro reads dark mode from macOS through /bin/sh, which the box does not let it run, so it falls
+# back to light. KIRO_TERMINAL_THEME skips the check.
+[inputs.kiro.theme]
+description = "Kiro CLI's color theme. Set light for a light terminal."
+from = "env:KIRO_TERMINAL_THEME"
+values = ["dark", "light"]
+default = "dark"
+
+# Kiro unpacks node, bun, and its agent server, then runs them. In storage the box cannot run them
+# (docs/design/cli/decisions.md#a-run-cannot-write-what-a-later-run-trusts), so Kiro reads them from a
+# folder on the host that the box cannot write. The operator fills it on the host:
+# KIRO_RUNTIME_DIR=~/.kiro-runtime kiro-cli --v3 chat --list-sessions
+# Not in ~/.kiro: the box grants no part of the agent's own folder
+# (docs/design/cli/decisions.md#an-agent-gets-a-private-configuration-folder).
+[inputs.kiro.runtime]
+description = "The folder that holds Kiro CLI's unpacked runtime. The box reads it and cannot change it, so fill it on your machine first, and again after each Kiro update."
+from = "env:KIRO_RUNTIME_DIR"
+default = "${{ home }}/.kiro-runtime"
+
+[inputs.kiro.sign-in]
+description = "How Kiro CLI signs in: login inside the box, or api-key from KIRO_API_KEY."
+type = "string"
+values = ["login", "api-key"]
+default = "login"
+
+# ~/.strands/box/storage/<profile>/default/agent/, shared by every project the profile runs in. With HOME
+# here, Kiro keeps its settings, its sessions, and a login made in the box in storage.
+[storage]
+directories = ["home", "tmp"]
+
+# What the box does, and the profile to change (docs/design/cli/decisions.md#an-agent-pack-tells-its-agent-about-the-box).
+# Kiro reads each file below .kiro/steering, so the guidance and your own steering are two copies
+# side by side. The env BOX_PROFILE names the profile.
+[[storage.files]]
+source = "${{ pack }}/box.md"
+target = "home/.kiro/steering/box.md"
+sync = true
+
+# Your own instructions, skills, and prompts, copied into storage on the profile's first run and
+# brought up to date with the host on each run after it. A box's edit stays until the host's file
+# changes.
+[[storage.files]]
+source = "${{ home }}/.kiro/steering"
+target = "home/.kiro/steering/host"
+optional = true
+sync = true
+
+[[storage.files]]
+source = "${{ home }}/.kiro/skills"
+target = "home/.kiro/skills"
+optional = true
+sync = true
+
+[[storage.files]]
+source = "${{ home }}/.kiro/prompts"
+target = "home/.kiro/prompts"
+optional = true
+sync = true
+
+# Your model. Not chat.agentEngine: the command names V3. Not chat.defaultAgent: a custom agent in
+# ~/.kiro/agents can name hooks and MCP servers, and the box copies no agent.
+[[storage.files]]
+source = "${{ home }}/.kiro/settings/cli.json"
+target = "home/.kiro/settings/cli.json"
+kind = "json"
+optional = true
+keep = [["chat.defaultModel"], ["chat.enableContextUsageIndicator"]]
+
+# An update in the box cannot replace the host's kiro-cli.
+[[storage.files.set]]
+key = ["app.disableAutoupdates"]
+value = true
+
+# With --trust-all-tools, Kiro asks at each start to accept the mode. agent.skip-permissions is that
+# answer. Without the switch, Kiro never shows the question. A host with no cli.json gets a copy of
+# only these set rows.
+[[storage.files.set]]
+key = ["chat.disableTrustAllConfirmation"]
+value = true
+
+# Kiro runs each command through SHELL, and the box's bash sends it through the policy.
+# KIRO_NO_AUTO_UPDATE: an update in the box cannot replace the host's kiro-cli.
+# KIRO_NO_REMOTE_CHANGELOG: Kiro reads its release news from prod.download.cli.kiro.dev, outside
+# Kiro's service.
+# Telemetry stays off: once its hosts are open, Kiro's telemetry client panics in the box
+# ("Attempted to create a NULL object" in security-framework) at the end of a run.
+[env]
+HOME = "${{ storage.home }}"
+TMPDIR = "${{ storage.tmp }}"
+SHELL = "${{ box }}/bin/bash"
+KIRO_RUNTIME_DIR = "${{ inputs.kiro.runtime }}"
+KIRO_TERMINAL_THEME = "${{ inputs.kiro.theme }}"
+KIRO_NO_AUTO_UPDATE = "1"
+KIRO_NO_REMOTE_CHANGELOG = "1"
+KIRO_DISABLE_TELEMETRY = "1"
+KIRO_DISABLE_TOOLKIT_TELEMETRY = "1"
+BOX_PROFILE = "${{ profile }}"
+
+[filesystem]
+read = [
+    "${{ inputs.kiro.path }}",
+    "${{ inputs.kiro.runtime }}",
+    # The runtime's node loads libstdc++.so.6 from the system's library folders: /usr/lib on Debian
+    # and Ubuntu, /usr/lib64 on Amazon Linux, Fedora, and RHEL. An exec grant on node alone would
+    # bring in only its own libraries, but a file inside the runtime's exec grant is refused. So the
+    # agent reads the four folders, and on Linux it can also run each program in them.
+    { path = "/lib", when = "linux" },
+    { path = "/usr/lib", when = "linux" },
+    { path = "/lib64", optional = true, when = "linux" },
+    { path = "/usr/lib64", optional = true, when = "linux" },
+]
+exec = ["${{ inputs.kiro.path }}", "${{ inputs.kiro.runtime }}"]
+
+# Kiro's service, us-east-1 only: Kiro's other regions are not tested. With login, the sign-in
+# service and Kiro's two hosts get no credential, and Kiro keeps its login token in the box's
+# storage, where the agent can read it
+# (docs/design/cli/decisions.md#a-route-with-only-destinations-opens-a-host).
+[egress.kiro-login]
+when = { variable = "inputs.kiro.sign-in", equals = "login" }
+destinations = [
+    "oidc.us-east-1.amazonaws.com",
+    "management.us-east-1.kiro.dev",
+    "runtime.us-east-1.kiro.dev",
+]
+
+# With api-key, the box adds the Kiro API key to each request to both hosts. The agent gets one
+# stand-in value that starts with ksk_, like a Kiro API key.
+[egress.kiro]
+when = { variable = "inputs.kiro.sign-in", equals = "api-key" }
+destinations = ["management.us-east-1.kiro.dev", "runtime.us-east-1.kiro.dev"]
+secret.ref = "env://KIRO_API_KEY"
+secret.phantom_prefix = "ksk_"

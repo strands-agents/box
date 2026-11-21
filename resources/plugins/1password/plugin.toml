@@ -1,0 +1,41 @@
+# Read secrets from 1Password with its command-line program, op. The paths below come from op
+# 2.42.0 on macOS.
+[plugin]
+name    = "@box/1password"
+version = 1
+kind    = "secret-source"
+scheme  = "op"
+
+[inputs.onepassword.path]
+description = "The 1Password command-line program."
+type        = "program"
+program     = "op"
+
+[run]
+command = ["${{ inputs.onepassword.path }}", "read", "op://{ref}"]
+
+# The program's variables, written as in a pack. The plugin passes no session of a manual sign-in
+# (`eval "$(op signin)"`): op names that variable after the account, `OP_SESSION_<account>`, and an
+# entry names one variable. A copy of this plugin can name it (see README.md).
+[env]
+OP_ACCOUNT               = { from = "env:OP_ACCOUNT" }
+OP_CONNECT_HOST          = { from = "env:OP_CONNECT_HOST" }
+# op keeps the session of a manual sign-in in a folder under TMPDIR. macOS gives each user a
+# TMPDIR of its own, and without it op looks in /tmp. The plugin passes TMPDIR, unlike
+# XDG_CONFIG_HOME below, so that op looks in the folder that it uses in your shell, and a copy of
+# this plugin needs only the session variable. This file's `[protect] paths` cannot name that
+# folder, because its path differs for each user. A copy can add its full path (see README.md).
+TMPDIR                   = { from = "env:TMPDIR" }
+OP_SERVICE_ACCOUNT_TOKEN = { from = "env:OP_SERVICE_ACCOUNT_TOKEN" }
+OP_CONNECT_TOKEN         = { from = "env:OP_CONNECT_TOKEN" }
+
+# What the box keeps from the agent, its tools, and its MCP servers.
+[protect]
+# The token of a service account, and the token of a Connect server.
+env   = ["OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_TOKEN"]
+# op keeps its accounts in ~/.config/op, and an older install keeps them in ~/.op. The plugin
+# passes no XDG_CONFIG_HOME or OP_CONFIG_DIR, because `paths` cannot follow the folder they name.
+# On macOS, with only HOME set, op reads the 1Password app's settings in the Group Containers
+# folder, and the app keeps its sockets there.
+paths = ["${{ home }}/.config/op", "${{ home }}/.op",
+         "${{ home }}/Library/Group Containers/2BUA8C4S2C.com.1password"]
