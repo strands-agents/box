@@ -31,11 +31,12 @@ pub(super) struct ProfilePolicy {
     protected: Vec<PathBuf>,
     config: String,
     text: String,
-    /// The forbids in `text` that `box` writes, which stay while policy is off.
+    /// The forbids in `text` that `box` writes for every box, which stay while policy is off.
     generated: String,
 }
 
-/// A compiled policy that waits for a reload, and the forbids in it that `box` writes.
+/// A compiled policy that waits for a reload, and the forbids in it that `box` writes for every
+/// box.
 #[derive(Debug, Clone, PartialEq)]
 struct Pending {
     text: String,
@@ -69,11 +70,11 @@ impl ProfilePolicy {
             protected,
             config: run.compiled.box_toml.clone(),
             text: run.compiled.policy.clone(),
-            generated: run.compiled.generated_forbids.clone(),
+            generated: run.compiled.box_forbids.clone(),
         }
     }
 
-    /// The policy that policy off installs: `OFF`, then the forbids that `box` writes.
+    /// The policy that policy off installs: `OFF`, then the forbids that `box` writes for every box.
     pub(super) fn off(&self) -> String {
         match self.generated.trim_end() {
             "" => OFF.to_string(),
@@ -127,7 +128,7 @@ impl ProfilePolicy {
             .map_err(|error| error.to_string())?;
         Ok(Some(Pending {
             text: compiled.policy,
-            generated: compiled.generated_forbids,
+            generated: compiled.box_forbids,
         }))
     }
 }
@@ -584,9 +585,9 @@ pub(super) mod tests {
         );
     }
 
-    /// **Policy off drops the operator's rules and keeps the forbids `box` writes**, so the box's
-    /// shell and Python still cannot change what a later run trusts, and `policy_off` is the one
-    /// permit.
+    /// **Policy off drops the operator's rules and keeps the forbids `box` writes for every box**,
+    /// so the box's shell and Python still cannot change what a later run trusts, and `policy_off`
+    /// is the one permit.
     #[test]
     fn policy_off_keeps_the_generated_rules_and_drops_the_operators() {
         let scene = Scene::new();

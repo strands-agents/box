@@ -48,8 +48,9 @@ pub struct Compiled {
     pub policy: String,
     /// The `@id` of each rule that `box` writes into `policy`.
     pub generated_ids: Vec<String>,
-    /// The forbids that `box` writes into `policy`, one per line.
-    pub generated_forbids: String,
+    /// The forbids in `policy` that `box` writes for every box, one per line: policy off keeps
+    /// them, and drops the rules a profile or a rule file adds.
+    pub box_forbids: String,
     pub journal: PathBuf,
     pub storage: Storage,
     /// Each stdio MCP server that gets no permit to start, with the reason.
@@ -298,7 +299,7 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
     );
     let (generated, unstarted) = generated_policy(&profile, run)?;
     let path_dropped = inherit_path(&mut profile.mcp, &profile.servers, run.search_path);
-    let mut around = project_rules(&tilde(run.home, run.workspace), access);
+    let around = project_rules(&tilde(run.home, run.workspace), access);
     let with_parents = |entry: &String| {
         let folder = resolve(entry);
         let mut parents: Vec<String> = Vec::new();
@@ -323,10 +324,12 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
         .iter()
         .map(with_parents)
         .collect();
-    deny_write_rules(&mut around, &protected_folders);
+    // The forbids that a profile's `[filesystem]` adds, which policy off drops.
+    let mut closed = Rules::default();
+    deny_write_rules(&mut closed, &protected_folders);
     let denied_paths: Vec<(String, Vec<String>)> =
         denied_everywhere.iter().map(with_parents).collect();
-    deny_rules(&mut around, &denied_paths);
+    deny_rules(&mut closed, &denied_paths);
     let egress: toml::Table = profile
         .egress
         .into_iter()
@@ -394,9 +397,9 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
             tool_text.trim_end(),
             generated_text.trim_end(),
         ])),
-        &around.text(),
+        &format!("{}{}", around.text(), closed.text()),
     );
-    let generated_forbids = [run.tool_rules, &generated, &around]
+    let box_forbids = [run.tool_rules, &generated, &around]
         .into_iter()
         .flat_map(Rules::forbids)
         .map(|line| format!("{line}\n"))
@@ -404,6 +407,7 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
     let mut generated_ids = run.tool_rules.ids.clone();
     generated_ids.extend(generated.ids);
     generated_ids.extend(around.ids);
+    generated_ids.extend(closed.ids);
     Ok(Compiled {
         box_toml: format!(
             "{}{}",
@@ -412,7 +416,7 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
         ),
         policy: rendered,
         generated_ids,
-        generated_forbids,
+        box_forbids,
         journal,
         storage: profile.storage.clone(),
         unstarted,
