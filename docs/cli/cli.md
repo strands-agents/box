@@ -27,7 +27,6 @@ box run claude
 | [`box profile delete`](#box-profile-delete) | Delete a profile, with its boxes and storage. |
 | [`box runs list`](#box-runs-list) | Find an earlier run and its box ID. |
 | [`box runs history`](#box-runs-history) | See what the box allowed and denied in a run. |
-| [`box clean`](#box-clean) | Remove one earlier run, or every run that has finished. |
 | [`box telemetry`](#box-telemetry) | Turn usage telemetry on or off. |
 | [`box help agent`](#box-help-agent) | Give a coding agent on your host the guide to make or change a profile. |
 
@@ -467,30 +466,6 @@ TIME (UTC)	RESULT	ACTION	RESOURCE	RULE	REASON
 2026-11-11T12:30:02.481516234Z	installed	policy	policy off	-	-
 2026-11-11T12:31:40.112358132Z	installed	policy	policy.dw	-	-
 ```
-
-## box clean
-
-Remove the box of an earlier run, and its records. A run's box stays after the agent exits, so you
-can run in it again or read its history. `box` asks before it removes anything, and never removes a
-run that is still going. Your profiles and their storage stay, so the agent keeps its settings and
-sessions.
-
-```sh
-box clean b-5b8e3d70c92f14ab
-```
-
-```text
-box clean <box ID> [--no-ask]
-box clean --all [--no-ask]
-```
-
-| Flag | What it does |
-| --- | --- |
-| `<box ID>` | The run to remove, from [`box runs list`](#box-runs-list). |
-| `--all` | Remove every run that isn't still going. |
-| `--no-ask` | Remove without asking, for a script. |
-
-To remove only one profile's runs, use [`box profile clean`](#box-profile-clean).
 
 ## box telemetry
 

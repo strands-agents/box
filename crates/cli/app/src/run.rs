@@ -601,15 +601,6 @@ impl HeldBoxes {
     }
 }
 
-/// What `box clean --all` removed and kept.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Cleaned {
-    /// How many run folders were removed.
-    pub removed: usize,
-    /// The running boxes that were kept.
-    pub running: Vec<String>,
-}
-
 impl Launcher {
     /// Run profiles for this process's own operator.
     pub fn from_host() -> Self {
@@ -887,54 +878,6 @@ impl Launcher {
         Ok(names)
     }
 
-    /// Check that `id` names one of the run folders that `runs` lists, and that its box is not
-    /// running. Refuse it otherwise.
-    pub fn find_run(&self, id: &str) -> Result<(), Error> {
-        self.saved_box(id)?;
-        hold(&self.runs_root(), id).map(drop)
-    }
-
-    /// Remove the run folder `id`, a link without its target. Refuse a box that is still running,
-    /// and hold the lock until the folder is gone, so a box cannot start in it meanwhile.
-    pub fn remove_run(&self, id: &str) -> Result<(), Error> {
-        self.saved_box(id)?;
-        let held = hold(&self.runs_root(), id)?;
-        remove_held(&self.runs_root().join(id), &held)?;
-        Ok(())
-    }
-
-    /// Refuse `id` unless it names one of the run folders that `runs` lists.
-    fn saved_box(&self, id: &str) -> Result<(), Error> {
-        if self.runs()?.iter().any(|name| name == id) {
-            Ok(())
-        } else {
-            Err(Error::BoxUnknown {
-                id: id.to_string(),
-                root: self.runs_root(),
-            })
-        }
-    }
-
-    /// Remove every run folder whose box is not running. `cleaned` counts the removed folders and
-    /// names the running boxes that were kept, also when a removal fails.
-    pub fn remove_runs(&self, cleaned: &mut Cleaned) -> Result<(), Error> {
-        let root = self.runs_root();
-        for name in self.runs()? {
-            let held = match hold(&root, &name) {
-                Ok(held) => held,
-                Err(Error::BoxRunning { id }) => {
-                    cleaned.running.push(id);
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            if remove_held(&root.join(name), &held)? {
-                cleaned.removed += 1;
-            }
-        }
-        Ok(())
-    }
-
     /// The saved boxes of `profiles`, by ID, or every saved box when `profiles` is `None`. A box
     /// belongs to a profile when its ID is valid and its `profile-name` records `profile`,
     /// the same check that `box run --box-id` makes.
@@ -992,10 +935,9 @@ impl Launcher {
         let mut held = Vec::new();
         let mut running = Vec::new();
         for id in ids {
-            match hold(&root, id) {
-                Ok(lock) => held.push((root.join(id), lock)),
-                Err(Error::BoxRunning { id }) => running.push(id),
-                Err(error) => return Err(error),
+            match hold(&root, id)? {
+                Hold::Free(lock) => held.push((root.join(id), lock)),
+                Hold::Running => running.push(id.clone()),
             }
         }
         match running.as_slice() {
@@ -2200,7 +2142,7 @@ fn minted_by(directory: &Path, profile: &str) -> Result<bool, Error> {
 
 /// Hold the run folder `name` in `runs` with the lock that `claim` takes, so a box that is still
 /// running is refused. A link holds no box that `claim` accepts, so it needs no lock.
-fn hold(runs: &Path, name: &str) -> Result<Option<std::fs::File>, Error> {
+fn hold(runs: &Path, name: &str) -> Result<Hold, Error> {
     let directory = runs.join(name);
     let file = match std::fs::OpenOptions::new()
         .read(true)
@@ -2214,14 +2156,23 @@ fn hold(runs: &Path, name: &str) -> Result<Option<std::fs::File>, Error> {
                 Some(nix::libc::ELOOP | nix::libc::ENOTDIR)
             ) || error.kind() == std::io::ErrorKind::NotFound =>
         {
-            return Ok(None);
+            return Ok(Hold::Free(None));
         }
         Err(source) => return Err(io_error("open", &directory, source)),
     };
-    lock_run(file, &directory, || Error::BoxRunning {
-        id: name.to_string(),
-    })
-    .map(Some)
+    match file.try_lock() {
+        Ok(()) => Ok(Hold::Free(Some(file))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(Hold::Running),
+        Err(std::fs::TryLockError::Error(source)) => Err(io_error("lock", &directory, source)),
+    }
+}
+
+/// What [`hold`] found at a run folder.
+enum Hold {
+    /// No box runs there. It holds the folder's lock, or nothing for a link or a missing folder.
+    Free(Option<std::fs::File>),
+    /// A box holds the lock.
+    Running,
 }
 
 /// Remove the run folder `path` while `_held` holds its lock, so no box starts in it meanwhile.
@@ -2290,7 +2241,7 @@ pub(crate) fn mint(runs: &Path, profile: &str, base: &Path) -> Result<Instance, 
 }
 
 /// A new instance under `runs`: a name no other run holds, its directory, and its `box_dir`, and
-/// the lock on its directory, taken before the directory holds anything, so `box clean` keeps it.
+/// the lock on its directory, taken before the directory holds anything, so `box profile clean` refuses it.
 pub(crate) fn mint_claimed(
     runs: &Path,
     profile: &str,
@@ -2349,7 +2300,7 @@ pub(crate) fn mint_claimed(
     Err(io_error("create", &directory, source))
 }
 
-/// Lock the run folder that `mint_claimed` just created. `None` when `box clean` took it first:
+/// Lock the run folder that `mint_claimed` just created. `None` when `box profile clean` took it first:
 /// it holds the lock, or it removed the folder before the lock.
 fn lock_new(directory: &Path) -> Result<Option<std::fs::File>, Error> {
     let file = match std::fs::OpenOptions::new()

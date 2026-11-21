@@ -251,11 +251,11 @@ into your project.
 Each run leaves a folder in `~/.strands/box/r`, and they pile up. To remove them:
 
 ```sh
-box clean --all
+box profile clean --all
 ```
 
 ```text
-box: Remove 4 boxes and their records? A box that is still running is kept.
+box: Remove all 4 boxes, and their records?
 
 > [1] Keep (default)
     Cancel without changes.
@@ -264,7 +264,8 @@ box: Remove 4 boxes and their records? A box that is still running is kept.
     Delete the items listed above.
 ```
 
-Choose **Remove**. The profile, and Claude Code's settings and history, stay. To start over, run
+Choose **Remove**. The profile, and Claude Code's settings and history, stay. If one of the boxes
+is still running, `box` removes nothing and names it, so exit that box first. To start over, run
 `box profile delete --all`: it asks first, then deletes every profile with its boxes and storage,
 and you'll need to redo steps 2 and 3.
 

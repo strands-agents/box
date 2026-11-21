@@ -141,7 +141,7 @@ runs in <new>`. A new run writes the full profile name to `profile-name` in its 
 `0600`. The profile check reads the `profile-name` record, which must be a file that names this profile
 exactly. Every run then holds an exclusive lock on its run directory until it ends, opened without
 following a link, and `box` refuses a run directory that another `box run` holds, or that a
-`box clean` holds while it removes it.
+`box profile clean` holds while it removes it.
 
 ### Load the packs
 
@@ -651,8 +651,7 @@ history and each `when temporal` rule that the compiled policy has not changed k
 `policy.dw`. Two runs of
 one profile in one workspace share its storage, so the run that starts last writes each
 `[[storage.files.set]]` value into the shared copy. Run directories stay after the run stops, about
-2 MB each. `box clean <BOX_ID>` removes one run directory, and `box clean --all` removes every run
-directory whose box is not running. It asks `[y/N]` first, and `--no-ask` removes without asking.
+2 MB each. [`box profile clean`](../../cli/cli.md#box-profile-clean) removes them.
 
 ## What `box run` refuses
 
@@ -723,8 +722,8 @@ candidate it can run, and lists each candidate it passed over and why.
 **`--box-id`.** The value is not `b-` followed by 16 lowercase hexadecimal digits, names no run
 directory with a `box.toml` and a `box/` (none of them a link), or names a run whose `box.toml`
 names no workspace. The run's `profile-name` record is missing, is not a file, or does not name
-this profile exactly. Another `box run` holds the run directory, or a `box clean` holds it while
-it removes it.
+this profile exactly. Another `box run` holds the run directory, or a `box profile clean` holds it
+while it removes it.
 
 ## Paths and variables
 

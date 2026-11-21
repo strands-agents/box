@@ -200,8 +200,7 @@ run `box telemetry off` on the new computer too.
 | List your profiles and the starters you can make one from | [`box profile list`](cli.md#box-profile-list) |
 | Find a run's box ID | [`box runs list`](cli.md#box-runs-list) |
 | Read what a run allowed and stopped | [`box runs history`](cli.md#box-runs-history) |
-| Remove finished runs | [`box clean`](cli.md#box-clean) |
-| Remove the runs of one profile | [`box profile clean`](cli.md#box-profile-clean) |
+| Remove the runs of a profile, or every run | [`box profile clean`](cli.md#box-profile-clean) |
 | Start a profile's agent fresh, without its settings and sessions | [`box profile reset`](cli.md#box-profile-reset) |
 | Delete a profile, with its runs and storage | [`box profile delete`](cli.md#box-profile-delete) |
 | Turn usage telemetry on or off | [`box telemetry`](cli.md#box-telemetry) |
