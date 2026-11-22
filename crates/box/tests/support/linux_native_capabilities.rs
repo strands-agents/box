@@ -1,6 +1,8 @@
 //! Native startup with effective and permitted-only loader authority.
 use super::{bounded_output::bounded_output, root};
+use std::cell::Cell;
 use std::process::{Command, ExitCode};
+use std::rc::Rc;
 
 const SYS_ADMIN: u64 = 1 << 21;
 const PERFMON: u64 = 1 << 38;
@@ -14,6 +16,7 @@ struct Case {
     effective: u64,
     permitted: u64,
     enabled: Option<bool>,
+    callback: bool,
     loads: bool,
 }
 
@@ -23,6 +26,7 @@ const CASES: &[Case] = &[
         effective: SYS_ADMIN,
         permitted: SYS_ADMIN,
         enabled: Some(true),
+        callback: true,
         loads: true,
     },
     Case {
@@ -30,6 +34,7 @@ const CASES: &[Case] = &[
         effective: SYS_ADMIN | BPF,
         permitted: SYS_ADMIN | BPF,
         enabled: Some(true),
+        callback: true,
         loads: true,
     },
     Case {
@@ -37,6 +42,7 @@ const CASES: &[Case] = &[
         effective: SYS_ADMIN | PERFMON,
         permitted: SYS_ADMIN | PERFMON,
         enabled: Some(true),
+        callback: true,
         loads: true,
     },
     Case {
@@ -44,6 +50,7 @@ const CASES: &[Case] = &[
         effective: NATIVE,
         permitted: NATIVE,
         enabled: Some(true),
+        callback: true,
         loads: true,
     },
     Case {
@@ -51,6 +58,7 @@ const CASES: &[Case] = &[
         effective: PAIR,
         permitted: PAIR,
         enabled: Some(true),
+        callback: true,
         loads: true,
     },
     Case {
@@ -58,6 +66,7 @@ const CASES: &[Case] = &[
         effective: BPF,
         permitted: BPF,
         enabled: Some(true),
+        callback: true,
         loads: false,
     },
     Case {
@@ -65,6 +74,7 @@ const CASES: &[Case] = &[
         effective: PERFMON,
         permitted: PERFMON,
         enabled: Some(true),
+        callback: true,
         loads: false,
     },
     Case {
@@ -72,6 +82,7 @@ const CASES: &[Case] = &[
         effective: 0,
         permitted: 0,
         enabled: Some(true),
+        callback: true,
         loads: false,
     },
     Case {
@@ -79,6 +90,7 @@ const CASES: &[Case] = &[
         effective: 0,
         permitted: SYS_ADMIN,
         enabled: Some(true),
+        callback: true,
         loads: false,
     },
     Case {
@@ -86,6 +98,7 @@ const CASES: &[Case] = &[
         effective: 0,
         permitted: PAIR,
         enabled: Some(true),
+        callback: true,
         loads: false,
     },
     Case {
@@ -93,6 +106,7 @@ const CASES: &[Case] = &[
         effective: BPF,
         permitted: PAIR,
         enabled: Some(true),
+        callback: true,
         loads: false,
     },
     Case {
@@ -100,6 +114,7 @@ const CASES: &[Case] = &[
         effective: PAIR,
         permitted: NATIVE,
         enabled: Some(true),
+        callback: true,
         loads: true,
     },
     Case {
@@ -107,6 +122,7 @@ const CASES: &[Case] = &[
         effective: SYS_ADMIN,
         permitted: NATIVE,
         enabled: Some(true),
+        callback: true,
         loads: true,
     },
     Case {
@@ -114,6 +130,7 @@ const CASES: &[Case] = &[
         effective: SYS_ADMIN,
         permitted: SYS_ADMIN,
         enabled: Some(false),
+        callback: false,
         loads: false,
     },
     Case {
@@ -121,6 +138,7 @@ const CASES: &[Case] = &[
         effective: BPF,
         permitted: BPF,
         enabled: Some(false),
+        callback: false,
         loads: false,
     },
     Case {
@@ -128,6 +146,23 @@ const CASES: &[Case] = &[
         effective: 0,
         permitted: 0,
         enabled: Some(false),
+        callback: false,
+        loads: false,
+    },
+    Case {
+        name: "callback-off-sys-admin",
+        effective: SYS_ADMIN,
+        permitted: SYS_ADMIN,
+        enabled: Some(false),
+        callback: true,
+        loads: true,
+    },
+    Case {
+        name: "callback-off-neither",
+        effective: 0,
+        permitted: 0,
+        enabled: Some(false),
+        callback: true,
         loads: false,
     },
     Case {
@@ -135,6 +170,7 @@ const CASES: &[Case] = &[
         effective: SYS_ADMIN,
         permitted: SYS_ADMIN,
         enabled: None,
+        callback: false,
         loads: false,
     },
 ];
@@ -247,9 +283,12 @@ pub(super) fn check(name: &str) {
         quote(root.join("state")), quote(root.join("workspace"))
     )).unwrap();
     let enabled = case.enabled == Some(true);
+    let callback_ran = Rc::new(Cell::new(false));
     let options = strands_box::RunOptions {
-        on_ready: enabled.then(|| {
+        on_ready: case.callback.then(|| {
+            let callback_ran = Rc::clone(&callback_ran);
             Box::new(move || {
+                callback_ran.set(true);
                 assert_eq!(
                     guard_descriptors(),
                     if case.loads { 4 } else { 0 },
@@ -262,6 +301,12 @@ pub(super) fn check(name: &str) {
         ..Default::default()
     };
     let result = strands_box::run(config, Vec::new(), options);
+    assert_eq!(
+        callback_ran.get(),
+        case.callback,
+        "{}: callback invocation",
+        case.name
+    );
     assert_eq!(
         result,
         if !enabled || case.loads {
