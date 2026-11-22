@@ -2470,6 +2470,39 @@ impl Launch {
         &self.journal
     }
 
+    /// A fresh run that failed before Box Core wrote any state, which `box` removes.
+    fn unused(&self, code: ExitCode) -> bool {
+        !self.reused
+            && code != ExitCode::SUCCESS
+            && self
+                .config
+                .with_file_name("box")
+                .read_dir()
+                .is_ok_and(|mut entries| entries.next().is_none())
+    }
+
+    fn reuse_instruction(&self) -> String {
+        let argument = &self.policy.argument;
+        let id = self.name();
+        let command = if banner::clean(argument) != *argument
+            || argument.contains('\\')
+            || self.profile.to_str().is_none()
+        {
+            format!("repeat your command with --box-id {id} before any --")
+        } else if argument
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_./:-".contains(&byte))
+        {
+            format!("box run {argument} --box-id {id}")
+        } else {
+            format!(
+                "box run '{}' --box-id {id}",
+                argument.replace('\'', "'\\''")
+            )
+        };
+        format!("box: to reuse this box run: {command}")
+    }
+
     fn report(&self) {
         let name = &self.profile_name;
         for (link, why) in self.not_copied() {
@@ -2529,7 +2562,7 @@ impl Launch {
                 "box: running profile {name} with box ID {id} (records: {})",
                 self.journal().display()
             );
-            eprintln!("box: to reuse this box run: box run {name} --box-id {id}");
+            eprintln!("{}", self.reuse_instruction());
         }
         eprintln!("box: policy history: box runs history {id}");
     }
@@ -2592,8 +2625,7 @@ impl Launch {
                 self.run_options(),
             ))
         };
-        if !self.reused
-            && !result.as_ref().is_ok_and(|code| *code == ExitCode::SUCCESS)
+        if self.unused(*result.as_ref().unwrap_or(&ExitCode::FAILURE))
             && let Some(directory) = self.config.parent()
             && std::fs::remove_dir(directory.join("box")).is_ok()
             && let Err(error) = remove_if_present(directory)
