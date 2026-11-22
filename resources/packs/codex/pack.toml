@@ -94,8 +94,8 @@ exception.
 Your shell runs under a policy and is not a full bash. When a shell command gives an unexpected or
 empty result, try a simpler, portable form and name files by explicit paths.
 
-`rg` runs only when ripgrep is installed on the user's machine. When `rg` is not found, search with
-`grep -rn` instead.
+`rg` runs only when the profile lists `@box/rg` and ripgrep is installed on the user's machine.
+When `rg` is not found or is refused, search with `grep -rn` instead.
 
 ## How the user changes what the box allows
 
