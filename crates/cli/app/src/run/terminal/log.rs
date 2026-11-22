@@ -10,6 +10,18 @@ use crate::files::open_at;
 const FILE: &str = "box.log";
 const PREVIEW_BYTES: usize = 1024;
 const PREVIEW_LINES: usize = 6;
+/// The reach words that open a grant line in Box Core's startup disclosure.
+const GRANT_WORDS: &[&str] = &[
+    "read",
+    "write",
+    "read_file",
+    "write_file",
+    "list",
+    "metadata",
+    "exec",
+    "enter",
+    "connect",
+];
 
 pub(super) struct Log {
     pub(super) input: File,
@@ -18,6 +30,9 @@ pub(super) struct Log {
     tail: String,
     truncated: bool,
     unshown: usize,
+    started: bool,
+    disclosing: bool,
+    grants: usize,
 }
 
 impl Log {
@@ -53,6 +68,9 @@ impl Log {
             tail: String::new(),
             truncated: false,
             unshown: 0,
+            started: false,
+            disclosing: false,
+            grants: 0,
         }
     }
 
@@ -77,6 +95,7 @@ impl Log {
     /// Startup lines are expected, so the count of lines left out of the preview starts after them.
     pub(super) fn started(&mut self) {
         self.unshown = 0;
+        self.started = true;
     }
 
     fn save(&mut self, bytes: &[u8]) {
@@ -91,6 +110,9 @@ impl Log {
         let line = self.line.strip_suffix(b"\n").unwrap_or(&self.line);
         let text = String::from_utf8_lossy(line).into_owned();
         self.line.clear();
+        if !self.started {
+            self.count_grant(&text);
+        }
         if text
             .split_once(": ")
             .is_some_and(|(_, message)| message.starts_with("error:"))
@@ -98,6 +120,25 @@ impl Log {
             self.show(&text);
         } else {
             self.unshown += 1;
+        }
+    }
+
+    /// Count `text` when it is a grant line under a table's startup disclosure heading.
+    fn count_grant(&mut self, text: &str) {
+        match text.strip_prefix("  ") {
+            Some(entry) => {
+                if self.disclosing
+                    && entry
+                        .split_whitespace()
+                        .next()
+                        .is_some_and(|word| GRANT_WORDS.contains(&word))
+                {
+                    self.grants += 1;
+                }
+            }
+            None => {
+                self.disclosing = text.starts_with("strands-box: [") && text.ends_with(':');
+            }
         }
     }
 
@@ -144,20 +185,28 @@ impl Log {
             Some(text) if super::super::banner::clean(text) == text => text.to_owned(),
             _ => format!("{path:?}"),
         };
-        let more = match self.unshown {
-            0 => String::new(),
-            1 => " (1 more message)".to_owned(),
-            count => format!(" ({count} more messages)"),
-        };
-        let saved = match &self.output {
-            Ok(_) => format!("box: full log{more}: {path}\n"),
+        let log = match &self.output {
+            Ok(_) => path,
             Err(error) => format!(
-                "box: could not write log {path}: {}\n",
-                error.to_string().escape_debug(),
+                "could not write {path}: {}",
+                error.to_string().escape_debug()
             ),
         };
-        let reuse = launch.reuse_instruction();
-        format!("\n{preview}{saved}\n{reuse}\n\n")
+        let id = launch.name();
+        format!(
+            "\n{preview}box: run {id} ended\n  {} disclosed at startup \u{b7} {}\n  log      {log}\n  \
+             history  box runs history {id}\n  reuse    {}\n\n",
+            counted(self.grants, "grant", "grants"),
+            counted(self.unshown, "more message", "more messages"),
+            launch.reuse_command(),
+        )
+    }
+}
+
+fn counted(count: usize, one: &str, many: &str) -> String {
+    match count {
+        1 => format!("1 {one}"),
+        count => format!("{count} {many}"),
     }
 }
 
@@ -215,6 +264,54 @@ mod tests {
         assert!(error.len() <= PREVIEW_BYTES);
     }
 
+    fn log_report(launch: &Launch) -> String {
+        Log::new(File::open("/dev/null").unwrap(), tempfile::tempfile()).report(launch, true)
+    }
+
+    /// Box Core's startup disclosure, in the shape its tables print.
+    const DISCLOSURE: &str = concat!(
+        "strands-box: box b-1 created \u{b7} config /r/b-1/box.toml\n",
+        "strands-box: [tool.git]: a bare `git` in the Shell runs /usr/bin/git\n",
+        "strands-box: starting workload\n",
+        "strands-box: [tool.git] runs /usr/bin/git with no policy decision over these paths:\n",
+        "  read        /work\n",
+        "  write_file  /work/.git/index\n",
+        "  deny_write  /work/.git/hooks  (read-only)\n",
+        "strands-box: [tool.git] runtime minimum, added by Core:\n",
+        "  read        /usr/share/zoneinfo\n",
+        "  metadata    /  (entry only)\n",
+        "  deny        /private/var/db\n",
+        "  exec        /bin/sh  (interpreter)\n",
+        "strands-box: [tool.git] HOME=/home/u PATH=/usr/bin\n",
+        "strands-box: [agent] runs /usr/bin/agent with no policy decision over these paths:\n",
+        "  (no filesystem entry)\n",
+        "  exec        /usr/bin/agent  (command, implicit)\n",
+        "strands-box: [agent] interpreter aliases for configured access:\n",
+        "  alias       /usr/bin/python3 -> /usr/bin/python3.12  (interpreter spelling)\n",
+        "strands-box: [agent] runtime minimum, added by Core:\n",
+        "  list        /tmp\n",
+        "  enter       /work  (workspace, entry only)\n",
+        "strands-box: [agent] HOME=/home/u PATH=/r/b-1/box/bin:/usr/bin\n",
+        "strands-box: warning: aws:// signs with this machine's AWS identity\n",
+        "  read        /not/under/a/heading\n",
+    );
+
+    /// **Grants count once, at startup, from the reach words under each table's heading**: a deny,
+    /// an alias, a placeholder, and a line under no heading are not grants, and a later disclosure
+    /// is a later message.
+    #[test]
+    fn the_exit_counts_startup_grants_apart_from_later_messages() {
+        let mut log = Log::new(File::open("/dev/null").unwrap(), tempfile::tempfile());
+        for part in DISCLOSURE.as_bytes().chunks(5) {
+            log.push(part);
+        }
+        log.started();
+        log.push(b"strands-box: [mcp.docs] starts on demand; approved direct filesystem grants:\n");
+        log.push(b"  read        /docs\n");
+        assert_eq!(log.grants, 8);
+        assert_eq!(log.unshown, 2);
+    }
+
     #[test]
     fn logs_append_privately_and_keep_the_preview_when_saving_fails() {
         let host = crate::FakeHost::new();
@@ -243,7 +340,17 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600,
         );
-        assert!(console.starts_with("\nbox: full log (1 more message): "));
+        assert!(
+            console.starts_with(&format!(
+                "\nbox: run {} ended\n  0 grants disclosed at startup \u{b7} 1 more message\n  log      ",
+                launch.name
+            )),
+            "{console}"
+        );
+        assert!(
+            console.contains(&format!("\n  history  box runs history {}\n", launch.name)),
+            "{console}"
+        );
         let arguments = console.split_once("box run ").unwrap().1;
         let parsed = std::process::Command::new("/bin/sh")
             .args(["-c", &format!("printf '%s\\n' {arguments}")])
@@ -266,8 +373,10 @@ mod tests {
             log.push(b"strands-box: error: important failure\n");
             let console = log.report(&launch, true);
             assert!(console.contains("  strands-box: error: important failure\n"));
-            assert!(console.contains("could not write log"));
-            assert!(!console.contains("box: full log:"));
+            assert!(
+                console.contains("\n  log      could not write "),
+                "{console}"
+            );
         }
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
 
@@ -284,6 +393,14 @@ mod tests {
             "/two\\\\slashes",
         ] {
             launch.policy.argument = argument.into();
+            assert!(
+                log_report(&launch).contains(&format!(
+                    "\n  reuse    repeat your command with --box-id {} before any --\n",
+                    launch.name
+                )),
+                "{}",
+                log_report(&launch)
+            );
             assert_eq!(
                 launch.reuse_instruction(),
                 format!(
