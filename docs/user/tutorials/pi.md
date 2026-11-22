@@ -455,9 +455,9 @@ With the setting, pi's `bash` tool starts the `bash` in the box's `bin` director
 alias, and the box's shell takes each command from there.
 
 **The process title, in `box-preload.mjs`.** pi sets its process title when it starts. In a box
-that call ends the Node process at once, so the box prints its startup lines and then stops, with
-nothing from pi and exit status `139`. The preload file makes the title setter do nothing, which
-is a workaround for a Box limitation.
+that call ends the Node process at once, so the box stops with nothing from pi and exit status
+`139`. The preload file makes the title setter do nothing, which is a workaround for a Box
+limitation.
 
 **File timestamps, in `box-preload.mjs`.** Without the
 [`file-attributes`](../config.md#file-attributes) switch, Box does not let the agent change file
@@ -487,7 +487,7 @@ that permitted three tasks and refused two with text pi quoted back. To give pi 
 |---|---|
 | `containment config failed: path does not exist: .../.pi/agent/install/releases/.../node_modules/.bin/pi` | The `sed` in step 1 did not run, or the installed version changed. Write the version from `~/.pi/agent/install/current-version` into `command`. |
 | `[agent] filesystem entry "..." is refused: ... is not there` | Make the directory it names: `mkdir -p pi/agent pi/tmp`. |
-| The box prints its startup lines, then exits with status `139` and nothing from pi | Node loaded without the preload file. Check the `--import` path in `command`. |
+| The box exits with status `139` and nothing from pi | Node loaded without the preload file. Check the `--import` path in `command`. |
 | `Credential store read failed for amazon-bedrock: EPERM ... utime ...auth.json.lock` | The preload file did not load, or pi changed how it probes its lock file. Check the `--import` path in `command`. When pi tolerates the refusal, the timestamp part of the preload can go. |
 | pi reports `spawn EPERM` for every command | pi's `bash` tool started `/bin/bash`. Check that `pi/agent/settings.json` is there and sets `shellPath`. |
 | `credential setup failed: credential variable AWS_BEARER_TOKEN_BEDROCK is not set` | Export the key in the shell that runs the box. A key lasts up to 12 hours. |

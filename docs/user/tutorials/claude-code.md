@@ -432,7 +432,7 @@ as `git`.
 
 | Error | Fix |
 |---|---|
-| `error: An unknown error occurred, possibly due to low max file descriptors (Unexpected)`, right after the startup lines | Claude Code could not read its working directory. Check that `list` in `[agent.filesystem]` names the project. |
+| `error: An unknown error occurred, possibly due to low max file descriptors (Unexpected)`, as Claude Code starts | Claude Code could not read its working directory. Check that `list` in `[agent.filesystem]` names the project. |
 | `[agent] filesystem entry "..." is refused: ... is not there` | Make the directory it names: `mkdir -p claude-code/config claude-code/tmp`. |
 | `credential setup failed: credential variable AWS_BEARER_TOKEN_BEDROCK is not set` | Export the key in the host OS's shell that runs the box. A key lasts up to 12 hours. |
 | A `403` from Bedrock in the agent's output | Bedrock refused the key. Check that it is in `AWS_BEARER_TOKEN_BEDROCK` and was made in `us-west-2`. |
