@@ -364,18 +364,14 @@ impl Vault {
         // and ambient fallback is allowed: a named-profile-only vault, a `credsd://` vault, or one
         // under `require_scoped_aws_profile` does no resolve at open, so a box that never signs a
         // bare route forces no credentials to exist. The resolve primes the shared provider cache,
-        // `audit_aws_resolve` emits the one prepare-step record, and the vault warns once here rather
-        // than on each signed request, which keeps its own audit record.
+        // and `audit_aws_resolve` emits the one prepare-step record.
         if vault.ambient_policy != AmbientFallbackPolicy::Deny
             && let Some(locator) = vault
                 .signed_aws
                 .iter()
                 .find_map(|(_, (loc, _))| is_bare_aws_default_chain(loc).then(|| loc.clone()))
         {
-            let resolution = vault.audit_aws_resolve(&locator)?;
-            if let Some(warning) = resolution.acquisition.warning() {
-                vault.warn_at_open(warning);
-            }
+            vault.audit_aws_resolve(&locator)?;
         }
 
         Ok(Opened::new(vault, phantoms, skipped))
@@ -486,13 +482,6 @@ impl Vault {
         CAPTURED_WARNINGS.with(|warnings| warnings.borrow_mut().push(message.to_string()));
     }
 
-    /// Report, once at open, a condition that holds for every request this vault serves.
-    fn warn_at_open(&self, message: &str) {
-        eprintln!("strands-box: warning: {message}");
-        #[cfg(test)]
-        CAPTURED_WARNINGS.with(|warnings| warnings.borrow_mut().push(message.to_string()));
-    }
-
     /// What must be edited on `req` before it goes upstream, or `None` when this vault governs no
     /// credential for its destination.
     pub fn attach_for(&self, req: Outbound<'_>) -> Result<Option<Attachment>> {
@@ -585,8 +574,8 @@ impl Vault {
 
 #[cfg(test)]
 thread_local! {
-    /// Warnings the vault emitted on this thread, so a test can observe a warning without capturing
-    /// stderr. Drained by [`drain_captured_warnings`]. Hermetic: a test injects a
+    /// Warnings `Vault::warn` emitted on this thread, so a test can observe a per-request warning
+    /// without capturing stderr. Drained by [`drain_captured_warnings`]. Hermetic: a test injects a
     /// fake AWS provider, so `warn` runs on the test thread and never reaches the SDK worker.
     static CAPTURED_WARNINGS: std::cell::RefCell<Vec<String>> =
         const { std::cell::RefCell::new(Vec::new()) };

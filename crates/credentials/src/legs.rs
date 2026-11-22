@@ -125,6 +125,11 @@ impl Vault {
         // audit record, exactly like a load-time one. A signed route resolves nothing at open,
         // so without this an AWS credential acquisition would never be audited at all.
         let resolution = self.audit_aws_resolve(config)?;
+        if let Some(warning) = resolution.acquisition.warning() {
+            // An ambient fallback is allowed but not silent: it means the request is being signed with
+            // whatever identity the host happens to carry rather than a declared scoped one.
+            self.warn(warning);
+        }
         // The source's return type is the credentials themselves, so there is no "wrong material kind"
         // branch left to get wrong here.
         let credentials = &*resolution.credentials;
@@ -445,10 +450,10 @@ mod tests {
         }
     }
 
-    /// Open a signed-`aws://` vault with the fake provider injected, sign `requests` requests to an
-    /// AWS host, and return the warnings emitted at open and while signing. Drives the real
-    /// `Vault::sign_aws` path end to end, through the seam a process-wide provider did not allow.
-    fn sign_through_fake(locator: &str, requests: usize) -> (Vec<String>, Vec<String>) {
+    /// Open a signed-`aws://` vault with the fake provider injected, sign one request to an AWS
+    /// host, and return the warnings `sign_aws` emitted. Drives the real `Vault::sign_aws` path end
+    /// to end — the seam that a hardcoded process-wide provider did not allow.
+    fn sign_through_fake(locator: &str) -> Vec<String> {
         let _ = drain_captured_warnings();
         let opened = Vault::open_with_aws_provider(
             VaultConfig::new(Backend::local(), "tenant-a").route(RouteSpec::signed_aws(
@@ -458,64 +463,42 @@ mod tests {
             Arc::new(FixedProvider),
         )
         .expect("the signed route opens with the injected provider");
-        let at_open = drain_captured_warnings();
         let vault = opened.into_vault();
-        for _ in 0..requests {
-            vault
-                .attach_for(Outbound {
-                    destination: Destination {
-                        host: "s3.us-west-2.amazonaws.com",
-                        port: 443,
-                        path: "/",
-                    },
-                    method: "GET",
-                    url: "https://s3.us-west-2.amazonaws.com/",
-                    query: "",
-                    headers: &[],
-                    body: b"",
-                })
-                .expect("the signed route attaches")
-                .expect("a credential is bound for this destination");
-        }
-        (at_open, drain_captured_warnings())
+        vault
+            .attach_for(Outbound {
+                destination: Destination {
+                    host: "s3.us-west-2.amazonaws.com",
+                    port: 443,
+                    path: "/",
+                },
+                method: "GET",
+                url: "https://s3.us-west-2.amazonaws.com/",
+                query: "",
+                headers: &[],
+                body: b"",
+            })
+            .expect("the signed route attaches")
+            .expect("a credential is bound for this destination");
+        drain_captured_warnings()
     }
 
-    /// End to end through `Vault::sign_aws`: a bare `aws://` warns once when the vault opens and
-    /// never on a sign, and a scoped `aws://PROFILE` warns not at all. Hermetic because the injected
+    /// End to end through `Vault::sign_aws`: a bare `aws://` warns once per sign (the ambient
+    /// identity), and a scoped `aws://PROFILE` warns not at all. Hermetic because the injected
     /// provider resolves the credentials, so no SDK, worker, or `AWS_*` environment is reached.
     #[test]
     fn sign_aws_warns_on_bare_and_not_on_scoped() {
-        let (at_open, signing) = sign_through_fake("aws://", 1);
-        assert_eq!(
-            at_open.len(),
-            1,
-            "a bare route warns once at open: {at_open:?}"
-        );
+        let bare = sign_through_fake("aws://");
+        assert_eq!(bare.len(), 1, "a bare sign warns exactly once: {bare:?}");
         assert!(
-            at_open[0].contains("machine's AWS identity"),
-            "the warning names the machine's identity: {}",
-            at_open[0]
+            bare[0].contains("ambient"),
+            "the warning names the ambient identity: {}",
+            bare[0]
         );
-        assert!(signing.is_empty(), "a bare sign warns no more: {signing:?}");
 
-        let (at_open, signing) = sign_through_fake("aws://prod", 1);
+        let scoped = sign_through_fake("aws://prod");
         assert!(
-            at_open.is_empty() && signing.is_empty(),
-            "a scoped profile emits no warning: {at_open:?} {signing:?}"
-        );
-    }
-
-    /// Many signed requests through a bare `aws://` leave exactly one ambient-identity warning.
-    #[test]
-    fn many_bare_signs_leave_one_ambient_warning() {
-        let (at_open, signing) = sign_through_fake("aws://", 7);
-        let all: Vec<&String> = at_open.iter().chain(&signing).collect();
-        assert_eq!(
-            all.iter()
-                .filter(|warning| warning.contains("machine's AWS identity"))
-                .count(),
-            1,
-            "{all:?}"
+            scoped.is_empty(),
+            "a scoped-profile sign emits no warning: {scoped:?}"
         );
     }
 
