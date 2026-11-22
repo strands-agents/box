@@ -21,28 +21,38 @@ fn rg_cannot_change_the_project_that_it_reads() {
 }
 
 #[test]
-fn a_codex_box_without_rg_skips_the_tool_and_still_runs() {
+fn a_codex_profile_lists_rg_and_runs_without_it() {
     let host = FakeHost::new();
-    let generated = host
-        .trial()
+    let created = host
+        .profile()
         .with("codex")
         .with("bedrock-mantle")
         .search_path(host.own_search_path())
-        .generate()
-        .expect("a configuration without rg");
+        .policy("open")
+        .answer(None)
+        .expect("answers")
+        .create()
+        .expect("a profile");
     assert!(
-        box_toml(&generated)
-            .get("tool")
-            .and_then(|tools| tools.get("rg"))
-            .is_none(),
-        "{}",
-        generated.box_toml()
+        created
+            .profile()
+            .packs()
+            .iter()
+            .any(|pack| pack == "@box/rg"),
+        "{:?}",
+        created.profile().packs()
     );
+    created.write(false).expect("a write");
+    let prepared = host
+        .launcher()
+        .search_path(host.own_search_path())
+        .prepare("codex", &host.project(), None)
+        .expect("a run without rg");
     assert!(
-        generated
+        prepared
             .skipped()
             .contains(&("rg (@box/rg)".to_string(), "rg is not on PATH".to_string())),
         "{:?}",
-        generated.skipped()
+        prepared.skipped()
     );
 }

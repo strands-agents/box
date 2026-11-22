@@ -81,10 +81,7 @@ fn graph_includes_transitive_packs_once_in_id_order() {
     let mut observations = Observations::default();
     observations.packs(&layers);
     let value = snapshot(observations);
-    assert_eq!(
-        value["builtin_packs"],
-        json!(["base", "claude", "codex", "rg"])
-    );
+    assert_eq!(value["builtin_packs"], json!(["base", "claude", "codex"]));
     assert_eq!(value["has_custom_packs"], false);
     assert_eq!(value["mcp_configured"], Value::Null);
 }

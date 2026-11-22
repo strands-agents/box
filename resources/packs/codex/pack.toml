@@ -4,8 +4,6 @@ name = "@box/codex"
 version = 1
 kind = "agent"
 extend = ["@box/base"]
-# Codex searches with rg. A run skips the tool when rg is not on your PATH.
-include = ["@box/rg"]
 
 [run]
 command = [

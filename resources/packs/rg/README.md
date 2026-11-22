@@ -1,11 +1,12 @@
 # ripgrep in a box (`@box/rg`)
 
 The `@box/rg` pack lets the agent run the `rg` that your `PATH` finds, such as ripgrep from
-Homebrew, `cargo install`, or your system's package manager. `@box/codex` includes it, because
-Codex searches with `rg`. If `rg` isn't on your `PATH`, `box run` skips the tool and says so.
+Homebrew, `cargo install`, or your system's package manager. `box profile create codex` adds it
+to the profile's `packs`, because Codex searches with `rg`. To take the tool away, delete
+`"@box/rg"` from `packs`. If `rg` isn't on your `PATH`, `box run` skips the tool and says so.
 
-Claude Code searches with its own Grep tool, which needs no tool in the box. For `rg` in Claude
-Code's shell, add `"@box/rg"` to your profile's `packs`.
+For another agent, such as Claude Code, add `"@box/rg"` to the profile's `packs`. Claude Code
+searches with its own Grep tool, which needs no tool in the box.
 
 ## What rg can reach
 
