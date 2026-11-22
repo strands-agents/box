@@ -873,7 +873,10 @@ fn a_profile_that_turns_file_attributes_off_cannot_set_file_times_on_macos() {
     if cfg!(target_os = "macos") {
         let text = stderr(&output);
         assert!(!output.status.success(), "{text}");
-        assert!(text.contains("strands-box: starting workload"), "{text}");
+        assert!(
+            text.contains("strands-box: note[B0302]: starting workload"),
+            "{text}"
+        );
         assert!(
             text.contains("stamped.txt: Operation not permitted"),
             "{text}"
@@ -3730,7 +3733,7 @@ fn a_run_prints_the_box_id_that_brings_it_back() {
         "Box Core stores the box ID that box prints"
     );
     assert!(
-        stderr(&output).contains(&format!("strands-box: box {id} created")),
+        stderr(&output).contains(&format!("strands-box: note[B0301]: box {id} created")),
         "{}",
         stderr(&output)
     );

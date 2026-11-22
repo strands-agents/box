@@ -64,7 +64,7 @@ impl Diagnostics {
             self.original.write_all(b"\n")?;
             ::diagnostics::diag!(
                 into self.original,
-                warning,
+                B1002,
                 "further runtime diagnostics were discarded"
             )?;
         }
@@ -166,7 +166,7 @@ mod tests {
                 let mut expected = b"NATIVE\n".to_vec();
                 expected.extend(vec![b'x'; CAPACITY]);
                 expected.extend(
-                    b"\nstrands-box: warning: further runtime diagnostics were discarded\nRESTORED\n",
+                    b"\nstrands-box: warning[B1002]: further runtime diagnostics were discarded\nRESTORED\n",
                 );
                 expected
             } else {

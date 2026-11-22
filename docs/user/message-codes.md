@@ -142,6 +142,9 @@ is what you intended.
 | `B0207` | note | A tool's program is not installed, so the box left the tool out of this run. | Install the program, or build it, before `run`. See [a tool whose program is not installed](config.md#a-tool-whose-program-is-not-installed). |
 | `B0208` | note | How a bare program name in the Shell resolves differs from what a table suggests. | See [a grammar action replaces `shell:spawn`](tool-grammars.md#a-grammar-action-replaces-shellspawn), [`monty`](config.md#monty), and [`PATH`](shell.md#path). |
 | `B0209` | note | A telemetry target receives each MCP tool call's arguments and output in clear text. | Remove `mcp_tool_calls` from the target's `include` unless it must receive them. See [a tool call](telemetry.md#a-tool-call). |
+| `B0210` | note | A process connects to the network directly, with no egress gateway, no network policy decision, and no credential injection. | Set `contain_egress = false` only for a program whose client cannot use a proxy. See [Network](mcp.md#network). |
+| `B0211` | note | Box gives a process with native egress no proxy and no certificate authority, so its client uses its own defaults. | No action when the program trusts its own roots. See [Network](mcp.md#network). |
+| `B0212` | warning | A process's write grant reaches the program it runs, so the process can replace that program. | Move the program out of the writable grant, or narrow the grant. See [what is refused](config.md#what-is-refused). |
 
 <a id="b03"></a>
 
@@ -220,6 +223,7 @@ These apply only when native filesystem policy is on. See
 | Code | Severity | Meaning | What to do |
 |---|---|---|---|
 | `B1001` | warning | Part of the box's shutdown failed. | Read the part that the text names. A failed final history flush can lose pending history, as [history persistence and process crashes](policy.md#history-persistence-and-process-crashes) describes. |
+| `B1002` | warning | Box held its messages while the workload drew on the terminal, and discarded those past its limit. | Run the box with stderr sent to a file or a pipe to read every message as it is written. |
 
 <a id="b11"></a>
 
@@ -229,6 +233,19 @@ These apply only when native filesystem policy is on. See
 |---|---|---|---|
 | `B1101` | warning | The broker rejected a client of its socket. | Read the reason in the text. If it repeats, report it with the full stderr of the run. |
 | `B1102` | warning | Serving a client of the broker's socket failed. | Read the reason in the text. If it repeats, report it with the full stderr of the run. |
+
+<a id="b12"></a>
+
+## B12: Messages to the agent
+
+Box writes these into the stderr of the command the agent ran, so the agent reads them as that
+command's output.
+
+| Code | Severity | Meaning | What to do |
+|---|---|---|---|
+| `B1201` | warning | A command's stdin was longer than the limit, so the command received only the first part. | Pass less input, or raise `shell.max_stdin`. See [`[limits]`](config.md#limits). |
+| `B1202` | error | A command could not start in the directory it named. | Nothing ran. See [exit statuses](shell.md#exit-statuses). |
+| `B1203` | error | A call's deadline is past this platform's clock range, so the call did not run. | Reduce `limits.shell.timeout`. See [exit statuses](shell.md#exit-statuses). |
 
 <a id="h01"></a>
 

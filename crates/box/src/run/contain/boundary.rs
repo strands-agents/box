@@ -1042,7 +1042,7 @@ type DisclosureMessage = (::diagnostics::Kind, String);
 /// The messages a box prints for one spec: its grants, selected policy checks, Core's own
 /// additions, and the effective `HOME` and `PATH`.
 fn disclosure(inputs: &DisclosureInputs<'_>) -> Vec<DisclosureMessage> {
-    use ::diagnostics::{Code, Kind, Severity};
+    use ::diagnostics::{Code, Kind};
     let grant = Kind::Coded(Code::B0201);
     let table = inputs.table;
     let coverage = if inputs.native_filesystem_policy {
@@ -1127,16 +1127,15 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> Vec<DisclosureMessage> {
         } else {
             ""
         };
-        // No code names a direct route to the network yet, so these two are uncoded notes.
         messages.push((
-            Kind::Uncoded(Severity::Note),
+            Kind::Coded(Code::B0210),
             format!(
                 "{table} native egress: connects to the network directly{arguments} with \
                  no egress gateway, no net:connect or http:request decision, and no credential injection"
             ),
         ));
         messages.push((
-            Kind::Uncoded(Severity::Note),
+            Kind::Coded(Code::B0211),
             format!(
                 "{table} native trust: no proxy and no CA variable from Box, so its \
                  client uses its own defaults or its table's `env`{services}",
@@ -1162,9 +1161,8 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> Vec<DisclosureMessage> {
         } else {
             "interpreter"
         };
-        // No code names a program its own grant can replace yet, so this is an uncoded warning.
         messages.push((
-            Kind::Uncoded(Severity::Warning),
+            Kind::Coded(Code::B0212),
             format!(
                 "{table} {role} {} lies inside the writable grant {}, so the \
                  process can replace the program it runs",
@@ -2978,7 +2976,7 @@ mod tests {
         );
         assert!(
             native.disclosure().contains(
-                "strands-box: note: [tool.sso-cli] native egress: connects to the network directly, with \
+                "strands-box: note[B0210]: [tool.sso-cli] native egress: connects to the network directly, with \
                  the arguments the agent passes,"
             ),
             "{}",
@@ -2995,7 +2993,7 @@ mod tests {
             "{}",
             gateway.disclosure()
         );
-        let trust = "strands-box: note: [tool.sso-cli] native trust: no proxy and no CA variable from \
+        let trust = "strands-box: note[B0211]: [tool.sso-cli] native trust: no proxy and no CA variable from \
                      Box, so its client uses its own defaults or its table's `env`";
         assert!(
             native.disclosure().contains(trust),
@@ -4236,7 +4234,9 @@ mod tests {
         let boundary = fixture.translate(&spec, "[agent]", &[]);
 
         assert!(
-            boundary.disclosure().contains("warning: [agent] command")
+            boundary
+                .disclosure()
+                .contains("strands-box: warning[B0212]: [agent] command")
                 && boundary
                     .disclosure()
                     .contains("can replace the program it runs"),
@@ -4264,7 +4264,7 @@ mod tests {
         let disclosure = boundary.disclosure();
 
         assert!(
-            disclosure.contains("warning: [agent] interpreter")
+            disclosure.contains("strands-box: warning[B0212]: [agent] interpreter")
                 && disclosure.contains(&interpreter.display().to_string()),
             "{disclosure}"
         );
@@ -4290,7 +4290,7 @@ mod tests {
         let disclosure = boundary.disclosure();
 
         assert!(
-            disclosure.contains("warning: [agent] interpreter")
+            disclosure.contains("strands-box: warning[B0212]: [agent] interpreter")
                 && disclosure.contains(&interpreter.display().to_string()),
             "{disclosure}"
         );

@@ -808,8 +808,8 @@ Let the filesystem update finish, then retry the launch.
 **A `write` grant alone is not runnable.** The agent's sandbox refuses to map code from a writable
 grant. When the agent's `command` or one of its interpreters lies inside a writable grant, the
 startup disclosure carries a warning:
-`strands-box: warning: [agent] command <path> lies inside the writable grant <path>, so the process
-can replace the program it runs`.
+`strands-box: warning[B0212]: [agent] command <path> lies inside the writable grant <path>, so the
+process can replace the program it runs`.
 
 <a id="linux-writable-libraries"></a>
 

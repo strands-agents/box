@@ -136,6 +136,11 @@ pub fn write(
     writer.write_all(render(source, kind, text).as_bytes())
 }
 
+/// One message as text, for a message Box sends to the agent inside a command's stderr.
+pub fn text(source: Source, kind: Kind, text: fmt::Arguments<'_>) -> String {
+    render(source, kind, text)
+}
+
 /// The message's lines: the first names the source, severity, and code, and each later line is
 /// indented so that it cannot read as a message of its own.
 pub(crate) fn render(source: Source, kind: Kind, text: fmt::Arguments<'_>) -> String {

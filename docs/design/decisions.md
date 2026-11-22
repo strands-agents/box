@@ -684,6 +684,23 @@ and raises `shell:exec`, and each file it touches raises its own `fs:*`. The ali
 command such as `cat` or `jq`. A program that the Shell starts in its own sandbox still reads no
 stdin. Plugin hooks remain broken because most of them exec a script.
 
+<a id="core-writes-stderr-only-through-diag-and-codes-each-kind"></a>
+### Box Core writes stderr only through `diag!`, and each kind of message has one code
+
+Every Box Core message reaches stderr through `diagnostics::diag!` as
+`<source>: <severity>[<code>]: <text>`, so a person, an agent, or a log reader can sort and look
+up messages without matching prose. One code names one kind of message, and the registry sets its
+severity. A code is decided where its text is built, so call sites that print the same kind share
+it, and a message with no code is an internal failure the reader can only report. Clippy refuses
+`eprintln!` and `std::io::stderr` in Core crates. The format is a convention on a stream that the
+workload's processes share, not an authenticated channel.
+
+**Rejected.** Codes only for messages a reader acts on today: whether to show a kind is the
+reader's choice, and an uncoded kind cannot be explained or acted on later.
+
+**Cost.** A new message needs a code or a reason to have none, and the docs page lists every code.
+A reader must not treat a coded line as proof that Box wrote it.
+
 ## Policy
 
 <a id="the-authored-policy-is-the-only-decision-authority"></a>

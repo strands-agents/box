@@ -12,11 +12,11 @@ mod format;
 mod parse;
 mod registry;
 
-pub use format::{Kind, Severity, Source, emit, stderr, write};
+pub use format::{Kind, Severity, Source, emit, stderr, text, write};
 pub use parse::{Line, Message, parse};
 pub use registry::Code;
 
-/// Write one message to stderr, or with `into`, to a writer.
+/// Write one message to stderr, with `into` to a writer, or with `text` into a `String`.
 ///
 /// The first argument is a code (`P0201`), a severity for an uncoded message (`error`, `warning`,
 /// `note`), or a braced expression that yields a [`Kind`]. The rest is a `format!` string. The
@@ -25,6 +25,13 @@ pub use registry::Code;
 #[allow(clippy::crate_in_macro_def)]
 #[macro_export]
 macro_rules! diag {
+    (text $kind:tt, $($format:tt)+) => {
+        $crate::text(
+            crate::DIAGNOSTIC_SOURCE,
+            $crate::kind!($kind),
+            ::std::format_args!($($format)+),
+        )
+    };
     (into $writer:expr, $kind:tt, $($format:tt)+) => {
         $crate::write(
             &mut $writer,

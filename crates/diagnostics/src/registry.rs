@@ -100,6 +100,9 @@ codes! {
     B0207 => note, "tools left out", "A tool's program is not installed, so the box left the tool out of this run.";
     B0208 => note, "bare name disclosures", "How a bare program name in the Shell resolves differs from what a table suggests.";
     B0209 => note, "clear-text MCP telemetry disclosures", "A telemetry target receives each MCP tool call's arguments and output in clear text.";
+    B0210 => note, "native egress disclosures", "A process connects to the network directly, with no egress gateway, no network policy decision, and no credential injection.";
+    B0211 => note, "native trust disclosures", "Box gives a process with native egress no proxy and no certificate authority, so its client uses its own defaults.";
+    B0212 => warning, "replaceable programs", "A process's write grant reaches the program it runs, so the process can replace that program.";
     // Box: lifecycle.
     B0301 => note, "box state changes", "The box was created, opened, or refreshed.";
     B0302 => note, "workload starts", "The box starts its workload.";
@@ -127,9 +130,14 @@ codes! {
     B0902 => error, "filesystem query supervisor failures", "The filesystem query supervisor failed.";
     // Box: shutdown.
     B1001 => warning, "shutdown failures", "Part of the box's shutdown failed.";
+    B1002 => warning, "discarded messages", "Box held its messages while the workload drew on the terminal, and discarded those past its limit.";
     // Box: broker connections.
     B1101 => warning, "rejected broker clients", "The broker rejected a client of its socket.";
     B1102 => warning, "failed broker clients", "Serving a client of the broker's socket failed.";
+    // Box: messages to the agent, written into a command's stderr.
+    B1201 => warning, "truncated command input", "A command's stdin was longer than the limit, so the command received only the first part.";
+    B1202 => error, "refused start directories", "A command could not start in the directory it named.";
+    B1203 => error, "call deadlines out of range", "A call's deadline is past this platform's clock range, so the call did not run.";
 
     // Helper programs, read by the agent.
     H0101 => error, "protocol version mismatches", "The alias and the box speak different protocol versions.";

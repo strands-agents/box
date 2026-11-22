@@ -376,7 +376,7 @@ its effect at the server stays.
 | `125` | The name of the directory the alias was run from isn't valid UTF-8. Run the command from another directory. | `strands-box-sock-alias: error[H0202]: the working directory is not valid UTF-8` |
 | `125` | The call exceeded the broker's backup deadline, five seconds after its finite Shell allowance. | `strands-box-sock-alias: error[H0105]: the call exceeded its deadline` |
 | `125` | The deadline exceeds the platform's clock range. Reduce `limits.shell.timeout`. | `strands-box-sock-alias: error: the call deadline exceeds this platform's clock range` |
-| `126` | Policy refused the directory the alias was run from, it isn't a directory, or it is outside the operator's home, the agent's home, and the workspace. Nothing ran. | `strands-box: cannot start in <directory>: <error>` |
+| `126` | Policy refused the directory the alias was run from, it isn't a directory, or it is outside the operator's home, the agent's home, and the workspace. Nothing ran. | `strands-box: error[B1202]: cannot start in <directory>: <error>` |
 | `126` | Policy refused the command. | `strands-shell: effect denied: policy denied this operation on '<program>'`, then `[policy: <id>]` or `[default-deny]`. A tool grammar action reads the same way. |
 | `126` | A tool grammar binds the program file, and Box refused the spawn before any rule decided it. | `strands-shell: effect denied: policy denied this operation on '<program>' [tool-grammar]: <reason>. No policy can permit it.` |
 | `126` | Policy permitted a program that a `[tool.<name>]` table names, and its arguments match no table's fixed arguments. | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments`` |
