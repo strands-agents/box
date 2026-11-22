@@ -18,6 +18,56 @@ one ahead of time.
 `/Library/Application Support/ClaudeCode/`. If your provider is set there, answer the question
 yourself.
 
+## Sign in with a Claude subscription
+
+To run Claude Code on your claude.ai Pro or Max plan instead of an API key, give the box a token
+from `claude setup-token`:
+
+1. On your machine, run `claude setup-token` and sign in in the browser it opens. It prints a
+   token that starts with `sk-ant-oat01-`.
+2. Put the token in `CLAUDE_CODE_OAUTH_TOKEN` in the terminal you run `box` from:
+
+   ```sh
+   export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+   ```
+
+3. Make a profile for the Anthropic API, then switch it to your subscription. `box profile create`
+   doesn't offer a subscription yet, so start with `box profile create claude --with
+   claude,anthropic`. In `~/.strands/box/profiles/claude/profile.toml`, delete `"@box/anthropic"`
+   from the `packs` list, keep the other packs, and add `claude.sign-in` under `[options]`:
+
+   ```toml
+   [options]
+   claude.host = "anthropic"
+   claude.sign-in = "subscription"
+   ```
+
+Keep `claude.host = "anthropic"`. With `bedrock`, Claude Code talks to Bedrock and never uses the
+token. And leave `@box/anthropic` out: it routes all of `api.anthropic.com` with your API key, and
+`box run` refuses a profile that has both, with an error that says `anthropic-subscription`
+overlaps `anthropic`. Without it, your `ANTHROPIC_API_KEY` doesn't reach the box, so Claude Code
+uses the token.
+
+The box adds the token only to Claude Code's model, settings, and sign-in paths on
+`api.anthropic.com`, which the `[egress.anthropic-subscription]` route in this pack's
+[`pack.toml`](pack.toml) lists. The rest of the host stays reachable without the token, which is
+what WebFetch's safety check and Claude Code's telemetry need. If a Claude Code feature fails with
+a 401 from another path, add the path to the route in `profile.toml`. Write the pack's list and
+your path, because your list replaces the pack's:
+
+```toml
+[egress.anthropic-subscription]
+destinations = [
+    "api.anthropic.com/v1/",
+    "api.anthropic.com/api/claude_cli/",
+    "api.anthropic.com/api/claude_code/",
+    "api.anthropic.com/api/oauth/",
+    "api.anthropic.com/api/claude_code_grove",
+]
+```
+
+[Destinations](../../../docs/user/egress.md#destinations) says how a path matches.
+
 ## How Claude Code asks before it acts
 
 Claude Code in the box starts with the permission settings from your machine. The first time you
@@ -307,16 +357,16 @@ on your machine after that first run don't come into the box. To bring them in, 
 `agent/config/settings.json` from the storage folder that `box profile show` prints, and the next
 run copies your file again.
 
-With the Anthropic API (`claude.host = "anthropic"`), the `@box/anthropic` route reaches
-`api.anthropic.com`, so the check stays on. A profile that you move from Bedrock to the Anthropic
+With the Anthropic API (`claude.host = "anthropic"`), the profile's route reaches
+`api.anthropic.com`, with an API key or a subscription, so the check stays on. A profile that you move from Bedrock to the Anthropic
 API keeps the setting from its earlier runs. To turn the check back on, remove
 `skipWebFetchPreflight` from `agent/config/settings.json` in the storage folder that
 `box profile show` prints.
 
 ## Limitations
 
-- Signing in with a claude.ai subscription doesn't work in a box. Use an Anthropic API key
-  (`@box/anthropic`) or Amazon Bedrock (`@box/bedrock`).
+- `box profile create` has no choice for a claude.ai subscription. Edit the profile as
+  [Sign in with a Claude subscription](#sign-in-with-a-claude-subscription) shows.
 - If your organization deploys `managed-mcp.json`, Claude Code uses only the MCP servers it lists,
   and those servers don't work in the box yet. Your own servers from `~/.claude.json` don't load
   either, because the policy turns them off.

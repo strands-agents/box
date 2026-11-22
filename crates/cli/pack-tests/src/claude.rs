@@ -1355,3 +1355,104 @@ fn a_claude_box_on_the_anthropic_api_keeps_webfetchs_domain_lookup_and_routes_it
         "Claude Code asks api.anthropic.com/api/web/domain_info before each WebFetch"
     );
 }
+
+/// The Claude Code paths on api.anthropic.com that a subscription's setup token reaches.
+const SUBSCRIPTION_PATHS: [&str; 4] = [
+    "api.anthropic.com/v1/",
+    "api.anthropic.com/api/claude_cli/",
+    "api.anthropic.com/api/claude_code/",
+    "api.anthropic.com/api/oauth/",
+];
+
+#[test]
+fn a_claude_subscription_routes_its_setup_token_to_claude_codes_paths_and_not_the_whole_host() {
+    let host = FakeHost::new();
+    let generated = host
+        .trial()
+        .with("claude")
+        .option("claude.host", "anthropic")
+        .option("claude.sign-in", "subscription")
+        .generate()
+        .expect("a configuration");
+    let file: toml::Value = toml::from_str(generated.box_toml()).expect("TOML");
+    let route = &file["egress"]["anthropic-subscription"];
+    assert_eq!(
+        strings(&route["destinations"]),
+        SUBSCRIPTION_PATHS,
+        "WebFetch's check and telemetry send no token, so the route leaves their paths out"
+    );
+    assert_eq!(
+        route["secret"]["ref"].as_str(),
+        Some("env://CLAUDE_CODE_OAUTH_TOKEN")
+    );
+    assert_eq!(
+        route["secret"]["phantom_prefix"].as_str(),
+        Some("sk-ant-oat01-")
+    );
+}
+
+#[test]
+fn a_claude_profile_on_an_api_key_routes_no_setup_token() {
+    let host = FakeHost::new();
+    let generated = host
+        .trial()
+        .with("claude")
+        .with("anthropic")
+        .option("claude.host", "anthropic")
+        .generate()
+        .expect("a configuration");
+    let file: toml::Value = toml::from_str(generated.box_toml()).expect("TOML");
+    assert!(
+        file["egress"].get("anthropic-subscription").is_none(),
+        "{}",
+        generated.box_toml()
+    );
+    assert!(
+        !generated.box_toml().contains("CLAUDE_CODE_OAUTH_TOKEN"),
+        "{}",
+        generated.box_toml()
+    );
+}
+
+#[test]
+fn an_anthropic_profile_edited_for_a_subscription_runs_only_once_it_drops_the_api_key_pack() {
+    let host = FakeHost::new();
+    host.profile()
+        .with("claude")
+        .with("anthropic")
+        .option("claude.host", "anthropic")
+        .create()
+        .expect("a profile")
+        .write(false)
+        .expect("a write");
+    let path = profiles_root(&host.home().join(".strands/box")).join("claude/profile.toml");
+    let saved = std::fs::read_to_string(&path).expect("the profile");
+    let signed_in = saved.replacen(
+        "claude.host = \"anthropic\"\n",
+        "claude.host = \"anthropic\"\nclaude.sign-in = \"subscription\"\n",
+        1,
+    );
+    assert!(signed_in.contains("claude.sign-in"), "{saved}");
+    std::fs::write(&path, &signed_in).expect("the profile with both routes");
+    let error = host
+        .launcher()
+        .prepare("claude", &host.project(), None)
+        .expect_err("two routes on api.anthropic.com");
+    assert!(
+        format!("{error:?}").contains("`anthropic-subscription` overlaps `anthropic`"),
+        "{error:?}"
+    );
+    let edited = signed_in.replacen("\"@box/anthropic\", ", "", 1);
+    assert!(!edited.contains("@box/anthropic"), "{saved}");
+    std::fs::write(&path, edited).expect("the edited profile");
+    let launch = host
+        .launcher()
+        .prepare("claude", &host.project(), None)
+        .expect("Box Core accepts the subscription profile");
+    let file: toml::Value =
+        toml::from_str(&std::fs::read_to_string(launch.config()).expect("box.toml")).expect("TOML");
+    assert_eq!(
+        strings(&file["egress"]["anthropic-subscription"]["destinations"]),
+        SUBSCRIPTION_PATHS
+    );
+}
