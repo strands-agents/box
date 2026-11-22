@@ -6,7 +6,32 @@ Instructions for changing Box. Edit this file only when the user explicitly asks
 **To run Box**, use the `setting-up-a-box` skill or follow
 [getting started](docs/user/getting-started.md).
 
-## `strands-box` is interface-frozen
+## Two products
+
+This repository holds two products with different readers, contracts, and reviewers. Each path
+belongs to one of them.
+
+| Product | Its contract | Frozen | Code | Docs | Reviewed by |
+| --- | --- | --- | --- | --- | --- |
+| Box Core (`strands-box`) | `box.toml`, the `strands-box` verbs, and the library API, which programs and the CLI build on | Yes, see [below](#strands-box-is-interface-frozen) | `crates/` outside `crates/cli/`, `examples/`, and the `test-*` suites outside `test-corpus/` | `docs/user/`, `docs/design/` | Box Core maintainers |
+| The `box` CLI | Profiles, packs, starters, and the `box` commands, which people use | No, see [`crates/cli/AGENTS.md`](crates/cli/AGENTS.md) | `crates/cli/`, `resources/`, `test-corpus/` | `docs/cli/`, `docs/design/cli/` | The CLI team |
+
+`.github/CODEOWNERS` maps each path to its reviewers.
+
+### A change that crosses the boundary
+
+The CLI is a client of Box Core, so the boundary runs one way.
+
+- When a CLI feature needs something Box Core lacks, such as a new `box.toml` key, the Core change
+  lands first in its own pull request, under the freeze, and Box Core maintainers review it. The
+  CLI pull request follows. Do not put a Core contract change in a CLI pull request.
+- The CLI's syntax is its own and can diverge from `box.toml`. Do not reuse a `box.toml` name or
+  shape in a profile or pack only to match Box Core, and do not add a Box Core key only to make CLI
+  syntax simpler.
+
+## Box Core
+
+### `strands-box` is interface-frozen
 
 Get the user's explicit approval **before writing code** that changes either:
 
@@ -37,18 +62,7 @@ After approval, bump `RECORD_VERSION`, `LIVE_VERSION`, or `PROTOCOL_VERSION` whe
 An approved interface change carries its reference page in the same commit; apply
 [What a change updates](#what-a-change-updates).
 
-## The `box` CLI
-
-`crates/cli/`, `resources/`, and `test-corpus/` hold the `box` CLI. A change there follows
-[`crates/cli/AGENTS.md`](crates/cli/AGENTS.md), and the freeze above does not cover it. Its user
-docs are in `docs/cli/`, written to [`writing.md`](.agents/references/writing.md), and its design
-pages and decision log are in `docs/design/cli/`. For those paths, the critics apply the CLI area
-files: `review-cli.md`, `axes-cli.md`, `surfaces-cli.md`, and the
-[CLI area](.agents/agents/test-critic.md#cli-area) of `test-critic`. The Core area files cover the
-rest of `crates/`, `test-integ/`, `test-native-filesystem/`, `test-common/`, `test-workload/`, and
-`examples/`.
-
-## Foundational premises
+### Foundational premises
 
 Preserve these premises and the tests that enforce them. Do not delete or `#[ignore]` a security
 test to make a suite pass.
@@ -79,7 +93,7 @@ test to make a suite pass.
   `runtime_mcp_start.rs::absent_start_permit_refuses_the_server_and_it_never_runs` and
   `host.rs::an_mcp_start_of_a_bound_program_is_decided_as_its_grammar_action`.
 
-### Filesystem reach
+#### Filesystem reach
 
 `HOME` defaults to the operator's home unless `[agent] env.HOME` names another directory.
 The box directory is not a home; no verb copies configuration into a private home.
@@ -101,7 +115,7 @@ named tests in [the box contract](crates/box/AGENTS.md#the-box-contract).
 and the [box's open findings](crates/box/AGENTS.md#open-findings--divergences-no-decision-covers).
 `contain_egress = false` bypasses the gateway; preserve its disclosure as residual risk.
 
-### macOS execution
+#### macOS execution
 
 Keep the agent's exec grants enumerated: one `process-exec` rule for its command, each `exec` entry,
 and each interpreter or MCP alias in `bin/`. Pair each with `file-read-metadata`, never `file-read*`.
@@ -121,6 +135,16 @@ write-xor-execute restrictions.
 [macOS measurements](crates/containment/AGENTS.md#macos-measured)
 and the tool and MCP rules linked above. Preserve
 `the_agent_profile_never_carries_broad_exec` and `a_leaf_carries_broad_exec_and_the_main_box_does_not`.
+
+## The `box` CLI
+
+A change to the CLI's paths follows [`crates/cli/AGENTS.md`](crates/cli/AGENTS.md), and the freeze
+above does not cover it. Its user docs in `docs/cli/` follow
+[`writing.md`](.agents/references/writing.md). For those paths, the critics apply the CLI area
+files: `review-cli.md`, `axes-cli.md`, `surfaces-cli.md`, and the
+[CLI area](.agents/agents/test-critic.md#cli-area) of `test-critic`. The Core area files cover the
+rest of `crates/`, `test-integ/`, `test-native-filesystem/`, `test-common/`, `test-workload/`, and
+`examples/`.
 
 ## Read before implementation
 

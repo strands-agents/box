@@ -1,0 +1,25 @@
+# Each path belongs to Box Core or to the `box` CLI. See "Two products" in AGENTS.md.
+# The last matching line wins.
+
+# Box Core, and every shared file: everything not matched below.
+*                               @strands-agents/strands-box-maintainers
+
+# The `box` CLI. Paths match the CLI area in .agents/references/feature-critic/review-cli.md.
+/crates/cli/                    @strands-agents/strands-box-cli
+/resources/                     @strands-agents/strands-box-cli
+/test-corpus/                   @strands-agents/strands-box-cli
+/docs/cli/                      @strands-agents/strands-box-cli
+/docs/design/cli/               @strands-agents/strands-box-cli
+/scripts/try-build.sh           @strands-agents/strands-box-cli
+/scripts/*-cli.py               @strands-agents/strands-box-cli
+/scripts/test_try_build.py      @strands-agents/strands-box-cli
+/scripts/test_ci_workflow.py    @strands-agents/strands-box-cli
+
+# Box Core's contract. The CLI builds on these, and Box Core maintainers review each change.
+/crates/box/README.md                       @strands-agents/strands-box-maintainers
+/crates/box/src/lib.rs                      @strands-agents/strands-box-maintainers
+/crates/box/tests/documented_inputs.rs      @strands-agents/strands-box-maintainers
+/crates/box/tests/documented_commands.rs    @strands-agents/strands-box-maintainers
+/docs/user/config.md                        @strands-agents/strands-box-maintainers
+/docs/site-manifest.json                    @strands-agents/strands-box-maintainers
+/docs/site-manifest-retirements.json        @strands-agents/strands-box-maintainers

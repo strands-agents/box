@@ -1,6 +1,9 @@
-# Box user guide
+# Box Core guide
 
-Box runs an agent, or another command, under an operator's policy, with operating system enforcement.
+Box Core runs an agent, or another command, under an operator's policy, with operating system
+enforcement. You configure it with `box.toml` and `policy.dw`, which are Box Core's stable
+interface: programs, including the `box` CLI, build on them. To run a coding agent with profiles
+and packs instead, read the [Box CLI guide](../cli/README.md).
 
 - [`getting-started.md`](./getting-started.md): download Box, then write and run a box for an agent.
   Start here.

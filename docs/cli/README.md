@@ -1,4 +1,4 @@
-# Box user guide
+# Box CLI guide
 
 Box runs a coding agent, such as Claude Code, in a box on your machine. The agent can change files
 in your project and reach what your profile allows, and the box stops everything else. This guide
