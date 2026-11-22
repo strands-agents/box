@@ -364,8 +364,8 @@ impl Vault {
         // and ambient fallback is allowed: a named-profile-only vault, a `credsd://` vault, or one
         // under `require_scoped_aws_profile` does no resolve at open, so a box that never signs a
         // bare route forces no credentials to exist. The resolve primes the shared provider cache,
-        // `audit_aws_resolve` emits the one prepare-step record, and the vault warns here once for each
-        // bare route rather than on each signed request, which keeps its own audit record.
+        // `audit_aws_resolve` emits the one prepare-step record, and the vault warns once here for each
+        // bare route.
         if vault.ambient_policy != AmbientFallbackPolicy::Deny
             && let Some(locator) = vault
                 .signed_aws
@@ -495,9 +495,10 @@ impl Vault {
 
     /// Report, once at open, a condition that holds for every request this vault serves.
     fn warn_at_open(&self, message: &str) {
-        eprintln!("strands-box: warning: {message}");
+        let line = format!("strands-box: warning: {message}");
+        eprintln!("{line}");
         #[cfg(test)]
-        CAPTURED_WARNINGS.with(|warnings| warnings.borrow_mut().push(message.to_string()));
+        CAPTURED_WARNINGS.with(|warnings| warnings.borrow_mut().push(line));
     }
 
     /// What must be edited on `req` before it goes upstream, or `None` when this vault governs no

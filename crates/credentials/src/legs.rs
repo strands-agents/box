@@ -493,7 +493,7 @@ mod tests {
         );
         assert_eq!(
             at_open[0],
-            "aws:// for *.amazonaws.com signs with this machine's AWS identity"
+            "strands-box: warning: aws:// for *.amazonaws.com signs with this machine's AWS identity"
         );
         assert!(signing.is_empty(), "a bare sign warns no more: {signing:?}");
 
@@ -525,8 +525,8 @@ mod tests {
         assert_eq!(
             drain_captured_warnings(),
             [
-                "aws:// for bedrock-runtime.us-west-2.amazonaws.com signs with this machine's AWS identity",
-                "aws:// for logs.us-west-2.amazonaws.com signs with this machine's AWS identity",
+                "strands-box: warning: aws:// for bedrock-runtime.us-west-2.amazonaws.com signs with this machine's AWS identity",
+                "strands-box: warning: aws:// for logs.us-west-2.amazonaws.com signs with this machine's AWS identity",
             ]
         );
     }

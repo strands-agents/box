@@ -212,13 +212,14 @@ and the refusal names the missing provider. If your identity is SSO, log in with
 static or session keys to `~/.aws/credentials`.
 
 Because a bare `aws://` signs with whatever identity the host carries, the box prints a warning in
-the startup disclosure, once for each route that signs this way:
+the startup disclosure, once for each destination that signs this way:
 
 ```
 strands-box: warning: aws:// for bedrock-runtime.us-west-2.amazonaws.com signs with this machine's AWS identity
 ```
 
-The line names the route's host, so a box with two such routes prints two lines.
+The line names the destination as the route writes it, so a box with two such destinations prints
+two lines.
 
 Each request it signs that way still gets its own audit record. To pin which identity signs, name a
 profile with `aws://PROFILE`, and grant the workload no write access to `~/.aws`.
