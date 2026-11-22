@@ -67,9 +67,7 @@ fn drain_warning(failed_exports: u64, finished: bool) -> Option<String> {
              finish in time"
         ),
     };
-    Some(format!(
-        "strands-box: warning: telemetry records were lost: {cause}"
-    ))
+    Some(format!("telemetry records were lost: {cause}"))
 }
 
 /// Shut `logs` down on a thread no runtime joins, and answer what the outcome arrives on.
@@ -537,7 +535,7 @@ impl Collector {
         let ended = ended.unwrap_or(Shutdown::Unanswered);
         let finished = drain_finished(ended, self.cut.load(Ordering::Relaxed));
         if let Some(warning) = drain_warning(self.dropped.load(Ordering::Relaxed), finished) {
-            eprintln!("{warning}");
+            diagnostics::diag!(T0101, "{warning}");
         }
     }
 
@@ -1454,7 +1452,7 @@ mod tests {
         ] {
             let warning = drain_warning(failed, finished).expect("a loss is reported");
             assert!(
-                warning.starts_with("strands-box: warning: telemetry records were lost: "),
+                warning.starts_with("telemetry records were lost: "),
                 "{warning}"
             );
             assert!(warning.contains(cause), "{warning}");

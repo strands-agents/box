@@ -2,7 +2,6 @@
 
 use std::collections::BTreeSet;
 use std::io;
-use std::io::Write as _;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -523,10 +522,7 @@ impl ToolLeg {
 
 /// Warn that a tool call's response was not recorded.
 fn unconfirmed() {
-    let _ = writeln!(
-        io::stderr().lock(),
-        "strands-box: warning: policy outcome recording was not confirmed"
-    );
+    diagnostics::diag!(P0301, "policy outcome recording was not confirmed");
 }
 
 /// Hands a remote tool call's reply to its shared [`ToolLeg`].
@@ -823,10 +819,7 @@ impl LocalPolicyEffectPermit {
         }
 
         if recorded.is_err() {
-            let _ = writeln!(
-                io::stderr().lock(),
-                "strands-box: warning: policy outcome recording was not confirmed"
-            );
+            diagnostics::diag!(P0301, "policy outcome recording was not confirmed");
         }
         Ok(())
     }

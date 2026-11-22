@@ -148,9 +148,11 @@ fn answered(
         let via = backend
             .map(|dial| format!(" (backend {}:{})", dial.host, dial.port))
             .unwrap_or_default();
-        eprintln!(
-            "strands-box: warning: egress request to {}:{}{via} failed: {error}",
-            connect.host, connect.port
+        diagnostics::diag!(
+            B0501,
+            "egress request to {}:{}{via} failed: {error}",
+            connect.host,
+            connect.port
         );
         WorkloadResponse::failure(error.http_status(), error.to_string().as_bytes())
     })

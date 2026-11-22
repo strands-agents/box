@@ -166,13 +166,17 @@ impl Drop for DogwoodEngine {
         let mut pending = match self.pending_outcomes.get_mut() {
             Ok(pending) => std::mem::take(pending),
             Err(_) => {
-                eprintln!("policy: warn: pending outcome lock poisoned; kept outcomes are lost");
+                diagnostics::diag!(
+                    P0301,
+                    "pending outcome lock poisoned; kept outcomes are lost"
+                );
                 return;
             }
         };
         if let Err(error) = self.submit_pending(&mut pending) {
-            eprintln!(
-                "policy: warn: {} kept outcome(s) not recorded at shutdown: {error}",
+            diagnostics::diag!(
+                P0301,
+                "{} kept outcome(s) not recorded at shutdown: {error}",
                 pending.len()
             );
         }
@@ -643,14 +647,17 @@ impl DogwoodEngine {
             Err(_) => Err("pending outcome lock poisoned".to_string()),
         };
         if let Err(error) = recorded {
-            eprintln!("policy: warn: an earlier outcome is not recorded yet: {error}; denying");
+            diagnostics::diag!(
+                P0202,
+                "an earlier outcome is not recorded yet: {error}; denying"
+            );
             return (Decision::internal_fault(), None, None);
         }
         let identity = request.identity();
         let conformed_arguments = match self.conformed_arguments(request, &identity) {
             Ok(arguments) => arguments,
             Err(error) => {
-                eprintln!("policy: warn: {error}; denying");
+                diagnostics::diag!(P0202, "{error}; denying");
                 return (Decision::internal_fault(), None, None);
             }
         };
@@ -687,7 +694,7 @@ impl DogwoodEngine {
             .map(|_| ()),
         };
         if let Err(error) = gate {
-            eprintln!("policy: warn: {error}; denying");
+            diagnostics::diag!(P0202, "{error}; denying");
             return (Decision::internal_fault(), None, None);
         }
         // A tool call's `input` is built once, so its `::request` and `::response` carry one value.
@@ -729,7 +736,7 @@ impl DogwoodEngine {
                 tool_input,
             ),
             Err(error) => {
-                eprintln!("policy: warn: {error}; denying");
+                diagnostics::diag!(P0202, "{error}; denying");
                 (Decision::internal_fault(), None, None)
             }
         }
@@ -886,7 +893,13 @@ impl DogwoodEngine {
         if std::thread::current().name() == Some("linux-native-policy")
             && std::env::var("BOX_NATIVE_TEST_FAULT").as_deref() == Ok("policy-lock")
         {
-            eprintln!("NATIVE_TEST_FAULT=policy-lock");
+            #[allow(
+                clippy::print_stderr,
+                reason = "a test-harness protocol line, not a message"
+            )]
+            {
+                eprintln!("NATIVE_TEST_FAULT=policy-lock");
+            }
             loop {
                 std::thread::park();
             }
@@ -923,7 +936,7 @@ impl DogwoodEngine {
         let attribution = match attribution {
             Ok(attribution) => attribution,
             Err(error) => {
-                eprintln!("policy: warn: {error}; denying");
+                diagnostics::diag!(P0202, "{error}; denying");
                 return Ok((Some(Decision::internal_fault()), offset));
             }
         };
@@ -931,7 +944,7 @@ impl DogwoodEngine {
         let mut errors = response.diagnostics().errors().peekable();
         if errors.peek().is_some() {
             let joined = errors.collect::<Vec<_>>().join("; ");
-            eprintln!("policy: warn: dogwood evaluation failed: {joined}; denying");
+            diagnostics::diag!(P0201, "dogwood evaluation failed: {joined}; denying");
             return Ok((
                 Some(Decision::Deny {
                     reason: DenyReason::InternalFault,
@@ -4224,6 +4237,11 @@ when temporal {{
         let minute = grow_history(&counting_window(60), EVENTS);
         let day = grow_history(&counting_window(24 * 3600), EVENTS);
         for (name, growth) in [("60 s window", &minute), ("24 h window", &day)] {
+            // Past the harness capture, so a hand run shows the measurement.
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "a test measurement, not a box message"
+            )]
             let _ = writeln!(
                 std::io::stderr().lock(),
                 "NFR-06 {name}: {} bytes after {} events, {} bytes after {EVENTS}; reopen {:?} then \

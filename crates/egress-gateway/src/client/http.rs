@@ -336,7 +336,7 @@ impl ResponseReader {
 impl Drop for ResponseReader {
     fn drop(&mut self) {
         if self.record_request_outcome().is_err() {
-            eprintln!("strands-box: warning: recording upstream request outcome failed");
+            diagnostics::diag!(P0301, "recording upstream request outcome failed");
         }
     }
 }

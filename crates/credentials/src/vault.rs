@@ -474,8 +474,9 @@ impl Vault {
 
     /// Report a non-fatal operator-facing condition.
     pub(crate) fn warn(&self, message: &str) {
-        eprintln!(
-            "strands-box credentials [{tenant}]: {message}",
+        diagnostics::diag!(
+            B0602,
+            "credentials [{tenant}]: {message}",
             tenant = self.tenant
         );
         #[cfg(test)]
