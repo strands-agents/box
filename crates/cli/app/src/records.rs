@@ -121,7 +121,7 @@ impl Decision {
     fn write_text(&self, output: &mut impl Write) -> io::Result<()> {
         let time = self
             .time
-            .map(|time| time.to_rfc3339_opts(SecondsFormat::Nanos, true))
+            .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
             .unwrap_or_else(|| "unknown".to_owned());
         let result = if self.is_would_deny() {
             "would deny"
