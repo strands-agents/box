@@ -1,8 +1,3 @@
----
-reader: Someone who wants to know where Box keeps its files, where a profile, pack, starter, or policy of their own goes, what Box writes by itself, and what's safe to delete or copy.
-belongs: Where each file lives, who writes it, and what it's for, with a link to the page that explains what goes in it. What goes in a profile, pack, starter, or policy goes to profiles.md, packs.md, starters.md, or policies.md. Each command and flag goes to cli.md. A fix after an error goes to troubleshooting.md.
----
-
 # Where Box keeps its files
 
 Box reads your settings from two places. Your Box folder, `~/.strands/box`, holds what you use in every
