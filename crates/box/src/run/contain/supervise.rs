@@ -540,8 +540,9 @@ impl Contained {
             (ingress_connection_limit() / ingress.len()).max(1)
         };
         for (_, address, workload_port) in &ingress {
-            eprintln!(
-                "strands-box: [ingress] {address} is relayed to the agent's port \
+            ::diagnostics::diag!(
+                B0701,
+                "[ingress] {address} is relayed to the agent's port \
                  {workload_port}, at most {limit} callers at once"
             );
         }
@@ -555,7 +556,9 @@ impl Contained {
             signals.restore_default = false;
         }
         #[cfg(unix)]
-        let diagnostics = if own_terminal || std::io::stderr().is_terminal() {
+        // Core holds its messages only while they would reach a terminal; a caller that points
+        // stderr at a pipe reads them live.
+        let diagnostics = if ::diagnostics::stderr().is_terminal() {
             Some(
                 crate::run::diagnostics::Diagnostics::capture()
                     .map_err(|source| SuperviseError::Diagnostics { source })?,
@@ -1078,9 +1081,14 @@ fn trampoline_message(stderr: &[u8]) -> Option<String> {
         .match_indices(PREFIX)
         .filter(|(offset, _)| *offset == 0 || text.as_bytes()[offset - 1] == b'\n')
         .last()
-        .map(|(offset, _)| offset + PREFIX.len());
+        .map(|(offset, _)| offset);
     let message = match start {
-        Some(start) => text[start..].trim(),
+        // The detail is the text after the trampoline's severity and code, when it names them.
+        Some(start) => match ::diagnostics::parse(&text[start..]) {
+            ::diagnostics::Line::Message(message) => message.text,
+            _ => &text[start + PREFIX.len()..],
+        }
+        .trim(),
         None => text
             .lines()
             .rev()
@@ -1377,6 +1385,16 @@ mod tests {
             "the failure names the library and the binary: {text}"
         );
         assert!(trampoline_message(b"").is_none());
+        let coded = b"strands-box: note[B0201]: [tool.cargo] runs /usr/bin/app\n\
+            strands-box-contain-trampoline: error[H0401]: containment apply failed: '/usr/bin/app' \
+            needs the shared library 'libnope.so.1'\n";
+        assert_eq!(
+            trampoline_message(coded).as_deref(),
+            Some(
+                "containment apply failed: '/usr/bin/app' needs the shared library 'libnope.so.1'"
+            ),
+            "the detail leaves out the trampoline's severity and code"
+        );
     }
 
     #[test]

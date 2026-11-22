@@ -1737,8 +1737,8 @@ fn describe_peer(peer: Option<i32>) -> String {
 fn report_client_result(result: Result<io::Result<()>, JoinError>) {
     match result {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => eprintln!("strands-box broker: rejected client: {error}"),
-        Err(error) => eprintln!("strands-box broker: client task failed: {error}"),
+        Ok(Err(error)) => ::diagnostics::diag!(B1101, "broker rejected client: {error}"),
+        Err(error) => ::diagnostics::diag!(B1102, "broker client task failed: {error}"),
     }
 }
 

@@ -351,13 +351,15 @@ impl DiscoveryRegistry {
             Ok(CatalogStage::Unchanged) => StagedList::Released,
             Ok(CatalogStage::Rejected { failure, reason }) => {
                 match failure {
-                    DiscoveryFailure::SchemaGeneration => eprintln!(
-                        "strands-box: warning: MCP server {server:?} schema generation failed: \
+                    DiscoveryFailure::SchemaGeneration => ::diagnostics::diag!(
+                        B0401,
+                        "MCP server {server:?} schema generation failed: \
                          {reason}"
                     ),
                     DiscoveryFailure::PolicyStaging => {
-                        eprintln!(
-                            "strands-box: warning: MCP server {server:?} policy staging failed: \
+                        ::diagnostics::diag!(
+                            B0402,
+                            "MCP server {server:?} policy staging failed: \
                              {reason}"
                         );
                         self.coordinator.control(telemetry::ControlRecord::refused(

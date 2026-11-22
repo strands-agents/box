@@ -23,7 +23,7 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
     if matches!(cli.command, Command::Run { .. })
         && let Err(error) = Hardening::apply()
     {
-        eprintln!("strands-box: refusing to run: {error}");
+        ::diagnostics::diag!(B0108, "refusing to run: {error}");
         return ExitCode::FAILURE;
     }
 
@@ -33,7 +33,7 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
             match run::prepare_native(config, options.on_ready.is_some()) {
                 Ok(setup) => Some(setup),
                 Err(error) => {
-                    eprintln!("strands-box: refusing to run: {error}");
+                    ::diagnostics::diag!({ error.code() }, "refusing to run: {error}");
                     return ExitCode::FAILURE;
                 }
             }
@@ -44,7 +44,7 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("strands-box: failed to start async runtime: {error}");
+            ::diagnostics::diag!(error, "failed to start async runtime: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -75,7 +75,7 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
     }) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("strands-box: error: {error}");
+            ::diagnostics::diag!({ error.code() }, "{error}");
             ExitCode::FAILURE
         }
     }

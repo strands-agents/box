@@ -23,7 +23,7 @@ pub(crate) struct Diagnostics {
 
 impl Diagnostics {
     pub(crate) fn capture() -> io::Result<Self> {
-        let original = File::from(io::stderr().as_fd().try_clone_to_owned()?);
+        let original = File::from(::diagnostics::stderr().as_fd().try_clone_to_owned()?);
         // SAFETY: stderr remains open.
         let flags = unsafe { libc::fcntl(libc::STDERR_FILENO, libc::F_GETFD) };
         if flags == -1 {
@@ -60,8 +60,13 @@ impl Diagnostics {
             .map_err(|_| io::Error::other("diagnostic reader panicked"))??;
         self.original.write_all(&report.bytes)?;
         if report.truncated {
-            self.original
-                .write_all(b"\nstrands-box: further runtime diagnostics were discarded\n")?;
+            // The held bytes may end mid-line, so the message starts on a line of its own.
+            self.original.write_all(b"\n")?;
+            ::diagnostics::diag!(
+                into self.original,
+                warning,
+                "further runtime diagnostics were discarded"
+            )?;
         }
         Ok(())
     }
@@ -116,7 +121,7 @@ mod tests {
             } else {
                 b"CORE\n".to_vec()
             };
-            io::stderr().write_all(&bytes).unwrap();
+            ::diagnostics::stderr().write_all(&bytes).unwrap();
             let retained_writer = diagnostics.writer.try_clone().unwrap();
             if scenario == "drop" {
                 drop(diagnostics);
@@ -125,7 +130,7 @@ mod tests {
             }
             // SAFETY: this queries the restored descriptor in this isolated process.
             assert_eq!(unsafe { libc::fcntl(2, libc::F_GETFD) }, libc::FD_CLOEXEC);
-            io::stderr().write_all(b"RESTORED\n").unwrap();
+            ::diagnostics::stderr().write_all(b"RESTORED\n").unwrap();
             drop(retained_writer);
             return;
         }
@@ -161,7 +166,7 @@ mod tests {
                 let mut expected = b"NATIVE\n".to_vec();
                 expected.extend(vec![b'x'; CAPACITY]);
                 expected.extend(
-                    b"\nstrands-box: further runtime diagnostics were discarded\nRESTORED\n",
+                    b"\nstrands-box: warning: further runtime diagnostics were discarded\nRESTORED\n",
                 );
                 expected
             } else {

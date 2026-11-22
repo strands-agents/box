@@ -260,8 +260,12 @@ impl Registration {
                             };
                             match response {
                                 Ok(response) => {
+                                    // A test-harness protocol line, not a message.
                                     #[cfg(feature = "test-support")]
-                                    eprintln!("NATIVE_RESEARCH_EVENT={response}");
+                                    #[allow(clippy::print_stderr)]
+                                    {
+                                        eprintln!("NATIVE_RESEARCH_EVENT={response}");
+                                    }
                                     #[cfg(not(feature = "test-support"))]
                                     let _ = response;
                                 }
@@ -275,10 +279,14 @@ impl Registration {
                                         |error| error.raw_os_error() == Some(libc::ENOENT),
                                     ) =>
                                 {
+                                    // A test-harness protocol line, not a message.
                                     #[cfg(feature = "test-support")]
-                                    eprintln!(
-                                        "NATIVE_RESEARCH_EVENT={{\"outcome\":\"cancelled\"}}"
-                                    );
+                                    #[allow(clippy::print_stderr)]
+                                    {
+                                        eprintln!(
+                                            "NATIVE_RESEARCH_EVENT={{\"outcome\":\"cancelled\"}}"
+                                        );
+                                    }
                                 }
                                 Err(error) => return Err(error),
                             }
@@ -346,8 +354,9 @@ pub(crate) fn preflight() -> Result<(), BoxError> {
         let supported = probe::path_handles().map_err(failure)?;
         let _ = PATH_HANDLES.set(supported);
         if !supported {
-            eprintln!(
-                "strands-box: native filesystem policy: this kernel cannot transfer O_PATH handles; path-only opens are refused"
+            ::diagnostics::diag!(
+                B0801,
+                "native filesystem policy: this kernel cannot transfer O_PATH handles; path-only opens are refused"
             );
         }
     }

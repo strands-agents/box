@@ -1,5 +1,8 @@
 //! Process protections and repeat-run refusal through the public library entry point.
 
+// Lines a test helper writes to stderr are test output, not Box Core messages.
+#![allow(clippy::print_stderr)]
+
 #[cfg(unix)]
 #[path = "support/bounded_output.rs"]
 mod bounded_output;
@@ -9,7 +12,7 @@ mod fixture;
 
 #[cfg(unix)]
 fn main() {
-    if reload_tests::dispatch() || decision_tests::dispatch() {
+    if reload_tests::dispatch() || decision_tests::dispatch() || terminal_tests::dispatch() {
         return;
     }
     #[cfg(target_os = "macos")]
@@ -150,7 +153,7 @@ fn main() {
     assert!(stderr.contains("missing.toml"), "{stderr}");
     assert!(
         stderr.lines().any(|line| {
-            line == "strands-box: refusing to run: this process already attempted to run a box"
+            line == "strands-box: error[B0106]: refusing to run: this process already attempted to run a box"
         }),
         "{stderr}"
     );
@@ -205,6 +208,7 @@ fn main() {
     a_supplied_box_id_names_the_box_and_its_telemetry();
     reload_tests::suite();
     decision_tests::suite();
+    terminal_tests::core_lines_reach_a_piped_stderr_while_a_library_terminal_runs();
 }
 
 /// **A caller-supplied box ID names a new box, its record, and its telemetry, and a configured box
@@ -270,7 +274,7 @@ fn a_supplied_box_id_names_the_box_and_its_telemetry() {
     let (ok, stderr) = run(&config, Some(supplied));
     assert!(ok, "{stderr}");
     assert!(
-        stderr.contains(&format!("strands-box: box {supplied} created")),
+        stderr.contains(&format!("strands-box: note[B0301]: box {supplied} created")),
         "{stderr}"
     );
     assert_eq!(stored(supplied), supplied);
@@ -1009,6 +1013,187 @@ mod decision_tests {
                     std::thread::sleep(Duration::from_millis(10));
                 }
             }
+        }
+    }
+}
+
+/// **A library caller that gives the workload its own terminal and points stderr at a pipe reads
+/// Core's lines live and whole**, so nothing waits for the run to end or stops at 32 KiB.
+#[cfg(unix)]
+mod terminal_tests {
+    use super::fixture;
+    use std::fs::File;
+    use std::io::Read as _;
+    use std::os::fd::FromRawFd as _;
+    use std::os::unix::process::CommandExt as _;
+    use std::path::Path;
+    use std::process::{Command, ExitCode, Stdio};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    /// A URL longer than the 32 KiB Core holds while a terminal is its stderr.
+    const PATH_LENGTH: usize = 40_000;
+    const NEEDLE: &str = "monty fetch refused before transport (SSRF floor)";
+    const DISCARDED: &str = "further runtime diagnostics were discarded";
+
+    pub(super) fn dispatch() -> bool {
+        let arguments: Vec<_> = std::env::args().collect();
+        match arguments.get(1).map(String::as_str) {
+            Some("--terminal-workload") => workload(),
+            Some("--terminal-run") => running_box(Path::new(&arguments[2])),
+            _ => return false,
+        }
+        true
+    }
+
+    pub(super) fn core_lines_reach_a_piped_stderr_while_a_library_terminal_runs() {
+        if !fixture::namespace_launcher_is_usable() {
+            eprintln!("skipping: a library terminal run requires a usable containment backend");
+            return;
+        }
+        let executable = tempfile::Builder::new()
+            .prefix("box-terminal-probe-")
+            .tempfile_in(fixture::box_binary().parent().unwrap())
+            .unwrap()
+            .into_temp_path();
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let configured = fixture::Request::with_config(
+            "library-terminal",
+            "permit(principal, action, resource);",
+            "",
+        )
+        .expect();
+        configured.write_command(executable.to_str().unwrap());
+        let release = configured.box_home().join("release");
+        let mut child = Command::new(&executable)
+            .arg("--terminal-run")
+            .arg(configured.config())
+            .env("HOME", configured.operator_home())
+            .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+            .env_remove("EXPERIMENTAL_X86_SUPPORT")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        let (send, received) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut buffer = [0; 8192];
+            while let Ok(length) = stderr.read(&mut buffer) {
+                if length == 0 || send.send(buffer[..length].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let url = format!("http://localhost/{}", "a".repeat(PATH_LENGTH));
+        let mut bytes = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let live = loop {
+            let text = String::from_utf8_lossy(&bytes);
+            if text.contains(NEEDLE) && text.contains(&url) {
+                break true;
+            }
+            if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+                break false;
+            }
+            if let Ok(chunk) = received.recv_timeout(Duration::from_millis(20)) {
+                bytes.extend(chunk);
+            }
+        };
+        // The workload still waits for its release here, so a line seen above arrived live.
+        let running = child.try_wait().unwrap().is_none();
+        std::fs::write(&release, "").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = Command::new("/bin/kill")
+                    .args(["-KILL", "--", &format!("-{}", child.id())])
+                    .status();
+                break child.wait().unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        reader.join().unwrap();
+        bytes.extend(received.try_iter().flatten());
+        let text = String::from_utf8_lossy(&bytes);
+        let shown = || text.replace(&"a".repeat(PATH_LENGTH), "<the long path>");
+        assert!(
+            live && running,
+            "Core's line must reach the pipe whole before the workload exits:\n{}",
+            shown()
+        );
+        assert!(
+            status.success(),
+            "the library run must succeed:\n{}",
+            shown()
+        );
+        assert!(
+            bytes.len() > 32 * 1024,
+            "{} bytes:\n{}",
+            bytes.len(),
+            shown()
+        );
+        assert!(!text.contains(DISCARDED), "{}", shown());
+    }
+
+    /// The library caller: the workload's terminal is a pseudo-terminal this process holds, and
+    /// stderr is the pipe of the test.
+    fn running_box(config: &Path) {
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: openpty initializes the two descriptors and reads no size or settings.
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(opened, 0, "{}", std::io::Error::last_os_error());
+        // SAFETY: each descriptor openpty returned is owned once.
+        let (mut master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
+        // The workload's terminal output is drained, so it never blocks on a full terminal.
+        std::thread::spawn(move || {
+            let mut buffer = [0; 8192];
+            while matches!(master.read(&mut buffer), Ok(length) if length > 0) {}
+        });
+        let code = strands_box::run(
+            config.into(),
+            vec!["--terminal-workload".into()],
+            strands_box::RunOptions {
+                terminal: Some(slave),
+                ..Default::default()
+            },
+        );
+        std::process::exit(if code == ExitCode::SUCCESS { 0 } else { 1 });
+    }
+
+    /// The workload: one Monty fetch the address floor refuses with a URL longer than 32 KiB, then
+    /// a wait for the test to release it.
+    fn workload() {
+        let script = format!(
+            "try:\n    fetch('http://localhost/' + 'a' * {PATH_LENGTH})\nexcept OSError:\n    pass\n"
+        );
+        let output = Command::new("python3")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let home = std::env::var_os("HOME").unwrap();
+        let release = Path::new(&home).join("release");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !release.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the test never released the workload"
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }

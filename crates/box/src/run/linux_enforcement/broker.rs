@@ -333,7 +333,10 @@ pub(super) fn file_request(
     let Some(mut operations) = operations(flags as u64) else {
         static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!("strands-box: native filesystem interception refused unsupported open flags");
+            ::diagnostics::diag!(
+                B0802,
+                "native filesystem interception refused unsupported open flags"
+            );
         }
         audit.refused("unsupported open flags");
         notify::reply(listener, request.id, libc::EACCES)?;

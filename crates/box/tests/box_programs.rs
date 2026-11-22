@@ -30,6 +30,9 @@
 //! is the capability MCP would need: one program, many calls, state surviving between them. If
 //! that holds, the abstraction can carry a session-oriented protocol later.
 
+// The measurement line a test helper writes to stderr is test output, not a Box Core message.
+#![allow(clippy::disallowed_methods)]
+
 use std::io::Write as _;
 use std::process::{Child, Output, Stdio};
 use std::sync::mpsc;
@@ -67,7 +70,7 @@ fn stderr(output: &Output) -> String {
 fn assert_workload_launched(output: &Output, what: &str) {
     let stderr = stderr(output);
     assert!(
-        !stderr.contains("strands-box: error:"),
+        !stderr.contains("strands-box: error"),
         "the run never reached its workload, so {what} measured nothing: {stderr}"
     );
 }

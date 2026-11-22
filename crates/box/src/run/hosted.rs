@@ -628,7 +628,7 @@ impl McpLeafLauncher {
         &self,
         boundary: Boundary,
     ) -> Result<crate::run::contain::supervise::StreamingLeaf, BoxError> {
-        eprintln!("{}", boundary.disclosure());
+        boundary.disclose();
         crate::run::contain::supervise::LeafBox::spawn_streaming(
             boundary,
             &self.layout,
@@ -966,13 +966,15 @@ impl HostedBox {
         )
         .map_err(BoxError::from)?;
         if let Some(roots) = proxy.upstream_host_roots() {
-            eprintln!(
-                "strands-box: the egress gateway also trusts {} root certificates from this \
+            ::diagnostics::diag!(
+                B0204,
+                "the egress gateway also trusts {} root certificates from this \
                  host's trust store for upstream servers ({} ignored)",
-                roots.added, roots.ignored
+                roots.added,
+                roots.ignored
             );
             for error in &roots.errors {
-                eprintln!("strands-box: warning: reading the host's trust store: {error}");
+                ::diagnostics::diag!(B0205, "reading the host's trust store: {error}");
             }
         }
         let proxy_port = proxy
@@ -1297,7 +1299,7 @@ fn program_finds_command(
 impl Drop for HostedBox {
     fn drop(&mut self) {
         if let Err(error) = self.shutdown() {
-            eprintln!("strands-box: shutdown failed: {error}");
+            ::diagnostics::diag!(B1001, "shutdown failed: {error}");
         }
     }
 }
