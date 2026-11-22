@@ -211,14 +211,17 @@ compiled out to keep the dependency surface small). Such a profile, named or def
 and the refusal names the missing provider. If your identity is SSO, log in with a tool that writes
 static or session keys to `~/.aws/credentials`.
 
-Because a bare `aws://` signs with whatever identity the host carries, the box prints a warning on
-**every** request it signs that way:
+Because a bare `aws://` signs with whatever identity the host carries, the box prints a warning in
+the startup disclosure, once for each route that signs this way:
 
 ```
-strands-box credentials [<tenant>]: signing with the host's ambient AWS identity: a bare aws://
-resolved the default credential provider chain. Name a scoped profile (aws://PROFILE) to pin which
-identity signs, and grant the workload no write access to ~/.aws
+strands-box: warning: aws:// for bedrock-runtime.us-west-2.amazonaws.com signs with this machine's AWS identity
 ```
+
+The line names the route's host, so a box with two such routes prints two lines.
+
+Each request it signs that way still gets its own audit record. To pin which identity signs, name a
+profile with `aws://PROFILE`, and grant the workload no write access to `~/.aws`.
 
 Naming a profile with `aws://PROFILE` pins *which* identity signs and does not warn. The shipped box
 has no setting that refuses a bare `aws://` outright. It always signs with a warning. So a
