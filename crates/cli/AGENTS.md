@@ -23,6 +23,17 @@ to a command needs no migration. What the CLI must not do is **break the Box Cor
 Box Core accepts, and it calls Box Core's public library API. Treat Box Core's config schema and library surface
 as an external dependency, even though Box Core is in the same workspace.
 
+The CLI team reviews changes to the CLI's paths, and Box Core maintainers review Box Core's.
+
+### When the CLI needs something Box Core lacks
+
+- A Core change the CLI needs, such as a new `box.toml` key or a new library function, lands first
+  in its own pull request under Box Core's rules, and Box Core maintainers review it. The CLI pull
+  request that uses it follows. A CLI pull request does not change Box Core's contract.
+- The CLI's syntax is its own: it is written for the people who use `box`, and it can diverge from
+  `box.toml`. Do not reuse a `box.toml` name or shape in a profile or pack only to match Box Core,
+  and do not ask for a Box Core key only to make CLI syntax simpler.
+
 ## How the CLI depends on Box Core
 
 Box Core has a library target, so the CLI links the `strands-box` crate (`crates/box`) by path.

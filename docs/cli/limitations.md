@@ -1,8 +1,3 @@
----
-reader: Someone deciding what to trust a box with, for example before turning permission prompts off.
-belongs: One section per thing the box leaves to you: what it leaves open, who it affects, and what to check or turn off. A key's meaning goes to its reference page. Install steps go to install.md, and a fix after an error goes to troubleshooting.md.
----
-
 # What a box does not protect
 
 Read this page before you trust a run with work that matters, such as a run with the agent's
@@ -405,8 +400,7 @@ from a route, so do this only for a tool and a host you trust.
 
 ## How Linux differs
 
-Box runs on Linux on aarch64, such as AWS Graviton, and on x86_64, with no opt-in. Releases have no
-x86_64 archive yet, so on x86_64 build `box` from source ([CONTRIBUTING.md](../../CONTRIBUTING.md)).
+Box runs on Linux on aarch64, such as AWS Graviton, and on x86_64, with no opt-in.
 What is different from a Mac:
 
 - Each run creates an empty `.box` folder in your project, so that the box can keep the agent out

@@ -1,8 +1,3 @@
----
-reader: Someone whose box run or profile command failed or did something unexpected.
-belongs: A section per symptom: a heading that names it, the message quoted, the cause, and the fix. Only messages that don't name their own fix. A limit with no fix goes to limitations.md. A key's meaning goes to its reference page.
----
-
 # Troubleshooting
 
 Use this page when `box` stops with an error, or when the agent can't do something in the box.

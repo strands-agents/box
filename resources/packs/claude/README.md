@@ -376,7 +376,7 @@ ANTHROPIC_MODEL = "global.anthropic.claude-opus-5-5"
 ```
 
 To see which models your account can use, run the command in
-[Get started](../../../docs/cli/getting-started.md#3-choose-the-model).
+[Get started](../../../docs/cli/getting-started.md#choose-the-model).
 
 Then stop the stuck run with Ctrl-C and start it again. If it still hangs, work through
 [Every model request fails with 403](../bedrock/README.md#every-model-request-fails-with-403).

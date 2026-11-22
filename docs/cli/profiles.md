@@ -1,8 +1,3 @@
----
-reader: Someone who has a profile, usually from Get started, and wants to understand it or change it.
-belongs: A section belongs here only if most users need it in their first month. Anything else goes to profiles-reference.md, cli.md, or troubleshooting.md, and nowhere on this page.
----
-
 # Profiles
 
 A profile is one agent persona. It decides how the box is set up: which agent runs, which model
