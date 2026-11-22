@@ -349,7 +349,7 @@ request, and the gateway replaces the signature.
 
 Both forms resolve through the AWS SDK: `aws://PROFILE` resolves only the named profile (never the
 ambient env keys or instance metadata, and a missing profile is refused), and a bare `aws://`
-resolves the default chain, the host's ambient identity, which the box warns about on every request.
+resolves the default chain, the host's ambient identity, which the box warns about once at startup.
 The decision
 [Both aws:// forms resolve through the AWS SDK and share one risk](decisions.md#a-bare-aws-resolves-the-default-credential-chain)
 states both forms and the writable-`~/.aws` cost.

@@ -212,7 +212,7 @@ and the refusal names the missing provider. If your identity is SSO, log in with
 static or session keys to `~/.aws/credentials`.
 
 Because a bare `aws://` signs with whatever identity the host carries, the box prints a warning in
-the startup disclosure, once for the credentials that hold the route:
+the startup disclosure, once for each route that signs this way:
 
 ```
 strands-box: warning: aws:// signs with this machine's AWS identity

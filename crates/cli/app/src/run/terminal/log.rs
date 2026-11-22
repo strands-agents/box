@@ -33,6 +33,7 @@ pub(super) struct Log {
     started: bool,
     disclosing: bool,
     grants: usize,
+    last_byte: u8,
 }
 
 impl Log {
@@ -71,6 +72,7 @@ impl Log {
             started: false,
             disclosing: false,
             grants: 0,
+            last_byte: 0,
         }
     }
 
@@ -80,6 +82,9 @@ impl Log {
             let remaining = PREVIEW_BYTES + 1 - self.line.len();
             self.line
                 .extend_from_slice(&part[..part.len().min(remaining)]);
+            if let Some(&byte) = part.strip_suffix(b"\n").unwrap_or(part).last() {
+                self.last_byte = byte;
+            }
             if part.ends_with(b"\n") {
                 self.collect();
             }
@@ -111,7 +116,8 @@ impl Log {
         let text = String::from_utf8_lossy(line).into_owned();
         self.line.clear();
         if !self.started {
-            self.count_grant(&text);
+            let last_byte = std::mem::take(&mut self.last_byte);
+            self.count_grant(&text, last_byte);
         }
         if text
             .split_once(": ")
@@ -124,7 +130,7 @@ impl Log {
     }
 
     /// Count `text` when it is a grant line under a table's startup disclosure heading.
-    fn count_grant(&mut self, text: &str) {
+    fn count_grant(&mut self, text: &str, last_byte: u8) {
         match text.strip_prefix("  ") {
             Some(entry) => {
                 if self.disclosing
@@ -137,7 +143,7 @@ impl Log {
                 }
             }
             None => {
-                self.disclosing = text.starts_with("strands-box: [") && text.ends_with(':');
+                self.disclosing = text.starts_with("strands-box: [") && last_byte == b':';
             }
         }
     }
@@ -317,6 +323,20 @@ mod tests {
         log.push(b"  read        /docs\n");
         assert_eq!(log.grants, 11);
         assert_eq!(log.unshown, 2);
+
+        let mut log = Log::new(File::open("/dev/null").unwrap(), tempfile::tempfile());
+        log.push(
+            format!(
+                "strands-box: [agent] runs /{} with no policy decision over these paths:\n",
+                "a".repeat(PREVIEW_BYTES * 2)
+            )
+            .as_bytes(),
+        );
+        log.push(b"  read        /work\n");
+        assert_eq!(
+            log.grants, 1,
+            "a heading longer than the preview still opens a block"
+        );
     }
 
     #[test]

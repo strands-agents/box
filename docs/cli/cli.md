@@ -57,7 +57,7 @@ then a short summary of the run:
 
 ```text
 box: run b-5b8e3d70c92f14ab ended
-  412 grants disclosed at startup · 0 more messages
+  169 grants disclosed at startup · 0 more messages
   log      /Users/you/.strands/box/r/b-5b8e3d70c92f14ab/box.log
   history  box runs history b-5b8e3d70c92f14ab
   reuse    box run claude --box-id b-5b8e3d70c92f14ab

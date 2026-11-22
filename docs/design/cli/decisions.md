@@ -1251,8 +1251,8 @@ can be wider than a named profile and which the operator cannot narrow in the pr
 floor stops a box from writing the default credential paths, but not a config file that
 `AWS_CONFIG_FILE` or `AWS_SHARED_CREDENTIALS_FILE` moves elsewhere, nor a store the operator names
 exactly; keeping those out of a write grant is the invoker's. A route that an operator adds by
-editing `profile.toml`, or that a pack adds after create, is disclosed only by Box Core's warning on
-each signed request, not by the create "Next" list. The shipped Bedrock packs sign with a bare
+editing `profile.toml`, or that a pack adds after create, is disclosed only by Box Core's startup
+warning, not by the create "Next" list. The shipped Bedrock packs sign with a bare
 route by default, so on a cloud machine a Bedrock profile signs as the machine's own role unless the
 operator picks a key.
 

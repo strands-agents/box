@@ -294,7 +294,7 @@ interpreters are part of the code the operator must trust.
    Box also prints, for each bare name a `[tool]` answers to, the file the Shell runs for it.
 5. It runs the programs of the declared secret sources to read every other secret, and records
    each read. It resolves bound secrets and starts the gateway with its own certificate authority.
-   A bare `aws://` route resolves the host's AWS identity once here, and Box prints one warning.
+   Each bare `aws://` route resolves the host's AWS identity once here, and Box prints a warning for it.
    The gateway reads the host's trusted roots once, and Box prints how many it added on stderr.
    It refuses a write grant that covers a configured tool program or the program of a secret source.
    It checks each process specification's filesystem grants, then binds the broker socket.

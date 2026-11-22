@@ -3758,6 +3758,7 @@ fn a_redirected_run_prints_every_grant_on_stderr_at_startup() {
     for heading in [
         "strands-box: [agent] runs ",
         "strands-box: [agent] runtime minimum, added by Core:",
+        "\n  exec        /bin/bash",
         "strands-box: [agent] HOME=",
     ] {
         let at = text
