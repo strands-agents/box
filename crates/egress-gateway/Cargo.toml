@@ -31,6 +31,7 @@ tls-intercept = [
 ]
 
 [dependencies]
+diagnostics = { package = "strands-box-diagnostics", path = "../diagnostics" }
 serde = { version = "1", features = ["derive"] }
 # The credential vault (mint half). This is the ONE-WAY dependency the mint/inject
 # split rests on: the proxy *injects* the secret, `credentials` *mints* it
@@ -89,3 +90,6 @@ tokio = { version = "1", features = ["io-util", "macros", "rt"] }
 # received, to prove the box signed exactly those bytes. `ring` is already in the tree (the
 # `tls-intercept` backend), so this adds no new locked dependency.
 ring = "0.17"
+
+[lints.clippy]
+print_stderr = "warn"

@@ -1,0 +1,16 @@
+[package]
+name = "strands-box-diagnostics"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The Strands box's stderr messages: one line format, the message codes, and a parser."
+
+[lib]
+name = "diagnostics"
+path = "src/lib.rs"
+
+[lints.rust]
+unused_must_use = "deny"
+
+[lints.clippy]
+print_stderr = "warn"

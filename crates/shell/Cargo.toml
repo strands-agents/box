@@ -10,6 +10,7 @@ name = "box_shell"
 path = "src/lib.rs"
 
 [dependencies]
+diagnostics = { package = "strands-box-diagnostics", path = "../diagnostics" }
 async-trait = "0.1"
 bytes = "1"
 libc = "0.2"
@@ -24,3 +25,6 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 [lints.rust]
 unused_must_use = "deny"
+
+[lints.clippy]
+print_stderr = "warn"

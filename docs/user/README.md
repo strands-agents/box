@@ -48,6 +48,8 @@ Box runs an agent, or another command, under an operator's policy, with operatin
   for AgentCore Runtime and Lambda MicroVM.
 - [`config.md`](./config.md): the `box.toml` reference: every key and table, its type and default,
   and what the loader refuses.
+- [`message-codes.md`](./message-codes.md): the format of the messages Box writes to stderr, and
+  what each message code means and what to do about it.
 - [`policy/actions.md`](./policy/actions.md): every action, its fields, and which part of the box
   raises it.
 
