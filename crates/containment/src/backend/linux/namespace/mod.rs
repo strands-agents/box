@@ -465,7 +465,10 @@ fn reaper_exit_code(mut wait: impl FnMut(&mut libc::c_int) -> std::io::Result<()
 
 fn close_reaper_descriptors(keep: &[libc::c_int], confirm_fd: Option<libc::c_int>) {
     if let Err(error) = authority::close_inherited_descriptors(keep) {
-        eprintln!("strands-box: namespace reaper could not close descriptors: {error}");
+        diagnostics::diag!(
+            B0901,
+            "namespace reaper could not close descriptors: {error}"
+        );
         write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: PID 1 exits before the workload starts, terminating the namespace.
         unsafe { libc::_exit(127) };
@@ -474,8 +477,9 @@ fn close_reaper_descriptors(keep: &[libc::c_int], confirm_fd: Option<libc::c_int
 
 fn protect_reaper_memory(confirm_fd: Option<libc::c_int>) {
     if let Err(error) = authority::refuse_process_memory_access() {
-        eprintln!(
-            "strands-box: namespace reaper could not refuse process-memory access \
+        diagnostics::diag!(
+            B0901,
+            "namespace reaper could not refuse process-memory access \
              ({error:?}); killing the namespace rather than starting a workload \
              from a reachable PID 1"
         );
@@ -490,8 +494,9 @@ fn drop_reaper_authority(confirm_fd: Option<libc::c_int>) {
     let locked = authority::set_no_new_privileges();
     if dropped.is_err() || locked.is_err() {
         write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
-        eprintln!(
-            "strands-box: namespace reaper could not drop its own authority \
+        diagnostics::diag!(
+            B0901,
+            "namespace reaper could not drop its own authority \
              ({dropped:?}, {locked:?}); killing the namespace rather than \
              supervising from a privileged PID 1"
         );
@@ -550,7 +555,10 @@ fn establish_pid_namespace_and_reaper(
             .and_then(|_| authority::set_no_new_privileges())
             .and_then(|_| authority::refuse_process_memory_access());
         if let Err(error) = hardened {
-            eprintln!("strands-box: filesystem query supervisor could not drop authority: {error}");
+            diagnostics::diag!(
+                B0902,
+                "filesystem query supervisor could not drop authority: {error}"
+            );
             write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
             // SAFETY: exit closes an incomplete lifetime handshake or triggers the armed parent-death signal.
             unsafe { libc::_exit(127) };
@@ -581,7 +589,7 @@ fn establish_pid_namespace_and_reaper(
     if let Err(error) = view.materialize() {
         // Printed because the reaper cannot return a `Result`: without this, a
         // failure here is only exit 127 and the cause is invisible.
-        eprintln!("strands-box: namespace reaper could not build the view: {error}");
+        diagnostics::diag!(B0901, "namespace reaper could not build the view: {error}");
         write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: PID 1 exiting kills the namespace, which is the right response to
         // being unable to build the boundary at all.

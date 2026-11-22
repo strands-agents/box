@@ -170,6 +170,9 @@
 //! code 2, preserving the binary target's build on any host without an
 //! enforcement backend.
 
+// A test probe: its stderr lines are harness output that the tests read, not box messages.
+#![allow(clippy::print_stderr)]
+
 use std::process::ExitCode;
 
 #[cfg(all(
