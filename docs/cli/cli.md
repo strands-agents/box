@@ -64,8 +64,8 @@ box: run b-5b8e3d70c92f14ab ended
 ```
 
 Box Core's startup disclosure, which names every grant the box gives the agent and its tools, is in
-the [log](files.md#profile-storage-and-runs). The messages are the Box lines that arrived after the
-agent started and that the summary didn't show. A new run that fails before its
+the [log](files.md#profile-storage-and-runs). The messages are the other Box lines in the log that the
+summary didn't show. A new run that fails before its
 box starts shows only the errors.
 
 If input or output is redirected, including stderr, or `TERM=dumb`, `box` prints the box ID and

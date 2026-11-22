@@ -3746,10 +3746,10 @@ fn a_run_prints_the_box_id_that_brings_it_back() {
     );
 }
 
-/// **A run with redirected output still prints every grant on stderr at startup**, before the
+/// **A run with redirected output still prints the startup disclosure on stderr**, before the
 /// workload's own output, because no `fs:*` decision covers a grant.
 #[test]
-fn a_redirected_run_prints_every_grant_on_stderr_at_startup() {
+fn a_redirected_run_prints_the_startup_disclosure_on_stderr() {
     let scene = Scene::new();
     let output = scene.probe(&scene.workspace(), "echo WORKLOAD_RAN >&2");
     succeeded(&output);
