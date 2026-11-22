@@ -52,10 +52,20 @@ box run [<profile>] [--box-id <box ID>] [--banner | --no-banner] [-- <agent argu
 | `--banner` | Show the banner, even when the profile or `~/.strands/box/config.toml` turns it off. |
 | `-- <agent arguments>` | Pass the rest of the line to the agent. `box run claude -- --continue` continues Claude Code's last conversation. |
 
-Once the terminal session starts, with or without the banner, `box` shows recent Box errors on exit.
-Then it shows the [log path](files.md#profile-storage-and-runs), with the number of later messages
-it didn't show, and a command to reuse the box. A new run that fails before its box starts shows
-only the errors.
+Once the terminal session starts, with or without the banner, `box` shows recent Box errors on exit,
+then a short summary of the run:
+
+```text
+box: run b-5b8e3d70c92f14ab ended
+  startup disclosure · 0 more messages
+  log      /Users/you/.strands/box/r/b-5b8e3d70c92f14ab/box.log
+  history  box runs history b-5b8e3d70c92f14ab
+  reuse    box run claude --box-id b-5b8e3d70c92f14ab
+```
+
+Box Core's startup disclosure, which names every grant the box gives the agent and its tools, is in
+the [log](files.md#profile-storage-and-runs). The messages are the other Box lines in the log that
+the summary didn't show. A new run that fails before its box starts shows only the errors.
 
 If input or output is redirected, including stderr, or `TERM=dumb`, `box` prints the box ID and
 these commands at startup:
