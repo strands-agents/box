@@ -1250,3 +1250,166 @@ fn a_codex_run_with_imported_hooks_writes_one_command_string_and_permits_its_scr
         std::fs::read_to_string(launch.config().with_file_name("policy.dw")).expect("the policy");
     assert!(!policy.contains("hook_script_"), "{policy}");
 }
+
+/// An npm install of Codex under `prefix`: the node launcher in `bin`, and the program in the
+/// platform package of each of `platforms`, as `(package, triple)`.
+fn npm_codex(prefix: &Path, platforms: &[(&str, &str)]) -> PathBuf {
+    let package = prefix.join("lib/node_modules/@openai/codex");
+    write(
+        &package.join("bin/codex.js"),
+        "#!/usr/bin/env node\nconsole.log('codex-cli 0.171.0')\n",
+    );
+    executable(&package.join("bin/codex.js"));
+    strands_box_cli_profile::fixtures::link(
+        "../lib/node_modules/@openai/codex/bin/codex.js",
+        &prefix.join("bin/codex"),
+    );
+    for (platform, triple) in platforms {
+        let bin = package.join(format!(
+            "node_modules/@openai/codex-{platform}/vendor/{triple}/bin"
+        ));
+        binary(&bin.join("codex"));
+        binary(&bin.join("codex-code-mode-host"));
+    }
+    package
+}
+
+const ARM64_MAC: (&str, &str) = ("darwin-arm64", "aarch64-apple-darwin");
+
+/// The program of the platform package `platform` of the npm install at `package`.
+fn platform_program(package: &Path, (platform, triple): (&str, &str)) -> PathBuf {
+    resolved(&package.join(format!(
+        "node_modules/@openai/codex-{platform}/vendor/{triple}/bin/codex"
+    )))
+}
+
+/// The `[agent.filesystem] key` paths of `generated` that lie under `folder`.
+fn granted_under(generated: &Trialed, key: &str, folder: &Path) -> Vec<String> {
+    let config: toml::Value = toml::from_str(generated.box_toml()).expect("box.toml parses");
+    string_list(config["agent"]["filesystem"].get(key))
+        .into_iter()
+        .filter(|path| Path::new(path).starts_with(folder))
+        .collect()
+}
+
+#[test]
+fn an_npm_installed_codex_runs_the_program_in_its_platform_package() {
+    let host = FakeHost::new();
+    host.uninstall_codex();
+    let prefix = host.home().join(".npm-global");
+    let package = resolved(&npm_codex(&prefix, &[ARM64_MAC]));
+    let generated = codex(&host)
+        .search_path(format!(
+            "{}:{}",
+            prefix.join("bin").display(),
+            host.search_path()
+        ))
+        .generate()
+        .expect("a configuration");
+    let program = platform_program(&package, ARM64_MAC);
+    assert_eq!(agent_command(&generated)[0], program.display().to_string());
+    let expected = vec![
+        program.display().to_string(),
+        program
+            .with_file_name("codex-code-mode-host")
+            .display()
+            .to_string(),
+    ];
+    for key in ["read", "exec"] {
+        assert_eq!(granted_under(&generated, key, &package), expected, "{key}");
+    }
+    for key in ["write", "read_file", "list", "metadata"] {
+        assert!(granted_under(&generated, key, &package).is_empty(), "{key}");
+    }
+}
+
+#[test]
+fn an_npm_installed_codex_takes_the_arm64_package_before_another() {
+    let host = FakeHost::new();
+    host.uninstall_codex();
+    let prefix = host.home().join(".npm-global");
+    let package = resolved(&npm_codex(
+        &prefix,
+        &[("darwin-x64", "x86_64-apple-darwin"), ARM64_MAC],
+    ));
+    let generated = codex(&host)
+        .search_path(format!(
+            "{}:{}",
+            prefix.join("bin").display(),
+            host.search_path()
+        ))
+        .generate()
+        .expect("a configuration");
+    assert_eq!(
+        agent_command(&generated)[0],
+        platform_program(&package, ARM64_MAC).display().to_string()
+    );
+}
+
+#[test]
+fn the_codex_on_the_first_path_folder_wins_whether_npm_or_native() {
+    let host = FakeHost::new();
+    let prefix = host.home().join(".npm-global");
+    let package = resolved(&npm_codex(&prefix, &[ARM64_MAC]));
+    let npm = prefix.join("bin").display().to_string();
+    let native = resolved(&host.codex_install());
+    for (search_path, expected) in [
+        (
+            format!("{npm}:{}", host.search_path()),
+            platform_program(&package, ARM64_MAC),
+        ),
+        (format!("{}:{npm}", host.search_path()), native),
+    ] {
+        let generated = codex(&host)
+            .search_path(search_path.clone())
+            .generate()
+            .expect("a configuration");
+        assert_eq!(
+            agent_command(&generated)[0],
+            expected.display().to_string(),
+            "{search_path}"
+        );
+    }
+}
+
+#[test]
+fn an_npm_launcher_without_its_platform_package_is_passed_over_at_create() {
+    let host = FakeHost::new();
+    host.uninstall_codex();
+    let prefix = host.home().join(".npm-global");
+    npm_codex(&prefix, &[]);
+    let npm = prefix.join("bin").display().to_string();
+    let search_path = format!("{npm}:{npm}:{}", host.search_path());
+    let error = codex(&host)
+        .search_path(search_path.clone())
+        .generate()
+        .expect_err("no program");
+    no_agent(&error, "codex");
+    assert_eq!(
+        error
+            .to_string()
+            .matches("codex (a node script, which the box cannot start)")
+            .count(),
+        1,
+        "a folder that PATH names twice is passed over once: {error}"
+    );
+    let created = host
+        .profile()
+        .with("codex")
+        .with("bedrock-mantle")
+        .search_path(search_path)
+        .create()
+        .expect("a profile with no program on the host");
+    let guided = created
+        .guided_summary(false)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        guided.contains(
+            "Codex is not on this host as a program the box can run: `agent.command.0`: no \
+             `codex` that the box can run"
+        ) && guided.contains("~/.npm-global/bin/codex (a node script, which the box cannot start)"),
+        "{guided}"
+    );
+}

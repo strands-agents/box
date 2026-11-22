@@ -224,9 +224,10 @@ Codex's default shell tool does not kill a command at a timeout. After 10 second
 
 ### Codex isn't found
 
-`npm install` puts Codex on your Mac as a Node.js script, and the box stops with
-`a node script, which the box cannot start`. Install Codex's own program for macOS instead of the
-npm package.
+`npm install -g @openai/codex` puts a Node.js script on your `PATH` and Codex's own program in the
+npm package's folder. `box` runs that program. When the npm package has no program for your
+platform, the box stops with `a node script, which the box cannot start`. Install the npm package
+again, or install Codex's own program from its release page.
 
 If Codex lives somewhere `box` doesn't look, set `codex.path` under `[options]`, as
 [The agent isn't found](../../../docs/cli/troubleshooting.md#the-agent-isnt-found) shows for

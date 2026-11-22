@@ -13967,7 +13967,48 @@ mod search {
             ),
             (
                 "type = \"program\"\nprogram = \"mine\"\nsearch = [{ path = \"/opt\" }]",
-                "takes only `env`",
+                "takes `env`",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\n\
+                 search = [{ env = \"PATH\", join = [\"../lib\"], path = \"/opt\" }]",
+                "takes `env`",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ join = [\"../lib\"] }]",
+                "takes `env`",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = \"../lib\" }]",
+                "`join` is a list of relative paths",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = [\"/opt\"] }]",
+                "`join` is a list of relative paths",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = [\"../${{ home }}\"] }]",
+                "`join` is a list of relative paths",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = [\"../lib//bin\"] }]",
+                "`join` is a list of relative paths",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = [\"\"] }]",
+                "`join` is a list of relative paths",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = [1] }]",
+                "`join` is a list of relative paths",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = [] }]",
+                "`join` is a list of relative paths",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = [\"../lib/*/bin\"] }]",
+                "`join` is a list of relative paths",
             ),
             (
                 "type = \"program\"\nprogram = \"mine\"\nsearch = [1]",

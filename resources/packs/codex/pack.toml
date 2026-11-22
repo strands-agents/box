@@ -150,8 +150,16 @@ default = "amazon-bedrock"
 description = "The Codex program."
 type = "program"
 program = "codex"
+# `npm i -g @openai/codex` puts a node launcher in <prefix>/bin, and Codex's own program in the
+# platform package under <prefix>/lib. Each folder of PATH is tried before the next, so the box
+# runs the Codex that the shell runs. An arm64 package comes first.
 search = [
-    { env = "PATH" },
+    { env = "PATH", join = [
+        "../lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin",
+        "../lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin",
+        "../lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-x64/vendor/x86_64-apple-darwin/bin",
+        "../lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin",
+    ] },
 ]
 
 # Select the host source folder; Codex itself keeps its private home in storage.

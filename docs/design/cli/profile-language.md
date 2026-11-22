@@ -382,6 +382,12 @@ A `search` entry is one of these:
   credential reference or a `secret.env` in the merged profile names, or that a `pass-secret-env`
   entry holds. For `PATH`, `box` reads the search path that
   it also uses for tools.
+- `{ env = "<NAME>", join = ["<path>", ...] }`: the same folders, and after each folder, each
+  relative `<path>` of `join` under it, before the next folder. A `<path>` holds no placeholder, no
+  `*`, and no empty component, and it can start with `..`, which the host resolves from the real
+  folder when a folder is a link. The Codex pack finds the program of an npm install this way:
+  npm puts a node launcher in `<prefix>/bin`, and the program in a package under
+  `<prefix>/lib/node_modules`, so the box runs the Codex that the shell finds first.
 
 `box` tries `<folder>/<program>` in each folder, in the order that `search` lists them:
 
