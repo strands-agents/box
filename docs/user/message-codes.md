@@ -93,6 +93,7 @@ The box denies the request that each of these messages names, and the run goes o
 |---|---|---|---|
 | `P0301` | warning | Outcomes that later decisions depend on were not recorded in the policy history. | A rule that counts or reads earlier outcomes does not see these. See [history persistence and process crashes](policy.md#history-persistence-and-process-crashes). |
 | `P0302` | warning | The policy history was not written to disk when it was due. | Check the disk that holds the box directory. Events that were not written can be lost if the run stops, as [history persistence and process crashes](policy.md#history-persistence-and-process-crashes) describes. |
+| `P0303` | error | The policy history could not be written to disk, so the box stopped. | Free disk space under the box directory, then run the box again. See [history persistence and process crashes](policy.md#history-persistence-and-process-crashes). |
 
 <a id="t01"></a>
 
@@ -123,6 +124,7 @@ Each of these stops the run before the workload starts. `strands-box` exits with
 | `B0109` | error | A declared MCP server could not be prepared, so the box did not start. | Read the step that the text names. See [MCP errors and exit codes](mcp.md#errors-and-exit-codes). |
 | `B0110` | error | The egress gateway or its relay failed, so the box did not start or stopped. | Report it as a bug with the full stderr of the run. |
 | `B0111` | error | The socket the box's interpreters reach could not be served. | Report it as a bug with the full stderr of the run. |
+| `B0112` | error | The library caller's `on_ready` callback returned an error, so the box did not start its workload. | Read the callback's error in the text; it comes from the program that runs the box, not from Box. |
 
 <a id="b02"></a>
 
@@ -192,6 +194,7 @@ is what you intended.
 | `B0701` | note | A host listener is relayed to a port of the agent. | No action. See [`[[agent.ingress]]`](config.md#agentingress). |
 | `B0702` | warning | Accepting a caller on a host listener failed, and the relay retries. | Read the reason in the text. See [`[[agent.ingress]]`](config.md#agentingress). |
 | `B0703` | warning | The agent's port did not answer a relayed caller. | Make the agent listen on its `workload_port` on `127.0.0.1` or `0.0.0.0`. See [`[[agent.ingress]]`](config.md#agentingress). |
+| `B0704` | error | An ingress listener could not be bound or relayed, so the box did not start or stopped. | Free the host address, or stop the process that already listens on the agent's port. See [`[[agent.ingress]]`](config.md#agentingress). |
 
 <a id="b08"></a>
 

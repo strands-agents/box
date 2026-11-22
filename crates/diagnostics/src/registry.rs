@@ -72,6 +72,7 @@ codes! {
     // Policy: history.
     P0301 => warning, "unrecorded policy outcomes", "Outcomes that later decisions depend on were not recorded in the policy history.";
     P0302 => warning, "policy history flush failures", "The policy history was not written to disk when it was due.";
+    P0303 => error, "policy history flush refusals", "The policy history could not be written to disk, so the box stopped.";
 
     // Telemetry.
     T0101 => warning, "lost telemetry records", "Telemetry records were lost before they reached a target.";
@@ -90,6 +91,7 @@ codes! {
     B0109 => error, "MCP servers that could not be prepared", "A declared MCP server could not be prepared, so the box did not start.";
     B0110 => error, "egress gateway failures", "The egress gateway or its relay failed, so the box did not start or stopped.";
     B0111 => error, "broker socket failures", "The socket the box's interpreters reach could not be served.";
+    B0112 => error, "refused library callbacks", "The library caller's `on_ready` callback returned an error, so the box did not start its workload.";
     // Box: startup disclosures.
     B0201 => note, "filesystem grant disclosures", "A process reaches these paths directly, with no policy decision.";
     B0202 => note, "exposed credential stores", "A process's filesystem grant reaches a credential store.";
@@ -120,6 +122,7 @@ codes! {
     B0701 => note, "ingress relays", "A host listener is relayed to a port of the agent.";
     B0702 => warning, "ingress accept failures", "Accepting a caller on a host listener failed, and the relay retries.";
     B0703 => warning, "unanswered ingress ports", "The agent's port did not answer a relayed caller.";
+    B0704 => error, "ingress listener failures", "An ingress listener could not be bound or relayed, so the box did not start or stopped.";
     // Box: native filesystem policy.
     B0801 => note, "native filesystem limits", "This host's kernel limits what native filesystem policy can intercept.";
     B0802 => warning, "refused native filesystem requests", "Native filesystem policy refused a request it cannot decide.";

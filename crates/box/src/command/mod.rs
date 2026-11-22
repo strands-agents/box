@@ -58,9 +58,7 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
             None
         };
         if let Some(on_ready) = options.on_ready {
-            on_ready().map_err(|source| crate::error::SuperviseError::Control {
-                reason: format!("on_ready callback failed: {source}"),
-            })?;
+            on_ready().map_err(|source| crate::error::SuperviseError::Callback { source })?;
         }
         dispatch(
             cli,

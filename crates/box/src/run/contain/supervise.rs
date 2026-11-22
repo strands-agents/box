@@ -527,7 +527,7 @@ impl Contained {
             #[cfg(target_os = "macos")]
             refuse_a_held_workload_port(workload_port)?;
             let listener = std::net::TcpListener::bind(address).map_err(|source| {
-                crate::error::SuperviseError::Control {
+                crate::error::SuperviseError::Ingress {
                     reason: format!("binding the ingress {address}: {source}"),
                 }
             })?;
@@ -682,7 +682,7 @@ impl Contained {
                 if let Some(mut terminal) = terminal {
                     let _ = terminal.restore();
                 }
-                return Err(crate::error::SuperviseError::Control {
+                return Err(crate::error::SuperviseError::Ingress {
                     reason: format!("starting the ingress relay: {error}"),
                 }
                 .into());
@@ -1334,7 +1334,7 @@ fn refuse_a_held_workload_port(port: u16) -> Result<(), BoxError> {
     let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     if std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(200)).is_ok()
     {
-        return Err(crate::error::SuperviseError::Control {
+        return Err(crate::error::SuperviseError::Ingress {
             reason: format!(
                 "the agent's port {port} already has a listener at {address}; another process \
                  holds it, so the ingress relay would reach that process and not the agent"

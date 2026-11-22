@@ -1186,9 +1186,10 @@ impl HostedBox {
         drop(self._proxy.take());
         #[cfg(feature = "experimental-idle-flush")]
         let history = match self._history_flusher.take() {
-            Some(flusher) if native.is_ok() && !std::thread::panicking() => {
-                flusher.shutdown().map(|_| ()).map_err(BoxError::from)
-            }
+            Some(flusher) if native.is_ok() && !std::thread::panicking() => flusher
+                .shutdown()
+                .map(|_| ())
+                .map_err(|error| crate::error::Internal::HistoryFlush(error).into()),
             Some(flusher) => flusher.stop().map(|_| ()).map_err(BoxError::from),
             None => Ok(()),
         };
@@ -1312,8 +1313,9 @@ pub(crate) fn with_shutdown<T>(
     match (outcome, shutdown) {
         (result, Ok(())) => result,
         (Ok(_), Err(error)) => Err(error),
-        (Err(outcome), Err(shutdown)) => Err(crate::error::SuperviseError::Control {
-            reason: format!("{outcome}; shutdown also failed: {shutdown}"),
+        (Err(outcome), Err(shutdown)) => Err(crate::error::SuperviseError::AlsoShutdown {
+            outcome: Box::new(outcome),
+            shutdown: Box::new(shutdown),
         }
         .into()),
     }
@@ -1324,10 +1326,10 @@ async fn history_failed(snapshot: impl Fn() -> policy::HistoryFlushSnapshot) -> 
     loop {
         let state = snapshot();
         if let Some(error) = state.last_error {
-            return policy::PolicyError::Evaluation(format!(
+            return crate::error::Internal::HistoryFlush(policy::PolicyError::Evaluation(format!(
                 "history flush failed {} time(s): {error}",
                 state.failures
-            ))
+            )))
             .into();
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

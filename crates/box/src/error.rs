@@ -75,10 +75,14 @@ impl Internal {
             Self::Supervise(error) => match error {
                 SuperviseError::Diagnostics { .. }
                 | SuperviseError::Spawn { .. }
-                | SuperviseError::NoProcessId
+                | SuperviseError::Native { .. } => Code::B0108.into(),
+                SuperviseError::Callback { .. } => Code::B0112.into(),
+                SuperviseError::Ingress { .. } => Code::B0704.into(),
+                SuperviseError::AlsoShutdown { outcome, .. } => outcome.code(),
+                SuperviseError::NoProcessId
                 | SuperviseError::Wait { .. }
                 | SuperviseError::Signal { .. }
-                | SuperviseError::Control { .. } => Code::B0108.into(),
+                | SuperviseError::Control { .. } => DEFECT,
             },
             Self::Shell(error) => match error {
                 ShellError::Missing { .. }
@@ -98,6 +102,7 @@ impl Internal {
                 Code::B0103.into()
             }
             Self::HistoryDisagreesWithRecord { .. } => Code::B0105.into(),
+            Self::HistoryFlush(_) => Code::P0303.into(),
             Self::Credential(_) | Self::CredentialProjection(_) => Code::B0104.into(),
             Self::Proxy(_) => Code::B0110.into(),
             Self::Containment(_) => Code::B0108.into(),
@@ -242,6 +247,10 @@ pub(crate) enum Internal {
         history: PathBuf,
         found: HistoryFound,
     },
+
+    /// The policy history could not be flushed when the box stopped.
+    #[error("{0}")]
+    HistoryFlush(policy::PolicyError),
 
     #[error("credential setup failed: {0}")]
     Credential(#[from] credentials::CredentialError),
@@ -762,6 +771,25 @@ pub(crate) enum SuperviseError {
 
     #[error("workload process control failed: {reason}")]
     Control { reason: String },
+
+    /// A library caller's `on_ready` callback refused the run.
+    #[error("workload process control failed: on_ready callback failed: {source}")]
+    Callback { source: std::io::Error },
+
+    /// An `[[agent.ingress]]` listener could not be bound or relayed.
+    #[error("workload process control failed: {reason}")]
+    Ingress { reason: String },
+
+    /// Native filesystem policy could not be set up or kept running.
+    #[error("workload process control failed: {reason}")]
+    Native { reason: String },
+
+    /// The run failed, and its shutdown failed too; the run's failure names the code.
+    #[error("workload process control failed: {outcome}; shutdown also failed: {shutdown}")]
+    AlsoShutdown {
+        outcome: Box<BoxError>,
+        shutdown: Box<BoxError>,
+    },
 }
 
 /// How far containment got before it failed.
@@ -886,8 +914,44 @@ mod tests {
     #[test]
     fn refusals_name_their_code() {
         use ::diagnostics::{Code, Kind, Severity};
-        let cases: [(BoxError, Kind); 16] = [
+        let cases: [(BoxError, Kind); 21] = [
             (ConfigError::EmptyWorkload.into(), Code::B0101.into()),
+            (
+                SuperviseError::Callback {
+                    source: std::io::Error::other("refused"),
+                }
+                .into(),
+                Code::B0112.into(),
+            ),
+            (
+                SuperviseError::Ingress {
+                    reason: "binding the ingress 127.0.0.1:8080: in use".into(),
+                }
+                .into(),
+                Code::B0704.into(),
+            ),
+            (
+                SuperviseError::AlsoShutdown {
+                    outcome: Box::new(DaemonError::NoProxyPort.into()),
+                    shutdown: Box::new(
+                        Internal::HistoryFlush(policy::PolicyError::Evaluation("full".into()))
+                            .into(),
+                    ),
+                }
+                .into(),
+                Code::B0110.into(),
+            ),
+            (
+                Internal::HistoryFlush(policy::PolicyError::Evaluation("full".into())).into(),
+                Code::P0303.into(),
+            ),
+            (
+                SuperviseError::Wait {
+                    source: std::io::Error::other("gone"),
+                }
+                .into(),
+                Kind::Uncoded(Severity::Error),
+            ),
             (
                 ConfigError::PolicyRead {
                     path: "policy.dw".into(),

@@ -98,7 +98,7 @@ pub(super) fn prepare_native(config: &Path, has_callback: bool) -> Result<Native
     let guard = crate::run::native_enforcement::EntryGuard::prepare(enabled);
     if guard.is_err() {
         crate::run::native_enforcement::EntryGuard::prepare(false).map_err(|source| {
-            crate::error::SuperviseError::Control {
+            crate::error::SuperviseError::Native {
                 reason: format!("native filesystem capability removal failed: {source}"),
             }
         })?;
@@ -293,7 +293,7 @@ pub(crate) async fn execute(
         let guard = if contract.uses_native_filesystem() {
             Some(
                 guard
-                    .map_err(|source| crate::error::SuperviseError::Control {
+                    .map_err(|source| crate::error::SuperviseError::Native {
                         reason: format!("native filesystem setup failed: {source}"),
                     })?
                     .ok_or_else(|| crate::error::SuperviseError::Control {

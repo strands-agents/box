@@ -27,7 +27,7 @@ const STOP_WAIT: Duration = Duration::from_secs(1);
 const WATCH_INTERVAL: Duration = Duration::from_millis(25);
 
 fn failure(reason: impl ToString) -> BoxError {
-    SuperviseError::Control {
+    SuperviseError::Native {
         reason: reason.to_string(),
     }
     .into()
