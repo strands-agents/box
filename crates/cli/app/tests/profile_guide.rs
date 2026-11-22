@@ -747,3 +747,42 @@ fn each_planted_mistake_gives_the_message_that_the_error_table_holds() {
         assert!(error.contains(message), "{message}: {error}");
     }
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn show_from_the_home_folder_prints_the_profile_and_notes_the_missing_preview() {
+    let source = "[agent]\ncommand = [\"/usr/bin/true\"]\n";
+    let (_root, home) = fixture(source);
+    let from_home = |arguments: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_box"))
+            .args(arguments)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .current_dir(&home)
+            .output()
+            .unwrap()
+    };
+    let result = from_home(&["profile", "show", "test"]);
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    assert_eq!(result.status.code(), Some(0), "{stdout}{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(
+        stdout.contains("Saved settings") && stdout.contains(source),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("this is your home folder") && stdout.contains("from a project folder"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("Resolves for this directory"), "{stdout}");
+
+    let json = from_home(&["profile", "show", "test", "--format", "json"]);
+    assert_eq!(json.status.code(), Some(1));
+    assert!(
+        String::from_utf8(json.stderr)
+            .unwrap()
+            .contains("is your home folder")
+    );
+}
