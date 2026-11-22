@@ -303,7 +303,7 @@ fn apply_containment(args: &Args, setup_status: &SetupStatus) -> Result<(), Exit
 fn disclose_warnings(config: &containment::ContainmentConfig, mut sink: impl std::io::Write) {
     for warning in config.warnings() {
         // A disclosure that cannot be written must not stop the apply: stderr may be closed.
-        let _ = diag!(into sink, H0402, "{warning}");
+        let _ = diag!(into sink, { warning.code() }, "{warning}");
     }
 }
 

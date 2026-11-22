@@ -3,7 +3,7 @@ name = "strands-box-diagnostics"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "The Strands box's stderr messages: one line format, the message codes, and a parser."
+description = "The Strands box's stderr messages: one line format, the message codes, and a parser (docs/design/decisions.md#core-writes-stderr-only-through-diag-and-codes-each-kind)."
 
 [lib]
 name = "diagnostics"
