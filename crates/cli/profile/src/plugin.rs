@@ -1287,6 +1287,7 @@ mod tests {
                 box_dir: &self.root.join("run/box"),
                 storage: &self.root.join("storage"),
                 os: "macos",
+                arch: "aarch64",
                 tool_cache: None,
                 packs: None,
             };

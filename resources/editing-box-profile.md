@@ -519,7 +519,7 @@ Read the complete declaration before changing an option or its constraints in a 
 | `pattern` | A Rust regular expression that the entire value must match |
 | `values` | Allowed values |
 | `program` | For `type = "program"`, the executable name to discover; cannot be combined with `default` |
-| `search` | With `program`, ordered search folders; defaults to `PATH`. Entries may contain placeholders or `*`; `{ env = "PATH" }` expands the host's search path. Version matches are tried newest first. |
+| `search` | With `program`, ordered search folders; defaults to `PATH`. Entries may contain placeholders or `*`; `{ env = "PATH" }` expands the host's search path, and `{ env = "PATH", join = ["<relative path>"] }` also tries each `join` path under each `PATH` folder, right after it. Version matches are tried newest first. |
 | `warning` | What choosing a value permits. Creation shows it with the input's question and saves the answer even when it is the default. Cannot combine with `from` or program discovery. |
 
 The value precedence is the profile's option, then a nonempty `from` variable (with `key`, a

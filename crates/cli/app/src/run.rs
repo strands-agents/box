@@ -374,6 +374,7 @@ pub(crate) fn compile_run(
         box_dir: &instance.box_directory,
         storage: &storage,
         os: host.os,
+        arch: host.arch,
         packs: packs_at.vendored.as_deref(),
     };
     let layers = source.profile.layers(source.policy, &packs_at)?;
@@ -2802,6 +2803,7 @@ mod tests {
             box_home: home.join(".strands/box"),
             search_path: "/usr/bin:/bin".into(),
             os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
             variables: Some(Vec::new()),
             answers: Vec::new(),
             root: false,

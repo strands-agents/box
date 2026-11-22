@@ -1275,6 +1275,32 @@ fn npm_codex(prefix: &Path, platforms: &[(&str, &str)]) -> PathBuf {
 }
 
 const ARM64_MAC: (&str, &str) = ("darwin-arm64", "aarch64-apple-darwin");
+const X64_MAC: (&str, &str) = ("darwin-x64", "x86_64-apple-darwin");
+const ARM64_LINUX: (&str, &str) = ("linux-arm64", "aarch64-unknown-linux-musl");
+const X64_LINUX: (&str, &str) = ("linux-x64", "x86_64-unknown-linux-musl");
+
+/// Give each program of `platforms` under `package` the executable header of its platform.
+fn platform_headers(package: &Path, platforms: &[(&str, &str)]) {
+    for &platform in platforms {
+        let program = platform_program(package, platform);
+        let header: Vec<u8> = match platform.1 {
+            "aarch64-apple-darwin" => [0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 0x01].to_vec(),
+            "x86_64-apple-darwin" => [0xcf, 0xfa, 0xed, 0xfe, 0x07, 0, 0, 0x01].to_vec(),
+            triple => {
+                let machine: u16 = if triple.starts_with("aarch64") {
+                    183
+                } else {
+                    62
+                };
+                let mut elf = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0];
+                elf.resize(18, 0);
+                elf.extend(machine.to_le_bytes());
+                elf
+            }
+        };
+        std::fs::write(&program, header).expect("a header");
+    }
+}
 
 /// The program of the platform package `platform` of the npm install at `package`.
 fn platform_program(package: &Path, (platform, triple): (&str, &str)) -> PathBuf {
@@ -1324,25 +1350,58 @@ fn an_npm_installed_codex_runs_the_program_in_its_platform_package() {
 }
 
 #[test]
-fn an_npm_installed_codex_takes_the_arm64_package_before_another() {
+fn an_npm_installed_codex_takes_the_platform_package_of_this_host() {
+    for (os, arch, platforms, expected) in [
+        ("linux", "x86_64", vec![ARM64_MAC, X64_LINUX], X64_LINUX),
+        ("linux", "x86_64", vec![ARM64_LINUX, X64_LINUX], X64_LINUX),
+        ("macos", "aarch64", vec![X64_MAC], X64_MAC),
+    ] {
+        let host = FakeHost::new();
+        host.uninstall_codex();
+        let prefix = host.home().join(".npm-global");
+        let package = resolved(&npm_codex(&prefix, &platforms));
+        platform_headers(&package, &platforms);
+        let generated = codex(&host)
+            .os(os)
+            .arch(arch)
+            .search_path(format!(
+                "{}:{}",
+                prefix.join("bin").display(),
+                host.search_path()
+            ))
+            .generate()
+            .expect("a configuration");
+        assert_eq!(
+            agent_command(&generated)[0],
+            platform_program(&package, expected).display().to_string(),
+            "{os} on {arch}"
+        );
+    }
+}
+
+#[test]
+fn an_npm_installed_codex_for_another_platform_only_is_passed_over() {
     let host = FakeHost::new();
     host.uninstall_codex();
     let prefix = host.home().join(".npm-global");
-    let package = resolved(&npm_codex(
-        &prefix,
-        &[("darwin-x64", "x86_64-apple-darwin"), ARM64_MAC],
-    ));
-    let generated = codex(&host)
+    let package = resolved(&npm_codex(&prefix, &[ARM64_MAC]));
+    platform_headers(&package, &[ARM64_MAC]);
+    let error = codex(&host)
+        .os("linux")
+        .arch("x86_64")
         .search_path(format!(
             "{}:{}",
             prefix.join("bin").display(),
             host.search_path()
         ))
         .generate()
-        .expect("a configuration");
-    assert_eq!(
-        agent_command(&generated)[0],
-        platform_program(&package, ARM64_MAC).display().to_string()
+        .expect_err("no program for this host");
+    no_agent(&error, "codex");
+    assert!(
+        error
+            .to_string()
+            .contains("(a program for macos, and this host runs linux)"),
+        "{error}"
     );
 }
 

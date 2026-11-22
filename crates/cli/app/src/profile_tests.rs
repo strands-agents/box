@@ -161,6 +161,7 @@ impl Scene {
                 box_dir: &instance.box_directory,
                 storage: &storage,
                 os: context.os,
+                arch: "aarch64",
                 packs: Some(packs),
             },
         )

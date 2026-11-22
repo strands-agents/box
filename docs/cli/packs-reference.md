@@ -93,7 +93,7 @@ starts. A pack declares it as `[inputs.<name>]` under its full name, such as
 | `description` | Text for a person who reads the pack. |
 | `type` | `string` (the default), `bool`, or `program`. |
 | `program` | For a `program` input: the file name to look for, such as `team-agent`. One name, with no `/`. |
-| `search` | For a `program` input with `program`: the folders to look in, in order. A folder can hold placeholders and a `*`, which matches every version folder, newest first. `{ env = "PATH" }` stands for the folders on your `PATH`. Without it, `box` looks on your `PATH` only. |
+| `search` | For a `program` input with `program`: the folders to look in, in order. A folder can hold placeholders and a `*`, which matches every version folder, newest first. `{ env = "PATH" }` stands for the folders on your `PATH`. `{ env = "PATH", join = ["../lib/<package>/bin"] }` also tries each relative `join` path under each `PATH` folder, right after that folder; a `join` path has no placeholder and no `*`. Without `search`, `box` looks on your `PATH` only. |
 | `from` | `env:<NAME>`: a variable in the shell where you run `box`. |
 | `key` | With `from`: one key of a variable that holds a list of `key=value` items separated by commas. The value is that key's value, with spaces at either end removed and each `%XX` escape decoded. A list that names the key twice is an error, and so is a value with a bad `%XX` escape, a value that isn't UTF-8 once decoded, or a value that decodes to a NUL. |
 | `default` | The value when neither your profile nor `from` gives one. A string, or `true` or `false`. It can hold placeholders. A `program` input with `program` has no `default`. |
@@ -107,8 +107,9 @@ and also hold `[inputs.team.mode]`. Each part of an input's name uses letters, d
 `-`, and the parts are joined with `.`. The name need not match the pack's folder.
 
 A `program` input names a program on your machine. `box` tries each `search` folder in order,
-skips a copy that is not a program the box can run (such as a Node.js script, or one inside your
-project), and uses the first one left. A path that a profile sets in `[options]` is used without
+skips a copy that is not a program the box can run (such as a Node.js script, a program built for
+another OS, or one inside your project), and uses the first one left that is built for your CPU,
+else the first one left. A path that a profile sets in `[options]` is used without
 a search.
 
 Some programs put several settings in one variable, such as

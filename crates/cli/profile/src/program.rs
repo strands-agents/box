@@ -229,6 +229,50 @@ fn flag(word: &str) -> Flag {
     }
 }
 
+/// The OS and CPU architecture that the executable header of `path` names, as
+/// `std::env::consts` names them, or none for a file that is not ELF or Mach-O, or that is too
+/// short to tell. A universal Mach-O file names no architecture.
+pub(crate) fn platform(path: &Path) -> Option<(&'static str, Option<&'static str>)> {
+    let mut header = [0u8; 20];
+    let file = std::fs::File::open(path).ok()?;
+    let mut read = Vec::with_capacity(header.len());
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, 20), &mut read).ok()?;
+    header[..read.len()].copy_from_slice(&read);
+    let header = &header[..read.len()];
+    match header {
+        [0x7f, b'E', b'L', b'F', _, data, ..] if header.len() >= 20 => {
+            let machine = [header[18], header[19]];
+            let machine = match data {
+                1 => u16::from_le_bytes(machine),
+                2 => u16::from_be_bytes(machine),
+                _ => return None,
+            };
+            Some(("linux", elf_arch(machine)))
+        }
+        [0xcf, 0xfa, 0xed, 0xfe, a, b, c, d, ..] => {
+            Some(("macos", macho_arch(u32::from_le_bytes([*a, *b, *c, *d]))))
+        }
+        [0xca, 0xfe, 0xba, 0xbe, ..] => Some(("macos", None)),
+        _ => None,
+    }
+}
+
+fn elf_arch(machine: u16) -> Option<&'static str> {
+    match machine {
+        62 => Some("x86_64"),
+        183 => Some("aarch64"),
+        _ => None,
+    }
+}
+
+fn macho_arch(cpu: u32) -> Option<&'static str> {
+    match cpu {
+        0x0100_0007 => Some("x86_64"),
+        0x0100_000c => Some("aarch64"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,6 +554,47 @@ mod tests {
             (Interpreter::Path("/bin/sh".into()), false),
         ] {
             assert_eq!(interpreter.is_node(), node, "{interpreter:?}");
+        }
+    }
+
+    #[test]
+    fn platform_reads_the_os_and_cpu_of_an_executable_header() {
+        let scene = Scene::new();
+        let elf = |data: u8, machine: [u8; 2]| {
+            let mut header = vec![0x7f, b'E', b'L', b'F', 2, data];
+            header.resize(18, 0);
+            header.extend(machine);
+            header
+        };
+        for (name, header, expected) in [
+            ("elf-x86", elf(1, [62, 0]), Some(("linux", Some("x86_64")))),
+            (
+                "elf-arm-be",
+                elf(2, [0, 183]),
+                Some(("linux", Some("aarch64"))),
+            ),
+            ("elf-other", elf(1, [243, 0]), Some(("linux", None))),
+            ("elf-short", b"\x7fELF".to_vec(), None),
+            (
+                "macho-arm",
+                vec![0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 0x01],
+                Some(("macos", Some("aarch64"))),
+            ),
+            (
+                "macho-x86",
+                vec![0xcf, 0xfa, 0xed, 0xfe, 0x07, 0, 0, 0x01],
+                Some(("macos", Some("x86_64"))),
+            ),
+            (
+                "universal",
+                vec![0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2],
+                Some(("macos", None)),
+            ),
+            ("script", b"#!/bin/sh\necho hi\n".to_vec(), None),
+        ] {
+            let path = scene.at(name);
+            std::fs::write(&path, header).expect("a file");
+            assert_eq!(platform(&path), expected, "{name}");
         }
     }
 }

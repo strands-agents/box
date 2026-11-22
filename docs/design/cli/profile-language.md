@@ -385,16 +385,18 @@ A `search` entry is one of these:
 - `{ env = "<NAME>", join = ["<path>", ...] }`: the same folders, and after each folder, each
   relative `<path>` of `join` under it, before the next folder. A `<path>` holds no placeholder, no
   `*`, and no empty component, and it can start with `..`, which the host resolves from the real
-  folder when a folder is a link. The Codex pack finds the program of an npm install this way:
-  npm puts a node launcher in `<prefix>/bin`, and the program in a package under
-  `<prefix>/lib/node_modules`, so the box runs the Codex that the shell finds first.
+  folder when a folder is a link. The `@box/codex` pack uses it
+  ([pack.toml](../../../resources/packs/codex/pack.toml)).
 
 `box` tries `<folder>/<program>` in each folder, in the order that `search` lists them:
 
 1. A candidate that does not exist is skipped.
 2. `box` follows each link to the real file.
 3. `box` passes over a candidate that is not an executable file, that is a script whose `#!` line
-   runs node, or that lies in the workspace, the run's storage, or `~/.strands/box`, as written or real.
+   runs node, whose ELF or Mach-O header names another OS than the host's, or that lies in the
+   workspace, the run's storage, or `~/.strands/box`, as written or real. A candidate whose header
+   names another CPU is used only when no later candidate is built for the host's CPU, because
+   macOS runs an x86_64 program on arm64.
 4. The first candidate that remains is the value, as its real path.
 
 An `[options]` or `from` value of an input with `program` passes the same checks, and its value
