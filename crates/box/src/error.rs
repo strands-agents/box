@@ -781,6 +781,7 @@ pub(crate) enum SuperviseError {
     Ingress { reason: String },
 
     /// Native filesystem policy could not be set up or kept running.
+    #[cfg_attr(not(feature = "native-filesystem-policy"), allow(dead_code))]
     #[error("workload process control failed: {reason}")]
     Native { reason: String },
 

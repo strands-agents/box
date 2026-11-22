@@ -122,7 +122,7 @@ async fn spawn_registered(
         };
         if let Some(reason) = error {
             let _ = group.stop().await;
-            return Err(SuperviseError::Control { reason }.into());
+            return Err(SuperviseError::Native { reason }.into());
         }
     }
     #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
@@ -135,7 +135,7 @@ async fn spawn_registered(
         };
         if let Some(reason) = error {
             let _ = group.stop().await;
-            return Err(SuperviseError::Control { reason }.into());
+            return Err(SuperviseError::Native { reason }.into());
         }
     }
     Ok((group, trampoline))

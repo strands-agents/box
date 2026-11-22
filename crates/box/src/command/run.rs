@@ -296,7 +296,7 @@ pub(crate) async fn execute(
                     .map_err(|source| crate::error::SuperviseError::Native {
                         reason: format!("native filesystem setup failed: {source}"),
                     })?
-                    .ok_or_else(|| crate::error::SuperviseError::Control {
+                    .ok_or_else(|| crate::error::SuperviseError::Native {
                         reason: "native filesystem interception requires CAP_BPF and CAP_PERFMON"
                             .to_string(),
                     })?,
