@@ -26,10 +26,11 @@ listen only on localhost.
 Download the installer and run it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | BOX_VERSION=0.3.0-preview.1 sh
 ```
 
-It installs the latest release, puts `box` on your `PATH`, and ends with example next steps. Usage telemetry is on by default, and the installer says how to turn it off
+It installs the `0.3.0-preview.1` release, puts `box` on your `PATH`, and ends with example next
+steps. Usage telemetry is on by default, and the installer says how to turn it off
 ([Usage telemetry](../../CLI_TELEMETRY.md)).
 
 Open a new terminal, and do every step from here on in it, because later steps use variables that
@@ -37,7 +38,7 @@ earlier ones set. Check that `box` runs:
 
 ```console
 $ box --version
-box 0.3.0
+box 0.3.0-preview.1
 ```
 
 If the installer stops instead, it says why. [Install Box](install.md) covers what it adds,
