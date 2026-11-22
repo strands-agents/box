@@ -71,7 +71,7 @@ first run:
   BEFORE RUNNING
 
   • Skipped tools: pnpm (@box/pnpm), yarn (@box/yarn).
-  • The bedrock route signs with your default AWS identity. Box Core warns on each request.
+  • The bedrock route signs with your default AWS identity. Box Core warns about it.
 ```
 
 Your list may differ. A skipped tool is one that `box` didn't find on your machine. Install it

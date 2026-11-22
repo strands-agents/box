@@ -273,7 +273,14 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   broken chain fails at `box run` rather than on the first request. Only when a bare route exists and
   `ambient_policy != Deny`; a named-profile-only or `credsd://` vault does no resolve at open, so a
   box that never signs a bare route forces no credentials to exist. The resolve primes the shared
-  cache and emits the one prepare-step audit record.
+  cache and emits the one prepare-step audit record. It is also where the vault prints the one
+  ambient-identity warning (`warn_at_open`), one line for each bare route, naming its destination. `sign_aws` warns no more: each sign keeps its audit
+  record, and a repeated warning told the operator nothing new.
+  `sign_aws_warns_on_bare_and_not_on_scoped` and `many_bare_signs_leave_one_ambient_warning` pin
+  one warning at open and none per sign; `each_bare_route_names_its_host_at_open` pins one line per
+  bare route. A destination warns once for the process (`first_warning`), because a box opens more
+  than one vault for one destination: a telemetry target's `preflight_aws` opens a second.
+  `a_destination_warns_once_across_vaults` pins it, and each warning test uses its own destination.
 - Build the per-request resolve from the vault's retained `ambient_policy` via
   `AwsSource::with_provider(self.aws_provider(), …)`, never `AwsSource::new()`, or
   `require_scoped_aws_profile` is unreachable.
