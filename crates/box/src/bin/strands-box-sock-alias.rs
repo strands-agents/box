@@ -17,6 +17,11 @@ mod fallback;
 mod close_descriptors;
 use close_descriptors::close_inherited_descriptors;
 
+/// The voice of every message this alias prints.
+const DIAGNOSTIC_SOURCE: diagnostics::Source = diagnostics::Source::SockAlias;
+
+use diagnostics::diag;
+
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -69,7 +74,7 @@ struct Mode {
 
 fn main() -> ExitCode {
     if let Err(error) = close_inherited_descriptors() {
-        eprintln!("strands-box-sock-alias: close inherited descriptors: {error}");
+        diag!(H0202, "close inherited descriptors: {error}");
         return ExitCode::from(SHELL_FAILURE_EXIT);
     }
     // Current-thread: this image hosts no Shell, so a multi-threaded runtime would spawn worker
@@ -80,7 +85,7 @@ fn main() -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("strands-box-sock-alias: create async runtime: {error}");
+            diag!(error, "create async runtime: {error}");
             return ExitCode::from(SHELL_FAILURE_EXIT);
         }
     };
@@ -92,13 +97,20 @@ fn main() -> ExitCode {
             match fallback::execute(&program, &arguments) {
                 Ok(status) => ExitCode::from(status),
                 Err(error) => {
-                    eprintln!("strands-box-sock-alias: {error}");
+                    diag!(H0302, "{error}");
                     ExitCode::from(SHELL_FAILURE_EXIT)
                 }
             }
         }
         Err(error) => {
-            eprintln!("strands-box-sock-alias: {error}");
+            if error
+                .get_ref()
+                .is_some_and(|inner| inner.is::<InputRefused>())
+            {
+                diag!(H0201, "{error}");
+            } else {
+                diag!(H0202, "{error}");
+            }
             ExitCode::from(SHELL_FAILURE_EXIT)
         }
     }
@@ -206,6 +218,18 @@ fn spawn_input_reader(reader: impl io::Read + Send + 'static) -> io::Result<Inpu
         refused,
     })
 }
+
+/// The alias's own input failure, carried to `main` so that it prints the input-failure code.
+#[derive(Debug)]
+struct InputRefused(String);
+
+impl std::fmt::Display for InputRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for InputRefused {}
 
 /// Why the alias refused its stdin, recorded by the thread that saw it.
 type Refusal = std::sync::Arc<std::sync::Mutex<Option<String>>>;
@@ -537,8 +561,8 @@ async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Res
                 arguments,
             });
         }
-        Body::Denied { reason, .. } => {
-            eprintln!("strands-box: {reason}");
+        Body::Denied { kind, reason } => {
+            diag!({ kind.code() }, "{reason}");
             return Ok(Outcome::Status(i32::from(SHELL_FAILURE_EXIT)));
         }
         other => {
@@ -596,8 +620,8 @@ async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Res
                     stdout.write_all(&bytes).await?;
                     stdout.flush().await?;
                 }
-                Body::Denied { reason, .. } => {
-                    eprintln!("strands-box: {reason}");
+                Body::Denied { kind, reason } => {
+                    diag!({ kind.code() }, "{reason}");
                     return Ok(Outcome::Status(i32::from(SHELL_FAILURE_EXIT)));
                 }
                 Body::Exit { status } => return Ok(Outcome::Status(status)),
@@ -763,17 +787,20 @@ async fn forward(
             }
             Body::Exit { status } => {
                 return match refusal() {
-                    Some(reason) => Err(invalid_input(reason)),
+                    Some(reason) => Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        InputRefused(reason),
+                    )),
                     None => Ok(Outcome::Status(status)),
                 };
             }
             // A transport refusal, including a version mismatch. Terminal, and reported as the
             // boundary's own failure rather than as something the program did.
-            Body::Denied { reason, .. } => {
+            Body::Denied { kind, reason } => {
                 if let Some(reason) = refusal() {
-                    eprintln!("strands-box-sock-alias: {reason}");
+                    diag!(H0201, "{reason}");
                 }
-                eprintln!("strands-box: {reason}");
+                diag!({ kind.code() }, "{reason}");
                 return Ok(Outcome::Status(i32::from(SHELL_FAILURE_EXIT)));
             }
             other => {

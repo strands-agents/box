@@ -107,7 +107,10 @@ fn start_connector(connector: Connector) {
             super::netns::serve_inbound(handoff);
         });
     if let Err(error) = spawned {
-        eprintln!("strands-box: namespace reaper could not start the inbound connector: {error}");
+        diagnostics::diag!(
+            B0901,
+            "namespace reaper could not start the inbound connector: {error}"
+        );
     }
 }
 
