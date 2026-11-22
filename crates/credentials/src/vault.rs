@@ -493,9 +493,12 @@ impl Vault {
         CAPTURED_WARNINGS.with(|warnings| warnings.borrow_mut().push(message.to_string()));
     }
 
-    /// Report, once at open, a condition that holds for every request this vault serves.
+    /// Report, once for this process, a condition that holds for every request this vault serves.
     fn warn_at_open(&self, message: &str) {
         let line = format!("strands-box: warning: {message}");
+        if !first_warning(&line) {
+            return;
+        }
         eprintln!("{line}");
         #[cfg(test)]
         CAPTURED_WARNINGS.with(|warnings| warnings.borrow_mut().push(line));
@@ -589,6 +592,16 @@ impl Vault {
             .find(|(pattern, _)| pattern.matches(dest))
             .map(|(_, value)| value)
     }
+}
+
+/// Whether `line` is the first time this process prints it.
+fn first_warning(line: &str) -> bool {
+    static PRINTED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    PRINTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(line.to_string())
 }
 
 #[cfg(test)]

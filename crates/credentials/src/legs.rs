@@ -445,14 +445,18 @@ mod tests {
         }
     }
 
-    /// Open a signed-`aws://` vault with the fake provider injected, sign `requests` requests to an
-    /// AWS host, and return the warnings emitted at open and while signing. Drives the real
+    /// Open a signed-`aws://` vault over `pattern` with the fake provider injected, sign `requests`
+    /// requests to an AWS host, and return the warnings emitted at open and while signing. Drives the real
     /// `Vault::sign_aws` path end to end, through the seam a process-wide provider did not allow.
-    fn sign_through_fake(locator: &str, requests: usize) -> (Vec<String>, Vec<String>) {
+    fn sign_through_fake(
+        pattern: &str,
+        locator: &str,
+        requests: usize,
+    ) -> (Vec<String>, Vec<String>) {
         let _ = drain_captured_warnings();
         let opened = Vault::open_with_aws_provider(
             VaultConfig::new(Backend::local(), "tenant-a").route(RouteSpec::signed_aws(
-                DestinationPattern::parse("*.amazonaws.com").unwrap(),
+                DestinationPattern::parse(pattern).unwrap(),
                 Locator::parse_uri(locator).unwrap(),
             )),
             Arc::new(FixedProvider),
@@ -485,7 +489,7 @@ mod tests {
     /// provider resolves the credentials, so no SDK, worker, or `AWS_*` environment is reached.
     #[test]
     fn sign_aws_warns_on_bare_and_not_on_scoped() {
-        let (at_open, signing) = sign_through_fake("aws://", 1);
+        let (at_open, signing) = sign_through_fake("s3.us-west-2.amazonaws.com:443", "aws://", 1);
         assert_eq!(
             at_open.len(),
             1,
@@ -493,11 +497,11 @@ mod tests {
         );
         assert_eq!(
             at_open[0],
-            "strands-box: warning: aws:// for *.amazonaws.com signs with this machine's AWS identity"
+            "strands-box: warning: aws:// for s3.us-west-2.amazonaws.com:443 signs with this machine's AWS identity"
         );
         assert!(signing.is_empty(), "a bare sign warns no more: {signing:?}");
 
-        let (at_open, signing) = sign_through_fake("aws://prod", 1);
+        let (at_open, signing) = sign_through_fake("*.amazonaws.com", "aws://prod", 1);
         assert!(
             at_open.is_empty() && signing.is_empty(),
             "a scoped profile emits no warning: {at_open:?} {signing:?}"
@@ -531,10 +535,23 @@ mod tests {
         );
     }
 
+    /// Two vaults that open the same bare destination, as a telemetry target and its preflight
+    /// do, print its warning once.
+    #[test]
+    fn a_destination_warns_once_across_vaults() {
+        let (first, _) = sign_through_fake("*.us-west-2.amazonaws.com", "aws://", 0);
+        let (second, _) = sign_through_fake("*.us-west-2.amazonaws.com", "aws://", 0);
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(
+            second.is_empty(),
+            "the second vault warns again: {second:?}"
+        );
+    }
+
     /// Many signed requests through a bare `aws://` leave exactly one ambient-identity warning.
     #[test]
     fn many_bare_signs_leave_one_ambient_warning() {
-        let (at_open, signing) = sign_through_fake("aws://", 7);
+        let (at_open, signing) = sign_through_fake("s3.us-west-2.amazonaws.com", "aws://", 7);
         let all: Vec<&String> = at_open.iter().chain(&signing).collect();
         assert_eq!(
             all.iter()
