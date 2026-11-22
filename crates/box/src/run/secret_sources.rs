@@ -264,13 +264,14 @@ impl SecretSources {
     /// for each entry of that source that no sandbox of this run denies.
     fn disclose(&self, mut output: impl std::io::Write) -> std::io::Result<()> {
         for (scheme, program) in &self.programs {
-            writeln!(
-                output,
-                "strands-box: [secret-source.{scheme}]: reads each {scheme}:// secret with \
+            ::diagnostics::diag!(
+                into output,
+                B0203,
+                "[secret-source.{scheme}]: reads each {scheme}:// secret with \
                  {program}, which runs outside every sandbox"
             )?;
             for (_, entry) in self.skipped.iter().filter(|(of, _)| of == scheme) {
-                writeln!(output, "strands-box: [secret-source.{scheme}]: {entry}")?;
+                ::diagnostics::diag!(into output, B0203, "[secret-source.{scheme}]: {entry}")?;
             }
         }
         Ok(())
@@ -354,8 +355,12 @@ impl SecretSources {
                 returned: read.is_ok(),
             });
             if let Err(error) = read {
-                let refusal = match writeln!(diagnostics, "strands-box: {}: {error}", secret.entry)
-                {
+                let refusal = match ::diagnostics::diag!(
+                    into diagnostics,
+                    B0601,
+                    "{}: {error}",
+                    secret.entry
+                ) {
                     Ok(()) => ConfigError::SecretFetch {
                         entry: secret.entry.clone(),
                         scheme: scheme.to_string(),

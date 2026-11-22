@@ -68,7 +68,7 @@ fn stderr(output: &Output) -> String {
 fn assert_workload_launched(output: &Output, what: &str) {
     let stderr = stderr(output);
     assert!(
-        !stderr.contains("strands-box: error:"),
+        !stderr.contains("strands-box: error"),
         "the run never reached its workload, so {what} measured nothing: {stderr}"
     );
 }

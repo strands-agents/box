@@ -25,6 +25,9 @@
 //! carries the same environment: a test must not pass merely because the secret was
 //! present for one of the two.
 
+// Lines a test helper writes to stderr are test output, not Box Core messages.
+#![allow(clippy::print_stderr)]
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Output};
@@ -532,7 +535,7 @@ fn a_declared_secret_is_read_at_startup_and_the_workload_holds_a_placeholder() {
     assert!(output.status.success(), "the box must start: {stderr}");
     assert!(
         stderr.contains(&format!(
-            "strands-box: [secret-source.op]: reads each op:// secret with {}, which runs \
+            "strands-box: note[B0203]: [secret-source.op]: reads each op:// secret with {}, which runs \
              outside every sandbox\n",
             program.path()
         )),
@@ -1066,7 +1069,7 @@ fn a_left_out_tool_with_a_write_grant_over_a_secret_source_program_stops_no_box(
     assert!(output.status.success(), "the box must start: {stderr}");
     assert!(
         stderr.contains(&format!(
-            "strands-box: [tool.spare] left out: {absent} not found\n"
+            "strands-box: note[B0207]: [tool.spare] left out: {absent} not found\n"
         )),
         "{stderr}"
     );
@@ -1335,7 +1338,7 @@ fn a_secret_source_that_fails_stops_the_box_before_the_workload() {
     );
     let refusal = |entry: &str| {
         format!(
-            "strands-box: error: `{entry}` names a secret that the secret source `op` ({}) did \
+            "strands-box: error[B0104]: `{entry}` names a secret that the secret source `op` ({}) did \
              not return, so the box does not start\n",
             program.path()
         )
@@ -1356,13 +1359,13 @@ fn a_secret_source_that_fails_stops_the_box_before_the_workload() {
     assert!(!output.status.success(), "the box must not start: {stderr}");
     assert!(
         stderr.ends_with(&format!(
-            "strands-box: [egress.c] secret.ref: {said}{}",
+            "strands-box: warning[B0601]: [egress.c] secret.ref: {said}{}",
             refusal("[egress.c] secret.ref")
         )),
         "{stderr}"
     );
     assert!(
-        !stderr.contains("strands-box: starting workload"),
+        !stderr.contains("strands-box: note[B0302]: starting workload"),
         "{stderr}"
     );
     let records = std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl"))
@@ -1399,7 +1402,7 @@ fn a_secret_source_that_fails_stops_the_box_before_the_workload() {
     assert!(!output.status.success(), "the box must not start: {stderr}");
     assert!(
         stderr.ends_with(&format!(
-            "strands-box: [telemetry.vendor] secret.ref: {said}{}",
+            "strands-box: warning[B0601]: [telemetry.vendor] secret.ref: {said}{}",
             refusal("[telemetry.vendor] secret.ref")
         )),
         "{stderr}"
@@ -1567,13 +1570,13 @@ permit(principal, action == Box::Action::"shell:spawn", resource);
     assert!(output.status.success(), "the box must start: {stderr}");
     let skipped = |list: &str, entry: &str| {
         format!(
-            "strands-box: [secret-source.op]: `{list}` entry {entry:?} names {}, which does not \
+            "strands-box: note[B0203]: [secret-source.op]: `{list}` entry {entry:?} names {}, which does not \
              exist when the box starts, so no sandbox denies it in this run\n",
             home.join(entry.trim_start_matches("~/")).display()
         )
     };
     let lines = format!(
-        "strands-box: [secret-source.op]: reads each op:// secret with {}, which runs outside \
+        "strands-box: note[B0203]: [secret-source.op]: reads each op:// secret with {}, which runs outside \
          every sandbox\n{}{}",
         program.path(),
         skipped("reads", "~/.op"),

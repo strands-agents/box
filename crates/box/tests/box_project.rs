@@ -550,7 +550,7 @@ fn a_run_on_a_running_box_is_refused_before_it_touches_an_alias() {
     );
 }
 
-/// A load-time finding that does not refuse the policy reaches stderr as `strands-box: warning:`
+/// A load-time finding that does not refuse the policy reaches stderr as `strands-box: warning[P0102]:`
 /// with the `program_path` hint, before the workload starts, and changes nothing else.
 #[test]
 fn a_load_time_warning_reaches_stderr_with_the_program_path_hint() {
@@ -564,7 +564,7 @@ fn a_load_time_warning_reaches_stderr_with_the_program_path_hint() {
     let control = run_in(home.path(), &workspace, &[]);
     let quiet = String::from_utf8_lossy(&control.stderr);
     assert!(
-        !quiet.contains("strands-box: warning:"),
+        !quiet.contains("strands-box: warning"),
         "a policy with no finding must earn no warning: {quiet}"
     );
     assert!(
@@ -582,7 +582,7 @@ fn a_load_time_warning_reaches_stderr_with_the_program_path_hint() {
     let reported = String::from_utf8_lossy(&warned.stderr);
     let warning = reported
         .lines()
-        .find(|line| line.starts_with("strands-box: warning:"))
+        .find(|line| line.starts_with("strands-box: warning[P0102]:"))
         .unwrap_or_else(|| panic!("the warning must reach stderr: {reported}"));
     assert!(
         warning.contains("\"/usr/bin/git\"") && warning.contains("program_path"),
@@ -592,7 +592,10 @@ fn a_load_time_warning_reaches_stderr_with_the_program_path_hint() {
         .find("starting workload")
         .unwrap_or_else(|| panic!("the warned run must still reach its workload: {reported}"));
     assert!(
-        reported.find("strands-box: warning:").unwrap_or(usize::MAX) < started,
+        reported
+            .find("strands-box: warning[P0102]:")
+            .unwrap_or(usize::MAX)
+            < started,
         "the warning must precede the workload start: {reported}"
     );
     assert_eq!(
@@ -829,8 +832,9 @@ fn a_damaged_history_refuses_the_next_run(
     );
     assert!(
         reported.lines().any(|line| {
-            line.starts_with("strands-box: error: policy staging failed:")
-                || line.starts_with("strands-box: error: policy load failed:")
+            line.starts_with("strands-box: error[B0103]: policy staging failed:")
+                || line.starts_with("strands-box: error[B0105]: policy staging failed:")
+                || line.starts_with("strands-box: error[B0103]: policy load failed:")
         }),
         "the refusal must name the policy history: {reported}"
     );
@@ -871,7 +875,7 @@ fn a_zero_length_history_refuses_the_next_run_and_is_left_as_found() {
     assert!(
         reported.lines().any(|line| {
             line.starts_with(
-                "strands-box: error: policy staging failed: the box record is committed, but the \
+                "strands-box: error[B0105]: policy staging failed: the box record is committed, but the \
                  history ",
             ) && line.ends_with(" is empty. Wipe the box directory to start again.")
         }),
@@ -889,7 +893,7 @@ fn a_history_without_a_committed_record_refuses_the_next_run_and_is_left_as_foun
     std::fs::remove_file(&commit).expect("remove the record commit");
 
     let second = run_in(home.path(), &workspace, &[]);
-    refused_before_the_workload(&second, "strands-box: error: unsafe box directory ");
+    refused_before_the_workload(&second, "strands-box: error[B0105]: unsafe box directory ");
     assert!(
         text(&second).contains("contains no valid private record"),
         "the refusal must name the missing record: {}",
@@ -1005,11 +1009,11 @@ fn an_edited_record_refuses_the_next_run_and_starts_no_workload() {
     std::fs::write(&record, &edited).expect("edit the record in place");
 
     let second = run_in(home.path(), &workspace, &[]);
-    refused_before_the_workload(&second, "strands-box: error: unsafe box directory ");
+    refused_before_the_workload(&second, "strands-box: error[B0105]: unsafe box directory ");
     let reported = text(&second);
     assert!(
         reported.lines().any(|line| {
-            line.starts_with("strands-box: error: unsafe box directory ")
+            line.starts_with("strands-box: error[B0105]: unsafe box directory ")
                 && line.contains(": its record identity is box-")
                 && line.contains(" sha256:")
                 && line.contains(", but the committed record has identity box-")

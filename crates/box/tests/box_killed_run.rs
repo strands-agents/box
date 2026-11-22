@@ -93,7 +93,7 @@ fn permits_metered(box_: &Configured, what: &str) -> usize {
     let output = box_.bash(&meter());
     let out = stdout(&output);
     assert!(
-        !stderr(&output).contains("strands-box: error:") && out.contains("meter-end"),
+        !stderr(&output).contains("strands-box: error") && out.contains("meter-end"),
         "{what}: the metering run must start and run to its end: {output:?}"
     );
     out.lines().filter(|line| *line == "ok").count()
