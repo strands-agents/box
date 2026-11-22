@@ -6500,7 +6500,6 @@ impl<S: Sources> Resolver<'_, S> {
         let at = format!("[inputs.{name}] search");
         let mut passed = Vec::new();
         let mut tried = std::collections::BTreeSet::new();
-        let mut other_cpu = None;
         for folder in &search.folders {
             let folders = self.folders(folder, &at)?;
             for candidate in crate::program::candidates(folders, &search.program) {
@@ -6511,13 +6510,20 @@ impl<S: Sources> Resolver<'_, S> {
                     Ok(real) => {
                         let written = utf8(&candidate).map_err(|error| error.to_string())?;
                         match crate::program::platform(Path::new(&real)) {
-                            Some((os, _)) if os != self.inputs.os => passed.push(format!(
-                                "{} (a program for {os}, and this host runs {})",
-                                candidate.display(),
-                                self.inputs.os
-                            )),
-                            Some((_, Some(arch))) if arch != self.inputs.arch => {
-                                other_cpu.get_or_insert((real, written));
+                            Some((os, arch))
+                                if !crate::program::runs_on(
+                                    (os, arch),
+                                    (self.inputs.os, self.inputs.arch),
+                                ) =>
+                            {
+                                let built =
+                                    arch.map_or(os.to_string(), |arch| format!("{os} on {arch}"));
+                                passed.push(format!(
+                                    "{} (a program for {built}, and this host is {} on {})",
+                                    candidate.display(),
+                                    self.inputs.os,
+                                    self.inputs.arch
+                                ));
                             }
                             _ => return Ok((real, written)),
                         }
@@ -6525,9 +6531,6 @@ impl<S: Sources> Resolver<'_, S> {
                     Err(why) => passed.push(format!("{} ({why})", candidate.display())),
                 }
             }
-        }
-        if let Some(found) = other_cpu {
-            return Ok(found);
         }
         self.absent = true;
         let mut reason = format!(

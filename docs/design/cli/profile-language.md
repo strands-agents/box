@@ -393,10 +393,9 @@ A `search` entry is one of these:
 1. A candidate that does not exist is skipped.
 2. `box` follows each link to the real file.
 3. `box` passes over a candidate that is not an executable file, that is a script whose `#!` line
-   runs node, whose ELF or Mach-O header names another OS than the host's, or that lies in the
-   workspace, the run's storage, or `~/.strands/box`, as written or real. A candidate whose header
-   names another CPU is used only when no later candidate is built for the host's CPU, because
-   macOS runs an x86_64 program on arm64.
+   runs node, whose ELF or Mach-O header names an OS or CPU that the host cannot run, or that lies
+   in the workspace, the run's storage, or `~/.strands/box`, as written or real. macOS on arm64
+   runs an x86_64 program.
 4. The first candidate that remains is the value, as its real path.
 
 An `[options]` or `from` value of an input with `program` passes the same checks, and its value

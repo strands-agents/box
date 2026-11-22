@@ -108,8 +108,8 @@ and also hold `[inputs.team.mode]`. Each part of an input's name uses letters, d
 
 A `program` input names a program on your machine. `box` tries each `search` folder in order,
 skips a copy that is not a program the box can run (such as a Node.js script, a program built for
-another OS, or one inside your project), and uses the first one left that is built for your CPU,
-else the first one left. A path that a profile sets in `[options]` is used without
+an OS or CPU that your machine cannot run, or one inside your project), and uses the first one
+left. A path that a profile sets in `[options]` is used without
 a search.
 
 Some programs put several settings in one variable, such as

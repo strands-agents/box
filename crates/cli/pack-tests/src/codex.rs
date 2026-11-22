@@ -1384,8 +1384,8 @@ fn an_npm_installed_codex_for_another_platform_only_is_passed_over() {
     let host = FakeHost::new();
     host.uninstall_codex();
     let prefix = host.home().join(".npm-global");
-    let package = resolved(&npm_codex(&prefix, &[ARM64_MAC]));
-    platform_headers(&package, &[ARM64_MAC]);
+    let package = resolved(&npm_codex(&prefix, &[X64_MAC]));
+    platform_headers(&package, &[X64_MAC]);
     let error = codex(&host)
         .os("linux")
         .arch("x86_64")
@@ -1400,7 +1400,7 @@ fn an_npm_installed_codex_for_another_platform_only_is_passed_over() {
     assert!(
         error
             .to_string()
-            .contains("(a program for macos, and this host runs linux)"),
+            .contains("(a program for macos on x86_64, and this host is linux on x86_64)"),
         "{error}"
     );
 }

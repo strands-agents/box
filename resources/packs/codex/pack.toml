@@ -152,9 +152,9 @@ type = "program"
 program = "codex"
 # `npm i -g @openai/codex` puts a node launcher in <prefix>/bin, and Codex's own program in the
 # platform package under <prefix>/lib. Each folder of PATH is tried before the next, so the box
-# runs the Codex that the shell runs. The search passes over a program for another OS and
-# prefers one for this CPU, so with more than one platform package it takes the host's, as npm's
-# launcher does.
+# runs the Codex that the shell runs. The search passes over a program that this host cannot
+# run. An arm64 package comes before an x64 one, because an arm64 Mac runs both and npm's
+# launcher takes the arm64 one there.
 search = [
     { env = "PATH", join = [
         "../lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin",

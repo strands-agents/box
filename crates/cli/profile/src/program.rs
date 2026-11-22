@@ -257,6 +257,14 @@ pub(crate) fn platform(path: &Path) -> Option<(&'static str, Option<&'static str
     }
 }
 
+/// Whether a program built for `built` runs on `host`, where macOS on aarch64 runs x86_64.
+pub(crate) fn runs_on(built: (&str, Option<&str>), host: (&str, &str)) -> bool {
+    built.0 == host.0
+        && built
+            .1
+            .is_none_or(|arch| arch == host.1 || (host == ("macos", "aarch64") && arch == "x86_64"))
+}
+
 fn elf_arch(machine: u16) -> Option<&'static str> {
     match machine {
         62 => Some("x86_64"),
