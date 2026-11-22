@@ -57,16 +57,15 @@ then a short summary of the run:
 
 ```text
 box: run b-5b8e3d70c92f14ab ended
-  169 grants disclosed at startup · 0 more messages
+  startup disclosure · 0 more messages
   log      /Users/you/.strands/box/r/b-5b8e3d70c92f14ab/box.log
   history  box runs history b-5b8e3d70c92f14ab
   reuse    box run claude --box-id b-5b8e3d70c92f14ab
 ```
 
-The grant count is the number of filesystem grant lines in Box Core's startup disclosure, for the
-agent, each tool, and each MCP server, including the paths Box Core adds itself. The full
-disclosure is in the [log](files.md#profile-storage-and-runs). The messages are the Box lines that
-arrived after the agent started and that the summary didn't show. A new run that fails before its
+Box Core's startup disclosure, which names every grant the box gives the agent and its tools, is in
+the [log](files.md#profile-storage-and-runs). The messages are the Box lines that arrived after the
+agent started and that the summary didn't show. A new run that fails before its
 box starts shows only the errors.
 
 If input or output is redirected, including stderr, or `TERM=dumb`, `box` prints the box ID and

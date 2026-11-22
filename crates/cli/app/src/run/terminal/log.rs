@@ -10,18 +10,6 @@ use crate::files::open_at;
 const FILE: &str = "box.log";
 const PREVIEW_BYTES: usize = 1024;
 const PREVIEW_LINES: usize = 6;
-/// The reach words that open a grant line in Box Core's startup disclosure.
-const GRANT_WORDS: &[&str] = &[
-    "read",
-    "write",
-    "read_file",
-    "write_file",
-    "list",
-    "metadata",
-    "exec",
-    "enter",
-    "connect",
-];
 
 pub(super) struct Log {
     pub(super) input: File,
@@ -30,10 +18,6 @@ pub(super) struct Log {
     tail: String,
     truncated: bool,
     unshown: usize,
-    started: bool,
-    disclosing: bool,
-    grants: usize,
-    last_byte: u8,
 }
 
 impl Log {
@@ -69,10 +53,6 @@ impl Log {
             tail: String::new(),
             truncated: false,
             unshown: 0,
-            started: false,
-            disclosing: false,
-            grants: 0,
-            last_byte: 0,
         }
     }
 
@@ -82,9 +62,6 @@ impl Log {
             let remaining = PREVIEW_BYTES + 1 - self.line.len();
             self.line
                 .extend_from_slice(&part[..part.len().min(remaining)]);
-            if let Some(&byte) = part.strip_suffix(b"\n").unwrap_or(part).last() {
-                self.last_byte = byte;
-            }
             if part.ends_with(b"\n") {
                 self.collect();
             }
@@ -100,7 +77,6 @@ impl Log {
     /// Startup lines are expected, so the count of lines left out of the preview starts after them.
     pub(super) fn started(&mut self) {
         self.unshown = 0;
-        self.started = true;
     }
 
     fn save(&mut self, bytes: &[u8]) {
@@ -115,10 +91,6 @@ impl Log {
         let line = self.line.strip_suffix(b"\n").unwrap_or(&self.line);
         let text = String::from_utf8_lossy(line).into_owned();
         self.line.clear();
-        if !self.started {
-            let last_byte = std::mem::take(&mut self.last_byte);
-            self.count_grant(&text, last_byte);
-        }
         if text
             .split_once(": ")
             .is_some_and(|(_, message)| message.starts_with("error:"))
@@ -126,25 +98,6 @@ impl Log {
             self.show(&text);
         } else {
             self.unshown += 1;
-        }
-    }
-
-    /// Count `text` when it is a grant line under a table's startup disclosure heading.
-    fn count_grant(&mut self, text: &str, last_byte: u8) {
-        match text.strip_prefix("  ") {
-            Some(entry) => {
-                if self.disclosing
-                    && entry
-                        .split_whitespace()
-                        .next()
-                        .is_some_and(|word| GRANT_WORDS.contains(&word))
-                {
-                    self.grants += 1;
-                }
-            }
-            None => {
-                self.disclosing = text.starts_with("strands-box: [") && last_byte == b':';
-            }
         }
     }
 
@@ -200,19 +153,14 @@ impl Log {
         };
         let id = launch.name();
         format!(
-            "\n{preview}box: run {id} ended\n  {} disclosed at startup \u{b7} {}\n  log      {log}\n  \
+            "\n{preview}box: run {id} ended\n  startup disclosure \u{b7} {}\n  log      {log}\n  \
              history  box runs history {id}\n  reuse    {}\n\n",
-            counted(self.grants, "grant", "grants"),
-            counted(self.unshown, "more message", "more messages"),
+            match self.unshown {
+                1 => "1 more message".to_owned(),
+                count => format!("{count} more messages"),
+            },
             launch.reuse_command(),
         )
-    }
-}
-
-fn counted(count: usize, one: &str, many: &str) -> String {
-    match count {
-        1 => format!("1 {one}"),
-        count => format!("{count} {many}"),
     }
 }
 
@@ -274,71 +222,6 @@ mod tests {
         Log::new(File::open("/dev/null").unwrap(), tempfile::tempfile()).report(launch, true)
     }
 
-    /// Box Core's startup disclosure, in the shape its tables print.
-    const DISCLOSURE: &str = concat!(
-        "strands-box: box b-1 created \u{b7} config /r/b-1/box.toml\n",
-        "strands-box: [tool.git]: a bare `git` in the Shell runs /usr/bin/git\n",
-        "strands-box: starting workload\n",
-        "strands-box: [tool.git] runs /usr/bin/git with no policy decision over these paths:\n",
-        "  read        /work\n",
-        "  write       /work/target\n",
-        "  read_file   /etc/gitconfig\n",
-        "  write_file  /work/.git/index\n",
-        "  deny_write  /work/.git/hooks  (read-only)\n",
-        "strands-box: [tool.git] runtime minimum, added by Core:\n",
-        "  read        /usr/share/zoneinfo\n",
-        "  metadata    /  (entry only)\n",
-        "  deny        /private/var/db\n",
-        "  exec        /bin/sh  (interpreter)\n",
-        "strands-box: [tool.git] HOME=/home/u PATH=/usr/bin\n",
-        "strands-box: [agent] runs /usr/bin/agent with no policy decision over these paths:\n",
-        "  (no filesystem entry)\n",
-        "  exec        /usr/bin/agent  (command, implicit)\n",
-        "strands-box: [agent] interpreter aliases for configured access:\n",
-        "  alias       /usr/bin/python3 -> /usr/bin/python3.12  (interpreter spelling)\n",
-        "strands-box: [agent] runtime minimum, added by Core:\n",
-        "  list        /tmp\n",
-        "  connect     /var/run/mDNSResponder\n",
-        "  enter       /work  (workspace, entry only)\n",
-        "strands-box: [agent] HOME=/home/u PATH=/r/b-1/box/bin:/usr/bin\n",
-        "strands-box: warning: aws:// signs with this machine's AWS identity\n",
-        "  read        /not/under/a/heading\n",
-        "strands-box: [agent] HOME and PATH follow\n",
-        "  read        /after/a/heading/with/no/colon\n",
-        "box: skipped tool cargo (@box/cargo): cargo is not on PATH:\n",
-        "  read        /after/a/line/from/another/source\n",
-    );
-
-    /// **Grants count once, at startup, from the reach words under each table's heading**: a deny,
-    /// an alias, a placeholder, and a line under no heading are not grants, and a later disclosure
-    /// is a later message.
-    #[test]
-    fn the_exit_counts_startup_grants_apart_from_later_messages() {
-        let mut log = Log::new(File::open("/dev/null").unwrap(), tempfile::tempfile());
-        for part in DISCLOSURE.as_bytes().chunks(5) {
-            log.push(part);
-        }
-        log.started();
-        log.push(b"strands-box: [mcp.docs] starts on demand; approved direct filesystem grants:\n");
-        log.push(b"  read        /docs\n");
-        assert_eq!(log.grants, 11);
-        assert_eq!(log.unshown, 2);
-
-        let mut log = Log::new(File::open("/dev/null").unwrap(), tempfile::tempfile());
-        log.push(
-            format!(
-                "strands-box: [agent] runs /{} with no policy decision over these paths:\n",
-                "a".repeat(PREVIEW_BYTES * 2)
-            )
-            .as_bytes(),
-        );
-        log.push(b"  read        /work\n");
-        assert_eq!(
-            log.grants, 1,
-            "a heading longer than the preview still opens a block"
-        );
-    }
-
     #[test]
     fn logs_append_privately_and_keep_the_preview_when_saving_fails() {
         let host = crate::FakeHost::new();
@@ -369,7 +252,7 @@ mod tests {
         );
         assert!(
             console.starts_with(&format!(
-                "\nbox: run {} ended\n  0 grants disclosed at startup \u{b7} 1 more message\n  log      ",
+                "\nbox: run {} ended\n  startup disclosure \u{b7} 1 more message\n  log      ",
                 launch.name
             )),
             "{console}"

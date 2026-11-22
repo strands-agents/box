@@ -3800,11 +3800,7 @@ fn a_terminal_run_ends_with_the_exit_block_and_logs_the_disclosure() {
         .split_once(&format!("box: run {id} ended\n  "))
         .unwrap_or_else(|| panic!("no exit block\n{text}"))
         .1;
-    let grants: usize = block
-        .split_once(" disclosed at startup \u{b7} ")
-        .and_then(|(count, _)| count.split(' ').next()?.parse().ok())
-        .unwrap_or_else(|| panic!("no grant count\n{text}"));
-    assert!(grants > 0, "{text}");
+    assert!(block.starts_with("startup disclosure \u{b7} "), "{text}");
     for line in [
         format!("\n  log      {}\n", run.join("box.log").display()),
         format!("\n  history  box runs history {id}\n"),

@@ -386,8 +386,8 @@ signs with the first credentials that the AWS SDK finds outside the box, in this
 4. The ECS or EKS container credentials endpoint.
 5. EC2 instance metadata.
 
-So on a cloud machine, `aws://` can sign as the machine's own role. The box prints a warning when
-the run starts, once for each route that signs this way.
+So on a cloud machine, `aws://` can sign as the machine's own role. The box prints a
+[warning](../user/egress.md#credential-sources) for each route that signs this way.
 
 Neither form signs with an AWS SSO or `aws login` profile
 ([AWS credentials resolve to nothing](troubleshooting.md#aws-credentials-resolve-to-nothing)).
