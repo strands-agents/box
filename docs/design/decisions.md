@@ -685,21 +685,20 @@ command such as `cat` or `jq`. A program that the Shell starts in its own sandbo
 stdin. Plugin hooks remain broken because most of them exec a script.
 
 <a id="core-writes-stderr-only-through-diag-and-codes-each-kind"></a>
-### Box Core writes stderr only through `diag!`, and each kind of message has one code
+### Box Core writes stderr only through `diag!`, and codes each kind of message but internal failures
 
 Every Box Core message reaches stderr through `diagnostics::diag!` as
-`<source>: <severity>[<code>]: <text>`, so a person, an agent, or a log reader can sort and look
-up messages without matching prose. One code names one kind of message, and the registry sets its
-severity. A code is decided where its text is built, so call sites that print the same kind share
-it, and a message with no code is an internal failure the reader can only report. Clippy refuses
-`eprintln!` and `std::io::stderr` in Core crates. The format is a convention on a stream that the
-workload's processes share, not an authenticated channel.
+`<source>: <severity>[<code>]: <text>`, and clippy refuses any other stderr write in Core crates.
+Each kind of message has one code, decided where its text is built, and the registry sets its
+severity. The one exception is an internal failure the reader can only report, which carries no
+code. The format is a convention on a stream the workload's processes share, not an
+authenticated channel.
 
 **Rejected.** Codes only for messages a reader acts on today: whether to show a kind is the
-reader's choice, and an uncoded kind cannot be explained or acted on later.
+reader's choice, and an uncoded kind cannot be explained later.
 
-**Cost.** A new message needs a code or a reason to have none, and the docs page lists every code.
-A reader must not treat a coded line as proof that Box wrote it.
+**Cost.** Each new kind of message needs a code and a row on `message-codes.md`. A reader must not
+treat a coded line as proof that Box wrote it.
 
 ## Policy
 

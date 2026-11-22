@@ -191,6 +191,25 @@ mod tests {
         }
     }
 
+    /// The production code of one source file: no unit-test module, no comment line, and runs
+    /// of whitespace joined, so a code that only a test or a comment names is not a use.
+    fn production(text: &str) -> String {
+        let text = text
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or_default();
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect();
+        lines
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace("( ", "(")
+    }
+
     #[test]
     fn each_code_is_used_by_box_core() {
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -203,19 +222,29 @@ mod tests {
                 if path.is_dir() {
                     if !matches!(
                         name.as_str(),
-                        "cli" | "diagnostics" | "box-bench" | "target"
+                        "cli" | "diagnostics" | "box-bench" | "target" | "tests" | "examples"
                     ) {
                         pending.push(path);
                     }
-                } else if name.ends_with(".rs") {
-                    sources.push_str(&std::fs::read_to_string(&path).unwrap());
+                } else if name.ends_with(".rs") && !name.ends_with("tests.rs") {
+                    sources.push_str(&production(&std::fs::read_to_string(&path).unwrap()));
+                    sources.push(' ');
                 }
             }
         }
         for code in Code::ALL {
+            let code = code.as_str();
+            let used = [
+                format!("Code::{code}"),
+                format!("diag!({code},"),
+                format!("text {code},"),
+                format!(", {code},"),
+            ]
+            .iter()
+            .any(|shape| sources.contains(shape.as_str()));
             assert!(
-                sources.contains(code.as_str()),
-                "{code} is declared and no Box Core source uses it"
+                used,
+                "{code} is declared and no Box Core production code uses it"
             );
         }
     }
@@ -225,18 +254,18 @@ mod tests {
         let page = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../docs/user/message-codes.md");
         let page = std::fs::read_to_string(page).unwrap();
-        let listed: Vec<(&str, &str)> = page
+        let listed: Vec<(&str, &str, &str)> = page
             .lines()
             .filter_map(|line| {
                 let cells: Vec<&str> = line.split('|').map(str::trim).collect();
                 let code = cells.get(1)?.strip_prefix('`')?.strip_suffix('`')?;
                 Code::named(code)?;
-                Some((code, *cells.get(2)?))
+                Some((code, *cells.get(2)?, *cells.get(3)?))
             })
             .collect();
-        let expected: Vec<(&str, &str)> = Code::ALL
+        let expected: Vec<(&str, &str, &str)> = Code::ALL
             .iter()
-            .map(|code| (code.as_str(), code.severity().as_str()))
+            .map(|code| (code.as_str(), code.severity().as_str(), code.meaning()))
             .collect();
         assert_eq!(listed, expected, "docs/user/message-codes.md");
     }

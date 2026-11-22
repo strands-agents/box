@@ -886,8 +886,57 @@ mod tests {
     #[test]
     fn refusals_name_their_code() {
         use ::diagnostics::{Code, Kind, Severity};
-        let cases: [(BoxError, Kind); 7] = [
+        let cases: [(BoxError, Kind); 16] = [
             (ConfigError::EmptyWorkload.into(), Code::B0101.into()),
+            (
+                ConfigError::PolicyRead {
+                    path: "policy.dw".into(),
+                    source: std::io::Error::other("gone"),
+                }
+                .into(),
+                Code::B0103.into(),
+            ),
+            (
+                Internal::Policy(policy::PolicyError::UnknownAction("x".into())).into(),
+                Code::B0103.into(),
+            ),
+            (
+                ConfigError::Credential {
+                    host: "api.example.com".into(),
+                    reason: "no locator".into(),
+                }
+                .into(),
+                Code::B0104.into(),
+            ),
+            (
+                Internal::CredentialProjection("unset".into()).into(),
+                Code::B0104.into(),
+            ),
+            (
+                Internal::HistoryDisagreesWithRecord {
+                    committed: true,
+                    history: "history".into(),
+                    found: HistoryFound::Absent,
+                }
+                .into(),
+                Code::B0105.into(),
+            ),
+            (
+                ExecutableError::NotOnPath {
+                    program: "claude".into(),
+                }
+                .into(),
+                Code::B0107.into(),
+            ),
+            (McpDiscoveryError::NoOutcome.into(), Code::B0109.into()),
+            (DaemonError::NoProxyPort.into(), Code::B0110.into()),
+            (
+                Internal::Telemetry(telemetry::TelemetryError::Config {
+                    reason: "no target".into(),
+                })
+                .into(),
+                Code::T0103.into(),
+            ),
             (
                 ConfigError::Filesystem {
                     table: "[agent]".into(),
