@@ -173,8 +173,8 @@ fn credential_steps(routes: &[Route], declared: &BTreeMap<String, Option<String>
                  AWS SSO or aws login profile."
             ),
             CredentialSource::AwsDefaultChain(route) => format!(
-                "The {route} route signs with your default AWS identity. Box Core warns on each \
-                 request."
+                "The {route} route signs with your default AWS identity. Box Core warns once when \
+                 the run starts."
             ),
             CredentialSource::Source(hosts, scheme, plugin) => {
                 let program = match plugin {

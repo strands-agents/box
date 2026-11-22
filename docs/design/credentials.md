@@ -33,7 +33,7 @@ scheme determines how Box reads and uses the secret.
 | The secret comes from | The variable `NAME` in the environment of `box run` | The AWS profile `PROFILE`, resolved through the SDK (static keys, `credential_process`, assume-role, or web identity) | The AWS SDK default credential provider chain (the host's ambient identity) |
 | Box reads it | Once, at startup | On each request | On each request |
 | A process in the box gets | A placeholder in `NAME` | Placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` | The same placeholder AWS keys |
-| The gateway | Swaps the placeholder for the secret | Signs the request with SigV4 | Signs with SigV4, and warns that it used the ambient identity |
+| The gateway | Swaps the placeholder for the secret | Signs the request with SigV4 | Signs with SigV4; the vault warns once at startup that it uses the ambient identity |
 | Where the secret goes | A header, HTTP basic auth, or a query parameter | The SigV4 headers | The SigV4 headers |
 | The response | Every copy of the secret is redacted | Not scanned | Not scanned |
 | The usual failure | A request without the placeholder gets a 403 | The host names no AWS service and region | The chain resolves no credentials |
