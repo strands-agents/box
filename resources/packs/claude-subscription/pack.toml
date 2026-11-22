@@ -1,0 +1,22 @@
+# A claude.ai subscription as Claude Code's model provider, with claude.host = "anthropic".
+[pack]
+name = "@box/claude-subscription"
+version = 1
+kind = "support"
+
+# The box adds the token from `claude setup-token` to each request to these paths. The agent gets
+# a stand-in value that starts with sk-ant-oat01-, like a setup token. The route is scoped to
+# paths, which match by whole segment: WebFetch's safety check (/api/web/domain_info) and
+# telemetry (/api/event_logging/..., /api/directory/server-urls) send no token, and under the
+# default secret.inject = "phantom" the gateway refuses a request to a credentialed destination
+# that carries no stand-in. A route on the whole host breaks WebFetch. @box/anthropic routes the
+# whole host, so a profile lists one of the two.
+[egress.anthropic-subscription]
+destinations = [
+    "api.anthropic.com/v1/",
+    "api.anthropic.com/api/claude_cli/",
+    "api.anthropic.com/api/claude_code/",
+    "api.anthropic.com/api/oauth/",
+]
+secret.ref = "env://CLAUDE_CODE_OAUTH_TOKEN"
+secret.phantom_prefix = "sk-ant-oat01-"

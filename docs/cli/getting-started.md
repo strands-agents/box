@@ -19,7 +19,10 @@ listen only on localhost.
 
 - An AWS account that can call Claude models on Amazon Bedrock, and an AWS profile for it on this
   machine. If the model refuses you, [Every model request fails with 403](../../resources/packs/bedrock/README.md#every-model-request-fails-with-403)
-  lists what an account needs.
+  lists what an account needs. With a claude.ai Pro or Max plan instead, you need neither AWS nor
+  the AWS CLI: in step 2, make the profile as
+  [`@box/claude-subscription`](../../resources/packs/claude-subscription/README.md) shows, then
+  skip step 3.
 
 ## 1. Install Box
 

@@ -34,12 +34,6 @@ type = "string"
 values = ["bedrock", "anthropic"]
 default = "bedrock"
 
-[inputs.claude.sign-in]
-description = "How Claude Code signs in to the Anthropic API: api-key from the provider pack, or subscription from CLAUDE_CODE_OAUTH_TOKEN. Set claude.host to anthropic too."
-type = "string"
-values = ["api-key", "subscription"]
-default = "api-key"
-
 [inputs.agent.skip-permissions]
 description = "Turn off Claude Code's permission prompts, whatever your copied settings say, unless your organization's policy turns that mode off. The box still allows or refuses each action."
 type = "bool"
@@ -321,26 +315,6 @@ ANTHROPIC_DEFAULT_OPUS_MODEL = { from = "env:ANTHROPIC_DEFAULT_OPUS_MODEL", when
 ANTHROPIC_DEFAULT_SONNET_MODEL = { from = "env:ANTHROPIC_DEFAULT_SONNET_MODEL", when = { variable = "inputs.claude.import-env", equals = "true" } }
 ANTHROPIC_DEFAULT_HAIKU_MODEL = { from = "env:ANTHROPIC_DEFAULT_HAIKU_MODEL", when = { variable = "inputs.claude.import-env", equals = "true" } }
 
-
-# With claude.sign-in = "subscription", the box adds the token from `claude setup-token` to each
-# request to these paths, and the agent gets a stand-in value that starts with sk-ant-oat01-.
-# The profile lists no @box/anthropic: its route would be a second route on api.anthropic.com.
-# The route is scoped to paths, which match by whole segment: WebFetch's safety check
-# (/api/web/domain_info) and telemetry (/api/event_logging/..., /api/directory/server-urls) send
-# no token, and under the default secret.inject = "phantom" the gateway refuses a request to a
-# credentialed destination that carries no stand-in. A route on the whole host breaks WebFetch.
-# A `when` takes one condition, so the route does not check claude.host: with bedrock it is still
-# declared, and Claude Code uses Bedrock and sends no token.
-[egress.anthropic-subscription]
-when = { variable = "inputs.claude.sign-in", equals = "subscription" }
-destinations = [
-    "api.anthropic.com/v1/",
-    "api.anthropic.com/api/claude_cli/",
-    "api.anthropic.com/api/claude_code/",
-    "api.anthropic.com/api/oauth/",
-]
-secret.ref = "env://CLAUDE_CODE_OAUTH_TOKEN"
-secret.phantom_prefix = "sk-ant-oat01-"
 
 # Your organization's Claude Code policy, read as on your machine: the managed settings folder, each
 # fixed file in it by name so that a file deployed as a link is read where it points, and on macOS

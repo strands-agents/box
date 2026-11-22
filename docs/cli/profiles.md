@@ -345,6 +345,7 @@ Name the agent and its provider in `--with`, and give the profile a name that sa
 ```sh
 box profile create claude-work --with claude,bedrock --option bedrock.region=us-east-1
 box profile create claude-api --with claude,anthropic --option claude.host=anthropic
+box profile create claude-max --with claude,claude-subscription --option claude.host=anthropic
 ```
 
 When it saves, **Before running** names the variable that holds the provider's key. Export it in
