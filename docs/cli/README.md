@@ -41,6 +41,8 @@ shows how to set it up, run it, and change what the agent can reach.
 - [Get help from a coding agent](profiles.md#get-help-from-a-coding-agent): tell your agent
   `Run box help agent and follow it to create a profile.`
 
+- [Use experimental storage mounts on AgentCore Runtime](experimental-runtime-storage.md): build, deploy, and verify storage that arrives after Box starts.
+
 ## Reference
 
 - [Command reference](cli.md): every `box` command, flag, variable, and exit status.

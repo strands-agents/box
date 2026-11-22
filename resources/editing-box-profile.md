@@ -23,6 +23,7 @@ section for the task, then the reference sections that it names.
 | Give the agent an MCP server | [Add an MCP server](#add-an-mcp-server) |
 | Change where the model runs, or its key | [Choose the model provider](#choose-the-model-provider) |
 | Bring host files or settings into the box | [Edit stored files](#edit-stored-files) |
+| Use externally mounted Linux storage | [Incoming Linux storage](#incoming-linux-storage) |
 | Allow or refuse an action | [Edit policy](#edit-policy) |
 | Confirm that a change is correct | [Check a change](#check-a-change) |
 | Repair a profile that `box` refuses | [Fix an error](#fix-an-error) |
@@ -409,26 +410,46 @@ should change.
 
 ## Incoming Linux storage
 
-Enable storage attached by a trusted Linux host after Box starts with these profile settings:
+Enable experimental forwarding for filesystems that a trusted Linux storage manager attaches
+before or after Box starts. In `profile.toml`, list mount sources separately for each recipient:
 
 ```toml
 [experimental-features]
 linux-storage-mounts = true
 
-[storage]
+[agent.filesystem]
 mounts = ["/mnt/data", "/mnt/workspace"]
+read = ["/mnt/data", "/mnt/workspace"]
+
+[tool.indexer.filesystem]
+mounts = ["/mnt/data"]
+read = ["/mnt/data"]
+
+[mcp.files.filesystem]
+mounts = ["/mnt/workspace"]
+read = ["/mnt/workspace"]
 ```
 
-Only a profile can declare these settings. `mounts` is a list of absolute host mount paths,
-not managed storage directories or permission grants. Boxy does not create the paths.
-Set read, write, execute, and denial lists for the agent, each tool, and each local server as usual.
-Use literal permission paths inside these mounts; Boxy rejects wildcard expansion into them.
-Existing optional-path semantics remain in effect.
+The tool and local MCP server must already be declared. Each recipient's `mounts` array
+contains absolute paths and grants no permissions. A recipient inherits no other recipient's
+list. With no paths declared for a recipient, forwarding stays disabled. Lists from packs and
+profiles append and deduplicate within the same recipient; an empty profile list does not
+remove a pack's paths for that recipient. Only a profile can set the experimental flag.
+Mount declarations require both Linux and the enabled flag. The declared directories must
+already exist when Box starts; they can remain empty until the storage manager attaches a mount.
 
-Boxy preserves required permission paths until Box Core can inspect the incoming filesystem.
-The application starts with storage inaccessible. Box Core applies the original restrictions
-before making storage visible. The application can retry while storage is unavailable.
-A required rule that cannot be applied stops the affected Box.
+The CLI keeps `[storage]` for managed directories, files, and hooks; it does not accept
+`storage.mounts`. The external manager owns the incoming mount paths and their contents.
+Set each recipient's read, write, execute, and denial lists separately. Use literal permission
+paths inside incoming mounts, because wildcard expansion into them is rejected. Existing
+optional-path semantics remain in effect.
+
+Box CLI preserves required permission paths until Box Core can inspect the incoming filesystem.
+When storage is pending, the application starts with that storage inaccessible and can retry
+file operations. Box Core applies the original restrictions before making storage visible.
+If a source is already mounted when Box checks a new process, the process waits for its
+protected view before running code. Other pending sources do not delay that launch. A required
+rule that cannot be applied stops the affected Box.
 
 Hosted Shell and Python (Monty) use the agent's protected storage view, with their existing
 `fs:*` policy rules applied as well. Source filesystem permissions still apply. If no agent

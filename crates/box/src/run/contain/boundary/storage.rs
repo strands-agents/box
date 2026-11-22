@@ -352,10 +352,10 @@ pub(crate) fn validate_source_preflight(
     commands: &ConfiguredCommands,
 ) -> Result<(), BoxError> {
     with_filesystem_context(table, tables, protected_sources, |context| {
-        let generation = FilesystemPlan::new(&spec.filesystem, &tables.storage_roots, context)?
+        let generation = FilesystemPlan::new(&spec.filesystem, &spec.filesystem.mounts, context)?
             .compile_generation(&[], context)?;
         generation.with_policy(|reach, _, _| {
-            commands.validate_storage_reach(table, reach, &tables.storage_roots, &[])
+            commands.validate_storage_reach(table, reach, &spec.filesystem.mounts, &[])
         })
     })
 }

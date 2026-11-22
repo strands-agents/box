@@ -924,6 +924,7 @@ impl HostedBox {
         let remote_mcp_servers: Vec<(String, String)> = record.mcp_servers();
         let (coordinator_fatal_sender, coordinator_fatal) = tokio::sync::mpsc::unbounded_channel();
         let storage = StorageOwner::new(coordinator_fatal_sender.clone());
+        let storage_startup = storage.startup_guard();
         let mut doors = BTreeSet::from([DiscoveryDoor::Stdio]);
         if !remote_mcp_servers.is_empty() {
             doors.insert(DiscoveryDoor::Egress);
@@ -1059,6 +1060,8 @@ impl HostedBox {
             commands,
         )?);
         #[cfg(target_os = "linux")]
+        storage.configure_sources(&approved.storage_roots(), approved.installation())?;
+        #[cfg(target_os = "linux")]
         if let Some(policy) = approved
             .table("[agent]")
             .and_then(|reach| reach.storage.as_ref())
@@ -1077,18 +1080,6 @@ impl HostedBox {
                             ),
                         )
                     })
-                    .collect(),
-            )?;
-        } else if !record.storage.mounts.is_empty() {
-            // No agent means no protected agent view can be published. Reserve these
-            // names anyway so hosted home/workspace mappings cannot disclose underlays.
-            storage.configure_hosted(
-                record
-                    .storage
-                    .mounts
-                    .iter()
-                    .cloned()
-                    .map(|root| (root, true))
                     .collect(),
             )?;
         }
@@ -1176,6 +1167,7 @@ impl HostedBox {
         *RUNNING_POLICY
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some((policy, Arc::clone(&collector)));
+        storage_startup.disarm();
         Ok(Self {
             discovery: Some(discovery),
             broker: Some(broker),
@@ -1466,7 +1458,6 @@ mod tests {
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
-            storage: Default::default(),
             file_attributes: false,
             monty: true,
             gateway: Default::default(),
@@ -3741,7 +3732,6 @@ while :; do :; done"#
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
-            storage: Default::default(),
             file_attributes: false,
             monty: true,
             gateway: Default::default(),

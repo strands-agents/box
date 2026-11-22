@@ -375,7 +375,7 @@ impl FilesystemGeneration {
         not(test),
         expect(
             dead_code,
-            reason = "Normal storage compiler handoff is not connected yet"
+            reason = "Tests recompile this view directly; production admission compiles retained checkpoints"
         )
     )]
     pub(crate) fn recompile(

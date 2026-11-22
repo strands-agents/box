@@ -374,7 +374,7 @@ impl ConfiguredCommands {
             let _ = admitted;
             Err(ConfigError::Filesystem {
                 table: table.to_string(),
-                entry: "storage.mounts".to_string(),
+                entry: "filesystem.mounts".to_string(),
                 reason: "storage command protection requires Linux mount inspection".to_string(),
             }
             .into())
@@ -724,7 +724,6 @@ mod tests {
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
-            storage: Default::default(),
             file_attributes: false,
             monty: true,
             gateway: Default::default(),
@@ -2060,7 +2059,6 @@ mod left_out_tests {
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
-            storage: Default::default(),
             file_attributes: false,
             monty: true,
             gateway: Default::default(),

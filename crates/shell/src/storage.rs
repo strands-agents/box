@@ -73,7 +73,9 @@ impl StorageView {
 
     /// Install the root received from this Box's trusted agent launcher once.
     pub fn install(&self, root: File) -> io::Result<()> {
+        // SAFETY: root owns the live descriptor; F_GETFL only inspects its open flags.
         let flags = unsafe { libc::fcntl(root.as_raw_fd(), libc::F_GETFL) };
+        // SAFETY: F_GETFD only inspects flags on the live descriptor owned by root.
         let descriptor_flags = unsafe { libc::fcntl(root.as_raw_fd(), libc::F_GETFD) };
         if flags < 0
             || descriptor_flags < 0
@@ -86,9 +88,11 @@ impl StorageView {
             ));
         }
         let mut information = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: root is live and information provides writable space for one statvfs value.
         if unsafe { libc::fstatvfs(root.as_raw_fd(), information.as_mut_ptr()) } != 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: the successful fstatvfs call initialized information.
         let information = unsafe { information.assume_init() };
         let required = libc::ST_RDONLY | libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC;
         if information.f_flag & required != required {
@@ -203,12 +207,13 @@ impl StorageView {
             ancestors.push(identity(&metadata));
             directories.push(object);
         }
+        let current = Arc::clone(directories.last().expect("root retained"));
         Ok(StoragePath {
-            logical: PathBuf::from("/"),
+            logical: logical(&names),
             original: path.to_path_buf(),
-            parent: Arc::clone(&root),
+            parent: Arc::clone(&current),
             leaf: CString::new(".").expect("literal"),
-            object: Some(root),
+            object: Some(current),
             ancestors,
         })
     }
@@ -295,6 +300,7 @@ impl StoragePath {
         if expected.is_none() && flags & libc::O_CREAT != 0 {
             opening |= libc::O_EXCL;
         }
+        // SAFETY: parent is retained, leaf is NUL-terminated, and mode is supplied for creation.
         let fd = unsafe {
             libc::openat(
                 self.parent.as_raw_fd(),
@@ -306,6 +312,7 @@ impl StoragePath {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: successful openat returned a new descriptor whose ownership transfers to File.
         let file = unsafe { File::from_raw_fd(fd) };
         if let Some(expected) = expected
             && identity(&file.metadata()?) != expected
@@ -378,15 +385,18 @@ fn refused(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
 fn open_at(parent: &File, name: &std::ffi::CStr, flags: libc::c_int) -> io::Result<File> {
+    // SAFETY: parent is live, name is NUL-terminated, and callers do not request file creation.
     let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags | libc::O_CLOEXEC) };
     if fd < 0 {
         Err(io::Error::last_os_error())
     } else {
+        // SAFETY: successful openat returned a new owned descriptor.
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 }
 fn read_link_at(parent: &File, name: &std::ffi::CStr) -> io::Result<PathBuf> {
     let mut bytes = vec![0u8; 4096];
+    // SAFETY: parent and name are live; bytes provides the writable capacity passed to readlinkat.
     let length = unsafe {
         libc::readlinkat(
             parent.as_raw_fd(),
@@ -740,6 +750,78 @@ mod tests {
             let allowed = shell.run("cat /workspace/incoming/allowed").await;
             assert_eq!(allowed.status, 0, "{}", allowed.stderr);
             assert_eq!(allowed.stdout, "SOURCE-ALLOWED");
+        });
+    }
+    #[test]
+    fn terminal_directory_symlinks_preserve_the_resolved_directory() {
+        let (directory, view) = fixture();
+        std::fs::create_dir(directory.path().join("incoming/child")).unwrap();
+        for (name, target, expected) in [
+            ("self", ".", "/incoming"),
+            ("child/up", "..", "/incoming"),
+            ("roundtrip", "child/..", "/incoming"),
+            ("normal", "child", "/incoming/child"),
+        ] {
+            std::os::unix::fs::symlink(target, directory.path().join("incoming").join(name))
+                .unwrap();
+            let result = view
+                .resolve(&Path::new("/incoming").join(name), true)
+                .unwrap();
+            assert_eq!(
+                result.logical(),
+                Path::new(expected),
+                "link {name} -> {target}"
+            );
+            let direct = view.resolve(Path::new(expected), true).unwrap();
+            assert_eq!(result.identity().unwrap(), direct.identity().unwrap());
+        }
+        let direct = view.resolve(Path::new("/incoming"), true).unwrap();
+        let linked = view.resolve(Path::new("/incoming/self"), true).unwrap();
+        assert_eq!(linked.logical(), direct.logical());
+        assert_eq!(linked.identity().unwrap(), direct.identity().unwrap());
+    }
+
+    #[test]
+    fn hosted_shell_directory_symlink_matches_ordinary_serving() {
+        let ambient = tempfile::tempdir().unwrap();
+        let protected = tempfile::tempdir().unwrap();
+        for incoming in [
+            ambient.path().join("incoming"),
+            protected.path().join("workspace/incoming"),
+        ] {
+            std::fs::create_dir_all(incoming.join("child")).unwrap();
+            std::fs::write(incoming.join("marker"), "MARKER").unwrap();
+            std::os::unix::fs::symlink(".", incoming.join("self")).unwrap();
+            std::os::unix::fs::symlink("..", incoming.join("child/up")).unwrap();
+            std::os::unix::fs::symlink("child", incoming.join("normal")).unwrap();
+        }
+        let view =
+            Arc::new(StorageView::new(vec![(PathBuf::from("/workspace/incoming"), true)]).unwrap());
+        view.state.write().unwrap().root = Some(open_test_root(protected.path()));
+        let vfs = strands_shell::vfs_config::build_vfs(&Default::default()).unwrap();
+        let ordinary = crate::ShellKernel::over(
+            Arc::new(
+                crate::Filesystem::serving(
+                    vfs,
+                    &[(ambient.path().to_str().unwrap(), "/workspace")],
+                )
+                .unwrap(),
+            ),
+            Arc::new(ServingPolicy),
+        );
+        let mut ordinary = ordinary.shell();
+        let mut storage = serving_kernel(ambient.path(), view).shell();
+        run(async {
+            for suffix in ["", "/normal", "/self", "/child/up"] {
+                let command = format!("cd /workspace/incoming{suffix} && pwd");
+                let baseline = ordinary.run(&command).await;
+                let proposed = storage.run(&command).await;
+                assert_eq!(baseline.status, 0, "ordinary success control failed");
+                assert_eq!(proposed.status, 0, "{command}: {}", proposed.stderr);
+                assert_eq!(proposed.stdout, baseline.stdout, "{command}");
+            }
+            let result = storage.run("cd /workspace/incoming/self && pwd").await;
+            assert_eq!(result.status, 0, "{}", result.stderr);
         });
     }
 }

@@ -209,7 +209,6 @@ fn record(text: &str) -> Record {
     Record {
         version: RECORD_VERSION,
         experimental_features: Default::default(),
-        storage: Default::default(),
         file_attributes: false,
         gateway: Default::default(),
         limits: Default::default(),

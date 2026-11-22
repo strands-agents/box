@@ -102,8 +102,6 @@ struct EngineConfig<'a> {
         skip_serializing_if = "toml::Table::is_empty"
     )]
     experimental_features: toml::Table,
-    #[serde(skip_serializing_if = "toml::Table::is_empty")]
-    storage: toml::Table,
 }
 
 /// Compile a resolved profile for one run in `workspace`.
@@ -125,21 +123,34 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
     let mut profile = run.profile.clone();
     let access = profile.project_access();
     let deny = utf8(&run.workspace.join(PROJECT_CONFIGURATION))?;
-    let mounts = profile.storage.mounts.clone();
-    let pending = |entry: &str| {
-        crate::storage_mounts::depends(&expand_home(run.home, Path::new(entry)), &mounts)
+    let mounts: Vec<PathBuf> = profile
+        .agent
+        .filesystem
+        .mounts
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    let pending_for = |entry: &str, roots: &[PathBuf]| {
+        crate::storage_mounts::depends(&expand_home(run.home, Path::new(entry)), roots)
     };
-    let resolve = |entry: &str| {
+    let resolve_for = |entry: &str, roots: &[PathBuf]| {
         let path = expand_home(run.home, Path::new(entry));
-        if crate::storage_mounts::depends(&path, &mounts) {
+        if crate::storage_mounts::depends(&path, roots) {
             path
         } else {
             (run.resolve)(&path)
         }
     };
-    let keep_protection = |entry: &str, writes: &[PathBuf], pending_write: bool| {
-        pending(entry) || pending_write || writes.iter().any(|write| within(&resolve(entry), write))
-    };
+    let pending = |entry: &str| pending_for(entry, &mounts);
+    let resolve = |entry: &str| resolve_for(entry, &mounts);
+    let keep_protection =
+        |entry: &str, writes: &[PathBuf], pending_write: bool, roots: &[PathBuf]| {
+            pending_for(entry, roots)
+                || pending_write
+                || writes
+                    .iter()
+                    .any(|write| within(&resolve_for(entry, roots), write))
+        };
     let everywhere = std::mem::take(&mut profile.filesystem.deny_write);
     refuse_file_protections("[filesystem] deny_write", &everywhere, &resolve, &pending)?;
     let denied_everywhere = std::mem::take(&mut profile.filesystem.deny);
@@ -196,11 +207,14 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
     )?;
     filesystem
         .deny_write
-        .retain(|entry| keep_protection(entry, &writes, agent_pending_write));
+        .retain(|entry| keep_protection(entry, &writes, agent_pending_write, &mounts));
     for process in profile.processes_mut() {
         add(&mut process.filesystem.deny, &deny);
     }
     for (name, tool) in &mut profile.tool {
+        let mounts: Vec<PathBuf> = tool.filesystem.mounts.iter().map(PathBuf::from).collect();
+        let pending = |entry: &str| pending_for(entry, &mounts);
+        let resolve = |entry: &str| resolve_for(entry, &mounts);
         refuse_file_protections(
             &format!("[tool.{name}.filesystem] deny_write"),
             &tool.filesystem.deny_write,
@@ -221,7 +235,7 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
             .collect();
         tool.filesystem
             .deny_write
-            .retain(|entry| keep_protection(entry, &writes, pending_write));
+            .retain(|entry| keep_protection(entry, &writes, pending_write, &mounts));
     }
     let agent_deny = profile.agent.filesystem.deny.clone();
     let servers = profile.servers.clone();
@@ -254,6 +268,12 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
             .or_insert_with(|| toml::Value::Table(toml::Table::new()))
             .as_table_mut()
             .ok_or_else(|| refuse("`filesystem` is not a table"))?;
+        let mounts: Vec<PathBuf> = strings_in(filesystem.get("mounts"))
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        let pending = |entry: &str| pending_for(entry, &mounts);
+        let resolve = |entry: &str| resolve_for(entry, &mounts);
         if !everywhere.is_empty() {
             let list = filesystem
                 .entry("deny_write")
@@ -287,7 +307,7 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
         if let Some(toml::Value::Array(list)) = filesystem.get_mut("deny_write") {
             list.retain(|item| {
                 item.as_str()
-                    .is_some_and(|entry| keep_protection(entry, &writes, pending_write))
+                    .is_some_and(|entry| keep_protection(entry, &writes, pending_write, &mounts))
             });
             if list.is_empty() {
                 filesystem.remove("deny_write");
@@ -411,18 +431,6 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
     if !upgrade_http.is_empty() {
         gateway.insert("upgrade_http".into(), toml::Value::Array(upgrade_http));
     }
-    let mut incoming_storage = toml::Table::new();
-    if !mounts.is_empty() {
-        incoming_storage.insert(
-            "mounts".into(),
-            toml::Value::Array(
-                mounts
-                    .iter()
-                    .map(|path| utf8(path).map(toml::Value::String))
-                    .collect::<Result<_, _>>()?,
-            ),
-        );
-    }
     let config = EngineConfig {
         name: &run.instance.name,
         box_dir: utf8(&run.instance.box_directory)?,
@@ -437,7 +445,6 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
         telemetry,
         secret_source: profile.secret_source,
         experimental_features,
-        storage: incoming_storage,
     };
     let tool_text = run.tool_rules.text();
     let generated_text = generated.text();

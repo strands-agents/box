@@ -77,13 +77,18 @@ every harness's stored credentials, through an interpreter that runs outside con
 refusal tells the operator to make a directory for the workspace and to work there, and
 `the_operator_home_is_not_a_project` pins it.
 
-The config file's complete key set is **fifteen**: `name`, `box_dir`, `policy`, `[agent]`,
+The config file's complete key set is **fourteen**: `name`, `box_dir`, `policy`, `[agent]`,
 `[tool.<label>]`, `[egress.<name>]`, `[secret-source.<scheme>]`, `[mcp.<name>]`,
-`[telemetry.<kind>]`, `[experimental-features]`, `[storage]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.
-`[storage] mounts` declares storage attachment points and grants no filesystem access.
+`[telemetry.<kind>]`, `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.
+Each process's `filesystem.mounts` lists its storage attachment points and grants no filesystem access.
 On Linux, `[experimental-features] linux-storage-mounts = true` enables asynchronous admission
 of those mounts with each process's original filesystem restrictions. Other platforms reject the switch.
-See [storage configuration](../../docs/user/config.md#storage) for startup and failure behavior.
+See [storage configuration](../../docs/user/config.md#filesystemmounts) for startup and failure behavior.
+
+Linux packages include `strands-box-storage-compiler`, a private executable that compiles
+permissions for captured storage mounts. Its Rust entry, `strands_box::storage_compiler_main()`,
+serves that executable and is not an operator command. Box invokes it for configured storage
+admission through an inherited controller channel.
 `name` and `box_dir` are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
 every removed spelling is refused by its own name with its replacement.
 `four_inputs.rs::the_config_record_carries_only_the_four_inputs` pins the set, and

@@ -185,8 +185,10 @@ declaration and its reason. Each selected host entry remains in the configuratio
 
 ### Preserve incoming storage rules
 
-For an enabled profile's `[storage] mounts`, Boxy passes the mount paths and the
-`linux-storage-mounts` feature flag to Box Core. It keeps required filesystem rules that
+The CLI passes each recipient's `filesystem.mounts` list and the profile's
+`linux-storage-mounts` feature flag to Box Core. Each agent, tool, and local server keeps its
+own list; no recipient inherits another's mount sources. The resolver uses that recipient's
+list when deciding which filesystem checks wait for arrival. It keeps required rules that
 cannot yet be resolved against the incoming filesystem, including program-resolved tools'
 missing literal paths and symbolic links that enter a declared mount path.
 
@@ -240,8 +242,8 @@ and existing sections (see [MCP servers](profile-language.md#mcp-servers)). When
 keeps a reused one with its box. A policy error comes before this step, so it creates no storage
 directory and copies nothing.
 
-`[storage] mounts` names incoming host mount paths. This preparation step does not create
-those paths or their contents.
+Each recipient's `filesystem.mounts` list names incoming paths owned by the external storage
+manager. Managed-storage preparation does not create those paths or their contents.
 
 ### Start Box Core
 

@@ -269,8 +269,10 @@ your project. Each profile gets one storage folder, which every project it runs 
 - `box run` creates each directory and gives the agent read and write on it, so do not add that
   access yourself.
 
-A profile can also declare `[storage] mounts` for [Incoming Linux storage](profiles-reference.md#incoming-linux-storage).
-Packs cannot set `mounts`. These paths are not managed storage directories.
+External mount paths belong to each recipient's `filesystem.mounts` list, described in
+[Incoming Linux storage](profiles-reference.md#incoming-linux-storage). They are separate from
+the managed directories in `[storage]`. For a deployment using external mounts, see
+[Use storage in AgentCore Runtime](experimental-runtime-storage.md).
 
 ### Copy files into storage
 

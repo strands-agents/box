@@ -63,8 +63,7 @@ jobs:
       contents: read
     runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-24.04' }}
     timeout-minutes: 20
-    # The host tests on Linux x86_64, including the telemetry tests that start a real box. The
-    # `macos` job runs them on macOS, with the engine suite: CI runs the engine suite only on macOS.
+    # The host and engine tests run on Linux x86_64 and in the separate macOS job.
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -95,6 +94,20 @@ jobs:
 
       - name: Build
         run: cargo build --locked --all-features -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline --bin strands-box-storage-compiler
+
+      - name: Install launcher test prerequisites
+        run: |
+          launcher_prefix="$RUNNER_TEMP/box-launchers"
+          npm install --prefix "$launcher_prefix" pnpm@10.34.9 bun@1.4.4
+          python3 -m pip install --target "$launcher_prefix/python" uv==0.13.7
+          export PATH="$launcher_prefix/node_modules/.bin:$launcher_prefix/python/bin:$PATH"
+          printf '%s\n' "$launcher_prefix/node_modules/.bin" "$launcher_prefix/python/bin" >> "$GITHUB_PATH"
+          node --version
+          npm --version
+          pnpm --version
+          bun --version
+          uv --version
+          command -v npx uvx bunx pnpx python3 node
 
       # The CLI's packages only: Box Core's tests run in rust-test-lint.yml.
       - name: Test

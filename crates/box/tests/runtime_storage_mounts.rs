@@ -730,13 +730,10 @@ fn normal_box(mode: &str) {
         format!(
             "name = \"normal-storage\"\nbox_dir = {}\npolicy = \"policy.dw\"\n\n\
          [experimental-features]\nlinux-storage-mounts = true\n\n\
-         [storage]\nmounts = [{}, {}]\n\n\
          [agent]\ncommand = [{args}]\nworkspace = {}\n\n\
-         [agent.filesystem]\nread = [\"/mnt\"]\nwrite = [{}, {}, {}]\n\
+         [agent.filesystem]\nmounts = [{mount_one}, {mount_two}]\nread = [\"/mnt\"]\nwrite = [{}, {}, {}]\n\
          deny = [{}, {}]\ndeny_write = [{}, {}]\nexec = [{}]\n",
             quoted(&state.display().to_string()),
-            quoted(ROOTS[0]),
-            quoted(ROOTS[1]),
             quoted(OUTPUT),
             quoted(&roots[0].join("writable").display().to_string()),
             quoted(&roots[1].join("writable").display().to_string()),
@@ -746,6 +743,8 @@ fn normal_box(mode: &str) {
             quoted(&roots[0].join("writable/frozen").display().to_string()),
             quoted(&roots[1].join("writable/frozen").display().to_string()),
             quoted(&positive.display().to_string()),
+            mount_one = quoted(ROOTS[0]),
+            mount_two = quoted(ROOTS[1]),
         ),
     )
     .unwrap();
@@ -998,7 +997,8 @@ fn normal_box_roles(expect_failure: bool) {
             .chain(std::iter::once(quoted(&root.join("required-secret"))))
             .collect();
         format!(
-            "read = [\"/mnt\"]\nwrite = [{}, {}]\ndeny = [{}]\n",
+            "mounts = [{}]\nread = [\"/mnt\"]\nwrite = [{}, {}]\ndeny = [{}]\n",
+            quoted(root),
             quoted(&root.join(role)),
             quoted(&output.join(role)),
             others.join(", ")
@@ -1015,7 +1015,6 @@ fn normal_box_roles(expect_failure: bool) {
         format!(
             "name = \"storage-roles\"\nbox_dir = {}\npolicy = \"policy.dw\"\n\n\
          [experimental-features]\nlinux-storage-mounts = true\n\n\
-         [storage]\nmounts = [{}]\n\n\
          [agent]\ncommand = [{}, \"{}\", {}, {}]\nworkspace = {}\n\
          [agent.filesystem]\n{}\n\
          [tool.storage_probe]\ncommand = [\"storage-tool\"]\n\
@@ -1023,7 +1022,6 @@ fn normal_box_roles(expect_failure: bool) {
          [mcp.storage_probe]\ntype = \"stdio\"\ncommand = [\"storage-server\", \"{}\", {}, {}]\n\
          [mcp.storage_probe.filesystem]\n{}",
             quoted(&state),
-            quoted(root),
             quoted(&bin.join("storage-agent")),
             if expect_failure {
                 "role-agent-failure"
@@ -1098,6 +1096,7 @@ fn normal_box_roles(expect_failure: bool) {
     assert_eq!(monitoring["incarnation"], pending["server"]["incarnation"]);
     assert!(monitoring["checks"].as_u64().unwrap() >= 3);
     workload.require_running("after every actual role proved pending storage inaccessible");
+    assert_shared_source_workers(1);
     let before_mount_processes = descendants(workload.child.id());
     let mut source = start_fuse(&backing, root, b"captured-roles");
     // Each denied operation has a direct, positive provider control outside Box.
@@ -1332,4 +1331,279 @@ fn fixture_unix_millis() -> u64 {
         .as_millis()
         .try_into()
         .unwrap()
+}
+
+#[test]
+#[ignore = "requires BOX_STORAGE_TEST_FUSE and native Linux user/mount/FUSE support"]
+fn already_mounted_storage_is_ready_for_the_agents_first_read_with_an_absent_second_root() {
+    isolated(|| first_read_box(false, FirstReadSource::Before));
+}
+
+#[test]
+#[ignore = "requires BOX_STORAGE_TEST_FUSE and native Linux user/mount/FUSE support"]
+fn already_mounted_storage_is_ready_for_repeated_tools_and_local_server_first_reads() {
+    isolated(|| first_read_box(true, FirstReadSource::Before));
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FirstReadSource {
+    Before,
+    After,
+    Covered,
+}
+
+#[test]
+#[ignore = "requires BOX_STORAGE_TEST_FUSE and native Linux user/mount/FUSE support"]
+fn storage_hidden_before_startup_does_not_delay_launch_or_expose_underlay() {
+    isolated(|| first_read_box(false, FirstReadSource::Covered));
+}
+
+fn first_read_box(leaves: bool, timing: FirstReadSource) {
+    let after_start = timing == FirstReadSource::After;
+    mount_tmpfs(Path::new("/mnt"));
+    let _mount = PrivateMount;
+    // SAFETY: only the fixture's private mount participates in propagation.
+    assert_eq!(
+        unsafe {
+            libc::mount(
+                std::ptr::null(),
+                c"/mnt".as_ptr(),
+                std::ptr::null(),
+                libc::MS_SHARED,
+                std::ptr::null(),
+            )
+        },
+        0
+    );
+    for root in ROOTS {
+        std::fs::create_dir(root).unwrap();
+        mount_tmpfs(Path::new(root));
+        populate(Path::new(root), b"WRONG UNDERLAY BYTES");
+    }
+    std::fs::create_dir(OUTPUT).unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("bfr")
+        .tempdir_in("/var/tmp")
+        .unwrap();
+    let state = home.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let backing = home.path().join("backing");
+    populate(&backing, CONTENTS[0]);
+    let mut source = if after_start {
+        None
+    } else {
+        Some(start_fuse(&backing, Path::new(ROOTS[0]), CONTENTS[0]))
+    };
+    if timing == FirstReadSource::Covered {
+        mount_tmpfs(Path::new(ROOTS[0]));
+        populate(Path::new(ROOTS[0]), b"WRONG COVER BYTES");
+    }
+    let bin = home.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    for name in ["storage-agent", "storage-tool", "storage-server"] {
+        std::fs::copy(env!("CARGO_BIN_EXE_box-storage-probe"), bin.join(name)).unwrap();
+        std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let quote = |path: &Path| toml::Value::String(path.display().to_string()).to_string();
+    let roots = format!(
+        "{}, {}",
+        quote(Path::new(ROOTS[0])),
+        quote(Path::new(ROOTS[1]))
+    );
+    let filesystem = format!(
+        "mounts = [{roots}]\nread = [{roots}]\ndeny = [{}]\n",
+        quote(&Path::new(ROOTS[0]).join("secret"))
+    );
+    let mode = if timing == FirstReadSource::Covered {
+        "first-read-pending"
+    } else if after_start {
+        "first-read-wait"
+    } else if leaves {
+        "first-read-client"
+    } else {
+        "first-read-native"
+    };
+    let mut config = format!(
+        "name = \"storage-first-read\"\nbox_dir = {}\npolicy = \"policy.dw\"\n[experimental-features]\nlinux-storage-mounts = true\n[agent]\ncommand = [{}, \"{mode}\", {roots}]\nworkspace = {}\n",
+        quote(&state),
+        quote(&bin.join("storage-agent")),
+        quote(Path::new(OUTPUT))
+    );
+    if after_start {
+        config.push_str(&format!(
+            "[agent.filesystem]\nread = [{}]\nwrite = [{}]\n",
+            quote(Path::new(OUTPUT)),
+            quote(Path::new(OUTPUT))
+        ));
+    }
+    if leaves {
+        config.push_str(&format!("[tool.first_read]\ncommand = [\"storage-tool\"]\n[tool.first_read.filesystem]\n{filesystem}\n[mcp.first_read]\ntype = \"stdio\"\ncommand = [\"storage-server\", \"first-read-server\", {roots}]\n[mcp.first_read.filesystem]\n{filesystem}"));
+    } else {
+        config.push_str(&format!("[agent.filesystem]\n{filesystem}"));
+    }
+    std::fs::write(home.path().join("box.toml"), config).unwrap();
+    std::fs::write(
+        home.path().join("policy.dw"),
+        "permit(principal, action, resource);\n",
+    )
+    .unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let mut workload = Process::start(
+        Command::new(env!("CARGO_BIN_EXE_strands-box"))
+            .args(["run", "--config"])
+            .arg(home.path().join("box.toml"))
+            .env("HOME", home.path())
+            .env("PATH", path)
+            .current_dir(OUTPUT),
+    );
+    if after_start {
+        wait_marker(&Path::new(OUTPUT).join("waiting-to-launch"), &mut workload);
+        source = Some(start_fuse(&backing, Path::new(ROOTS[0]), CONTENTS[0]));
+        assert_shared_source_workers(2);
+        std::fs::write(Path::new(OUTPUT).join("launch-now"), b"source attached").unwrap();
+    }
+    workload.finish();
+    let receipt = tail(&mut workload.stdout);
+    assert!(
+        receipt.contains(if timing == FirstReadSource::Covered {
+            "pending-first-read-passed"
+        } else if leaves {
+            "three-tool-and-server-first-reads-passed"
+        } else {
+            "native-first-read-passed"
+        }),
+        "{receipt}"
+    );
+    source
+        .as_mut()
+        .unwrap()
+        .require_running("after first-read checks");
+    assert_eq!(
+        std::fs::read(Path::new(ROOTS[0]).join("public")).unwrap(),
+        if timing == FirstReadSource::Covered {
+            b"WRONG COVER BYTES"
+        } else {
+            CONTENTS[0]
+        }
+    );
+    assert_eq!(
+        std::fs::read(Path::new(ROOTS[1]).join("public")).unwrap(),
+        b"WRONG UNDERLAY BYTES"
+    );
+}
+
+fn assert_shared_source_workers(expected_roots: usize) {
+    let mut source_processes = std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(command) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        if !command
+            .split(|byte| *byte == 0)
+            .any(|argument| argument == b"--source-control-fd")
+        {
+            continue;
+        }
+        let status = std::fs::read_to_string(entry.path().join("status")).unwrap();
+        let parent = status
+            .lines()
+            .find_map(|line| line.strip_prefix("PPid:"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        source_processes.insert(pid, parent);
+    }
+    let owners: Vec<_> = source_processes
+        .iter()
+        .filter(|(_, parent)| !source_processes.contains_key(parent))
+        .map(|(pid, _)| *pid)
+        .collect();
+    assert_eq!(
+        owners.len(),
+        1,
+        "all three recipients must share one source helper: {source_processes:?}"
+    );
+    assert_eq!(
+        source_processes.len(),
+        1 + expected_roots,
+        "source acquisition count must depend on distinct roots, not recipient count"
+    );
+    assert!(
+        source_processes
+            .iter()
+            .filter(|(pid, _)| **pid != owners[0])
+            .all(|(_, parent)| *parent == owners[0])
+    );
+}
+
+#[test]
+#[ignore = "requires BOX_STORAGE_TEST_FUSE and native Linux user/mount/FUSE support"]
+fn storage_arriving_before_later_tool_launches_is_ready_without_retries() {
+    isolated(|| first_read_box(true, FirstReadSource::After));
+}
+
+/// The root-mapped FUSE fixture does not reproduce proc ownership during an ordinary user's setup.
+#[test]
+fn nonroot_host_starts_storage_with_pending_sources_without_an_outer_user_namespace() {
+    // SAFETY: geteuid only reads this test process's effective user identity.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: ordinary non-root host startup requires a nonzero effective UID");
+        return;
+    }
+    let home = tempfile::Builder::new()
+        .prefix("bsu")
+        .tempdir_in("/var/tmp")
+        .unwrap();
+    let state = home.path().join("state");
+    let workspace = home.path().join("workspace");
+    let roots = [home.path().join("first"), home.path().join("second")];
+    std::fs::create_dir(&state).unwrap();
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::create_dir(&workspace).unwrap();
+    for root in &roots {
+        populate(root, b"visible to the uncontained caller");
+        assert_eq!(
+            std::fs::read(root.join("public")).unwrap(),
+            b"visible to the uncontained caller"
+        );
+    }
+    let program = home.path().join("storage-agent");
+    std::fs::copy(env!("CARGO_BIN_EXE_box-storage-probe"), &program).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let quote = |path: &Path| toml::Value::String(path.display().to_string()).to_string();
+    let config = format!(
+        "name = \"storage-nonroot\"\nbox_dir = {}\npolicy = \"policy.dw\"\n[experimental-features]\nlinux-storage-mounts = true\n[agent]\ncommand = [{}, \"first-read-pending\", {}, {}]\nworkspace = {}\n[agent.filesystem]\nmounts = [{}, {}]\nread = [{}, {}]\n",
+        quote(&state),
+        quote(&program),
+        quote(&roots[0]),
+        quote(&roots[1]),
+        quote(&workspace),
+        quote(&roots[0]),
+        quote(&roots[1]),
+        quote(&roots[0]),
+        quote(&roots[1])
+    );
+    std::fs::write(home.path().join("box.toml"), config).unwrap();
+    std::fs::write(
+        home.path().join("policy.dw"),
+        "permit(principal, action, resource);\n",
+    )
+    .unwrap();
+    let mut workload = Process::start(
+        Command::new(env!("CARGO_BIN_EXE_strands-box"))
+            .args(["run", "--config"])
+            .arg(home.path().join("box.toml"))
+            .env("HOME", home.path())
+            .current_dir(&workspace),
+    );
+    workload.finish();
+    assert!(tail(&mut workload.stdout).contains("pending-first-read-passed"));
 }

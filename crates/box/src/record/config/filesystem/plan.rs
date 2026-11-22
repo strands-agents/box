@@ -5,9 +5,10 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 mod generation;
+#[cfg(target_os = "linux")]
+pub(crate) use generation::FilesystemTargetKind;
 pub(crate) use generation::{
-    FilesystemCheckpoint, FilesystemGeneration, FilesystemTargetKind, PendingMask,
-    PublicationTarget,
+    FilesystemCheckpoint, FilesystemGeneration, PendingMask, PublicationTarget,
 };
 
 use super::{DirectReach, FilesystemContext, direct_grants, expand_home, refuse};
@@ -244,7 +245,7 @@ impl FilesystemPlan {
 
 impl PendingFilesystem {
     /// The partial reach for tests that always install every pending-root barrier.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn available_for_test(&self) -> &DirectReach {
         &self.available
     }
@@ -264,7 +265,7 @@ impl PendingFilesystem {
         not(test),
         expect(
             dead_code,
-            reason = "The protected mount admission loop is not connected yet"
+            reason = "Tests rejudge this view directly; production admission compiles retained checkpoints"
         )
     )]
     pub(crate) fn judge_current_view(

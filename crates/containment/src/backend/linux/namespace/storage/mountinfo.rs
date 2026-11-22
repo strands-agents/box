@@ -32,6 +32,8 @@ pub(crate) struct MountRecord {
 #[derive(Debug)]
 pub(crate) struct MountTable {
     records: BTreeMap<u64, MountRecord>,
+    children: BTreeMap<u64, Vec<u64>>,
+    namespace_roots: Vec<u64>,
 }
 
 /// A reason the observation cannot yet supply a storage candidate.
@@ -118,7 +120,69 @@ impl MountTable {
                 });
             }
         }
-        Ok(Self { records })
+        let mut children = BTreeMap::<u64, Vec<u64>>::new();
+        let mut namespace_roots = Vec::new();
+        for record in records.values() {
+            if record.parent_id == record.mount_id || !records.contains_key(&record.parent_id) {
+                namespace_roots.push(record.mount_id);
+            } else {
+                children
+                    .entry(record.parent_id)
+                    .or_default()
+                    .push(record.mount_id);
+            }
+        }
+        Ok(Self {
+            records,
+            children,
+            namespace_roots,
+        })
+    }
+
+    /// Identify the visible attachment without entering a possibly blocked provider.
+    /// Mounts below a covered parent remain in mountinfo, so matching any row is insufficient.
+    pub(crate) fn has_storage_at(&self, root: &Path) -> Result<bool, MountInfoError> {
+        let mut candidates = self.namespace_roots.as_slice();
+        let mut visible = None;
+        for _ in 0..=self.records.len() {
+            // A mount at an ancestor path hides siblings below that path. Following the shortest
+            // matching child first also follows same-path stacks in their parent order.
+            let mut next: Option<&MountRecord> = None;
+            for id in candidates {
+                let record = &self.records[id];
+                if !root.starts_with(&record.mount_point) {
+                    continue;
+                }
+                match next {
+                    None => next = Some(record),
+                    Some(previous) if record.mount_point == previous.mount_point => {
+                        return Err(MountInfoError::Invalid {
+                            line: 0,
+                            reason: "ambiguous visible mount attachment",
+                        });
+                    }
+                    Some(previous) if previous.mount_point.starts_with(&record.mount_point) => {
+                        next = Some(record);
+                    }
+                    Some(_) => {}
+                }
+            }
+            let Some(record) = next else {
+                return Ok(visible.is_some_and(|id| {
+                    matches!(self.classify(root, id), SourceObservation::Candidate(_))
+                }));
+            };
+            visible = Some(record.mount_id);
+            candidates = self
+                .children
+                .get(&record.mount_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+        }
+        Err(MountInfoError::Invalid {
+            line: 0,
+            reason: "cyclic mount ancestry",
+        })
     }
 
     /// Match the exact root against a freshly observed attachment identity.
@@ -147,15 +211,20 @@ fn parse_record(line: &[u8]) -> Result<MountRecord, &'static str> {
         return Err("NUL byte");
     }
     let fields: Vec<_> = line.split(|byte| *byte == b' ').collect();
-    if fields.iter().any(|field| field.is_empty()) {
-        return Err("empty field");
-    }
     let separator = fields
         .iter()
         .position(|field| *field == b"-")
         .ok_or("missing field separator")?;
     if separator < 6 || fields.len() != separator + 4 {
         return Err("wrong field count");
+    }
+    // The kernel can emit an empty mount source; every other field must be present.
+    if fields
+        .iter()
+        .enumerate()
+        .any(|(index, field)| field.is_empty() && index != separator + 2)
+    {
+        return Err("empty field");
     }
     let mount_id = number(fields[0])
         .filter(|value| *value != 0)
@@ -292,6 +361,57 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_mount_source_does_not_hide_another_storage_mount() {
+        let tmpfs = "114 28 0:54 / /tmp/emptysrc rw,relatime shared:129 - tmpfs  rw,inode64\n";
+        for source in ["mountpoint-s3", ""] {
+            let fuse =
+                format!("22 1 0:47 / /mnt/data rw,nosuid,nodev - fuse {source} rw,user_id=0\n");
+            for rows in [format!("{tmpfs}{fuse}"), format!("{fuse}{tmpfs}")] {
+                let table = MountTable::parse(rows.as_bytes()).expect("valid empty source field");
+                assert!(table.records[&114].source.is_empty());
+                assert_eq!(
+                    table.classify(Path::new("/tmp/emptysrc"), 114),
+                    SourceObservation::Pending(PendingReason::NonStorageFilesystem)
+                );
+                let SourceObservation::Candidate(record) =
+                    table.classify(Path::new("/mnt/data"), 22)
+                else {
+                    panic!("the FUSE attachment must remain observable")
+                };
+                assert_eq!(record.filesystem, "fuse");
+                assert_eq!(record.source, source);
+                assert_eq!(record.super_options, b"rw,user_id=0");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_fields_other_than_the_mount_source_still_refuse_the_snapshot() {
+        let fields = [
+            "10",
+            "1",
+            "0:1",
+            "/",
+            "/mnt/data",
+            "rw",
+            "shared:7",
+            "-",
+            "fuse",
+            "source",
+            "rw",
+        ];
+        for index in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10] {
+            let mut malformed = fields;
+            malformed[index] = "";
+            let row = malformed.join(" ");
+            assert!(
+                MountTable::parse(row.as_bytes()).is_err(),
+                "empty field {index} was accepted: {row:?}"
+            );
+        }
+    }
+
+    #[test]
     fn source_arrival_changes_classification_not_just_identity() {
         let before = b"21 1 8:1 /mnt/data /mnt/data rw shared:19 - ext4 /dev/root rw\n";
         assert_eq!(
@@ -320,6 +440,57 @@ mod tests {
                 SourceObservation::Candidate(_)
             ));
         }
+    }
+
+    #[test]
+    fn launch_cutoff_follows_visible_stacks_in_either_row_order() {
+        let base = "1 0 8:1 / / rw - ext4 /dev/root rw\n";
+        let fuse = "22 1 0:47 / /mnt/data rw - fuse mountpoint-s3 rw\n";
+        let cover = "23 22 0:58 / /mnt/data rw - tmpfs tmpfs rw\n";
+        let restored = "24 23 0:59 / /mnt/data rw - fuse storage rw\n";
+        for rows in [
+            format!("{base}{fuse}{cover}"),
+            format!("{cover}{fuse}{base}"),
+        ] {
+            let table = MountTable::parse(rows.as_bytes()).unwrap();
+            assert!(!table.has_storage_at(Path::new("/mnt/data")).unwrap());
+            let table = MountTable::parse(format!("{restored}{rows}").as_bytes()).unwrap();
+            assert!(table.has_storage_at(Path::new("/mnt/data")).unwrap());
+        }
+    }
+
+    #[test]
+    fn launch_cutoff_ignores_storage_below_a_covered_ancestor() {
+        let rows = "1 0 8:1 / / rw - ext4 /dev/root rw\n\
+                    22 1 0:47 / /mnt/data rw - fuse storage rw\n\
+                    23 1 0:58 / /mnt rw - tmpfs tmpfs rw\n";
+        let table = MountTable::parse(rows.as_bytes()).unwrap();
+        assert!(!table.has_storage_at(Path::new("/mnt/data")).unwrap());
+        let rows = format!("{rows}24 23 0:59 / /mnt/data rw - fuse storage rw\n");
+        let table = MountTable::parse(rows.as_bytes()).unwrap();
+        assert!(table.has_storage_at(Path::new("/mnt/data")).unwrap());
+    }
+
+    #[test]
+    fn launch_cutoff_follows_root_covers_without_numeric_id_ordering() {
+        let rows = "100 999 8:1 / / rw - ext4 /dev/root rw\n\
+                    80 100 0:47 / /mnt/data rw - fuse hidden rw\n\
+                    20 100 0:58 / / rw - tmpfs tmpfs rw\n";
+        let table = MountTable::parse(rows.as_bytes()).unwrap();
+        assert!(!table.has_storage_at(Path::new("/mnt/data")).unwrap());
+        let rows = format!("10 20 0:59 / /mnt/data rw - fuse visible rw\n{rows}");
+        let table = MountTable::parse(rows.as_bytes()).unwrap();
+        assert!(table.has_storage_at(Path::new("/mnt/data")).unwrap());
+    }
+
+    #[test]
+    fn launch_cutoff_does_not_confuse_prefixes_or_parent_storage_with_the_root() {
+        let rows = b"1 0 8:1 / / rw - ext4 /dev/root rw\n\
+                     22 1 0:47 / /mnt rw - fuse storage rw\n\
+                     23 22 0:48 / /mnt/database rw - fuse storage rw\n";
+        let table = MountTable::parse(rows).unwrap();
+        assert!(!table.has_storage_at(Path::new("/mnt/data")).unwrap());
+        assert!(table.has_storage_at(Path::new("/mnt/database")).unwrap());
     }
 
     #[test]

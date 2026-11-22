@@ -266,12 +266,12 @@ fn exercise(failure: bool) {
     };
     let mode = if failure { "-failure" } else { "" };
     scene.profile("storage", &format!(
-        "[experimental-features]\nlinux-storage-mounts = true\n[storage]\nmounts = [{root}]\n\
+        "[experimental-features]\nlinux-storage-mounts = true\n\
          [project]\naccess = \"none\"\n[agent]\ncommand = [{agent}, \"role-agent{mode}\", {output}, {root}]\n\
-         [agent.filesystem]\n{agent_fs}\n\
-         [tool.storage_probe]\nprogram = \"storage-tool\"\n[tool.storage_probe.filesystem]\n{tool_fs}\n\
+         [agent.filesystem]\nmounts = [{root}]\n{agent_fs}\n\
+         [tool.storage_probe]\nprogram = \"storage-tool\"\n[tool.storage_probe.filesystem]\nmounts = [{root}]\n{tool_fs}\n\
          [mcp.storage_probe]\ntype = \"stdio\"\ncommand = [\"storage-server\", \"role-server{mode}\", {output}, {root}]\n\
-         [mcp.storage_probe.filesystem]\n{server_fs}",
+         [mcp.storage_probe.filesystem]\nmounts = [{root}]\n{server_fs}",
         root=quote(root), output=quote(output), agent=quote(&bin.join("storage-agent")),
         agent_fs=filesystem("agent"), tool_fs=filesystem("tool"), server_fs=filesystem("server"),
     ), "permit(principal, action, resource);\n");
@@ -305,10 +305,17 @@ fn exercise(failure: bool) {
         .unwrap();
     let generated: toml::Table =
         toml::from_str(&std::fs::read_to_string(run.join("box.toml")).unwrap()).unwrap();
-    assert_eq!(
-        generated["storage"]["mounts"],
-        toml::Value::from(vec![ROOT])
-    );
+    for recipient in [
+        &generated["agent"],
+        &generated["tool"]["storage_probe"],
+        &generated["mcp"]["storage_probe"],
+    ] {
+        assert_eq!(
+            recipient["filesystem"]["mounts"],
+            toml::Value::from(vec![ROOT])
+        );
+    }
+    assert!(generated.get("storage").is_none());
     assert_eq!(
         generated["experimental-features"]["linux-storage-mounts"].as_bool(),
         Some(true)
@@ -670,9 +677,9 @@ fn exercise_files(aliased_denial: bool, hosted_shell: bool) {
         "permit(principal, action, resource);\n".into()
     };
     scene.profile("storage-files", &format!(
-        "[experimental-features]\nlinux-storage-mounts = true\n[storage]\nmounts = [{root}]\n\
+        "[experimental-features]\nlinux-storage-mounts = true\n\
          [project]\naccess = \"none\"\n[agent]\ncommand = [\"/bin/bash\", \"--noprofile\", \"--norc\"]\n\
-         [agent.filesystem]\nread = [{output}, {control}, {public}, {writable}, {visible}, {executables}]\n\
+         [agent.filesystem]\nmounts = [{root}]\nread = [{output}, {control}, {public}, {writable}, {visible}, {executables}]\n\
          write = [{output}, {control}, {writable}]\nread_file = [{read_file}, {write_file}]\n\
          write_file = [{write_file}]\ndeny = [{secret}]\ndeny_write = [{alias}]\nexec = [{allowed}]\n",
         root=quote(root), output=quote(output), control=quote(&control), public=quote(&root.join("public")),
@@ -1040,9 +1047,9 @@ fn exercise_hosted_failure() {
     assert!(!backing.join("required-secret").exists());
     let quote = |path: &Path| toml::Value::String(path.display().to_string()).to_string();
     scene.profile("storage-hosted-failure", &format!(
-        "[experimental-features]\nlinux-storage-mounts = true\n[storage]\nmounts = [{root}]\n\
+        "[experimental-features]\nlinux-storage-mounts = true\n\
          [project]\naccess = \"none\"\n[agent]\ncommand = [\"/bin/bash\", \"--noprofile\", \"--norc\"]\n\
-         [agent.filesystem]\nread = [{root}, {output}, {control}]\n\
+         [agent.filesystem]\nmounts = [{root}]\nread = [{root}, {output}, {control}]\n\
          write = [{writable}, {output}, {control}]\ndeny = [{secret}]\n",
         root=quote(root), output=quote(output), control=quote(&control),
         writable=quote(&root.join("writable")), secret=quote(&root.join("required-secret")),

@@ -33,4 +33,6 @@ read = ["${{ root.parent }}"]
 read_file = [
     { path = "/private/etc/hosts", when = "macos" },
     { path = "/etc/hosts", when = "linux" },
+    # Downloaded Node scripts select node through /usr/bin/env on Linux.
+    { path = "/usr/bin/env", when = "linux" },
 ]

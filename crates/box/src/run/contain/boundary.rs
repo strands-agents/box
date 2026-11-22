@@ -25,9 +25,12 @@ use crate::run::contain::executable;
 use crate::run::contain::runtime_minimum::{self, MinimumCell};
 use crate::run::hosted::Attachment;
 
-#[allow(
-    dead_code,
-    reason = "Storage remains Linux-only and its operator switch is held closed until qualification"
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "Production storage admission is supported only on Linux"
+    )
 )]
 pub(crate) mod storage;
 
@@ -87,19 +90,19 @@ impl ApprovedReach {
         protected_sources: &[AuthoritySource],
         commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
     ) -> Result<Self, BoxError> {
-        let installation = std::sync::Arc::new(if stored.storage.mounts.is_empty() {
+        let judged = stored.process_tables();
+        let installation = std::sync::Arc::new(if judged.storage_roots.is_empty() {
             crate::run::installation::TrustedInstallation::load()?
         } else {
             crate::run::installation::TrustedInstallation::load_for_storage()?
         });
         // The tables that the early check of a secret source program judges, so no table reaches
         // one judgement and not the other.
-        let judged = stored.process_tables();
         let tables = judged
             .tables
             .iter()
             .map(|(table, spec)| {
-                if !stored.storage.mounts.is_empty() {
+                if !spec.filesystem.mounts.is_empty() {
                     let context = storage::FrozenFilesystemContext::capture(
                         table,
                         &judged,
@@ -110,7 +113,7 @@ impl ApprovedReach {
                             spec,
                             table,
                             context: &context,
-                            roots: &stored.storage.mounts,
+                            roots: &spec.filesystem.mounts,
                             commands: &commands,
                             installation: &installation,
                         },
@@ -121,7 +124,7 @@ impl ApprovedReach {
                         spec: spec.clone(),
                         table: table.clone(),
                         context,
-                        roots: stored.storage.mounts.clone(),
+                        roots: spec.filesystem.mounts.clone(),
                         checkpoint: generation.checkpoint(),
                         layout: generation.with_policy(|_, masks, targets| {
                             storage::StorageLayout {
@@ -157,6 +160,17 @@ impl ApprovedReach {
         &self,
     ) -> &std::sync::Arc<crate::run::installation::TrustedInstallation> {
         &self.installation
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn storage_roots(&self) -> Vec<std::path::PathBuf> {
+        self.tables
+            .values()
+            .filter_map(|reach| reach.storage.as_ref())
+            .flat_map(|policy| policy.roots.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     /// The reach approved for one process table, named as a refusal names it.
@@ -2242,7 +2256,6 @@ mod tests {
             let record = Record {
                 version: RECORD_VERSION,
                 experimental_features: Default::default(),
-                storage: Default::default(),
                 file_attributes: false,
                 monty: true,
                 gateway: Default::default(),

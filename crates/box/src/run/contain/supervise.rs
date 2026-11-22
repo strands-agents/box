@@ -954,7 +954,7 @@ impl LeafBox {
     /// Linux — its own netns relay to the parent gateway. A containment setup failure is a
     /// [`TrampolineError::SetupFailed`], not a workload status. Buffered: the streams come back
     /// whole; a long-lived session uses [`spawn_streaming`](Self::spawn_streaming).
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) async fn run(
         boundary: Boundary,
         layout: &BoxRoot,
@@ -1060,7 +1060,7 @@ impl LeafBox {
     }
 
     /// Return live streams after setup completes without a reported executable launch failure.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) async fn spawn_streaming(
         boundary: Boundary,
         layout: &BoxRoot,

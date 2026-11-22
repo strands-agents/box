@@ -22,6 +22,7 @@ pub(crate) struct Receiver {
     plan: Arc<LaunchPlan>,
     owner: StorageOwner,
     cancel: Arc<Cancellation>,
+    sources: Option<UnixStream>,
 }
 
 impl Receiver {
@@ -30,12 +31,14 @@ impl Receiver {
         let (parent, child) = UnixStream::pair().map_err(io_error)?;
         let cancel = Arc::new(Cancellation::default());
         cancel.track(&parent).map_err(io_error)?;
+        let sources = owner.subscribe_sources(&plan.policy.roots)?;
         Ok(Self {
             child: Some(child),
             parent: Some(parent),
             plan,
             owner,
             cancel,
+            sources: Some(sources),
         })
     }
 
@@ -54,8 +57,12 @@ impl Receiver {
         let plan = Arc::clone(&self.plan);
         let owner = self.owner.clone();
         let cancel = Arc::clone(&self.cancel);
+        let sources = self
+            .sources
+            .take()
+            .ok_or_else(|| failure("storage source subscription already transferred"))?;
         self.owner.spawn_worker(Arc::clone(&cancel), move || {
-            run(control, plan, owner, cancel)
+            run(control, plan, owner, cancel, sources)
         })
     }
 }
@@ -171,6 +178,7 @@ fn run(
     plan: Arc<LaunchPlan>,
     owner: StorageOwner,
     cancel: Arc<Cancellation>,
+    sources: UnixStream,
 ) -> Result<(), BoxError> {
     let layout = initial_layout(&plan)?;
     if !send_or_complete(
@@ -180,9 +188,10 @@ fn run(
     )? {
         return Ok(());
     }
+    control_result(wire::send_fd(&control, &sources.into()), &cancel)?;
     let user_namespace = File::from(control_result(wire::receive_owner(&control), &cancel)?);
-    match control_result(wire::receive_event(&control), &cancel)? {
-        HelperEvent::ViewReady => {}
+    let required = match control_result(wire::receive_event(&control), &cancel)? {
+        HelperEvent::ViewReady { required } => required,
         HelperEvent::Complete => return Ok(()),
         HelperEvent::Failed { stage, message } => {
             return Err(failure(format!("{stage}: {message}")));
@@ -192,6 +201,14 @@ fn run(
                 "receiver did not register its protected workload view",
             ));
         }
+    };
+    let required_set: BTreeSet<_> = required.iter().copied().collect();
+    if required_set.len() != required.len()
+        || required
+            .iter()
+            .any(|root| *root as usize >= layout.roots.len())
+    {
+        return Err(failure("receiver has invalid initial storage roots"));
     }
     let view = File::from(control_result(wire::receive_fd(&control), &cancel)?);
     if plan.input.table == "[agent]" {
@@ -201,6 +218,15 @@ fn run(
     let mut published = BTreeSet::new();
     let mut input = plan.input.clone();
     let mut generation = 0_u64;
+    let mut launch_released = false;
+    release_launch(
+        &control,
+        &owner,
+        &cancel,
+        &required_set,
+        &BTreeSet::new(),
+        &mut launch_released,
+    )?;
     loop {
         let event = control_result(wire::receive_event(&control), &cancel)?;
         if !note_capture(event, layout.roots.len(), &mut observed)? {
@@ -273,6 +299,14 @@ fn run(
             )? {
                 return Ok(());
             }
+            release_launch(
+                &control,
+                &owner,
+                &cancel,
+                &required_set,
+                &captured,
+                &mut launch_released,
+            )?;
             continue;
         }
         if !send_or_complete(
@@ -328,7 +362,36 @@ fn run(
         }
         published.extend(targets);
         input.previous = output.checkpoint;
+        release_launch(
+            &control,
+            &owner,
+            &cancel,
+            &required_set,
+            &captured,
+            &mut launch_released,
+        )?;
     }
+}
+
+fn release_launch(
+    control: &UnixStream,
+    owner: &StorageOwner,
+    cancel: &Cancellation,
+    required: &BTreeSet<u32>,
+    completed: &BTreeSet<u32>,
+    released: &mut bool,
+) -> Result<(), BoxError> {
+    if !*released && required.is_subset(completed) {
+        let sent = owner.admit(|| {
+            Ok(wire::send_command(
+                control,
+                &ControllerCommand::ReleaseLaunch,
+            ))
+        })?;
+        command_result_or_complete(control, sent, cancel, None)?;
+        *released = true;
+    }
+    Ok(())
 }
 
 fn control_result<T>(

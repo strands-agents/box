@@ -8,6 +8,7 @@ pub(crate) struct BoxError(Internal);
 
 impl BoxError {
     /// Expected interruption of a private storage controller during owned shutdown.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn is_storage_cancelled(&self) -> bool {
         matches!(
             self.0,
@@ -225,7 +226,7 @@ pub(crate) enum RelayError {
 /// The four inputs could not be read, parsed, or validated.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigError {
-    #[error("invalid `[storage]` table: {reason}")]
+    #[error("invalid filesystem `mounts` list: {reason}")]
     Storage { reason: String },
 
     #[error("experimental `linux-storage-mounts` requires a Linux build")]

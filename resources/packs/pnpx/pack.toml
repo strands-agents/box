@@ -45,4 +45,6 @@ read = ["${{ root.parent }}"]
 read_file = [
     { path = "/private/etc/hosts", when = "macos" },
     { path = "/etc/hosts", when = "linux" },
+    # pnpm starts downloaded command wrappers through /bin/sh on Linux.
+    { path = "/bin/sh", when = "linux" },
 ]

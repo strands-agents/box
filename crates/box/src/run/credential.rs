@@ -706,7 +706,6 @@ mod tests {
                 secret_sources: true,
                 ..Default::default()
             },
-            storage: Default::default(),
             file_attributes: false,
             gateway: Default::default(),
             limits: Default::default(),

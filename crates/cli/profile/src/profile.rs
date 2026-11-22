@@ -248,6 +248,8 @@ impl Network {
 #[serde(deny_unknown_fields)]
 pub struct Filesystem {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write: Vec<String>,

@@ -30,7 +30,7 @@ pub(super) fn validate(
     roots: &[PathBuf],
     admitted: &[PathBuf],
 ) -> Result<(), BoxError> {
-    declarations(roots, admitted).map_err(|error| refusal(table, "storage.mounts", error))?;
+    declarations(roots, admitted).map_err(|error| refusal(table, "filesystem.mounts", error))?;
     // Keep the ordinary name, inode, route, and ancestor checks, including file-only grants.
     for grant in &reach.grants {
         if grant.operation != Operation::Write {
@@ -81,7 +81,7 @@ pub(super) fn validate(
         .map(|command| command.identity.0)
         .collect();
     let proof = Proof::capture(roots, admitted, &devices)
-        .map_err(|error| refusal(table, "storage.mounts", error))?;
+        .map_err(|error| refusal(table, "filesystem.mounts", error))?;
     for grant in &reach.grants {
         if grant.operation != Operation::Write || grant.scope == Scope::File {
             continue;
@@ -107,7 +107,7 @@ pub(super) fn validate(
     }
     proof
         .verify()
-        .map_err(|error| refusal(table, "storage.mounts", error))
+        .map_err(|error| refusal(table, "filesystem.mounts", error))
 }
 
 fn refusal(table: &str, entry: &str, error: io::Error) -> BoxError {
@@ -372,7 +372,10 @@ impl MountTable {
                 .ok_or_else(|| invalid("mount table separator is missing"))?;
             if separator < 6
                 || fields.len() != separator + 4
-                || fields.iter().any(|field| field.is_empty())
+                || fields
+                    .iter()
+                    .enumerate()
+                    .any(|(index, field)| field.is_empty() && index != separator + 2)
             {
                 return Err(invalid("invalid mount table fields"));
             }

@@ -240,7 +240,7 @@ A box whose agent, tool, or local MCP server declares a [`deny_write`](config.md
 A [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table, or a `secret.env` key on a route or a
 remote MCP server, requires record version 39.
 A [telemetry target](telemetry.md#include) that names `mcp_tool_calls` requires record version 40.
-Record version 41 carries the experimental storage mount declarations.
+Record version 42 carries the experimental storage mount declarations.
 The `linux-storage-mounts` switch enables protected asynchronous storage admission on Linux;
 other platforms refuse the switch. Storage admission does not require native filesystem interception.
 When a configuration selects more than one of these features, it uses the highest required version

@@ -2,6 +2,8 @@
 
 #[cfg(target_os = "linux")]
 mod launcher;
+#[cfg(target_os = "linux")]
+mod sources;
 
 use std::fmt::Display;
 use std::future::Future;
@@ -22,6 +24,8 @@ struct State {
     hosted: Mutex<Option<Arc<box_shell::StorageView>>>,
     #[cfg(target_os = "linux")]
     launcher: Mutex<Option<launcher::Launcher>>,
+    #[cfg(target_os = "linux")]
+    sources: Mutex<Option<sources::SourceHelper>>,
 }
 
 #[derive(Default)]
@@ -42,7 +46,76 @@ impl StorageOwner {
             hosted: Mutex::new(None),
             #[cfg(target_os = "linux")]
             launcher: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            sources: Mutex::new(None),
         }))
+    }
+
+    /// Own cleanup until HostedBox has finished every fallible construction step.
+    pub(super) fn startup_guard(&self) -> StartupGuard {
+        StartupGuard(Some(self.clone()))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn configure_sources(
+        &self,
+        roots: &[std::path::PathBuf],
+        trusted: &crate::run::installation::TrustedInstallation,
+    ) -> Result<(), BoxError> {
+        if roots.is_empty() {
+            return Ok(());
+        }
+        self.check()?;
+        let helper = sources::SourceHelper::start(roots, trusted)?;
+        let (control, cancel) = helper.monitor()?;
+        self.admit(|| {
+            let mut sources = self
+                .0
+                .sources
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if sources.is_some() {
+                return Err(SuperviseError::Control {
+                    reason: "Box source helper already configured".into(),
+                }
+                .into());
+            }
+            *sources = Some(helper);
+            Ok(())
+        })?;
+        self.spawn_worker(Arc::clone(&cancel), move || {
+            let result = containment::storage::sources::monitor(&control);
+            if cancel.is_cancelled() {
+                return Err(SuperviseError::StorageCancelled.into());
+            }
+            result.map_err(|error| {
+                SuperviseError::Control {
+                    reason: error.to_string(),
+                }
+                .into()
+            })
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn subscribe_sources(
+        &self,
+        roots: &[std::path::PathBuf],
+    ) -> Result<std::os::unix::net::UnixStream, BoxError> {
+        self.check()?;
+        let sources = self
+            .0
+            .sources
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        sources
+            .as_ref()
+            .ok_or_else(|| {
+                BoxError::from(SuperviseError::Control {
+                    reason: "storage-enabled launch has no shared source helper".into(),
+                })
+            })?
+            .subscription(roots)
     }
 
     #[cfg(target_os = "linux")]
@@ -122,6 +195,15 @@ impl StorageOwner {
     fn close_hosted(&self) {
         #[cfg(target_os = "linux")]
         {
+            if let Some(sources) = self
+                .0
+                .sources
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_mut()
+            {
+                sources.close();
+            }
             if let Some(view) = self.hosted_view() {
                 view.close();
             }
@@ -248,6 +330,7 @@ impl StorageOwner {
     }
 
     /// Own one blocking controller until normal shutdown has joined it.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn spawn_worker(
         &self,
         cancel: Arc<Cancellation>,
@@ -278,6 +361,7 @@ impl StorageOwner {
         })
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn reap_finished(&self) {
         let completed = {
             let mut workers = self
@@ -307,6 +391,17 @@ impl StorageOwner {
     pub(super) fn finish(&self) -> Result<(), BoxError> {
         #[cfg(target_os = "linux")]
         {
+            let sources = self
+                .0
+                .sources
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            if let Some(mut sources) = sources
+                && let Err(error) = sources.finish()
+            {
+                self.fail(error);
+            }
             let launcher = self
                 .0
                 .launcher
@@ -346,6 +441,25 @@ impl StorageOwner {
     }
 }
 
+pub(super) struct StartupGuard(Option<StorageOwner>);
+
+impl StartupGuard {
+    pub(super) fn disarm(mut self) {
+        self.0.take();
+    }
+}
+
+impl Drop for StartupGuard {
+    fn drop(&mut self) {
+        if let Some(owner) = self.0.take() {
+            owner.close();
+            if let Err(error) = owner.finish() {
+                eprintln!("strands-box: storage cleanup after startup failure: {error}");
+            }
+        }
+    }
+}
+
 struct Worker {
     cancel: Arc<Cancellation>,
     join: std::thread::JoinHandle<()>,
@@ -356,14 +470,17 @@ struct Worker {
 pub(crate) struct Cancellation {
     cancelled: std::sync::atomic::AtomicBool,
     sockets: Mutex<Vec<(u64, std::os::unix::net::UnixStream)>>,
+    #[cfg(any(target_os = "linux", test))]
     next_socket: std::sync::atomic::AtomicU64,
 }
 
 impl Cancellation {
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn track(&self, socket: &std::os::unix::net::UnixStream) -> std::io::Result<u64> {
         let mut sockets = self
             .sockets
@@ -387,6 +504,7 @@ impl Cancellation {
         Ok(id)
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn untrack(&self, id: u64) {
         self.sockets
             .lock()
@@ -850,6 +968,46 @@ mod worker_tests {
     use super::*;
     use std::io::Read;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn failed_startup_cancels_and_joins_storage_workers_before_returning() {
+        let (fatal, mut failures) = tokio::sync::mpsc::unbounded_channel();
+        let owner = StorageOwner::new(fatal);
+        let weak = Arc::downgrade(&owner.0);
+        let guard = owner.startup_guard();
+        let cancel = Arc::new(Cancellation::default());
+        let (mut waiting, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        cancel.track(&waiting).unwrap();
+        let joined = Arc::new(AtomicBool::new(false));
+        let completed = Arc::clone(&joined);
+        owner
+            .spawn_worker(cancel, move || {
+                let _ = waiting.read(&mut [0]);
+                completed.store(true, Ordering::Release);
+                Err(SuperviseError::StorageCancelled.into())
+            })
+            .unwrap();
+        drop(owner);
+        drop(guard);
+        assert!(joined.load(Ordering::Acquire));
+        assert!(
+            weak.upgrade().is_none(),
+            "failed startup retained its storage owner"
+        );
+        assert!(failures.try_recv().is_err());
+    }
+
+    #[test]
+    fn successful_startup_transfers_cleanup_to_the_hosted_box() {
+        let (fatal, _) = tokio::sync::mpsc::unbounded_channel();
+        let owner = StorageOwner::new(fatal);
+        owner.startup_guard().disarm();
+        owner
+            .check()
+            .expect("successful construction keeps admission open");
+        owner.close();
+        owner.finish().unwrap();
+    }
 
     #[test]
     fn shutdown_interrupts_and_joins_a_controller_waiting_for_storage() {

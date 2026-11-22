@@ -1315,8 +1315,193 @@ mod linux {
         }
     }
 
+    fn first_read(root: &Path, missing: &Path) -> Result<(), String> {
+        read_expected(&root.join("public"), PUBLIC[0])?;
+        denied(&root.join("secret/token"))?;
+        require(
+            fs::write(root.join("public"), b"forbidden").is_err(),
+            || "read-only storage became writable".into(),
+        )?;
+        pending(missing)
+    }
+
+    fn first_read_server(root: &Path, missing: &Path) -> Result<(), String> {
+        use std::io::BufRead as _;
+        first_read(root, missing)?;
+        for line in std::io::stdin().lock().lines() {
+            let request: Value = serde_json::from_str(&line.map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+            let Some(id) = request.get("id") else {
+                continue;
+            };
+            let result = match request["method"].as_str() {
+                Some("initialize") => {
+                    json!({"protocolVersion":"2024-11-05", "capabilities":{"tools":{}}, "serverInfo":{"name":"first-read-probe", "version":"1"}})
+                }
+                Some("tools/list") => {
+                    json!({"tools":[{"name":"initial_read", "description":"Report a storage read completed before the server accepted input", "inputSchema":{"type":"object", "properties":{}, "additionalProperties":false}}]})
+                }
+                Some("tools/call") => {
+                    json!({"content":[{"type":"text", "text":"server-first-read-passed"}], "isError":false})
+                }
+                method => return Err(format!("unexpected first-read MCP method: {method:?}")),
+            };
+            println!("{}", json!({"jsonrpc":"2.0", "id":id, "result":result}));
+            std::io::stdout()
+                .flush()
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn first_read_client(root: &Path, missing: &Path) -> Result<(), String> {
+        use std::io::{BufRead as _, BufReader};
+        use std::process::Stdio;
+        denied(&root.join("public"))?;
+        for _ in 0..3 {
+            let result = Command::new("sh")
+                .args([
+                    "-c",
+                    &format!(
+                        "storage-tool first-read-tool {} {}",
+                        root.display(),
+                        missing.display()
+                    ),
+                ])
+                .output()
+                .map_err(|error| error.to_string())?;
+            require(result.status.success(), || {
+                format!(
+                    "first-read tool failed: {}",
+                    String::from_utf8_lossy(&result.stderr)
+                )
+            })?;
+            require(result.stdout == b"tool-first-read-passed\n", || {
+                format!("unexpected tool receipt: {:?}", result.stdout)
+            })?;
+        }
+        let mut child = Command::new("storage-server")
+            .arg("first-read-server")
+            .arg(root)
+            .arg(missing)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        let mut input = child.stdin.take().ok_or("missing server input")?;
+        let mut output = BufReader::new(child.stdout.take().ok_or("missing server output")?);
+        for (id, method, params) in [
+            (
+                1,
+                "initialize",
+                json!({"protocolVersion":"2024-11-05", "capabilities":{}, "clientInfo":{"name":"first-read-client", "version":"1"}}),
+            ),
+            (2, "tools/list", json!({})),
+            (
+                3,
+                "tools/call",
+                json!({"name":"initial_read", "arguments":{}}),
+            ),
+        ] {
+            writeln!(
+                input,
+                "{}",
+                json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params})
+            )
+            .map_err(|error| error.to_string())?;
+            input.flush().map_err(|error| error.to_string())?;
+            let mut line = String::new();
+            require(
+                output
+                    .read_line(&mut line)
+                    .map_err(|error| error.to_string())?
+                    > 0,
+                || "server closed before its first-read receipt".into(),
+            )?;
+            let response: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
+            require(
+                response["id"] == id && response.get("error").is_none(),
+                || format!("server first-read request failed: {response}"),
+            )?;
+            if id == 1 {
+                writeln!(
+                    input,
+                    "{}",
+                    json!({"jsonrpc":"2.0", "method":"notifications/initialized"})
+                )
+                .map_err(|error| error.to_string())?;
+                input.flush().map_err(|error| error.to_string())?;
+            }
+            if id == 3 {
+                require(
+                    response["result"]["content"][0]["text"] == "server-first-read-passed",
+                    || format!("unexpected server receipt: {response}"),
+                )?;
+            }
+        }
+        drop(input);
+        let status = child.wait().map_err(|error| error.to_string())?;
+        require(status.success(), || {
+            format!("server alias exited with {status}")
+        })?;
+        println!("three-tool-and-server-first-reads-passed");
+        Ok(())
+    }
+
     pub(super) fn run() -> Result<(), String> {
         let args = std::env::args_os().collect::<Vec<_>>();
+        if let Some(mode) = args.get(1).and_then(|mode| mode.to_str())
+            && matches!(
+                mode,
+                "first-read-native"
+                    | "first-read-tool"
+                    | "first-read-server"
+                    | "first-read-client"
+                    | "first-read-wait"
+                    | "first-read-pending"
+            )
+        {
+            if args.len() != 4 {
+                return Err("first-read probe requires one mounted and one absent root".into());
+            }
+            let root = Path::new(&args[2]);
+            let missing = Path::new(&args[3]);
+            return match mode {
+                "first-read-pending" => {
+                    pending(root)?;
+                    pending(missing)?;
+                    println!("pending-first-read-passed");
+                    Ok(())
+                }
+                "first-read-server" => first_read_server(root, missing),
+                "first-read-client" => first_read_client(root, missing),
+                "first-read-wait" => {
+                    let output = Path::new("/mnt/storage-output");
+                    marker(output, "waiting-to-launch", &json!({"started":true}))?;
+                    let deadline = Instant::now() + BOUND;
+                    while !output.join("launch-now").exists() {
+                        require(Instant::now() < deadline, || {
+                            "fixture did not release tool launch".into()
+                        })?;
+                        thread::sleep(STEP);
+                    }
+                    first_read_client(root, missing)
+                }
+                _ => {
+                    first_read(root, missing)?;
+                    println!(
+                        "{}-first-read-passed",
+                        if mode == "first-read-tool" {
+                            "tool"
+                        } else {
+                            "native"
+                        }
+                    );
+                    Ok(())
+                }
+            };
+        }
         if let Some(mode) = args.get(1).and_then(|mode| mode.to_str())
             && matches!(
                 mode,

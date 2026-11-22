@@ -830,7 +830,6 @@ mod tests {
             Storage {
                 root: self.root.clone(),
                 directories: vec![self.root.join("config")],
-                mounts: Vec::new(),
                 tool_states: Vec::new(),
                 launcher_caches: Vec::new(),
                 files: vec![file.clone()],

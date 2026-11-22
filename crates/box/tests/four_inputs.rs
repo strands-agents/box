@@ -34,7 +34,7 @@
 //! guards, in the file whose own header calls that spelling load-bearing. It now calls
 //! `parser_source::fields_of`, which takes the last token before the colon.
 //!
-//! # The configuration holds fifteen keys, and the four inputs still stand
+//! # The configuration holds fourteen keys, and the four inputs still stand
 //!
 //! `policy` and credentials are authority, `name` and `box_dir` select state, and `[agent] command`
 //! plus the trailing argv select the workload. `[mcp]`, `[telemetry]`, `[tool]`, and `[agent.ingress]`
@@ -215,11 +215,10 @@ fn the_config_record_carries_only_the_four_inputs() {
             "name",
             "policy",
             "secret_source",
-            "storage",
             "telemetry",
             "tool"
         ],
-        "the fifteen config keys include execution limits, explicit experimental enforcement selection, \
+        "the fourteen config keys include execution limits, explicit experimental enforcement selection, \
          `file-attributes`, which widens only the workload's own write grants, `[gateway]`, \
          whose upgraded requests policy still decides, `monty`, which selects what a bare \
          `python3` runs and grants nothing, and `[secret-source]`, which names where a \

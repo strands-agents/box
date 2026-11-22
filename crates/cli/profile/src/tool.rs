@@ -814,7 +814,6 @@ pub fn scratch(run: &Path, tool: &str) -> PathBuf {
 /// interpreter a `when` removed.
 pub(crate) fn compose(resolved: &mut Resolved, tools: &mut Tools, workspace: &Path, run: &Path) {
     let access = resolved.project_access();
-    let mounts = resolved.storage.mounts.clone();
     tools
         .found
         .retain(|found| resolved.tool.contains_key(&found.name));
@@ -984,6 +983,12 @@ pub(crate) fn compose(resolved: &mut Resolved, tools: &mut Tools, workspace: &Pa
             .into_iter()
             .chain(process.filesystem.read.iter().cloned())
             .chain(read)
+            .map(PathBuf::from)
+            .collect();
+        let mounts: Vec<PathBuf> = process
+            .filesystem
+            .mounts
+            .iter()
             .map(PathBuf::from)
             .collect();
         let mut kept = unique(entries);

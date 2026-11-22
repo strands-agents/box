@@ -281,3 +281,49 @@ fn incomplete_and_expired_proofs_refuse() {
         .is_err()
     );
 }
+
+#[test]
+fn an_unrelated_empty_source_preserves_provider_separation() {
+    let empty_source = "3 1 0:100 / /unrelated rw shared:7 - tmpfs  rw\n";
+    let mounts = table(empty_source);
+    assert_eq!(mounts.entries.len(), 3);
+    assert_eq!(mounts.entries[2].point, PathBuf::from("/unrelated"));
+    assert_eq!(
+        closure(&mounts).unwrap(),
+        HashSet::from([libc::makedev(0, 99)])
+    );
+
+    let protected_child = table(&format!(
+        "{empty_source}4 2 8:1 /tools /mnt/data/command-alias rw - ext4 root rw\n"
+    ));
+    assert!(
+        closure(&protected_child).is_err(),
+        "accepting an unrelated empty source must preserve command-device refusal"
+    );
+
+    let valid_fields = [
+        "3",
+        "1",
+        "0:100",
+        "/",
+        "/unrelated",
+        "rw",
+        "shared:7",
+        "-",
+        "tmpfs",
+        "source",
+        "rw",
+    ];
+    for empty_index in 0..valid_fields.len() {
+        if empty_index == 9 {
+            continue; // Only the source field may be empty.
+        }
+        let mut fields = valid_fields;
+        fields[empty_index] = "";
+        let malformed = format!("{}\n", fields.join(" "));
+        assert!(
+            MountTable::parse(malformed.as_bytes(), Instant::now() + PROOF_TIMEOUT).is_err(),
+            "empty field {empty_index} must still be refused: {malformed:?}"
+        );
+    }
+}

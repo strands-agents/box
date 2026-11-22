@@ -1,0 +1,71 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Runtime execution role for the experimental Box storage example
+Parameters:
+  RepositoryArn:
+    Type: String
+    Description: ARN of the ECR repository containing the example image
+  BucketName:
+    Type: String
+    Default: ""
+    Description: Optional S3 bucket for the availability-dependent bucket mount
+  BucketPrefix:
+    Type: String
+    Default: "box-storage-example/"
+    Description: Dedicated nonempty prefix ending in a slash
+    AllowedPattern: ".+/"
+Conditions:
+  UseBucket: !Not [!Equals [!Ref BucketName, ""]]
+Resources:
+  RuntimeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/*"
+      Policies:
+        - PolicyName: RuntimeStorageExample
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability]
+                Resource: !Ref RepositoryArn
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:DescribeLogStreams, logs:PutLogEvents]
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*"
+              - !If
+                - UseBucket
+                - Effect: Allow
+                  Action: s3:GetBucketLocation
+                  Resource: !Sub "arn:${AWS::Partition}:s3:::${BucketName}"
+                - !Ref AWS::NoValue
+              - !If
+                - UseBucket
+                - Effect: Allow
+                  Action: s3:ListBucket
+                  Resource: !Sub "arn:${AWS::Partition}:s3:::${BucketName}"
+                  Condition:
+                    StringLike:
+                      s3:prefix: [!Ref BucketPrefix, !Sub "${BucketPrefix}*"]
+                - !Ref AWS::NoValue
+              - !If
+                - UseBucket
+                - Effect: Allow
+                  Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:AbortMultipartUpload]
+                  Resource: !Sub "arn:${AWS::Partition}:s3:::${BucketName}/${BucketPrefix}*"
+                - !Ref AWS::NoValue
+Outputs:
+  RoleArn:
+    Value: !GetAtt RuntimeRole.Arn

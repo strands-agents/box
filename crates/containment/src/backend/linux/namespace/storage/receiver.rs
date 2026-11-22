@@ -2,7 +2,7 @@
 
 use super::protocol::{ControllerCommand, GenerationRequest, HelperEvent, StorageLayout};
 use super::target::PinnedTarget;
-use super::worker::{Child, Worker};
+use super::worker::Child;
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +32,8 @@ struct State {
     snapshot: Option<Snapshot>,
     published: BTreeSet<u32>,
     published_dependencies: BTreeSet<u32>,
+    completed_roots: BTreeSet<u32>,
+    launch_released: bool,
 }
 
 impl State {
@@ -91,8 +93,21 @@ impl State {
         Ok(())
     }
     fn release(&mut self, generation: u64) -> Result<(), ContainmentError> {
-        self.require(generation, Phase::Compiling)?;
+        let roots = self.require(generation, Phase::Compiling)?.roots.clone();
+        self.completed_roots.extend(roots);
         self.snapshot = None;
+        Ok(())
+    }
+    fn release_launch(&mut self, required: &BTreeSet<u32>) -> Result<(), ContainmentError> {
+        if self.launch_released
+            || self.snapshot.is_some()
+            || !required.is_subset(&self.completed_roots)
+        {
+            return Err(failure(
+                "workload startup needs every required source protected exactly once",
+            ));
+        }
+        self.launch_released = true;
         Ok(())
     }
     fn commit(&mut self, generation: u64) -> Result<(), ContainmentError> {
@@ -103,6 +118,7 @@ impl State {
     fn published(&mut self, generation: u64, targets: &[u32]) -> Result<(), ContainmentError> {
         let roots = self.require(generation, Phase::Committing)?.roots.clone();
         self.published.extend(targets.iter().copied());
+        self.completed_roots.extend(roots.iter().copied());
         self.published_dependencies.extend(roots);
         self.snapshot = None;
         Ok(())
@@ -123,11 +139,9 @@ impl CloneJob {
     fn start(
         purpose: ClonePurpose,
         roots: Vec<u32>,
-        workers: &[Worker],
+        sources: &UnixStream,
     ) -> Result<Self, ContainmentError> {
-        for root in &roots {
-            workers[*root as usize].request_clone()?;
-        }
+        sources::request_clones(sources, &roots)?;
         Ok(Self {
             purpose,
             roots,
@@ -281,7 +295,13 @@ impl Stage {
     }
 }
 
-fn report_captures(workers: &mut [Worker], control: &UnixStream) -> Result<(), ContainmentError> {
+#[derive(Default)]
+struct Capture {
+    source: Option<(protocol::SourceIdentity, String)>,
+    reported: bool,
+}
+
+fn report_captures(workers: &mut [Capture], control: &UnixStream) -> Result<(), ContainmentError> {
     for (index, worker) in workers.iter_mut().enumerate() {
         if !worker.reported
             && let Some((identity, filesystem)) = &worker.source
@@ -305,7 +325,21 @@ pub(super) fn run(
     control: &UnixStream,
     registration: &UnixStream,
     lifetime: &UnixStream,
+    sources: &UnixStream,
 ) -> Result<bool, ContainmentError> {
+    let sources::Event::Initialized { required } = sources::receive_event(sources)? else {
+        return Err(failure(
+            "source subscription did not establish its launch cutoff",
+        ));
+    };
+    let initial: BTreeSet<_> = required.iter().copied().collect();
+    if initial.len() != required.len()
+        || required
+            .iter()
+            .any(|index| *index as usize >= layout.roots.len())
+    {
+        return Err(failure("source subscription has invalid initial roots"));
+    }
     let namespace = transport::receive_fd(registration)?;
     let view = transport::receive_fd(registration)?;
     let mut targets = layout
@@ -313,14 +347,10 @@ pub(super) fn run(
         .iter()
         .map(|target| PinnedTarget::receive(registration, &target.path, target.scope).map(Some))
         .collect::<Result<Vec<_>, _>>()?;
-    protocol::send_event(control, &HelperEvent::ViewReady)?;
+    protocol::send_event(control, &HelperEvent::ViewReady { required })?;
     transport::send_fd(control, &view)?;
     drop(view);
-    let mut workers = layout
-        .roots
-        .iter()
-        .map(|root| Worker::spawn(root))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut workers: Vec<_> = layout.roots.iter().map(|_| Capture::default()).collect();
     let mut state = State::default();
     let mut job: Option<CloneJob> = None;
     let mut stage: Option<Stage> = None;
@@ -340,11 +370,11 @@ pub(super) fn run(
                 revents: 0,
             },
         ];
-        descriptors.extend(workers.iter().map(|worker| libc::pollfd {
-            fd: worker.control.as_raw_fd(),
+        descriptors.push(libc::pollfd {
+            fd: sources.as_raw_fd(),
             events: libc::POLLIN | libc::POLLRDHUP,
             revents: 0,
-        }));
+        });
         if let Some(stage) = &stage {
             descriptors.push(libc::pollfd {
                 fd: stage.control.as_raw_fd(),
@@ -375,19 +405,31 @@ pub(super) fn run(
             }
             return Err(failure("invalid launcher lifetime signal"));
         }
-        for (index, worker) in workers.iter_mut().enumerate() {
-            if descriptors[2 + index].revents == 0 {
-                continue;
-            }
-            if worker.source.is_none() {
-                worker.capture()?;
-            } else if let Some(job) = job.as_mut().filter(|job| job.waiting_for(index as u32)) {
-                job.clones
-                    .insert(index as u32, transport::receive_fd(&worker.control)?);
-            } else {
-                return Err(failure(
-                    "captured-source worker exited or sent an unexpected frame",
-                ));
+        if descriptors[2].revents != 0 {
+            match sources::receive_event(sources)? {
+                sources::Event::Captured {
+                    root,
+                    identity,
+                    filesystem,
+                } => {
+                    let capture = workers
+                        .get_mut(root as usize)
+                        .ok_or_else(|| failure("source event has an unknown root"))?;
+                    if capture.source.is_some() {
+                        return Err(failure("source root was captured twice"));
+                    }
+                    capture.source = Some((identity, filesystem));
+                }
+                sources::Event::Cloned { root } => {
+                    let job = job
+                        .as_mut()
+                        .filter(|job| job.waiting_for(root))
+                        .ok_or_else(|| failure("source cache sent an unrequested clone"))?;
+                    job.clones.insert(root, transport::receive_fd(sources)?);
+                }
+                sources::Event::Initialized { .. } => {
+                    return Err(failure("source subscription initialized twice"));
+                }
             }
         }
         if job.as_ref().is_some_and(CloneJob::complete) {
@@ -425,9 +467,7 @@ pub(super) fn run(
             }
         }
         if let Some(active) = stage.as_mut()
-            && descriptors
-                .get(2 + workers.len())
-                .is_some_and(|event| event.revents != 0)
+            && descriptors.get(3).is_some_and(|event| event.revents != 0)
         {
             let event: StageEvent =
                 serde_json::from_str(&transport::receive_text(&active.control, CONTROL_LIMIT)?)
@@ -485,7 +525,7 @@ pub(super) fn run(
                             .expect("snapshot created")
                             .roots
                             .clone(),
-                        &workers,
+                        sources,
                     )?);
                 }
                 ControllerCommand::Release { generation } => {
@@ -511,7 +551,7 @@ pub(super) fn run(
                             .expect("snapshot exists")
                             .roots
                             .clone(),
-                        &workers,
+                        sources,
                     )?);
                 }
                 ControllerCommand::Commit { generation } => {
@@ -521,6 +561,10 @@ pub(super) fn run(
                         .ok_or_else(|| failure("commit has no staging worker"))?;
                     (&active.control).write_all(b"C").map_err(io_failure)?;
                 }
+                ControllerCommand::ReleaseLaunch => {
+                    state.release_launch(&initial)?;
+                    (&*registration).write_all(b"R").map_err(io_failure)?;
+                }
                 ControllerCommand::Abort => return Ok(false),
             }
         }
@@ -529,6 +573,33 @@ pub(super) fn run(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn launch_release_waits_for_initial_sources_but_not_absent_sources() {
+        let mut state = State::default();
+        assert!(state.release_launch(&BTreeSet::from([0])).is_err());
+        state.snapshot(1, vec![0]).unwrap();
+        assert!(state.release_launch(&BTreeSet::from([0])).is_err());
+        state.snapshot.as_mut().unwrap().phase = Phase::Compiling;
+        state.release(1).unwrap();
+        state.release_launch(&BTreeSet::from([0])).unwrap();
+        assert!(state.release_launch(&BTreeSet::from([0])).is_err());
+        assert!(!state.completed_roots.contains(&1));
+        let mut absent = State::default();
+        absent.release_launch(&BTreeSet::new()).unwrap();
+    }
+
+    #[test]
+    fn prepared_sources_do_not_release_launch_until_publication_completes() {
+        let mut state = State::default();
+        state.snapshot(1, vec![0]).unwrap();
+        state.snapshot.as_mut().unwrap().phase = Phase::Prepared;
+        assert!(state.release_launch(&BTreeSet::from([0])).is_err());
+        state.commit(1).unwrap();
+        assert!(state.release_launch(&BTreeSet::from([0])).is_err());
+        state.published(1, &[0]).unwrap();
+        state.release_launch(&BTreeSet::from([0])).unwrap();
+    }
     use super::*;
     fn request(generation: u64, roots: Vec<u32>, targets: Vec<u32>) -> GenerationRequest {
         GenerationRequest {
