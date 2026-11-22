@@ -496,8 +496,9 @@ mod tests {
             "a bare route warns once at open: {at_open:?}"
         );
         assert!(
-            at_open[0].contains("s3.us-west-2.amazonaws.com:443"),
-            "the warning names its destination: {}",
+            at_open[0]
+                .starts_with("strands-box: warning: aws:// for s3.us-west-2.amazonaws.com:443 "),
+            "the warning keeps its prefix and names its destination: {}",
             at_open[0]
         );
         assert!(signing.is_empty(), "a bare sign warns no more: {signing:?}");
