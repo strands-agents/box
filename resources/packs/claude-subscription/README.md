@@ -24,47 +24,34 @@ claude.ai Pro or Max plan instead of an Anthropic API key. The box adds a token 
 The profile lists `@box/claude-subscription` and sets `claude.host = "anthropic"`. Keep that
 value: with `bedrock`, Claude Code talks to Bedrock and never uses the token.
 
-Use this pack instead of `@box/anthropic`, not beside it. `@box/anthropic` sends your API key to
-all of `api.anthropic.com`, and this pack sends the token to only part of that host, so
-`box run` and `box profile show` refuse a profile that lists both. Without `@box/anthropic`, your `ANTHROPIC_API_KEY` doesn't reach the box, so
-Claude Code uses the token.
+Use this pack instead of `@box/anthropic`, not beside it. Both packs send a credential to
+`api.anthropic.com`, so `box run` and `box profile show` refuse a profile that lists both.
+Without `@box/anthropic`, your `ANTHROPIC_API_KEY` doesn't reach the box, so Claude Code uses the
+token.
 
-## The paths that get the token
+## The token goes on every request to Anthropic
 
-The box adds the token only to Claude Code's model, settings, and sign-in paths on
-`api.anthropic.com`, which the `[egress.anthropic-subscription]` route in [`pack.toml`](pack.toml)
-lists. The rest of the host stays reachable without the token, which is what WebFetch's safety
-check and Claude Code's telemetry need.
+Claude Code makes some requests to `api.anthropic.com` without its token, such as WebFetch's
+check that a site is safe to fetch. So the box adds your token to every request the agent sends to
+`api.anthropic.com`, whether or not the request carries the stand-in. That keeps every Claude Code
+feature working, whatever paths a new release calls.
 
-When a Claude Code feature fails with a 401 from another path on `api.anthropic.com`, add the path
-to the route in your `profile.toml`. Write the pack's list and your path, because your list
-replaces the pack's:
-
-```toml
-[egress.anthropic-subscription]
-destinations = [
-    "api.anthropic.com/v1/",
-    "api.anthropic.com/api/claude_cli/",
-    "api.anthropic.com/api/claude_code/",
-    "api.anthropic.com/api/oauth/",
-    "api.anthropic.com/api/claude_code_grove",
-]
-```
-
-[Destinations](../../../docs/user/egress.md#destinations) says how a path matches.
+The cost: for this one host, the box can't tell whether a request came from Claude Code or from
+another program in the box. Any program in the box can call `api.anthropic.com` with your
+subscription. The token still goes nowhere else. Each time the box adds the token to a request
+that carried no stand-in, it writes a warning to the run's `box.log`, not to your screen. When
+the run ends, `box` prints where that log is.
 
 ## Limitations
 
 - The pack works only with Claude Code. Other agents don't read `CLAUDE_CODE_OAUTH_TOKEN`.
-- Some Claude Code features call paths that the route leaves out, such as
-  `/api/claude_code_grove`, and get a 401 until you add the path as shown above.
 
 ## Troubleshooting
 
 ### The run stops because two routes overlap
 
 ```text
-box: error: Box Core cannot check the policy: invalid credential entry for host "api.anthropic.com/v1/": `anthropic-subscription` overlaps `anthropic` at "api.anthropic.com"; one destination is one authority, and a request matching both has no unambiguous secret or backend
+box: error: Box Core cannot check the policy: invalid credential entry for host "api.anthropic.com": `anthropic-subscription` overlaps `anthropic` at "api.anthropic.com"; one destination is one authority, and a request matching both has no unambiguous secret or backend
 ```
 
 The profile lists both `@box/anthropic` and `@box/claude-subscription`. Delete `"@box/anthropic"`
