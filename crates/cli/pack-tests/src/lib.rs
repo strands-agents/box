@@ -14,4 +14,5 @@ mod npm;
 mod pi;
 mod pnpm;
 mod pnpx;
+mod rg;
 mod uvx;

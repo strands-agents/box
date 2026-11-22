@@ -4,6 +4,8 @@ name = "@box/codex"
 version = 1
 kind = "agent"
 extend = ["@box/base"]
+# Codex searches with rg. A run skips the tool when rg is not on your PATH.
+include = ["@box/rg"]
 
 [run]
 command = [
@@ -93,6 +95,9 @@ exception.
 
 Your shell runs under a policy and is not a full bash. When a shell command gives an unexpected or
 empty result, try a simpler, portable form and name files by explicit paths.
+
+`rg` runs only when ripgrep is installed on the user's machine. When `rg` is not found, search with
+`grep -rn` instead.
 
 ## How the user changes what the box allows
 

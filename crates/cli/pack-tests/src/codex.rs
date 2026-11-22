@@ -810,6 +810,10 @@ fn a_codex_box_tells_codex_it_runs_in_a_box_and_where_its_profile_is() {
     assert!(guidance.contains(RESTART_NOTE), "{guidance}");
     assert!(guidance.contains(DNS_NOTE), "{guidance}");
     assert!(
+        guidance.contains("When `rg` is not found, search with\n`grep -rn` instead."),
+        "{guidance}"
+    );
+    assert!(
         guidance.contains("`AWS_BEARER_TOKEN_BEDROCK`"),
         "{guidance}"
     );
@@ -848,7 +852,12 @@ fn codex_comes_from_the_path() {
         host.codex_install().to_str()
     );
     let (summary, _) = codex_report(&host);
-    assert!(summary.contains("✓ Codex  @box/codex\n"), "{summary}");
+    assert!(
+        summary
+            .lines()
+            .any(|line| line.split_whitespace().eq(["✓", "Codex", "@box/codex"])),
+        "{summary}"
+    );
 }
 
 #[test]
