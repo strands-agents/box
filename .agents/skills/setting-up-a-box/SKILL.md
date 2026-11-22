@@ -21,6 +21,8 @@ to check first, when to ask, and what never to do: don't touch the Bedrock API k
 - Offer to build Box from this checkout in place of the download. Run
   `cargo build --release -p strands-box -p strands-box-containment` here, then copy the three
   binaries into `~/box-tutorial/box-core` the way the page's "Build from source" section does.
+- A Box message on stderr carries a code, such as `B0201` in `strands-box: note[B0201]: ...`.
+  [`docs/user/message-codes.md`](../../../docs/user/message-codes.md) explains each code.
 
 ## After setup
 

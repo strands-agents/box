@@ -156,7 +156,7 @@ credential it attached from that answer, so an endpoint that echoes a refused ke
 key in your logs:
 
 ```text
-strands-box: telemetry export failed: https://cloud.langfuse.com/api/public/otel/v1/traces answered 401 Unauthorized: ...
+telemetry: warning[T0102]: telemetry export failed: https://cloud.langfuse.com/api/public/otel/v1/traces answered 401 Unauthorized: ...
 ```
 
 ## The workload's own signals
@@ -422,7 +422,7 @@ Box prints one line on stderr if an export to a configured target failed, or if 
 not finish in time:
 
 ```text
-strands-box: warning: telemetry records were lost: 2 exports to the configured targets failed
+telemetry: warning[T0101]: telemetry records were lost: 2 exports to the configured targets failed
 ```
 
 The count is exports, not records: one export can carry many records. The run's exit code does not

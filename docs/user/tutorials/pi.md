@@ -202,9 +202,9 @@ The box prints what pi's own process can touch, then pi works. The runtime minim
 here:
 
 ```text
-strands-box: box box-e86f327fe83e07e9 created · config pi/box.toml
-strands-box: starting workload
-strands-box: [agent] runs /opt/homebrew/Cellar/node/<node version>/bin/node with no policy decision over these paths:
+strands-box: note[B0301]: box box-e86f327fe83e07e9 created · config pi/box.toml
+strands-box: note[B0302]: starting workload
+strands-box: note[B0201]: [agent] runs /opt/homebrew/Cellar/node/<node version>/bin/node with no policy decision over these paths:
   read        /Users/you/.pi/agent/install
   read        /Users/you/box-tutorial/pi/agent
   read        /Users/you/box-tutorial/pi/tmp
@@ -214,9 +214,9 @@ strands-box: [agent] runs /opt/homebrew/Cellar/node/<node version>/bin/node with
   read_file   /opt/homebrew/etc/openssl@3/openssl.cnf
   list        /Users/you/box-tutorial/my-project
   exec        /opt/homebrew/Cellar/node/<node version>/bin/node  (command, implicit)
-strands-box: [agent] runtime minimum, added by Core:
+strands-box: note[B0201]: [agent] runtime minimum, added by Core:
   ...
-strands-box: [agent] HOME=/Users/you PATH=/Users/you/box-tutorial/pi/state/bin:/usr/bin:/bin
+strands-box: note[B0201]: [agent] HOME=/Users/you PATH=/Users/you/box-tutorial/pi/state/bin:/usr/bin:/bin
 README.md (`/Users/you/box-tutorial/my-project/README.md`) contains only a single heading, "My project," with no further content.
 
 Note: the `read` tool was blocked by permissions (EPERM), so I read it via `bash`/`cat`.

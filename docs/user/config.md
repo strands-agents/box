@@ -184,8 +184,9 @@ restores times with the switch, but an archive that macOS `tar` made with its de
 still fails to restore the owner and the flags. Extract it with `tar -x --no-mac-metadata`.
 
 The box prints one line for each process the switch applies to, in the startup disclosure:
-`strands-box: [agent] file attributes: may set file times, set-user-ID and set-group-ID bits, the
-group, the owner, and access control lists on files in its writable grants`. Linux prints no line.
+`strands-box: note[B0201]: [agent] file attributes: may set file times, set-user-ID and
+set-group-ID bits, the group, the owner, and access control lists on files in its writable grants`.
+Linux prints no line.
 
 ## `[limits]`
 
@@ -360,7 +361,7 @@ The box adds the runtime minimum to every process; see
 The program is a full path or a bare name. A bare name uses `env.PATH` when set.
 Otherwise, Box uses the operator's `PATH`, or `/usr/bin:/bin` if it is absent. In the Shell, the last
 part of a `[tool]`'s program is the name that runs it, before the operator's `PATH`, and `run` prints
-``strands-box: [tool.git]: a bare `git` in the Shell runs <file>`` for each. See
+``strands-box: note[B0208]: [tool.git]: a bare `git` in the Shell runs <file>`` for each. See
 [`PATH` in the Shell reference](shell.md#path). A relative path with more than one
 component is refused: ``` `command` element 0 "<program>" is a relative path; write an absolute
 path, or a bare name that `env.PATH` resolves```. Scripts on Linux require
@@ -462,7 +463,7 @@ On macOS, the startup disclosure names each selected process before the agent st
 This includes stdio MCP servers that remain unstarted; Box repeats their disclosure when they start.
 
 ```text
-strands-box: [tool.dev] file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events, as well as the host-wide event count and each volume's history identifier; file-content and write restrictions still apply, except that a root process can delete any volume's event history
+strands-box: note[B0206]: [tool.dev] file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events, as well as the host-wide event count and each volume's history identifier; file-content and write restrictions still apply, except that a root process can delete any volume's event history
 ```
 
 A record with any selected process requires version 35.
@@ -596,8 +597,8 @@ accepts on its port. On Linux the agent's sandbox creates no IPv6 socket, so an 
 At startup the box prints each listener:
 
 ```text
-strands-box: [ingress] 0.0.0.0:8080 is relayed to the agent's port 8081, at most 640 callers at once
-strands-box: [ingress] 0.0.0.0:8000 is relayed to the agent's port 8001, at most 640 callers at once
+strands-box: note[B0701]: [ingress] 0.0.0.0:8080 is relayed to the agent's port 8081, at most 640 callers at once
+strands-box: note[B0701]: [ingress] 0.0.0.0:8000 is relayed to the agent's port 8001, at most 640 callers at once
 ```
 
 On Linux, the box starts no listener's relay until the agent's sandbox reports that it is ready, and
@@ -741,20 +742,22 @@ A `read` or `read_file` entry is the one exception: it may name a symbolic link 
 - The disclosure shows the entry as `read_file   /usr/bin/cc -> /usr/bin/gcc`.
 
 **No policy decision covers a filesystem list**, so `run` discloses each entry on stderr before the
-workload starts, under `strands-box: [agent] runs <program> with no policy decision over these
-paths:`. Getting started shows the example's disclosure. A credential store, such as `~/.aws` or
-`~/.ssh`, is disclosed by name as well, as `strands-box: [tool.<name>]: exposes ~/.ssh (read)` for
-a tool granted the operator's SSH directory.
+workload starts, under
+`strands-box: note[B0201]: [agent] runs <program> with no policy decision over these paths:`.
+Getting started shows the example's disclosure. A credential store, such as `~/.aws` or `~/.ssh`, is
+disclosed by name as well, as `strands-box: note[B0202]: [tool.<name>]: exposes ~/.ssh (read)` for a
+tool granted the operator's SSH directory.
 
 On Linux, preserved interpreter spellings appear in a separate section before the runtime minimum:
 
 ```text
-strands-box: [tool.check] interpreter aliases for configured access:
+strands-box: note[B0201]: [tool.check] interpreter aliases for configured access:
   alias       /bin/sh -> /usr/bin/dash  (interpreter spelling)
 ```
 
 The arrow maps the script's spelling to the file its configured grants already authorize.
 The section appears only when Box preserves an interpreter spelling.
+[Message codes](message-codes.md) explains the code in each line of the disclosure, such as `B0201`.
 
 With no `filesystem` table, the process reaches its `command` and the runtime minimum. The
 command's own exec grant is implicit: a process may always run its `command`, and the startup
@@ -847,7 +850,7 @@ count as nothing, so Box refuses to start.
 `run` prints one line for each tool it leaves out, before the workload starts:
 
 ```text
-strands-box: [tool.tsx] left out: tsx not found
+strands-box: note[B0207]: [tool.tsx] left out: tsx not found
 ```
 
 A left-out tool gets no filesystem grants, and Box does not check its lists. It runs nothing for
@@ -856,7 +859,7 @@ spawns by program name, so it still decides another `[tool]` or stdio `[mcp.<nam
 program name. The startup line for that table says so:
 
 ```text
-strands-box: [tool.system_git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
+strands-box: note[B0208]: [tool.system_git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
 ```
 
 The set of tools is fixed when the run starts. A program installed
@@ -999,7 +1002,7 @@ still decides each other name of that program file, such as `make` through macOS
 except in the cases that [`shell:spawn`](shell.md#shellspawn) refuses:
 
 ```text
-strands-box: [tool.git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
+strands-box: note[B0208]: [tool.git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
 ```
 
 A copy of that program at another path is a different file, and `shell:spawn` still decides it.
@@ -1191,7 +1194,7 @@ When the box starts, it checks the program file of each table and prints one lin
 stderr:
 
 ```text
-strands-box: [secret-source.op]: reads each op:// secret with /opt/homebrew/bin/op, which runs outside every sandbox
+strands-box: note[B0203]: [secret-source.op]: reads each op:// secret with /opt/homebrew/bin/op, which runs outside every sandbox
 ```
 
 Box then runs the program once for each secret that the configuration names, before the workload
@@ -1223,8 +1226,8 @@ Each of these stops the box before the workload starts:
   program on its stderr. The second names the entry that holds the reference:
 
   ```text
-  strands-box: [egress.github] secret.ref: credential error: the secret source "op" ("/opt/homebrew/bin/op") for op://[REDACTED] exited unsuccessfully (exit status: 1): [ERROR] "GitHub" isn't an item in the "Personal" vault
-  strands-box: error: `[egress.github] secret.ref` names a secret that the secret source `op` (/opt/homebrew/bin/op) did not return, so the box does not start
+  strands-box: warning[B0601]: [egress.github] secret.ref: credential error: the secret source "op" ("/opt/homebrew/bin/op") for op://[REDACTED] exited unsuccessfully (exit status: 1): [ERROR] "GitHub" isn't an item in the "Personal" vault
+  strands-box: error[B0104]: `[egress.github] secret.ref` names a secret that the secret source `op` (/opt/homebrew/bin/op) did not return, so the box does not start
   ```
 
   Sign in to the vault or correct the reference, then start the box again. When the entry is a
@@ -1281,7 +1284,7 @@ sandbox also denies these
 paths, as it denies an entry of its own `deny` list. An entry that is a symbolic link protects the link and the path that it names. On macOS, a path that is absent when the box starts stays closed if it appears later. That includes a path behind a link, such as a socket that an app makes when it starts. On Linux, a sandbox gets an empty, read-only folder or an empty file in place of each path that exists when the box starts. Box skips an entry whose path doesn't exist then, or whose symbolic link names a target that doesn't exist: the box starts, and no sandbox denies that path in this run. No grant can reach it, as on macOS. Box prints one line for the entry after the line of its source:
 
 ```text
-strands-box: [secret-source.op]: `reads` entry "~/.op" names /home/me/.op, which does not exist when the box starts, so no sandbox denies it in this run
+strands-box: note[B0203]: [secret-source.op]: `reads` entry "~/.op" names /home/me/.op, which does not exist when the box starts, so no sandbox denies it in this run
 ```
 
 So one table can name each place that a vault can have, and a box starts on a machine that has only some of them. `policy generate-schema` prints the same line when a remote MCP server names a secret in that scheme. Read these lines when you write a table: on Linux a path with a typing error doesn't stop the box, and the line is how you see it.

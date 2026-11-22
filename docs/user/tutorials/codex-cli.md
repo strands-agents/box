@@ -202,17 +202,17 @@ The box prints what Codex's own process can touch, then Codex prints its setting
 runtime minimum lines are cut here:
 
 ```text
-strands-box: box box-5c8d2fcc54cb914a created · config codex/box.toml
-strands-box: starting workload
-strands-box: [agent] runs /opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex with no policy decision over these paths:
+strands-box: note[B0301]: box box-5c8d2fcc54cb914a created · config codex/box.toml
+strands-box: note[B0302]: starting workload
+strands-box: note[B0201]: [agent] runs /opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex with no policy decision over these paths:
   read        /Users/you/box-tutorial/codex/home
   write       /Users/you/box-tutorial/codex/home
   write       /Users/you/box-tutorial/codex/tmp
   list        /Users/you/box-tutorial/my-project
   exec        /opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex  (command, implicit)
-strands-box: [agent] runtime minimum, added by Core:
+strands-box: note[B0201]: [agent] runtime minimum, added by Core:
   ...
-strands-box: [agent] HOME=/Users/you PATH=/Users/you/box-tutorial/codex/state/bin:/usr/bin:/bin
+strands-box: note[B0201]: [agent] HOME=/Users/you PATH=/Users/you/box-tutorial/codex/state/bin:/usr/bin:/bin
 Reading additional input from stdin...
 2026-10-06T20:10:04.594775Z ERROR codex_skills_extension::loader::host: failed to walk skills root file:///Users/you/.agents/skills: Operation not permitted (os error 1)
 OpenAI Codex v0.160.1

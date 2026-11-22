@@ -216,9 +216,9 @@ The box prints what the agent's own process can touch, then the agent works. The
 lines are cut here:
 
 ```text
-strands-box: box box-6b8ee845f22b265a created · config strands-agent/box.toml
-strands-box: starting workload
-strands-box: [agent] runs /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14 with no policy decision over these paths:
+strands-box: note[B0301]: box box-6b8ee845f22b265a created · config strands-agent/box.toml
+strands-box: note[B0302]: starting workload
+strands-box: note[B0201]: [agent] runs /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14 with no policy decision over these paths:
   read        /Users/you/box-tutorial/strands-agent/runtime/.venv
   read        /opt/homebrew/Cellar/python@3.14
   read        /opt/homebrew/Cellar/openssl@3
@@ -229,9 +229,9 @@ strands-box: [agent] runs /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Pyt
   metadata    /opt/homebrew/opt
   exec        /opt/homebrew/Cellar/python@3.14
   exec        /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14  (command, implicit)
-strands-box: [agent] runtime minimum, added by Core:
+strands-box: note[B0201]: [agent] runtime minimum, added by Core:
   ...
-strands-box: [agent] HOME=/Users/you PATH=/Users/you/box-tutorial/strands-agent/state/bin:/usr/bin:/bin
+strands-box: note[B0201]: [agent] HOME=/Users/you PATH=/Users/you/box-tutorial/strands-agent/state/bin:/usr/bin:/bin
 I'll read the README.md file.
 Tool #1: read_file
 [tool] cat README.md (exit 0)
