@@ -17,6 +17,7 @@ pub(super) struct Log {
     line: Vec<u8>,
     tail: String,
     truncated: bool,
+    unshown: usize,
 }
 
 impl Log {
@@ -51,54 +52,72 @@ impl Log {
             line: Vec::with_capacity(PREVIEW_BYTES + 1),
             tail: String::new(),
             truncated: false,
+            unshown: 0,
         }
     }
 
     pub(super) fn push(&mut self, bytes: &[u8]) {
-        if let Ok(file) = &mut self.output
-            && let Err(error) = file.write_all(bytes)
-        {
-            self.output = Err(error);
-        }
+        self.save(bytes);
         for part in bytes.split_inclusive(|byte| *byte == b'\n') {
             let remaining = PREVIEW_BYTES + 1 - self.line.len();
             self.line
                 .extend_from_slice(&part[..part.len().min(remaining)]);
             if part.ends_with(b"\n") {
-                self.collect_error();
+                self.collect();
             }
         }
     }
 
+    /// A message from `box` itself, which the preview always shows.
     pub(super) fn message(&mut self, message: &str) {
-        // A relay message can arrive between two reads of the same Core line.
-        let partial = std::mem::take(&mut self.line);
-        self.push(message.as_bytes());
-        self.line = partial;
+        self.save(message.as_bytes());
+        self.show(message.trim_end());
     }
 
-    fn collect_error(&mut self) {
-        let line = self.line.strip_suffix(b"\n").unwrap_or(&self.line);
-        let text = String::from_utf8_lossy(line);
-        if let Some((_, message)) = text.split_once(": ")
-            && message.starts_with("error:")
+    /// Startup lines are expected, so the count of lines left out of the preview starts after them.
+    pub(super) fn started(&mut self) {
+        self.unshown = 0;
+    }
+
+    fn save(&mut self, bytes: &[u8]) {
+        if let Ok(file) = &mut self.output
+            && let Err(error) = file.write_all(bytes)
         {
-            let text = super::super::banner::clean(&text);
-            let end = text.floor_char_boundary(PREVIEW_BYTES - 1);
-            self.truncated |= end < text.len();
-            self.tail.push_str(&text[..end]);
-            self.tail.push('\n');
-            while self.tail.len() > PREVIEW_BYTES || self.tail.lines().count() > PREVIEW_LINES {
-                let end = self.tail.find('\n').unwrap() + 1;
-                self.tail.drain(..end);
-                self.truncated = true;
-            }
+            self.output = Err(error);
         }
+    }
+
+    fn collect(&mut self) {
+        let line = self.line.strip_suffix(b"\n").unwrap_or(&self.line);
+        let text = String::from_utf8_lossy(line).into_owned();
         self.line.clear();
+        if text
+            .split_once(": ")
+            .is_some_and(|(_, message)| message.starts_with("error:"))
+        {
+            self.show(&text);
+        } else {
+            self.unshown += 1;
+        }
+    }
+
+    fn show(&mut self, text: &str) {
+        let text = super::super::banner::clean(text);
+        let end = text.floor_char_boundary(PREVIEW_BYTES - 1);
+        self.truncated |= end < text.len();
+        self.tail.push_str(&text[..end]);
+        self.tail.push('\n');
+        while self.tail.len() > PREVIEW_BYTES || self.tail.lines().count() > PREVIEW_LINES {
+            let end = self.tail.find('\n').unwrap() + 1;
+            self.tail.drain(..end);
+            self.truncated = true;
+        }
     }
 
     pub(super) fn preview(&mut self) -> String {
-        self.collect_error();
+        if !self.line.is_empty() {
+            self.collect();
+        }
         if self.tail.is_empty() {
             return String::new();
         }
@@ -114,21 +133,31 @@ impl Log {
         preview
     }
 
-    pub(super) fn report(mut self, launch: &Launch) -> String {
+    /// What `box` prints on exit. A run that `box` removes gets only the preview.
+    pub(super) fn report(mut self, launch: &Launch, kept: bool) -> String {
+        let preview = self.preview();
+        if !kept {
+            return preview;
+        }
         let path = launch.config.with_file_name(FILE);
         let path = match path.to_str() {
             Some(text) if super::super::banner::clean(text) == text => text.to_owned(),
             _ => format!("{path:?}"),
         };
+        let more = match self.unshown {
+            0 => String::new(),
+            1 => " (1 more message)".to_owned(),
+            count => format!(" ({count} more messages)"),
+        };
         let saved = match &self.output {
-            Ok(_) => format!("box: full log: {path}\n"),
+            Ok(_) => format!("box: full log{more}: {path}\n"),
             Err(error) => format!(
                 "box: could not write log {path}: {}\n",
                 error.to_string().escape_debug(),
             ),
         };
         let reuse = launch.reuse_instruction();
-        format!("\n{}{saved}\n{reuse}\n\n", self.preview())
+        format!("\n{preview}{saved}\n{reuse}\n\n")
     }
 }
 
@@ -159,12 +188,13 @@ mod tests {
 
         log.push(format!("strands-box: warning: {}", "x".repeat(PREVIEW_BYTES * 2)).as_bytes());
         assert!(log.line.len() <= PREVIEW_BYTES + 1);
-        log.message("box: error: policy update failed: invalid edit\n");
+        log.message("box: policy update failed: invalid edit\n");
         log.push(b"strands-box: error: still part of the warning\n");
         assert_eq!(
             log.preview(),
-            format!("{preview}  box: error: policy update failed: invalid edit\n")
+            format!("{preview}  box: policy update failed: invalid edit\n")
         );
+        assert_eq!(log.unshown, 2001);
 
         for number in 0..7 {
             log.push(format!("box: error: failure {number}\n").as_bytes());
@@ -201,14 +231,19 @@ mod tests {
         std::fs::write(&path, "first run\n").unwrap();
         std::fs::set_permissions(&path, Permissions::from_mode(0o644)).unwrap();
         let mut log = Log::open(&launch, File::open("/dev/null").unwrap());
+        log.push(b"startup\n");
+        log.started();
         log.push(b"second run\n");
-        let console = log.report(&launch);
-        assert_eq!(std::fs::read(&path).unwrap(), b"first run\nsecond run\n");
+        let console = log.report(&launch, true);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"first run\nstartup\nsecond run\n"
+        );
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600,
         );
-        assert!(console.starts_with("\nbox: full log: "));
+        assert!(console.starts_with("\nbox: full log (1 more message): "));
         let arguments = console.split_once("box run ").unwrap().1;
         let parsed = std::process::Command::new("/bin/sh")
             .args(["-c", &format!("printf '%s\\n' {arguments}")])
@@ -229,12 +264,19 @@ mod tests {
             Log::new(File::open("/dev/null").unwrap(), File::open(&target)),
         ] {
             log.push(b"strands-box: error: important failure\n");
-            let console = log.report(&launch);
+            let console = log.report(&launch, true);
             assert!(console.contains("  strands-box: error: important failure\n"));
             assert!(console.contains("could not write log"));
             assert!(!console.contains("box: full log:"));
         }
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+
+        let mut log = Log::new(File::open("/dev/null").unwrap(), tempfile::tempfile());
+        log.push(b"strands-box: error: refused\nbox: running profile\n");
+        assert_eq!(
+            log.report(&launch, false),
+            "box: recent log output\n  strands-box: error: refused\n",
+        );
 
         for argument in [
             "/control\u{9b}2J",

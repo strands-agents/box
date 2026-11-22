@@ -50,7 +50,6 @@ fn terminal_error(source: io::Error) -> Error {
 
 pub(super) fn run(
     launch: &Launch,
-    keep_run: &mut bool,
     execute: impl for<'a> FnOnce(strands_box::RunOptions<'a>) -> ExitCode,
 ) -> Result<ExitCode, Error> {
     let mut terminal = Terminal::new().map_err(terminal_error)?;
@@ -160,7 +159,6 @@ pub(super) fn run(
                         result.map(|()| diagnostics)
                     })?,
             );
-            *keep_run = true;
             restore = Some(redirect);
             launch.report();
             Ok(())
@@ -175,7 +173,9 @@ pub(super) fn run(
                 .join()
                 .map_err(|_| terminal_error(io::Error::other("terminal relay panicked")))?
                 .map_err(terminal_error)?;
-            let report = diagnostics.report(launch).replace('\n', "\r\n");
+            let report = diagnostics
+                .report(launch, !launch.unused(code))
+                .replace('\n', "\r\n");
             let deadline = Instant::now() + OUTPUT_DRAIN_TIMEOUT;
             if write_until(&mut reporting, report.as_bytes(), deadline).is_err() {
                 return Ok(ExitCode::FAILURE);
@@ -501,7 +501,7 @@ fn relay(
             for (status, error) in policy.changes.try_iter() {
                 policy_status = status;
                 if let Some(error) = error {
-                    diagnostics.message(&format!("box: error: policy update failed: {error}\n"));
+                    diagnostics.message(&format!("box: policy update failed: {error}\n"));
                 }
             }
         }
@@ -675,7 +675,7 @@ fn relay(
                 drain_deadline.get_or_insert_with(|| Instant::now() + OUTPUT_DRAIN_TIMEOUT);
             if Instant::now() >= *deadline {
                 diagnostics.message(
-                    "box: error: terminal output stayed blocked; final screen was not fully written\n",
+                    "box: terminal output stayed blocked; final screen was not fully written\n",
                 );
                 return Ok(());
             }
@@ -755,6 +755,7 @@ fn relay(
         }
         if phase == DisplayPhase::Ready && output.is_empty() && fds[2].revents == 0 {
             phase = DisplayPhase::Agent;
+            diagnostics.started();
         }
         if !master_closed
             && (diagnostics_closed

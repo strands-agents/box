@@ -2469,6 +2469,17 @@ impl Launch {
         &self.journal
     }
 
+    /// A fresh run that failed before Box Core wrote any state, which `box` removes.
+    fn unused(&self, code: ExitCode) -> bool {
+        !self.reused
+            && code != ExitCode::SUCCESS
+            && self
+                .config
+                .with_file_name("box")
+                .read_dir()
+                .is_ok_and(|mut entries| entries.next().is_none())
+    }
+
     fn reuse_instruction(&self) -> String {
         let argument = &self.policy.argument;
         let id = self.name();
@@ -2598,9 +2609,8 @@ impl Launch {
     }
 
     fn run_inner(&self, args: &[OsString]) -> Result<ExitCode, Error> {
-        let mut keep_run = self.reused;
         let result = if terminal::attached() {
-            terminal::run(self, &mut keep_run, |options| {
+            terminal::run(self, |options| {
                 strands_box::run(self.config.clone(), args.to_vec(), options)
             })
         } else {
@@ -2611,8 +2621,7 @@ impl Launch {
                 self.run_options(),
             ))
         };
-        if !keep_run
-            && !result.as_ref().is_ok_and(|code| *code == ExitCode::SUCCESS)
+        if self.unused(*result.as_ref().unwrap_or(&ExitCode::FAILURE))
             && let Some(directory) = self.config.parent()
             && std::fs::remove_dir(directory.join("box")).is_ok()
             && let Err(error) = remove_if_present(directory)

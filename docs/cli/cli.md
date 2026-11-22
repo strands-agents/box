@@ -58,8 +58,10 @@ box run [<profile>] [--box-id <box ID>] [--banner | --no-banner] [-- <agent argu
 | `--banner` | Show the banner, even when the profile or `~/.strands/box/config.toml` turns it off. |
 | `-- <agent arguments>` | Pass the rest of the line to the agent. `box run claude -- --continue` continues Claude Code's last conversation. |
 
-Once the terminal session starts, with or without the banner, `box` shows recent Box errors on exit,
-then the [log path](files.md#profile-storage-and-runs) and a command to reuse the box.
+Once the terminal session starts, with or without the banner, `box` shows recent Box errors on exit.
+Then it shows the [log path](files.md#profile-storage-and-runs), with the number of later messages
+it didn't show, and a command to reuse the box. A new run that fails before its box starts shows
+only the errors.
 
 If input or output is redirected, including stderr, or `TERM=dumb`, `box` prints the box ID and
 these commands at startup:

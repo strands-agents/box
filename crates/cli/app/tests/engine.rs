@@ -3887,7 +3887,7 @@ fn a_new_run_refused_for_path_length_leaves_no_run_folder() {
 
 #[test]
 #[cfg(target_os = "macos")]
-fn a_startup_failure_at_a_terminal_keeps_its_log_and_reuse_id() {
+fn a_startup_failure_at_a_terminal_shows_the_error_and_leaves_no_run_folder() {
     use std::io::Read as _;
 
     let scene = Scene::new();
@@ -3911,24 +3911,18 @@ fn a_startup_failure_at_a_terminal_keeps_its_log_and_reuse_id() {
     let text = received.recv_timeout(Duration::from_secs(5)).unwrap();
     let text = String::from_utf8_lossy(&text).replace('\r', "");
     assert_eq!(result.status.code(), Some(1));
-    let id = text
-        .lines()
-        .find_map(|line| line.strip_prefix("box: to reuse this box run: box run probe --box-id "))
-        .expect("the terminal prints the reuse command");
-    let run = long.join("r").join(id);
-    assert!(run.join("box").is_dir(), "the run must remain reusable");
-    let report = run.join("box.log");
-    assert!(text.contains(&format!("box: full log: {}", report.display())));
     assert!(
-        text.contains("\nbox: recent log output\n  strands-box: error: "),
+        text.contains("box: recent log output\n  strands-box: error: ")
+            && text.contains("its broker socket path exceeds the platform limit"),
         "{text}"
     );
-    assert!(!text.contains("box: running profile"), "{text}");
-    assert!(
-        std::fs::read_to_string(report)
-            .unwrap()
-            .contains("its broker socket path exceeds the platform limit")
-    );
+    assert!(!text.contains("to reuse this box run"), "{text}");
+    assert!(!text.contains("box: full log"), "{text}");
+    let leftovers: Vec<PathBuf> = std::fs::read_dir(long.join("r"))
+        .expect("the runs folder")
+        .map(|entry| entry.expect("a run").path())
+        .collect();
+    assert!(leftovers.is_empty(), "leftover run folders: {leftovers:?}");
 }
 
 #[test]

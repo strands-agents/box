@@ -228,8 +228,8 @@ box: to reuse this box run: box run claude --box-id b-5b8e3d70c92f14ab
 A reused run prints `box: running profile claude with box ID b-5b8e3d70c92f14ab again` instead.
 
 If Core refuses a fresh run while its `box` directory is still empty, the CLI removes that run
-directory unless the terminal relay has started. It keeps reused runs and any run where Core has
-written state, including a workload that exits with a nonzero status.
+directory. It keeps reused runs and any run where Core has written state, including a workload
+that exits with a nonzero status.
 
 Once `box` calls `strands_box::run()`, Box Core runs in the `box` process. It owns the signals. The
 CLI reference describes [terminal behavior](../../cli/cli.md#the-activity-banner) and

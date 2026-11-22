@@ -157,8 +157,8 @@ allowed and stopped (`records.jsonl`), and the box's own state. The box ID lets 
 `box.log`. Only your account can read it, and it has no size limit. The agent's output stays on
 the terminal.
 
-A new run that fails before the box starts leaves no folder unless its terminal session has
-started. Every other run folder stays until you clean it up, and storage stays until you delete it.
+A new run that fails before the box starts leaves no folder. Every other run folder stays until you
+clean it up, and storage stays until you delete it.
 
 Two more items in `~/.strands/box` need no edits. `installation.toml` holds the choice made with
 `box telemetry` and the random ID that [usage telemetry](../../CLI_TELEMETRY.md) sends. `packages/`
