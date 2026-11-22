@@ -674,17 +674,11 @@ fn show(name: &str, full: bool, format: OutputFormat, output: &mut dyn Write) ->
                 profile_heading(output, &format!("Profile {name}"), color);
                 section(output, "Saved settings", color);
                 let _ = writeln!(output, "\n{}\n", profile.source().trim_end());
-                let home = matches!(error, Error::ProjectHoldsHome { .. });
-                let note = if home {
-                    "Run preview unavailable here, because this is your home folder. \
-                     Run this command from a project folder to see what a run gets."
-                } else {
-                    "Run preview unavailable for this directory."
-                };
-                let _ = writeln!(output, "{}\n", styled(color, "33", note));
-                if home {
-                    return Ok(());
-                }
+                let _ = writeln!(
+                    output,
+                    "{}\n",
+                    styled(color, "33", "Run preview unavailable for this directory.")
+                );
             }
             return Err(error);
         }

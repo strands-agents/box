@@ -358,7 +358,7 @@ impl CreatedProfile {
         }
         let _ = writeln!(
             out,
-            "\n  Details: {}",
+            "\n  Details, from a project folder: {}",
             paint.accent(&format!("box profile show {}", self.name))
         );
         out

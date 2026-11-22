@@ -54,8 +54,7 @@ when the project has none. Keep `.box` a folder: `box run` stops when
 it's a file or a link.
 
 The tools the agent runs still write their own files in the project, such as caches and build
-output: `.cache/<tool>` for most tools, `.npm` for node and npm, and `.cargo` and `target` for cargo.
-Add those to the project's `.gitignore`
+output, so add those to the project's `.gitignore`
 ([Tools write into the project](limitations.md#tools-write-into-the-project)).
 
 ## Custom packs, starters, and policies

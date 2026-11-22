@@ -177,9 +177,8 @@ box profile edit <name>
 ## box profile show
 
 Check what a run will get, before you run it: the packs, each option and where its value came
-from, and notes about anything the run leaves out. Run it in your project, because some values
-depend on the folder you're in. It starts no box and changes nothing in storage. In your home
-folder, it prints the saved profile and a note that the run preview needs a project folder.
+from, and notes about anything the run leaves out. Run it in your project folder, not your home folder, because some values
+depend on the folder you're in. It starts no box and changes nothing in storage.
 
 ```sh
 cd ~/src/my-app
