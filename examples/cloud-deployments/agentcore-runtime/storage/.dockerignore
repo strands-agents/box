@@ -1,0 +1,7 @@
+*
+!Dockerfile
+!server.py
+!workload
+!binary-manifest.json
+!bin/
+!bin/*

@@ -10,6 +10,8 @@ A check for another order cannot satisfy it. The eligibility endpoint returns HT
 
 Follow the [full build guide](../../../docs/user/tutorials/agentcore-runtime.md) to prepare dependencies, deploy, invoke, inspect the result, and clean up.
 
+For storage that arrives after Box starts, use the separate [experimental storage example](storage/). Its root-user configuration and storage checks differ from the shipment examples on this page.
+
 ## Choose a workload
 
 | Workload | Source | Behavior |

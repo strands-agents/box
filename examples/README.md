@@ -31,4 +31,6 @@ For Box installation and configuration, follow [getting started](../docs/user/ge
 [Linux cloud deployments](./cloud-deployments/): run workloads on Amazon EKS, AgentCore Runtime, or Google Compute Engine.
 The samples include source, deployment commands, expected refusals, and tested-platform limits.
 
+[Experimental Runtime storage](./cloud-deployments/agentcore-runtime/storage/): start Box before storage arrives and verify mounted reads with filesystem restrictions.
+
 For Linux environment requirements and deployment checks, read the [cloud deployment profiles](../docs/user/cloud-deployments.md).

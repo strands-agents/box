@@ -271,7 +271,8 @@ your project. Each profile gets one storage folder, which every project it runs 
 
 External mount paths belong to each recipient's `filesystem.mounts` list, described in
 [Incoming Linux storage](profiles-reference.md#incoming-linux-storage). They are separate from
-the managed directories in `[storage]`.
+the managed directories in `[storage]`. For a deployment using external mounts, see
+[Use storage in AgentCore Runtime](experimental-runtime-storage.md).
 
 ### Copy files into storage
 

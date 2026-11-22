@@ -94,7 +94,7 @@ agent pack's.
 | `command` | The agent's program and its arguments, as in [An agent pack's `[run]`](packs-reference.md#an-agent-packs-run). |
 | `dependency` | A list of other tables. It changes nothing about the run. |
 | `env` | The agent's variables, by name. A value is a string, a `{ value = ..., when = ... }` table, or a `{ from = "env:<NAME>" }` table ([A variable from the shell](#a-variable-from-the-shell)). |
-| `filesystem` | The paths the agent reaches, in the lists below. Each entry is a [path](#paths) or an [entry table](#entry-tables). |
+| `filesystem` | The agent's filesystem grants, in the lists below, and its [incoming mount declarations](#incoming-linux-storage). Each permission entry is a [path](#paths) or an [entry table](#entry-tables). |
 | `file-watching` | See [`file-watching`](#file-watching). |
 | `ingress` | Only in `[agent]`, so not in an agent pack. A port where the box takes callers and relays them to a server that the agent runs in the box, written as one `[[agent.ingress]]` table for each port, up to five. `listen` is the address that `box` binds, such as `"127.0.0.1:8080"`, and `workload_port` is the port of the agent's server, such as `8081`. A profile's tables add to the packs'. A profile table whose `when` holds replaces the packs' tables for its `workload_port`, such as to listen on `127.0.0.1` instead of `0.0.0.0`. The values hold no placeholder. Ingress is experimental in Box Core, so `box` turns it on for the run. Box's [`[[agent.ingress]]` reference](../user/config.md#agentingress) has the rules. |
 | `native-filesystem-policy` | Only in a profile. See [Experimental native filesystem policy](#experimental-native-filesystem-policy). |
@@ -118,7 +118,7 @@ what else the agent needs.
 
 ### Entry tables
 
-Each entry of a filesystem list is a path string. To give an entry a condition, write it as a
+Each entry of a filesystem permission list is a path string. To give an entry a condition, write it as a
 table:
 
 ```toml
@@ -552,9 +552,10 @@ pack.
 
 ## Incoming Linux storage
 
-Set `[experimental-features] linux-storage-mounts = true` in `profile.toml` when a trusted
-storage manager attaches filesystems after Box starts. List each recipient's source paths in
-its `filesystem.mounts` array:
+Set `[experimental-features] linux-storage-mounts = true` in `profile.toml` to use experimental
+Linux storage forwarding. A trusted storage manager attaches the filesystems before or after
+Box starts. For deployment steps, see [Use storage in AgentCore Runtime](experimental-runtime-storage.md).
+List each recipient's source paths in its `filesystem.mounts` array:
 
 ```toml
 [experimental-features]
@@ -588,8 +589,9 @@ An empty profile list does not remove paths declared for that recipient by a pac
 | `[tool.<name>.filesystem] mounts` | Lists that tool's incoming mount paths. |
 | `[mcp.<name>.filesystem] mounts` | Lists that local MCP server's incoming mount paths. Remote servers do not use local mounts. |
 
-Each path must resolve to an absolute directory path. Entry conditions and profile placeholders
-apply before validation. A mount declaration grants no read, write, or execute permission.
+Each path must resolve to an absolute directory path. The declared directories must exist
+when Box starts; they can be empty while storage is pending. Entry conditions and profile
+placeholders apply before validation. A mount declaration grants no read, write, or execute permission.
 Set each recipient's permission lists separately. Profile-wide `deny` and `deny_write` retain
 their existing scope, and the source filesystem's restrictions continue to apply.
 
@@ -602,11 +604,13 @@ including paths reached through symbolic links. Use literal permission paths ins
 mounts; wildcard expansion into a pending mount is rejected. Existing `optional` rules still
 apply: an optional path absent during profile resolution does not become a required future path.
 
-Box Core starts the process with incoming storage inaccessible. After the storage manager attaches it,
-Box Core prepares the process's protected view and then exposes it. This happens asynchronously:
-application startup does not wait for storage. An application can retry a file operation while
-the storage remains unavailable. If a required permission or denial cannot be applied, Box Core
-stops the affected Box instead of exposing that filesystem without the restriction.
+When storage is pending, Box Core starts the process with that storage inaccessible. After
+the storage manager attaches it, Box Core prepares the process's protected view and then
+exposes it. An application already running can retry a file operation while storage remains
+unavailable. If a source is already mounted when Box checks storage for a new process, that
+process waits for the protected view before its code runs. Other pending sources do not delay
+that launch. If a required permission or denial cannot be applied, Box Core stops the affected
+Box instead of exposing that filesystem without the restriction.
 
 Hosted Shell and Python (Monty) use the agent's protected incoming storage view. Their `fs:*`
 policy rules apply in addition to that view's restrictions. An allowed hosted-tool request

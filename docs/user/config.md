@@ -339,13 +339,17 @@ default.
 `secret-sources = true` turns on [`[secret-source.<scheme>]`](#secret-sourcescheme) and the
 `secret.env` key of a route or a remote MCP server, which are experimental and off by default.
 
+`linux-storage-mounts = true` turns on incoming Linux storage for each process's
+[`filesystem.mounts`](#filesystemmounts) declarations. It is experimental, off by default,
+and rejected on other operating systems.
+
 <a id="storage"></a>
 
 ## `filesystem.mounts`
 
 In Box Core's `box.toml`, each process's `filesystem.mounts` array lists absolute storage
-attachment paths that may receive filesystems after Box starts. Enable this experimental
-Linux feature explicitly:
+attachment paths that may receive filesystems before or after Box starts. Enable this
+experimental Linux feature explicitly:
 
 ```toml
 [experimental-features]
@@ -360,6 +364,10 @@ mounts = ["/mnt/data"]
 read = ["/mnt/data"]
 write = ["/mnt/data/output"]
 ```
+
+For deployment steps, see [Use storage in AgentCore Runtime](../cli/experimental-runtime-storage.md).
+The declared attachment directories must exist when Box starts, even while their storage is
+pending. Box does not create these directories or mount the source filesystem.
 
 Add these filesystem tables beneath processes with their own configured `command`.
 The agent, each tool, and each local MCP server declare their mount paths independently.
@@ -688,7 +696,9 @@ one line until a caller is served again.
 
 ## `[agent.filesystem]` and `[tool.<name>.filesystem]`
 
-Each list, and what one entry in it grants. `[agent.filesystem]` takes all nine;
+The table below describes the nine filesystem permission lists.
+[`filesystem.mounts`](#filesystemmounts) separately declares incoming storage and grants no access.
+`[agent.filesystem]` takes all nine permission lists;
 `[tool.<name>.filesystem]` takes seven. A `metadata` or `exec` list there is refused by name at
 load. [A tool's sandbox](../design/containment.md#a-tools-leaf-box) states what a tool reaches in
 their place.
@@ -721,7 +731,7 @@ exec = ["/work/project/.venv"]
 deny_write = ["/work/project/.venv"]
 ```
 
-The agent cannot create, change, rename, link, or remove anything below the directory. Like the other lists, `deny_write` governs the agent's own processes. A Shell or Python request through Box is decided by policy, so pair the entry with `forbid` rules on `fs:write`, `fs:delete`, and `fs:move` for the directory. For [incoming Linux storage](#filesystemmounts), hosted operations additionally use the agent's protected view; both that view and the hosted policy must allow the operation. A file below it that also has a hard link in a writable directory can still be changed through that link. Install with copies, such as `UV_LINK_MODE=copy`, or keep the installer's cache outside every write grant. The box does not
+The agent cannot create, change, rename, link, or remove anything below the directory. Like the other lists, `deny_write` governs the agent's own processes. A Shell or Python request through Box is decided by policy, so pair the entry with `forbid` rules on `fs:write`, `fs:delete`, and `fs:move` for the directory. For [incoming Linux storage](#filesystemmounts), hosted operations also use the agent's protected view; both that view and the hosted policy must allow the operation. A file below it that also has a hard link in a writable directory can still be changed through that link. Install with copies, such as `UV_LINK_MODE=copy`, or keep the installer's cache outside every write grant. The box does not
 warn that a program below a `deny_write` directory is writable. The startup disclosure lists each
 entry as `deny_write  <path>  (read-only)`. A `[tool.<name>] command` below a `deny_write`
 directory is still refused, as every tool command inside a write grant is.
