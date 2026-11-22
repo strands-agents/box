@@ -28,7 +28,7 @@ The CLI team reviews changes to the CLI's paths, and Box Core maintainers review
 ### When the CLI needs something Box Core lacks
 
 - A Core change the CLI needs, such as a new `box.toml` key or a new library function, lands first
-  in its own pull request under Box Core's freeze, and Box Core maintainers review it. The CLI pull
+  in its own pull request under Box Core's rules, and Box Core maintainers review it. The CLI pull
   request that uses it follows. A CLI pull request does not change Box Core's contract.
 - The CLI's syntax is its own: it is written for the people who use `box`, and it can diverge from
   `box.toml`. Do not reuse a `box.toml` name or shape in a profile or pack only to match Box Core,

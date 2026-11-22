@@ -9,12 +9,14 @@ Instructions for changing Box. Edit this file only when the user explicitly asks
 
 ## Two products
 
-This repository holds two products with different readers, contracts, and reviewers. Each path
-belongs to one of them.
+This repository holds two products with different readers, contracts, and reviewers. Most paths
+belong to one of them. Workspace, release, and publication files, such as `Cargo.toml`,
+`.github/`, `scripts/`, `install.sh`, `download.sh`, `README.md`, `docs/dev/`, and
+`docs/site-manifest.json`, are shared.
 
 | Product | Its contract | Frozen | Code | Docs | Reviewed by |
 | --- | --- | --- | --- | --- | --- |
-| Box Core (`strands-box`) | `box.toml`, the `strands-box` verbs, and the library API, which programs and the CLI build on | Yes, see [below](#strands-box-is-interface-frozen) | `crates/` outside `crates/cli/`, `examples/`, and the `test-*` suites outside `test-corpus/` | `docs/user/`, `docs/design/` | Box Core maintainers |
+| Box Core (`strands-box`) | `box.toml`, the `strands-box` verbs, and the library API, which programs and the CLI build on | Yes, apart from the library API, where an addition needs a maintainer's approval; see [below](#strands-box-is-interface-frozen) | `crates/` outside `crates/cli/`, `examples/`, and the `test-*` suites outside `test-corpus/` | `docs/user/`, `docs/design/` | Box Core maintainers |
 | The `box` CLI | Profiles, packs, starters, and the `box` commands, which people use | No, see [`crates/cli/AGENTS.md`](crates/cli/AGENTS.md) | `crates/cli/`, `resources/`, `test-corpus/` | `docs/cli/`, `docs/design/cli/` | The CLI team |
 
 ### A change that crosses the boundary
@@ -22,8 +24,8 @@ belongs to one of them.
 The CLI is a client of Box Core, so the boundary runs one way.
 
 - When a CLI feature needs something Box Core lacks, such as a new `box.toml` key, the Core change
-  lands first in its own pull request, under the freeze, and Box Core maintainers review it. The
-  CLI pull request follows. Do not put a Core contract change in a CLI pull request.
+  lands first in its own pull request, under Box Core's rules, and Box Core maintainers review it.
+  The CLI pull request follows. Do not put a Core contract change in a CLI pull request.
 - The CLI's syntax is its own and can diverge from `box.toml`. Do not reuse a `box.toml` name or
   shape in a profile or pack only to match Box Core, and do not add a Box Core key only to make CLI
   syntax simpler.
