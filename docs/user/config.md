@@ -4,6 +4,10 @@
 `strands-box run --config FILE`; the tutorial's download names the binary `box`. Box reads the
 selected file and its policy on every start.
 
+`box.toml` is Box Core's stable interface. A program that runs Box Core, such as the `box` CLI,
+writes it, and each key keeps its meaning across releases. If you use the `box` CLI, you don't
+write this file: the CLI builds it from your [profile](../cli/profiles.md).
+
 Audience: an operator who runs an agent or another command under a box, and who declares the
 paths, hosts, credentials, MCP servers, and telemetry targets it can use. The example on this page
 is the box that [getting started](./getting-started.md) builds: the Strands CLI on a
