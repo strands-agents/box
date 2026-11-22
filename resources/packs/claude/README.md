@@ -195,7 +195,7 @@ and output reach Claude Code as on your machine.
 
 A script gets at most 1 MiB of the event. A larger event, such as a `PostToolUse` event for a
 big file write, can make a script hang or see an empty event, and the run may print
-`strands-box: stdin is more than 1048576 bytes`. For hooks that read large events, raise both
+`strands-box-sock-alias: error[H0103]: stdin is more than 1048576 bytes`. For hooks that read large events, raise both
 limits in the profile:
 
 ```toml

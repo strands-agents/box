@@ -313,6 +313,8 @@ interpreters are part of the code the operator must trust.
    before the runtime-minimum section. Each line maps a spelling to a file the process's existing
    grants authorize. These mappings add no executable or library access. The
    [configuration reference](../user/config.md#agentfilesystem-and-toolnamefilesystem) shows the output.
+   Each disclosure line starts with `strands-box: note[<code>]:`, and
+   [Message codes](../user/message-codes.md) explains each code.
 7. It starts the trampoline, which becomes the agent, and waits for the workload to end.
 
 Before a selected Linux workload starts, native filesystem setup probes whether the kernel can transfer path-only file handles.

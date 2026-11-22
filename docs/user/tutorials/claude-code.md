@@ -219,9 +219,9 @@ The box prints what the agent's own process can touch, then the agent works. The
 lines are cut here:
 
 ```text
-strands-box: box box-e0aeff88e5629649 created · config claude-code/box.toml
-strands-box: starting workload
-strands-box: [agent] runs /Users/you/.local/share/claude/versions/2.1.292 with no policy decision over these paths:
+strands-box: note[B0301]: box box-e0aeff88e5629649 created · config claude-code/box.toml
+strands-box: note[B0302]: starting workload
+strands-box: note[B0201]: [agent] runs /Users/you/.local/share/claude/versions/2.1.292 with no policy decision over these paths:
   read        /Users/you/.local/share/claude/versions
   read        /Users/you/box-tutorial/claude-code/config
   read        /Users/you/box-tutorial/claude-code/tmp
@@ -230,9 +230,9 @@ strands-box: [agent] runs /Users/you/.local/share/claude/versions/2.1.292 with n
   list        /Users/you/box-tutorial/my-project
   exec        /Users/you/.local/share/claude/versions
   exec        /Users/you/.local/share/claude/versions/2.1.292  (command, implicit)
-strands-box: [agent] runtime minimum, added by Core:
+strands-box: note[B0201]: [agent] runtime minimum, added by Core:
   ...
-strands-box: [agent] HOME=/Users/you PATH=/Users/you/box-tutorial/claude-code/state/bin:/usr/bin:/bin
+strands-box: note[B0201]: [agent] HOME=/Users/you PATH=/Users/you/box-tutorial/claude-code/state/bin:/usr/bin:/bin
 README.md contains nothing but the heading `# My project` — there's no actual content to summarize beyond the project's title.
 
 One note: the Read tool was denied with `EPERM` on that path, so I read it via `cat` instead.
