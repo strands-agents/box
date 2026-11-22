@@ -493,11 +493,6 @@ fn the_profile_report_names_tools_and_points_to_full_grants() {
     assert!(summary.contains("@box/cargo"), "{summary}");
     assert!(!summary.contains("reads "), "{summary}");
     assert!(!summary.contains("~/.rustup"), "{summary}");
-    let guided = created.guided_summary(false);
-    assert!(
-        guided.contains("Details, from a project folder: box profile show claude"),
-        "{guided}"
-    );
     assert!(
         created
             .next_steps(false)

@@ -78,9 +78,3 @@ file takes effect in this session: the banner says UPDATE READY, and the user pr
 Without the banner, and for a change to the profile's startup settings (its packs, tools, folders,
 or egress routes), the user starts a new run.
 ";
-
-/// What the claude and codex packs tell their agent about reaching a host in the current session.
-pub(crate) const HOST_PERMIT_NOTE: &str =
-    "A route takes effect in a new run. To reach the host in this session, the user adds these two
-  permits to a policy file that `policies` lists, and presses Ctrl+Alt+R:
-";
