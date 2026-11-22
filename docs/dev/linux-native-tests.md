@@ -16,6 +16,8 @@ RUSTFLAGS="--cfg box_native_kernel_tests" cargo test -p strands-box --all-featur
 The runner needs CAP_BPF and CAP_PERFMON. Use a dedicated test process. Guard preparation removes these capabilities from that process. Set `NATIVE_TEST_ROOT` to a short writable directory.
 
 The tests use actual notification listeners and kernel hooks. A missing prerequisite is a test failure, not evidence of support. The root and callback regressions use the separate `linux_native_root` executable and require a root runner.
+That root runner needs effective `CAP_SYS_ADMIN`, `CAP_BPF`, `CAP_PERFMON`, and `CAP_SETFCAP` so isolated child processes can test each startup combination.
+The capability cases preserve ordinary root setup authority while selecting effective and permitted-only native-loader capabilities. They check guard attachment during the callback, workload output, capability cleanup, and guard detachment.
 
 Rebuild with fault controls before running failure injection and replacement races:
 

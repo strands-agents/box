@@ -88,7 +88,7 @@ impl FileMonitor {
         guard: Option<Arc<EntryGuard>>,
     ) -> Result<Self, BoxError> {
         let guard = guard.ok_or_else(|| {
-            failure("native entry guard was not loaded; start Box with CAP_BPF and CAP_PERFMON")
+            failure("native entry guard was not loaded; start Box with CAP_BPF and CAP_PERFMON, or CAP_SYS_ADMIN")
         })?;
         let state = Arc::new(State {
             guard,
