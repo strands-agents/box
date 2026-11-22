@@ -275,6 +275,8 @@ mod tests {
         "strands-box: starting workload\n",
         "strands-box: [tool.git] runs /usr/bin/git with no policy decision over these paths:\n",
         "  read        /work\n",
+        "  write       /work/target\n",
+        "  read_file   /etc/gitconfig\n",
         "  write_file  /work/.git/index\n",
         "  deny_write  /work/.git/hooks  (read-only)\n",
         "strands-box: [tool.git] runtime minimum, added by Core:\n",
@@ -290,10 +292,15 @@ mod tests {
         "  alias       /usr/bin/python3 -> /usr/bin/python3.12  (interpreter spelling)\n",
         "strands-box: [agent] runtime minimum, added by Core:\n",
         "  list        /tmp\n",
+        "  connect     /var/run/mDNSResponder\n",
         "  enter       /work  (workspace, entry only)\n",
         "strands-box: [agent] HOME=/home/u PATH=/r/b-1/box/bin:/usr/bin\n",
         "strands-box: warning: aws:// signs with this machine's AWS identity\n",
         "  read        /not/under/a/heading\n",
+        "strands-box: [agent] HOME and PATH follow\n",
+        "  read        /after/a/heading/with/no/colon\n",
+        "box: skipped tool cargo (@box/cargo): cargo is not on PATH:\n",
+        "  read        /after/a/line/from/another/source\n",
     );
 
     /// **Grants count once, at startup, from the reach words under each table's heading**: a deny,
@@ -308,7 +315,7 @@ mod tests {
         log.started();
         log.push(b"strands-box: [mcp.docs] starts on demand; approved direct filesystem grants:\n");
         log.push(b"  read        /docs\n");
-        assert_eq!(log.grants, 8);
+        assert_eq!(log.grants, 11);
         assert_eq!(log.unshown, 2);
     }
 

@@ -3800,8 +3800,8 @@ fn a_terminal_run_ends_with_the_exit_block_and_logs_the_disclosure() {
         .unwrap_or_else(|| panic!("no exit block\n{text}"))
         .1;
     let grants: usize = block
-        .split_once(" grants disclosed at startup \u{b7} ")
-        .and_then(|(count, _)| count.parse().ok())
+        .split_once(" disclosed at startup \u{b7} ")
+        .and_then(|(count, _)| count.split(' ').next()?.parse().ok())
         .unwrap_or_else(|| panic!("no grant count\n{text}"));
     assert!(grants > 0, "{text}");
     for line in [
