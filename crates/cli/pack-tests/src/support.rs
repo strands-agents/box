@@ -7,7 +7,7 @@ pub(crate) use strands_box_cli::test_support::{
     profiles_root, resolution, resources, run_folder, script_with, strings, text, tool, trial,
 };
 pub(crate) use strands_box_cli::{Error, FakeHost, Trial, Trialed};
-pub(crate) use strands_box_cli_profile::fixtures::{binary, executable, link, script, write};
+pub(crate) use strands_box_cli_profile::fixtures::{binary, executable, script, write};
 pub(crate) use strands_box_cli_profile::host::resolved;
 pub(crate) use strands_box_cli_profile::lang::storage_root;
 

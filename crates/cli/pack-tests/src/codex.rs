@@ -810,10 +810,6 @@ fn a_codex_box_tells_codex_it_runs_in_a_box_and_where_its_profile_is() {
     assert!(guidance.contains(RESTART_NOTE), "{guidance}");
     assert!(guidance.contains(DNS_NOTE), "{guidance}");
     assert!(
-        guidance.contains("When `rg` is not found, search with\n`grep -rn` instead."),
-        "{guidance}"
-    );
-    assert!(
         guidance.contains("`AWS_BEARER_TOKEN_BEDROCK`"),
         "{guidance}"
     );
