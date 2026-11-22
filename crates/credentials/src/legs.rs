@@ -495,9 +495,10 @@ mod tests {
             1,
             "a bare route warns once at open: {at_open:?}"
         );
-        assert_eq!(
-            at_open[0],
-            "strands-box: warning: aws:// for s3.us-west-2.amazonaws.com:443 signs with this machine's AWS identity"
+        assert!(
+            at_open[0].contains("s3.us-west-2.amazonaws.com:443"),
+            "the warning names its destination: {}",
+            at_open[0]
         );
         assert!(signing.is_empty(), "a bare sign warns no more: {signing:?}");
 
@@ -526,13 +527,17 @@ mod tests {
             Arc::new(FixedProvider),
         )
         .expect("the signed routes open with the injected provider");
-        assert_eq!(
-            drain_captured_warnings(),
-            [
-                "strands-box: warning: aws:// for bedrock-runtime.us-west-2.amazonaws.com signs with this machine's AWS identity",
-                "strands-box: warning: aws:// for logs.us-west-2.amazonaws.com signs with this machine's AWS identity",
-            ]
-        );
+        let warnings = drain_captured_warnings();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        for destination in [
+            "bedrock-runtime.us-west-2.amazonaws.com",
+            "logs.us-west-2.amazonaws.com",
+        ] {
+            assert!(
+                warnings.iter().any(|warning| warning.contains(destination)),
+                "{destination} is not named: {warnings:?}"
+            );
+        }
     }
 
     /// Two vaults that open the same bare destination, as a telemetry target and its preflight

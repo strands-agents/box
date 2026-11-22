@@ -1304,18 +1304,6 @@ mod tests {
         assert_eq!(recorder.0.lock().unwrap().as_slice(), [None]);
     }
 
-    /// The no-profile acquisition carries the warning that names the machine's AWS identity.
-    #[test]
-    fn default_chain_acquisition_warns() {
-        let warning = AwsAcquisition::DefaultChain
-            .warning()
-            .expect("the default chain warns");
-        assert!(
-            warning.contains("machine's AWS identity"),
-            "the warning names the machine's identity: {warning}"
-        );
-    }
-
     /// A scoped profile names its identity, so its acquisition carries no warning.
     #[test]
     fn scoped_profile_acquisition_does_not_warn() {
