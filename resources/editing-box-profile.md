@@ -418,9 +418,13 @@ requests. The profile setting does not compile support into an existing binary.
 On Linux ARM64, the host must support seccomp user notifications and descriptor injection, which
 let Box pause a system call and supply an approved file descriptor. It also needs BPF Linux
 Security Module hooks and BPF type information so Box can load kernel checks for file identity.
-When any workload selects native checks, start the trusted Box process with the
-[loader capabilities required by Box Core](https://github.com/strands-agents/box/blob/main/docs/user/native-filesystem-policy.md#linux-arm64-requirements).
-A normal install does not provide these capabilities. Missing capabilities or kernel support stop launch.
+When any workload selects native checks, start the trusted Box process with effective
+`CAP_BPF` and `CAP_PERFMON` together, or with an already-effective `CAP_SYS_ADMIN`.
+These Linux capabilities authorize loading the checks and accessing their tracing hooks.
+A normal install does not provide these capabilities; Box grants no new capability.
+After loading the checks, Box removes `CAP_BPF` and `CAP_PERFMON` before runtime startup
+and preserves inherited `CAP_SYS_ADMIN` in the trusted process. The sandbox clears every
+capability set before starting the workload. Missing capabilities or kernel support stop launch.
 Linux x86-64 refuses selection.
 
 The feature adds policy checks for supported file operations that processes perform directly.
