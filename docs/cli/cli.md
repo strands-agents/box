@@ -1,8 +1,3 @@
----
-reader: Someone who knows which box command they want and needs its usage, its flags, or the output it prints.
-belongs: Each command, its flags, and the output a reader acts on, plus the BOX_* variables that box reads and its exit status. What a profile, pack, starter, or policy is goes to its topic page, the files under ~/.strands/box go to files.md, and a fix after an error goes to troubleshooting.md.
----
-
 # box command reference
 
 This page lists every `box` command, its flags, and the output you use. `box <command> --help`, or
