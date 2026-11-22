@@ -357,7 +357,7 @@ impl SecretSources {
             if let Err(error) = read {
                 let refusal = match ::diagnostics::diag!(
                     into diagnostics,
-                    B0601,
+                    B0113,
                     "{}: {error}",
                     secret.entry
                 ) {

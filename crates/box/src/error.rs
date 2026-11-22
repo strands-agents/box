@@ -112,8 +112,8 @@ impl Internal {
                 RelayError::ControlPair { .. }
                 | RelayError::Receive { .. }
                 | RelayError::NoDescriptor
-                | RelayError::Accept { .. }
-                | RelayError::Ingress(_) => Code::B0110.into(),
+                | RelayError::Accept { .. } => Code::B0110.into(),
+                RelayError::Ingress(_) => Code::B0704.into(),
             },
             Self::McpDiscovery(error) => match error {
                 McpDiscoveryError::Thread { .. } | McpDiscoveryError::NoOutcome => {
@@ -1048,6 +1048,11 @@ mod tests {
         ];
         for (error, expected) in cases {
             assert_eq!(error.code(), expected, "{error}");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let relay: BoxError = RelayError::Ingress(ingress::IngressError::NotReady).into();
+            assert_eq!(relay.code(), Code::B0704.into(), "{relay}");
         }
     }
 

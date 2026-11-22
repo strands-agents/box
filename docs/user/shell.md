@@ -372,10 +372,10 @@ its effect at the server stays.
 | `1` | Submitted command text exceeds 256 KiB, including text with line breaks. Split the text across several calls, for example by appending to a file. | `strands-shell: input too large` |
 | `1` | The Shell call exceeded its execution allowance. | `strands-shell: execution timeout exceeded` |
 | `125` | Box failed to serve the command. | The failure |
-| `125` | The alias can't tell which directory it was run from. Set `PWD` to it. | `strands-box-sock-alias: error[H0202]: read the working directory: <error>; set PWD to it` |
-| `125` | The name of the directory the alias was run from isn't valid UTF-8. Run the command from another directory. | `strands-box-sock-alias: error[H0202]: the working directory is not valid UTF-8` |
+| `125` | The alias can't tell which directory it was run from. Set `PWD` to it. | `strands-box-sock-alias: error[H0203]: read the working directory: <error>; set PWD to it` |
+| `125` | The name of the directory the alias was run from isn't valid UTF-8. Run the command from another directory. | `strands-box-sock-alias: error[H0203]: the working directory is not valid UTF-8` |
 | `125` | The call exceeded the broker's backup deadline, five seconds after its finite Shell allowance. | `strands-box-sock-alias: error[H0105]: the call exceeded its deadline` |
-| `125` | The deadline exceeds the platform's clock range. Reduce `limits.shell.timeout`. | `strands-box-sock-alias: error: the call deadline exceeds this platform's clock range` |
+| `125` | The deadline exceeds the platform's clock range. Reduce `limits.shell.timeout`. | `strands-box-sock-alias: error[H0106]: the call deadline exceeds this platform's clock range` |
 | `126` | Policy refused the directory the alias was run from, it isn't a directory, or it is outside the operator's home, the agent's home, and the workspace. Nothing ran. | `strands-box: error[B1202]: cannot start in <directory>: <error>` |
 | `126` | Policy refused the command. | `strands-shell: effect denied: policy denied this operation on '<program>'`, then `[policy: <id>]` or `[default-deny]`. A tool grammar action reads the same way. |
 | `126` | A tool grammar binds the program file, and Box refused the spawn before any rule decided it. | `strands-shell: effect denied: policy denied this operation on '<program>' [tool-grammar]: <reason>. No policy can permit it.` |

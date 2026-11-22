@@ -1359,7 +1359,7 @@ fn a_secret_source_that_fails_stops_the_box_before_the_workload() {
     assert!(!output.status.success(), "the box must not start: {stderr}");
     assert!(
         stderr.ends_with(&format!(
-            "strands-box: warning[B0601]: [egress.c] secret.ref: {said}{}",
+            "strands-box: error[B0113]: [egress.c] secret.ref: {said}{}",
             refusal("[egress.c] secret.ref")
         )),
         "{stderr}"
@@ -1402,7 +1402,7 @@ fn a_secret_source_that_fails_stops_the_box_before_the_workload() {
     assert!(!output.status.success(), "the box must not start: {stderr}");
     assert!(
         stderr.ends_with(&format!(
-            "strands-box: warning[B0601]: [telemetry.vendor] secret.ref: {said}{}",
+            "strands-box: error[B0113]: [telemetry.vendor] secret.ref: {said}{}",
             refusal("[telemetry.vendor] secret.ref")
         )),
         "{stderr}"

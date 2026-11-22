@@ -109,7 +109,7 @@ The box denies the request that each of these messages names, and the run goes o
 
 ## B01: Refusals at startup
 
-Each of these stops the run before the workload starts. `strands-box` exits with status `1`.
+Each of these stops the box, almost always before the workload starts. `strands-box` exits with status `1`.
 
 | Code | Severity | Meaning | What to do |
 |---|---|---|---|
@@ -125,6 +125,7 @@ Each of these stops the run before the workload starts. `strands-box` exits with
 | `B0110` | error | The egress gateway or its relay failed, so the box did not start or stopped. | Report it as a bug with the full stderr of the run. |
 | `B0111` | error | The socket the box's interpreters reach could not be served. | Report it as a bug with the full stderr of the run. |
 | `B0112` | error | The library caller's `on_ready` callback returned an error, so the box did not start its workload. | Read the callback's error in the text; it comes from the program that runs the box, not from Box. |
+| `B0113` | error | A secret source program failed to read a secret, so the box did not start. | Sign in to the vault or correct the reference, then run the box again. The line names the entry and the program's own error. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |
 
 <a id="b02"></a>
 
@@ -174,7 +175,7 @@ is what you intended.
 |---|---|---|---|
 | `B0501` | warning | A request through the egress gateway to an upstream failed. | Read the reason in the text. See [egress errors and exit codes](egress.md#errors-and-exit-codes). |
 | `B0502` | warning | A Monty fetch was refused because no egress route reaches it. | The script's Python has no network in this box, and the request was not sent. See [`fetch()`](monty.md#fetch). |
-| `B0503` | warning | A Monty fetch was refused because it names a private or local address. | The request was not sent. See the `OSError: access denied` row in [`fetch()`](monty.md#fetch). |
+| `B0503` | warning | A Monty fetch was refused before it was sent: its URL names a private or local address, or a scheme Box does not fetch. | The request was not sent. See the `OSError: access denied` row in [`fetch()`](monty.md#fetch). |
 
 <a id="b06"></a>
 
@@ -182,7 +183,6 @@ is what you intended.
 
 | Code | Severity | Meaning | What to do |
 |---|---|---|---|
-| `B0601` | warning | A secret source program failed to read a secret. | Sign in to the vault or correct the reference. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |
 | `B0602` | warning | A credential capability reported a condition that does not stop the run. | Read the condition in the text. For a bare `aws://` route, name a profile as `aws://PROFILE`. See [credential sources](egress.md#credential-sources). |
 
 <a id="b07"></a>
@@ -263,6 +263,7 @@ The alias prints these on the agent's stderr when the box refuses a call.
 | `H0103` | error | A call exceeded a size or output budget, such as the stdin limit. | Send less input or output, or raise the limit in [`[limits]`](config.md#limits). See [standard input](shell.md#standard-input). |
 | `H0104` | error | A call was refused because the program was busy or its input was not read in time. | Retry the call. |
 | `H0105` | error | A call outlived its deadline. | Shorten the command, or raise `shell.timeout`. See [`limits.shell.timeout`](shell.md#limitsshelltimeout). |
+| `H0106` | error | The box refused the call for a reason the text names, such as an undeclared MCP command or a program that failed to start. | Read the reason in the text; it names what to change, such as a missing `[mcp.<name>]` table or `limits.shell.timeout`. |
 
 <a id="h02"></a>
 
@@ -272,6 +273,7 @@ The alias prints these on the agent's stderr when the box refuses a call.
 |---|---|---|---|
 | `H0201` | error | The alias could not read its input. | The alias stopped the command and exited with status `125`. See [standard input](shell.md#standard-input). |
 | `H0202` | error | The alias could not start or reach the box. | Check that the box is still running. If it is, report it with the full stderr of the run. |
+| `H0203` | error | The alias was run with arguments, input, or a working directory it cannot use. | Change how the command is run, as the text says: for example pass one script or `-c`, or set `PWD`. See [exit statuses](shell.md#exit-statuses). |
 
 <a id="h03"></a>
 

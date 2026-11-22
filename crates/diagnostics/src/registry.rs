@@ -92,6 +92,7 @@ codes! {
     B0110 => error, "egress gateway failures", "The egress gateway or its relay failed, so the box did not start or stopped.";
     B0111 => error, "broker socket failures", "The socket the box's interpreters reach could not be served.";
     B0112 => error, "refused library callbacks", "The library caller's `on_ready` callback returned an error, so the box did not start its workload.";
+    B0113 => error, "secret source failures", "A secret source program failed to read a secret, so the box did not start.";
     // Box: startup disclosures.
     B0201 => note, "filesystem grant disclosures", "A process reaches these paths directly, with no policy decision.";
     B0202 => note, "exposed credential stores", "A process's filesystem grant reaches a credential store.";
@@ -114,9 +115,8 @@ codes! {
     // Box: egress and fetch.
     B0501 => warning, "failed upstream requests", "A request through the egress gateway to an upstream failed.";
     B0502 => warning, "fetches with no egress route", "A Monty fetch was refused because no egress route reaches it.";
-    B0503 => warning, "fetches refused by the address floor", "A Monty fetch was refused because it names a private or local address.";
+    B0503 => warning, "fetches refused by the address floor", "A Monty fetch was refused before it was sent: its URL names a private or local address, or a scheme Box does not fetch.";
     // Box: credentials at run time.
-    B0601 => warning, "secret source failures", "A secret source program failed to read a secret.";
     B0602 => warning, "credential conditions", "A credential capability reported a condition that does not stop the run.";
     // Box: ingress.
     B0701 => note, "ingress relays", "A host listener is relayed to a port of the agent.";
@@ -148,8 +148,10 @@ codes! {
     H0103 => error, "calls over budget", "A call exceeded a size or output budget, such as the stdin limit.";
     H0104 => error, "calls refused for flow control", "A call was refused because the program was busy or its input was not read in time.";
     H0105 => error, "calls past their deadline", "A call outlived its deadline.";
+    H0106 => error, "other refused calls", "The box refused the call for a reason the text names, such as an undeclared MCP command or a program that failed to start.";
     H0201 => error, "alias input failures", "The alias could not read its input.";
     H0202 => error, "alias start failures", "The alias could not start or reach the box.";
+    H0203 => error, "alias usage mistakes", "The alias was run with arguments, input, or a working directory it cannot use.";
     H0301 => error, "ordinary programs not found", "No ordinary program by that name is on the agent's `PATH`.";
     H0302 => error, "ordinary programs that could not run", "The ordinary program could not be run.";
     H0401 => error, "sandbox setup failures", "Applying a sandbox failed before its program started.";
@@ -262,7 +264,20 @@ mod tests {
             .filter_map(|line| {
                 let cells: Vec<&str> = line.split('|').map(str::trim).collect();
                 let code = cells.get(1)?.strip_prefix('`')?.strip_suffix('`')?;
-                Code::named(code)?;
+                let shaped = code.len() == 5
+                    && code.starts_with(['P', 'T', 'B', 'H'])
+                    && code[1..].bytes().all(|byte| byte.is_ascii_digit());
+                if !shaped {
+                    return None;
+                }
+                assert!(
+                    Code::named(code).is_some(),
+                    "{code} is on the page and not in the registry"
+                );
+                assert!(
+                    cells.get(4).is_some_and(|todo| !todo.is_empty()),
+                    "{code} has no \"What to do\" on the page"
+                );
                 Some((code, *cells.get(2)?, *cells.get(3)?))
             })
             .collect();

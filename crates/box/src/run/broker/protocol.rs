@@ -148,16 +148,16 @@ pub(crate) enum DeniedKind {
 }
 
 impl DeniedKind {
-    /// The message code the alias prints this refusal with; an internal refusal has none.
+    /// The message code the alias prints this refusal with.
     pub(crate) const fn code(self) -> ::diagnostics::Kind {
-        use ::diagnostics::{Code, Kind, Severity};
+        use ::diagnostics::{Code, Kind};
         match self {
             Self::VersionMismatch => Kind::Coded(Code::H0101),
             Self::TransportError => Kind::Coded(Code::H0102),
             Self::OverBudget => Kind::Coded(Code::H0103),
             Self::FlowControl => Kind::Coded(Code::H0104),
             Self::Timeout => Kind::Coded(Code::H0105),
-            Self::Internal => Kind::Uncoded(Severity::Error),
+            Self::Internal => Kind::Coded(Code::H0106),
         }
     }
 }
@@ -869,14 +869,14 @@ mod tests {
     /// Each refusal the alias prints carries the code the docs page names for it.
     #[test]
     fn every_denied_kind_names_its_message_code() {
-        use ::diagnostics::{Code, Kind, Severity};
+        use ::diagnostics::{Code, Kind};
         for (kind, expected) in [
             (DeniedKind::VersionMismatch, Kind::Coded(Code::H0101)),
             (DeniedKind::TransportError, Kind::Coded(Code::H0102)),
             (DeniedKind::OverBudget, Kind::Coded(Code::H0103)),
             (DeniedKind::FlowControl, Kind::Coded(Code::H0104)),
             (DeniedKind::Timeout, Kind::Coded(Code::H0105)),
-            (DeniedKind::Internal, Kind::Uncoded(Severity::Error)),
+            (DeniedKind::Internal, Kind::Coded(Code::H0106)),
         ] {
             assert_eq!(kind.code(), expected, "{kind:?}");
         }

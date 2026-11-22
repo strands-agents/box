@@ -3950,7 +3950,7 @@ fn a_startup_failure_at_a_terminal_shows_the_error_and_leaves_no_run_folder() {
     let text = String::from_utf8_lossy(&text).replace('\r', "");
     assert_eq!(result.status.code(), Some(1));
     assert!(
-        text.contains("box: recent log output\n  strands-box: error: ")
+        text.contains("box: recent log output\n  strands-box: error[")
             && text.contains("its broker socket path exceeds the platform limit"),
         "{text}"
     );

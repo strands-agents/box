@@ -91,9 +91,14 @@ impl Log {
         let line = self.line.strip_suffix(b"\n").unwrap_or(&self.line);
         let text = String::from_utf8_lossy(line).into_owned();
         self.line.clear();
-        if text
-            .split_once(": ")
-            .is_some_and(|(_, message)| message.starts_with("error:"))
+        let core_error = matches!(
+            diagnostics::parse(&text),
+            diagnostics::Line::Message(message) if message.severity == diagnostics::Severity::Error
+        );
+        if core_error
+            || text
+                .split_once(": ")
+                .is_some_and(|(_, message)| message.starts_with("error:"))
         {
             self.show(&text);
         } else {
@@ -272,10 +277,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
 
         let mut log = Log::new(File::open("/dev/null").unwrap(), tempfile::tempfile());
-        log.push(b"strands-box: error: refused\nbox: running profile\n");
+        log.push(b"strands-box: error[B0105]: refused\nbox: running profile\n");
         assert_eq!(
             log.report(&launch, false),
-            "box: recent log output\n  strands-box: error: refused\n",
+            "box: recent log output\n  strands-box: error[B0105]: refused\n",
         );
 
         for argument in [

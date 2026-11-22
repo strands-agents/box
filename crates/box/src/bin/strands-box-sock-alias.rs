@@ -108,6 +108,11 @@ fn main() -> ExitCode {
                 .is_some_and(|inner| inner.is::<InputRefused>())
             {
                 diag!(H0201, "{error}");
+            } else if error
+                .get_ref()
+                .is_some_and(|inner| inner.is::<UsageRefused>())
+            {
+                diag!(H0203, "{error}");
             } else {
                 diag!(H0202, "{error}");
             }
@@ -230,6 +235,18 @@ impl std::fmt::Display for InputRefused {
 }
 
 impl std::error::Error for InputRefused {}
+
+/// A mistake in how the alias was called, carried to `main` so that it prints the usage code.
+#[derive(Debug)]
+struct UsageRefused(String);
+
+impl std::fmt::Display for UsageRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UsageRefused {}
 
 /// Why the alias refused its stdin, recorded by the thread that saw it.
 type Refusal = std::sync::Arc<std::sync::Mutex<Option<String>>>;
@@ -382,7 +399,7 @@ fn parse_alias(executable: &Path, name: &str, arguments: Vec<OsString>) -> io::R
             .enumerate()
             .map(|(index, argument)| {
                 argument.into_string().map_err(|_| {
-                    invalid_input(format!(
+                    usage_error(format!(
                         "MCP server argument {} is not valid UTF-8",
                         index + 1
                     ))
@@ -413,7 +430,7 @@ fn parse_alias(executable: &Path, name: &str, arguments: Vec<OsString>) -> io::R
             if !flags.iter().all(|flag| *flag == "-c" || *flag == "-l")
                 || !flags.iter().any(|flag| *flag == "-c")
             {
-                return Err(invalid_input(usage));
+                return Err(usage_error(usage));
             }
             return shell_mode(executable, command);
         }
@@ -422,20 +439,19 @@ fn parse_alias(executable: &Path, name: &str, arguments: Vec<OsString>) -> io::R
     let command = match <[OsString; 2]>::try_from(arguments) {
         Ok([flag, command]) => {
             if flag != "-c" && flag != "-lc" {
-                return Err(invalid_input(usage));
+                return Err(usage_error(usage));
             }
             command
                 .into_string()
-                .map_err(|_| invalid_input("Shell command is not valid UTF-8"))?
+                .map_err(|_| usage_error("Shell command is not valid UTF-8"))?
         }
         // Exactly one argument, and it must not look like a flag: `zsh -i` is an interactive shell
         // this cannot serve, and reading a file named `-i` would be a confusing way to say so.
         Err(arguments) => {
-            let [script] =
-                <[OsString; 1]>::try_from(arguments).map_err(|_| invalid_input(usage))?;
+            let [script] = <[OsString; 1]>::try_from(arguments).map_err(|_| usage_error(usage))?;
             let script = PathBuf::from(script);
             if script.to_string_lossy().starts_with('-') {
-                return Err(invalid_input(usage));
+                return Err(usage_error(usage));
             }
             read_script(&script)?
         }
@@ -447,7 +463,7 @@ fn parse_alias(executable: &Path, name: &str, arguments: Vec<OsString>) -> io::R
 fn shell_mode(executable: &Path, command: OsString) -> io::Result<Mode> {
     let command = command
         .into_string()
-        .map_err(|_| invalid_input("Shell command is not valid UTF-8"))?;
+        .map_err(|_| usage_error("Shell command is not valid UTF-8"))?;
     let workload_root = executable
         .parent()
         .and_then(Path::parent)
@@ -469,7 +485,7 @@ fn python_mode(executable: &Path, name: &str, arguments: Vec<OsString>) -> io::R
         .enumerate()
         .map(|(index, argument)| {
             argument.into_string().map_err(|_| {
-                invalid_input(format!("Python argument {} is not valid UTF-8", index + 1))
+                usage_error(format!("Python argument {} is not valid UTF-8", index + 1))
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -513,7 +529,7 @@ fn working_directory(
         _ => match getcwd {
             Ok(directory) if directory.is_absolute() => directory,
             Ok(directory) => {
-                return Err(invalid_input(format!(
+                return Err(usage_error(format!(
                     "the working directory {} is not an absolute path; set PWD to it",
                     directory.display()
                 )));
@@ -521,7 +537,9 @@ fn working_directory(
             Err(error) => {
                 return Err(io::Error::new(
                     error.kind(),
-                    format!("read the working directory: {error}; set PWD to it"),
+                    UsageRefused(format!(
+                        "read the working directory: {error}; set PWD to it"
+                    )),
                 ));
             }
         },
@@ -529,7 +547,7 @@ fn working_directory(
     directory
         .into_os_string()
         .into_string()
-        .map_err(|_| invalid_input("the working directory is not valid UTF-8"))
+        .map_err(|_| usage_error("the working directory is not valid UTF-8"))
 }
 
 /// Pump one MCP server's traffic: stdin to the box, the box's output to stdout.
@@ -673,7 +691,7 @@ fn read_script(script: &Path) -> io::Result<String> {
         )
     })?;
     if text.len() > MAX_SCRIPT_BYTES {
-        return Err(invalid_input(format!(
+        return Err(usage_error(format!(
             "Shell script {} is {} bytes; maximum is {MAX_SCRIPT_BYTES}",
             script.display(),
             text.len()
@@ -830,6 +848,11 @@ fn shell_status(status: i32) -> u8 {
 /// A refusal an operator reads, for input this alias will not forward.
 fn invalid_input(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
+}
+
+/// A mistake in how the caller ran the alias: its arguments, its input, or its working directory.
+fn usage_error(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, UsageRefused(message.into()))
 }
 
 fn timed_out(operation: &str) -> io::Error {
@@ -1024,6 +1047,10 @@ mod tests {
                 error.to_string().contains("accepts only"),
                 "the refusal must state what is accepted: {error}"
             );
+            assert!(
+                is_usage(&error),
+                "a usage mistake prints the usage code: {error}"
+            );
         }
     }
 
@@ -1040,6 +1067,10 @@ mod tests {
             assert!(
                 error.to_string().contains("accepts only"),
                 "the refusal must state what is accepted: {error}"
+            );
+            assert!(
+                is_usage(&error),
+                "a usage mistake prints the usage code: {error}"
             );
         }
     }
@@ -1362,10 +1393,19 @@ mod tests {
                 error.to_string().contains("set PWD"),
                 "the refusal must say how to fix it: {error}"
             );
+            assert!(is_usage(&error), "{error}");
         }
         let error = working_directory(None, None, Ok(PathBuf::from("relative")))
             .expect_err("a relative working directory must be refused");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(is_usage(&error), "{error}");
+    }
+
+    /// Whether `main` prints this error with the usage code.
+    fn is_usage(error: &io::Error) -> bool {
+        error
+            .get_ref()
+            .is_some_and(|inner| inner.is::<UsageRefused>())
     }
 
     /// Every submission opens a Shell Program and sends the caller's directory with the command.

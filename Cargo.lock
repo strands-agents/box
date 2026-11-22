@@ -4906,6 +4906,7 @@ dependencies = [
  "strands-box",
  "strands-box-cli-profile",
  "strands-box-cli-telemetry",
+ "strands-box-diagnostics",
  "sysinfo",
  "tempfile",
  "toml",

@@ -607,7 +607,7 @@ fn a_failed_fetch_names_its_entry_and_stops_the_later_reads() {
                 fetched("[egress.github] secret.ref", "op", false),
             ],
             // The words of the program reach the operator, and no record or refusal holds them.
-            "strands-box: warning[B0601]: [egress.github] secret.ref: credential error: the secret source \
+            "strands-box: error[B0113]: [egress.github] secret.ref: credential error: the secret source \
              \"op\" (\"/bin/sh\") for op://[REDACTED] exited unsuccessfully (exit status: 1): \
              no item BoxTest in the vault Personal\n"
                 .to_string(),
@@ -653,7 +653,7 @@ fn a_reference_that_the_runner_refuses_names_its_entry() {
             (
                 vec![fetched("[telemetry.vendor] secret.ref", scheme, false)],
                 format!(
-                    "strands-box: warning[B0601]: [telemetry.vendor] secret.ref: credential error: {reason}\n"
+                    "strands-box: error[B0113]: [telemetry.vendor] secret.ref: credential error: {reason}\n"
                 ),
                 Some(format!(
                     "`[telemetry.vendor] secret.ref` names a secret that the secret source \
@@ -697,7 +697,7 @@ fn a_program_path_that_names_another_file_after_the_check_stops_the_fetch() {
     assert_eq!(
         diagnostics,
         format!(
-            "strands-box: warning[B0601]: [egress.github] secret.ref: credential error: the secret source \
+            "strands-box: error[B0113]: [egress.github] secret.ref: credential error: the secret source \
              \"op\" ({link:?}) for op://[REDACTED] did not start: its program file changed \
              after the box checked it\n"
         )
