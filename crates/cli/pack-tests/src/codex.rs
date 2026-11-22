@@ -808,6 +808,7 @@ fn a_codex_box_tells_codex_it_runs_in_a_box_and_where_its_profile_is() {
     assert!(guidance.contains(SHELL_NOTE), "{guidance}");
     assert!(guidance.contains(OUTSIDE_FILES_NOTE), "{guidance}");
     assert!(guidance.contains(RESTART_NOTE), "{guidance}");
+    assert!(guidance.contains(HOST_PERMIT_NOTE), "{guidance}");
     assert!(guidance.contains(DNS_NOTE), "{guidance}");
     assert!(
         guidance.contains("`AWS_BEARER_TOKEN_BEDROCK`"),

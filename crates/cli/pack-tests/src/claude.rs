@@ -973,6 +973,7 @@ fn a_claude_box_tells_claude_code_it_runs_in_a_box_and_lets_it_read_the_guidance
     assert!(text.contains(SHELL_NOTE), "{text}");
     assert!(text.contains(OUTSIDE_FILES_NOTE), "{text}");
     assert!(text.contains(RESTART_NOTE), "{text}");
+    assert!(text.contains(HOST_PERMIT_NOTE), "{text}");
     assert!(text.contains(DNS_NOTE), "{text}");
     let config: toml::Value = toml::from_str(generated.box_toml()).expect("box.toml parses");
     let read_file = config["agent"]["filesystem"]["read_file"]
