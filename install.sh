@@ -798,9 +798,11 @@ if [ "$box_drawing" -eq 1 ]; then
     printf '\n\033[?25h' >&2
     box_drawing=0
 fi
+box_welcome=1
 if [ -n "$box_previous" ]; then
     box_old_version=${box_previous%-$box_triple}
     if [ "$box_old_version" = "$box_version" ]; then
+        box_welcome=0
         log "box $box_version is already installed."
     else
         log "Updated box $box_old_version to $box_version."
@@ -823,7 +825,9 @@ case ":${PATH-}:" in
         esac
         ;;
 esac
-if [ -z "$box_previous" ]; then
+# Installs and updates both welcome, so an update also shows the commands and the telemetry
+# notice. A rerun of the installed version keeps that release and leaves the welcome out.
+if [ "$box_welcome" -eq 1 ]; then
     printf '\n' >&2
     welcome
 fi
