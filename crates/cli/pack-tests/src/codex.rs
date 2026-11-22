@@ -848,12 +848,7 @@ fn codex_comes_from_the_path() {
         host.codex_install().to_str()
     );
     let (summary, _) = codex_report(&host);
-    assert!(
-        summary
-            .lines()
-            .any(|line| line.split_whitespace().eq(["✓", "Codex", "@box/codex"])),
-        "{summary}"
-    );
+    assert!(summary.contains("✓ Codex  @box/codex\n"), "{summary}");
 }
 
 #[test]
