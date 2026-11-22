@@ -1,0 +1,11 @@
+# The probe for the corpus's scripted layer, also loaded as PROBE by crates/cli/app/tests/engine.rs.
+# Those tests put their own top-level keys before this text, so this file must hold none.
+
+# The project access that `box profile create --policy scoped` writes.
+[project]
+access = "write"
+
+[agent]
+command = ["/bin/bash", "--noprofile", "--norc"]
+env.PATH = "/usr/bin:/bin"
+env.TMPDIR = "${{ workspace }}"

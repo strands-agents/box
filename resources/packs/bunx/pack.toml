@@ -1,0 +1,36 @@
+# The bunx tool and MCP launcher requirements.
+# MCP compatibility on macOS arm64:
+# Pass: Bun 1.4.4 / Node 22.22.2 and 22.23.4 (oldest LTS line).
+# Bun publishes no separate LTS track; this records specific tested versions.
+# Fail: Bun 1.3.4 during current-directory inspection.
+# Test scope and fixtures: docs/dev/engine-tests.md, Launcher tests.
+[pack]
+name = "@box/bunx"
+version = 1
+kind = "tool"
+extend = ["@box/node"]
+include = ["@box/node"]
+
+[inputs.bunx.path]
+description = "The bunx program."
+type = "program"
+program = "bunx"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.bunx.path }}"]
+# A downloaded package can need node, also when bunx is a native program.
+helpers = ["node"]
+hosts = ["registry.npmjs.org"]
+
+[env]
+BUN_INSTALL_CACHE_DIR = "${{ cache }}"
+
+[filesystem]
+read = ["${{ root.parent }}"]
+# node resolves `localhost` from the hosts file, so a test runner or dev server that looks it up
+# starts. This tool runs node as a helper, so node gets this tool's grants.
+read_file = [
+    { path = "/private/etc/hosts", when = "macos" },
+    { path = "/etc/hosts", when = "linux" },
+]

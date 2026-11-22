@@ -352,3 +352,238 @@ fn creating_the_existing_workspace_returns_exists() {
 fn creating_a_directory_without_its_parent_returns_not_found() {
     directory_error(false, libc::ENOENT);
 }
+
+#[derive(Clone, Copy)]
+enum EntryExpectation {
+    Completed,
+    PolicyDenied,
+    BaselineRefused,
+    Unsupported(&'static str),
+}
+
+/// The inode and bytes distinguish a refused operation from an effect followed by an error.
+fn entry_state(path: &Path) -> Option<(u64, bool, Vec<u8>)> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::metadata(path) {
+        Ok(metadata) => Some((
+            metadata.ino(),
+            metadata.is_dir(),
+            if metadata.is_dir() {
+                Vec::new()
+            } else {
+                std::fs::read(path).unwrap()
+            },
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("inspect {}: {error}", path.display()),
+    }
+}
+
+fn narrower_entry_case(
+    operation: &str,
+    directory: bool,
+    destination_exists: bool,
+    expected: EntryExpectation,
+) {
+    let parent = PathBuf::from(std::env::var_os("NATIVE_TEST_ROOT").expect("short fixture root"));
+    let root = tempfile::tempdir_in(parent).unwrap().keep();
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let source = workspace.join("source");
+    let destination = workspace.join("destination");
+    let unrelated = workspace.join("unrelated");
+    std::fs::write(&unrelated, "unrelated bytes\n").unwrap();
+    if operation.starts_with('m') {
+        if directory {
+            std::fs::create_dir(&source).unwrap();
+        } else {
+            std::fs::write(&source, "source bytes\n").unwrap();
+        }
+    }
+    if destination_exists {
+        if directory {
+            std::fs::create_dir(&destination).unwrap();
+        } else {
+            std::fs::write(&destination, "destination bytes\n").unwrap();
+        }
+    }
+    let before = (
+        entry_state(&source),
+        entry_state(&destination),
+        entry_state(&unrelated),
+    );
+    let workload = root.join("native-workload");
+    std::fs::copy(
+        std::env::var_os("NATIVE_WORKLOAD").unwrap_or_else(|| env!("NATIVE_WORKLOAD").into()),
+        &workload,
+    )
+    .unwrap();
+    let denied = !matches!(expected, EntryExpectation::Completed);
+    let args = [
+        workload.display().to_string(),
+        operation.into(),
+        source.display().to_string(),
+        destination.display().to_string(),
+        match expected {
+            EntryExpectation::Completed => "allow",
+            EntryExpectation::BaselineRefused => "E",
+            _ => "deny",
+        }
+        .into(),
+    ];
+    let q = |path: &Path| toml::Value::String(path.display().to_string()).to_string();
+    std::fs::write(
+        root.join("box.toml"),
+        format!(
+            "name = \"native-entry-contract\"\nbox_dir = {}\npolicy = \"policy.dw\"\n\
+             [experimental-features]\nnative-filesystem-policy = true\n\
+             [agent]\ncommand = {}\nworkspace = {}\n\
+             [agent.filesystem]\nread = [{}]\nwrite = [{}]\n",
+            q(&root.join("state")),
+            toml::Value::Array(args.into_iter().map(toml::Value::String).collect()),
+            q(&workspace),
+            q(&workspace),
+            q(&workspace),
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("policy.dw"),
+        if matches!(expected, EntryExpectation::PolicyDenied) {
+            "permit(principal, action, resource);\n\
+             forbid(principal, action == Box::Action::\"fs:move\", resource);\n"
+        } else {
+            "permit(principal, action, resource);\n"
+        },
+    )
+    .unwrap();
+    let mut command = Command::new(
+        std::env::var_os("NATIVE_BOX").unwrap_or_else(|| env!("CARGO_BIN_EXE_strands-box").into()),
+    );
+    command
+        .args(["run", "--config"])
+        .arg(root.join("box.toml"))
+        .env("HOME", &root)
+        .env_remove("BOX_NATIVE_TEST_FAULT")
+        .stdin(std::process::Stdio::null());
+    let output = bounded_output(command);
+    std::fs::write(root.join("stderr.log"), &output.stderr).unwrap();
+    std::fs::write(root.join("stdout.log"), &output.stdout).unwrap();
+    println!("fixture={}", root.display());
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        output.stdout,
+        if denied {
+            b"NATIVE_DENIED\n".as_slice()
+        } else {
+            b"NATIVE_ALLOWED\n".as_slice()
+        }
+    );
+    assert_eq!(entry_state(&unrelated), before.2);
+    match expected {
+        EntryExpectation::Completed => {
+            assert!(entry_state(&source).is_none());
+            assert_eq!(entry_state(&destination), before.0);
+        }
+        EntryExpectation::PolicyDenied
+        | EntryExpectation::BaselineRefused
+        | EntryExpectation::Unsupported(_) => {
+            assert_eq!(entry_state(&source), before.0);
+            assert_eq!(entry_state(&destination), before.1);
+        }
+    }
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let events: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("NATIVE_RESEARCH_EVENT="))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    if matches!(expected, EntryExpectation::BaselineRefused) {
+        assert!(
+            events.is_empty(),
+            "baseline refusal must precede native dispatch: {stderr}"
+        );
+        return;
+    }
+    assert_eq!(events.len(), 1, "{stderr}");
+    let event = &events[0];
+    match expected {
+        EntryExpectation::Completed => {
+            assert_eq!(event["outcome"], "completed", "{stderr}");
+            let decisions = event["decisions"].as_array().unwrap();
+            assert!(!decisions.is_empty() && decisions.iter().all(|d| d["allow"] == true));
+        }
+        EntryExpectation::PolicyDenied => {
+            assert_eq!(event["outcome"], "denied", "{stderr}");
+            assert!(
+                event["decisions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|d| d["allow"] == false
+                        && d["operation"] == "Rename"
+                        && d["path"] == source.as_os_str().to_str().unwrap())
+            );
+        }
+        EntryExpectation::BaselineRefused => unreachable!("checked before reading the event"),
+        EntryExpectation::Unsupported(reason) => {
+            assert_eq!(event["refusal"], reason, "{stderr}");
+            assert_eq!(event["broker_errno"], libc::EACCES, "{stderr}");
+            assert_eq!(event["decisions"], serde_json::json!([]), "{stderr}");
+        }
+    }
+}
+
+#[test]
+fn renameat2_without_flags_uses_native_move_policy() {
+    narrower_entry_case("m2", false, false, EntryExpectation::Completed);
+    narrower_entry_case("m2", false, false, EntryExpectation::PolicyDenied);
+}
+
+#[test]
+fn renameat2_noreplace_is_refused_before_policy_and_preserves_both_entries() {
+    for destination_exists in [false, true] {
+        narrower_entry_case(
+            "m2n",
+            false,
+            destination_exists,
+            EntryExpectation::Unsupported("unsupported entry flags or mode"),
+        );
+    }
+}
+
+#[test]
+fn file_creation_refuses_each_special_permission_bit_before_policy() {
+    narrower_entry_case(
+        "c1",
+        false,
+        false,
+        EntryExpectation::Unsupported("unsupported entry flags or mode"),
+    );
+    for operation in ["c2", "c4"] {
+        narrower_entry_case(operation, false, false, EntryExpectation::BaselineRefused);
+    }
+}
+
+#[test]
+fn directory_creation_refuses_each_special_permission_bit_before_policy() {
+    narrower_entry_case(
+        "j1",
+        false,
+        false,
+        EntryExpectation::Unsupported("unsupported entry flags or mode"),
+    );
+    for operation in ["j2", "j4"] {
+        narrower_entry_case(operation, false, false, EntryExpectation::BaselineRefused);
+    }
+}
+
+#[test]
+fn rename_refuses_an_existing_directory_before_policy_and_preserves_both_entries() {
+    narrower_entry_case(
+        "move",
+        true,
+        true,
+        EntryExpectation::Unsupported("replacing an existing directory is not supported"),
+    );
+}

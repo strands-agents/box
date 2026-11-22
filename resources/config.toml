@@ -1,0 +1,12 @@
+# The settings box ships. ~/.strands/box/config.toml changes them.
+[starters]
+only = ["@box/claude", "@box/codex", "@box/kiro"]
+
+# The tool packs `box profile create` adds when `--tools` names none, in `packs` order. A run skips
+# one whose program the machine does not have.
+[tools]
+defaults = ["cargo", "git", "node", "npm", "pnpm", "yarn"]
+
+[policy-starters]
+only = ["@box/open", "@box/scoped", "@box/locked"]
+default = "@box/open"

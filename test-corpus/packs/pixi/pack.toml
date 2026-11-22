@@ -1,0 +1,26 @@
+# pixi, as the operator's PATH finds it. Its package cache goes in the project, beside the .pixi
+# environment it makes there. pixi reads its own program file, so the pack lets it read its folder,
+# and it runs its activation script with bash. That script runs /usr/bin/env, which a tool on Linux
+# can't see unless it is granted.
+[pack]
+name = "pixi"
+version = 1
+kind = "tool"
+
+[inputs.pixi.path]
+description = "The pixi program."
+type = "program"
+program = "pixi"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.pixi.path }}"]
+helpers = ["bash", "env"]
+hosts = ["conda.anaconda.org", "prefix.dev", "repo.prefix.dev"]
+
+[env]
+PIXI_CACHE_DIR = "${{ cache }}"
+RATTLER_CACHE_DIR = "${{ cache }}"
+
+[filesystem]
+read = ["${{ root }}"]

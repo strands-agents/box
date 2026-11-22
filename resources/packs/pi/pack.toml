@@ -1,0 +1,150 @@
+# pi (https://pi.dev) in a box, tested with pi 1.5.2 from npm. Node.js starts pi's script, so the
+# box runs node, not the `pi` on your PATH. @box/node runs pi's script as a tool, so a profile that
+# names other tools still finds pi.
+[pack]
+name = "@box/pi"
+version = 1
+kind = "agent"
+extend = ["@box/base"]
+include = ["@box/node"]
+
+[run]
+# pi needs two patches to run in a box, and they cannot be one file:
+#
+# 1. The process title (--import, a Node preload). pi sets process.title in setupCli(), before it
+#    loads any extension, and in a box that call ends the Node process. Only a preload runs early
+#    enough, so the setter does nothing here. It is a data: URL, not a file: Node resolves a
+#    preload file's real path with an lstat of each folder above it, and the box refused that for
+#    /Volumes.
+# 2. The shell (-e box-shell.ts, a pi extension). pi's bash tool and its ! commands start
+#    BOX_SHELL_PATH, so each command goes through the policy. The box cannot run /bin/bash, pi's
+#    default. An env value names this run's box, where a shellPath in the shared settings.json
+#    would name the run that started last. This needs pi's extension API, which exists
+#    only after the preload has run.
+#
+# One file loaded both ways cannot import @earendil-works/pi-coding-agent by name: as a preload
+# Node does not find it from this folder, and pi maps only an extension's static imports. Reaching
+# it by its install path loads a second copy of pi, and ties the pack to pi's dist/ layout.
+command = [
+    "${{ inputs.pi.node }}",
+    '--import=data:text/javascript,Object.defineProperty(process,"title",{get:()=>"pi",set:()=>{}})',
+    "${{ tool.pi.root }}/cli.js",
+    "-e",
+    "${{ pack }}/box-shell.ts",
+    # What the box does, and the profile to change (docs/design/cli/decisions.md#an-agent-pack-tells-its-agent-about-the-box).
+    "--append-system-prompt",
+    "${{ pack }}/box.md",
+    "--append-system-prompt",
+    "This run's box profile is the folder ${{ profile }}, and its file is ${{ profile.file }}.",
+    { slot = "agent-args" },
+]
+
+# pi's `#!/usr/bin/env node` line runs the first node on PATH, so the box runs that node too.
+[inputs.pi.node]
+description = "The Node.js program that starts pi. pi needs Node.js 22.19 or later."
+type = "program"
+program = "node"
+search = [{ env = "PATH" }]
+
+# Finds pi's script as npm installs it, through its `#!` line and @box/node. pi's own installer puts
+# a /bin/sh launcher on PATH instead, which no tool table runs, so the run stops.
+[tool.pi]
+program = "pi"
+
+[inputs.pi.import-mcp]
+description = "Declare the MCP servers in your ~/.pi/agent/mcp.json in the box."
+type = "bool"
+default = false
+warning = """Choosing true lets the agent use each of these servers: a local server runs in the box with the keys in its configuration and your environment, and the agent can reach each remote server's host.
+It also covers servers you add later.
+Server settings are copied even without generated policy, and the agent can read any environment keys kept in that copy."""
+
+# Your MCP servers. box declares each one the box can run, and lists each one it skips. pi fills in
+# a variable in a server's env and headers only, written ${NAME} or $NAME, so command and args have
+# no references. pi runs a value that starts with ! as a command and reads $$ and $! as escapes, so
+# box skips a server that holds one.
+[[mcp-servers]]
+file = "${{ home }}/.pi/agent/mcp.json"
+kind = "json"
+target = "agent/mcp.json"
+target-key = "mcpServers"
+key = ["mcpServers"]
+env-var-locations = { env = "references", headers = "header-references" }
+env-var-syntax = ["${NAME}", "$NAME"]
+command-prefix = "!"
+when = { variable = "inputs.pi.import-mcp", equals = "true" }
+
+# ~/.strands/box/storage/<profile>/default/agent/, shared by every project the profile runs in. pi keeps its
+# settings and its sessions here.
+[storage]
+directories = ["agent", "tmp"]
+
+# Your own instructions, skills, prompts, themes, and keys, copied into storage on the profile's
+# first run and brought up to date with the host on each run after it. A box's edit stays until the
+# host's file changes.
+[[storage.files]]
+source = "${{ home }}/.pi/agent/AGENTS.md"
+target = "agent/AGENTS.md"
+optional = true
+sync = true
+
+[[storage.files]]
+source = "${{ home }}/.pi/agent/skills"
+target = "agent/skills"
+optional = true
+sync = true
+
+[[storage.files]]
+source = "${{ home }}/.pi/agent/prompts"
+target = "agent/prompts"
+optional = true
+sync = true
+
+[[storage.files]]
+source = "${{ home }}/.pi/agent/themes"
+target = "agent/themes"
+optional = true
+sync = true
+
+[[storage.files]]
+source = "${{ home }}/.pi/agent/keybindings.json"
+target = "agent/keybindings.json"
+optional = true
+sync = true
+
+# How pi looks and thinks. Not the provider or the model: the profile picks the provider. No key
+# that names a command, a path, a package, or a credential.
+[[storage.files]]
+source = "${{ home }}/.pi/agent/settings.json"
+target = "agent/settings.json"
+kind = "json"
+optional = true
+keep = [
+    ["theme"],
+    ["defaultThinkingLevel"],
+    ["modelThinkingLevels"],
+    ["hideThinkingBlock"],
+    ["quietStartup"],
+    ["steeringMode"],
+    ["followUpMode"],
+    ["doubleEscapeAction"],
+    ["editorPaddingX"],
+    ["outputPad"],
+    ["autocompleteMaxVisible"],
+    ["markdown"],
+    ["tuiMode"],
+]
+
+# PI_OFFLINE: no version check, and no download of fd or ripgrep, which the box would not run.
+[env]
+PI_CODING_AGENT_DIR = "${{ storage.agent }}"
+BOX_SHELL_PATH = "${{ box }}/bin/bash"
+TMPDIR = "${{ storage.tmp }}"
+PI_OFFLINE = "1"
+PI_TELEMETRY = "0"
+
+# Node, pi's npm package, and this folder. pi loads box-shell.ts by its real path, which needs the
+# folder's read grant and the metadata of each folder above it, not only a grant on the file.
+[filesystem]
+read = ["${{ inputs.pi.node }}", "${{ tool.pi.root.parent.parent }}", "${{ pack }}"]
+exec = ["${{ inputs.pi.node }}"]

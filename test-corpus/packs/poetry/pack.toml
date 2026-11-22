@@ -1,0 +1,22 @@
+# poetry, as the operator's PATH finds it. Its cache and the virtualenvs it makes go in the project.
+[pack]
+name = "poetry"
+version = 1
+kind = "tool"
+
+[inputs.poetry.path]
+description = "The poetry program."
+type = "program"
+program = "poetry"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.poetry.path }}"]
+hosts = ["pypi.org", "files.pythonhosted.org"]
+
+[env]
+POETRY_CACHE_DIR = "${{ cache }}"
+POETRY_VIRTUALENVS_IN_PROJECT = "true"
+
+[filesystem]
+read = ["${{ root.parent }}"]

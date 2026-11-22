@@ -4410,3 +4410,40 @@ read_file = ["{workspace}/script-target"{interpreter_grant}]
         "the script must not receive the canonical target as its script path: {output:?}"
     );
 }
+
+/// **The Shell refuses to change the host trust the gateway reads, whatever policy permits.** The
+/// box process runs with `SSL_CERT_FILE` naming a file under the operator home, and the policy
+/// permits every write, so only the floor stands between the agent and a root the next run trusts.
+#[test]
+fn the_shell_refuses_to_change_host_trust_under_a_permissive_policy() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let request = Request::with_policy("host-trust-shell", PERMISSIVE_POLICY);
+    let trust = request.operator_home().join("company-trust");
+    std::fs::create_dir_all(&trust).expect("a host trust directory");
+    let roots = trust.join("roots.pem");
+    std::fs::write(&roots, "").expect("the host trust file");
+    let other = request.operator_home().join("other.txt");
+    let box_ = request
+        .env("SSL_CERT_FILE", roots.to_str().expect("UTF-8"))
+        .expect();
+
+    let output = box_.bash(&format!(
+        "zsh -c 'printf planted >> {roots}'; printf 'trust=%s\\n' \"$?\"\n\
+         zsh -c 'printf fine > {other}'; printf 'other=%s\\n' \"$?\"",
+        roots = roots.display(),
+        other = other.display()
+    ));
+    assert_eq!(stdout(&output), "trust=1\nother=0\n", "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("SSL_CERT_FILE"),
+        "the refusal names the variable: {}",
+        stderr(&output)
+    );
+    assert_eq!(std::fs::read_to_string(&roots).expect("the trust file"), "");
+    assert_eq!(
+        std::fs::read_to_string(&other).expect("the other file"),
+        "fine"
+    );
+}

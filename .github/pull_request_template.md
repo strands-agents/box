@@ -1,7 +1,11 @@
+<!-- Title: a conventional commit with a lowercase subject, such as
+`fix(cli): refuse a profile with no agent`. crates/cli/AGENTS.md#pull-request-title lists the types and scopes. -->
+
 ## Description
 <!-- Write plain prose, as a teammate would. Lead with the problem this change solves and why the
 change is right, then say how it works in a few sentences. Do not use stacked bold labels or a file
-list. When Cargo.lock changes, say which versions moved and why. -->
+list. Name each decision entry the change adds or rewrites, by anchor.
+When Cargo.lock changes, say which versions moved and why. -->
 
 ## Related Issues
 

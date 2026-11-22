@@ -119,7 +119,7 @@ auth.ref = "env://BOX_GW_TOKEN"
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `backends.url` | string | required | The backend to dial, as `scheme://host[:port][/prefix]`. `https` or `http`. An explicit port must be 1 to 65535. A path prefix is allowed; a query or fragment is not. A prefix adds a request-path restriction — see the note below. |
+| `backends.url` | string | required | The backend to dial, as `scheme://host[:port][/prefix]`. `https` or `http`. An explicit port must be 1 to 65535. A path prefix is allowed; a query or fragment is not. A prefix adds a request-path restriction; see the note below. |
 | `backends.auth.ref` | string | none | The backend's own credential: `env://NAME` or a reference in a declared scheme for a static token (takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `env`, `inject`, or `phantom_prefix`), or `aws://PROFILE` to SigV4-sign the request over the backend host (requires `backends.auth.aws.service` and `backends.auth.aws.region`). |
 | `backends.auth.aws.service` / `backends.auth.aws.region` | string | none | The SigV4 service (e.g. `bedrock-agentcore`) and region (e.g. `us-east-1`) to sign under. Each must be non-empty and only lowercase letters, digits, or `-`, because the signer uses the value verbatim. Required for an `aws://` auth, refused otherwise. |
 
@@ -133,7 +133,7 @@ a `forbid` on a metadata or private address refuses a backend that resolves ther
 
 A `secret` on the entry may sit beside a backend, but only as `env://`, and it is phantom-only: the
 box provisions a placeholder in the named variable (so the agent's credential-shaped code works) and
-strips it from the request, and never sends the real value — the backend handles the destination's
+strips it from the request, and never sends the real value. The backend handles the destination's
 auth downstream. Because the box never reads the real value, the named variable may be unset, and
 `secret.inject` is refused (there is nothing to inject). A signed destination `secret` (`aws://` or
 `credsd://`) is refused beside a backend, because it mints no placeholder to strip. A destination
@@ -142,13 +142,13 @@ auth downstream. Because the box never reads the real value, the named variable 
 When the backend `url` has a path prefix, the box refuses a request whose path contains an encoded
 slash (`%2F`) or backslash (`%5C`): joining a prefix in front of an escaped separator could change
 which path the backend sees, so the box fails the request rather than risk a traversal. This rejects
-some legitimate requests — for example a GitLab path such as
+some legitimate requests, for example a GitLab path such as
 `/api/v4/projects/1/repository/files/src%2FREADME.md`. If a destination needs encoded separators,
 give the backend a **dedicated host with no path prefix** (`url = "https://gw.example.com"`), which
 carries no join and so no restriction.
 
 A backend's `auth` rides an `https` backend. An `env://` token is attached as-is; an `aws://` profile
-is SigV4-signed over the **backend** host — the box signs the request after it rewrites the `Host` to
+is SigV4-signed over the **backend** host. The box signs the request after it rewrites the `Host` to
 the backend, so the signature covers the bytes the backend receives. The service and region are
 **stated explicitly** in `backends.auth.aws` (e.g. `service = "bedrock-agentcore"`,
 `region = "us-east-1"`); the box does not guess them from the host, because a gateway or custom-domain
@@ -164,7 +164,7 @@ auth.aws.region  = "us-east-1"
 
 An entry may keep its own `secret` beside a backend, and it must be `env://`. It is phantom-only: the
 box provisions the placeholder to the workload (so the agent's credential-shaped code works) and
-strips it from the request, and never injects the real destination credential — the backend handles
+strips it from the request, and never injects the real destination credential. The backend handles
 the destination's auth. Because the box never reads the real value, the named variable need not be
 set; name it for the placeholder the workload expects. If the destination `secret` and the backend
 `auth` name the same header, the backend token wins.
@@ -174,9 +174,9 @@ several destinations. The box presents the backend host on the wire, so distinct
 backend would reach it as the same bytes with the agent's host lost. Write one entry per host.
 
 A host that re-routes to a backend may be named by no other entry, on any port. The box matches a
-re-route by host alone, so any other entry that covers the host — a direct entry on another port, a
-second backend, or a `*`/`*.suffix` wildcard that spans it — would load and then be refused on every
-request. The loader refuses the pair instead.
+re-route by host alone, so any other entry that covers the host would load and then be refused on
+every request. That includes a direct entry on another port, a second backend, or a `*`/`*.suffix`
+wildcard that spans it. The loader refuses the pair instead.
 
 This version re-routes to one backend. More than one backend and routing rules are not yet
 available.
@@ -191,7 +191,7 @@ A remote MCP server re-routes the same way: attach `[[mcp.<name>.backends]]` to 
 | `env://NAME` | The variable `NAME` in the environment of `box run` | Once, when the box starts. The agent, each tool, each stdio MCP server, and the Shell get a placeholder in `NAME`. Every destination that names `NAME`, in one route or in several, accepts the same placeholder. |
 | `aws://PROFILE` | The named profile `PROFILE`, resolved through the AWS SDK | On each request. The gateway signs the request with SigV4. |
 | `aws://` (no profile) | The AWS SDK default credential provider chain on the host | On each request. The gateway signs the request with SigV4, under the host's ambient identity. |
-| `<scheme>://NAME[#FIELD]`, for a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table declares | The host program that the table names | Experimental, and macOS only. Once, when the box starts: Box runs the program and reads the secret from its stdout. The agent, each tool, each stdio MCP server, and the Shell get a placeholder in the variable that `secret.env` names. You don't set that variable. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |
+| `<scheme>://NAME[#FIELD]`, for a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table declares | The host program that the table names | Experimental. Once, when the box starts: Box runs the program and reads the secret from its stdout. The agent, each tool, each stdio MCP server, and the Shell get a placeholder in the variable that `secret.env` names. You don't set that variable. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |
 
 An `aws://` route takes no placement, `header`, `prefix`, `param`, `inject`, or
 `phantom_prefix`. The gateway signs each request to the destinations. The service and region come
@@ -200,10 +200,10 @@ from the host, which ends in `.amazonaws.com` or `.api.aws`.
 Both forms resolve through the AWS SDK, so they share one capability. A bare `aws://` resolves the
 default credential provider chain, in order: the `AWS_*` environment variables, the profile files
 (including `credential_process`), web identity, the ECS or EKS container endpoint, then EC2 instance
-metadata — the host's **ambient** identity. `aws://PROFILE` resolves **only** the named profile: its
+metadata: the host's **ambient** identity. `aws://PROFILE` resolves **only** the named profile: its
 static keys, `credential_process`, assume-role, or web identity. It never reads the ambient `AWS_*`
-keys or instance metadata, and a missing profile is refused rather than signing as the ambient
-identity — like the AWS CLI's `--profile`. Naming a profile pins *which* identity signs; it does not
+keys or instance metadata. Like the AWS CLI's `--profile`, a missing profile is refused rather than
+signing as the ambient identity. Naming a profile pins *which* identity signs; it does not
 avoid `credential_process` (see the writable-`~/.aws` note below).
 
 This build does **not** resolve **AWS SSO** or `aws login` profiles (the SDK's `sso` provider is
@@ -211,31 +211,91 @@ compiled out to keep the dependency surface small). Such a profile, named or def
 and the refusal names the missing provider. If your identity is SSO, log in with a tool that writes
 static or session keys to `~/.aws/credentials`.
 
-Because a bare `aws://` signs with whatever identity the host carries, the box prints a warning on
-**every** request it signs that way:
+Because a bare `aws://` signs with whatever identity the host carries, the box prints a warning in
+the startup disclosure, once for each destination that signs this way:
 
 ```
-strands-box credentials [<tenant>]: signing with the host's ambient AWS identity: a bare aws://
-resolved the default credential provider chain. Name a scoped profile (aws://PROFILE) to pin which
-identity signs, and grant the workload no write access to ~/.aws
+strands-box: warning: aws:// for bedrock-runtime.us-west-2.amazonaws.com signs with this machine's AWS identity
 ```
+
+The line names the destination as the route writes it, so a box with two such destinations prints
+two lines.
+
+Each request it signs that way still gets its own audit record. To pin which identity signs, name a
+profile with `aws://PROFILE`, and grant the workload no write access to `~/.aws`.
 
 Naming a profile with `aws://PROFILE` pins *which* identity signs and does not warn. The shipped box
-has no setting that refuses a bare `aws://` outright — it always signs with a warning — so a
+has no setting that refuses a bare `aws://` outright. It always signs with a warning. So a
 deployment that must pin the identity writes `aws://PROFILE` rather than a bare `aws://`.
 
 > **Writable `~/.aws` is a remote-code-execution path.** Both `aws://` forms read the profile files,
-> which include the `credential_process` setting — a program the AWS SDK **executes** to obtain
+> which include the `credential_process` setting: a program the AWS SDK **executes** to obtain
 > credentials. That program runs inside the box's trusted process, **outside** the sandbox. So if a
 > filesystem list grants the workload (the agent, a tool, the interpreter, or the Shell) write
 > access to `~/.aws` or any parent of it, the workload can write
 > `credential_process = /path/to/its-own-program` and have the box run it outside containment on the
 > next `aws://` request. This covers a named profile as much as the bare form, since both resolve
 > `credential_process` through the SDK. **Grant write access to `~/.aws` only when every process that
-> can write there is trusted** — that is the box's only mitigation for either form.
+> can write there is trusted**. That is the box's only mitigation for either form.
 
 The gateway adds a credential only over HTTPS. A plain `http://` request to a destination a route
-names is refused.
+names is refused. The one exception is a service on your own machine, at `host.box.internal`; see
+[a service on your machine](#a-service-on-your-machine).
+
+## A service on your machine
+
+Inside a box, `localhost` is the box itself. To reach a service on your machine's loopback, such as
+a local LLM gateway on `127.0.0.1:4259`, point the agent at `http://host.box.internal:4259`. The
+gateway sends the request to `127.0.0.1:4259`. No starter policy permits the name;
+[reach a service on your machine](policy.md#reach-a-service-on-your-machine) shows the rules.
+
+A route can add the service's key, also over plain `http://`:
+
+```toml
+[egress.local_llm]
+destinations = ["host.box.internal:4259"]
+secret.ref   = "env://LOCAL_LLM_KEY"
+```
+
+A secret rides a plain request only when every route that matches names `host.box.internal`
+exactly, with a port, and no backend re-routes it. Plain HTTP doesn't check who answers, so the
+secret goes to whatever process holds that port: start the service before the agent. The route
+can't use an `[[agent.ingress]]` port, because that port leads back to the agent.
+
+- Use `http://`. An `https://` request fails the gateway's certificate check, because a local
+  service seldom has a trusted certificate for `host.box.internal`.
+- The name is IPv4 `127.0.0.1` only, so a service on `::1` alone is out of reach.
+- When Box runs in a container, the name reaches the container's loopback.
+
+## Networks that re-sign TLS
+
+Some company networks re-sign HTTPS traffic with their own root certificate. The gateway checks
+each server's certificate against its built-in public roots and the roots your machine trusts, so a
+root that your machine already trusts works in the box with no setting.
+
+- On macOS, the gateway reads the trusted roots in the keychain, including one your administrator
+  installed.
+- On Linux, it reads the system bundle, such as `/etc/pki/tls/certs/ca-bundle.crt` or
+  `/etc/ssl/certs/ca-certificates.crt`.
+- When `box run` has `SSL_CERT_FILE` or `SSL_CERT_DIR` set, the gateway reads only the file and
+  directories they name, on both platforms. On macOS that replaces the keychain.
+
+The gateway reads the roots once, when the box starts, and stderr says how many it added:
+
+```text
+strands-box: the egress gateway also trusts 136 root certificates from this host's trust store for upstream servers (0 ignored)
+```
+
+A trusted root can vouch for any server, and the network that re-signs the traffic reads every
+request in plain text, including each credential the gateway adds. Policy still decides every
+destination.
+
+The box doesn't start when a `write` or `write_file` entry, in any table, reaches a file or
+directory that `SSL_CERT_FILE` or `SSL_CERT_DIR` names. A root written there would be trusted by the
+next run. Read access is fine. A common case is `SSL_CERT_FILE` set to Python's `certifi` bundle
+inside a project's `.venv`, with the project writable: unset the variable for `box run`, or add a
+`deny` entry for the bundle. The Shell and Python also refuse to change these paths, whatever your
+policy permits.
 
 ## Upgrade plain HTTP to HTTPS
 
@@ -288,7 +348,7 @@ not upgrade `rust-lang.org`.
 | An entry has a backend, and its destination is not one exact host | A re-route is matched per connection, on host and port, and the box presents the backend host on the wire. Give a backend entry exactly one destination with an exact host (no path, no wildcard). Write one entry per host. |
 | A host with a backend is also named by another entry (any port) | A re-route is matched by host alone, so a host that re-routes may name no other entry. Move the other destination to its own host, or drop it. |
 | An entry has a backend and a signed (`aws://`/`credsd://`) `secret`, or one in a declared scheme | A re-routed destination secret is phantom-only, so it must be `env://`. |
-| An entry has a backend and sets `secret.inject` | A re-routed destination secret is phantom-only — provisioned to the workload and stripped, never injected — so `inject` has no effect. Remove `secret.inject`. |
+| An entry has a backend and sets `secret.inject` | A re-routed destination secret is phantom-only: it is provisioned to the workload and stripped, never injected. So `inject` has no effect. Remove `secret.inject`. |
 | A `backends.auth` uses `credsd://`, or sits on an `http` backend | Use an `env://` token or an `aws://` profile on an `https` backend. |
 | A `backends.auth` uses `aws://` without a valid `aws.service`/`aws.region` (or sets them on a non-`aws://` auth) | An `aws://` backend auth signs over the backend host, so state `backends.auth.aws.service` and `backends.auth.aws.region`, each non-empty and only lowercase letters, digits, or `-`. They are valid only on an `aws://` auth. |
 | `secret.ref` has a scheme other than `env` or `aws`, and no `[secret-source.<scheme>]` table declares it | Use one of the two schemes, or declare the [secret source](config.md#secret-sourcescheme). |
@@ -309,6 +369,8 @@ not upgrade `rust-lang.org`.
 | `phantom_prefix` is empty, longer than 64 characters, or holds another character | Use 1 to 64 letters, digits, `-`, `_`, `.`, or `~`. |
 | Two routes hold a placeholder in one variable with a different `phantom_prefix` | Set the same `phantom_prefix` on both. One variable holds one placeholder. |
 | A `[gateway] upgrade_http` entry names a scheme, a port, a path, a `*` wildcard, or an IP address, or holds another character | Write the host name alone, such as `static.rust-lang.org`. |
+| A `write` or `write_file` entry reaches a path that `SSL_CERT_FILE` or `SSL_CERT_DIR` names | Remove the write, subtract the path with a `deny` entry, or run `box run` without that variable. See [networks that re-sign TLS](#networks-that-re-sign-tls). |
+| A secret on `host.box.internal` names no port, or an `[[agent.ingress]]` port | Name the service's own port, such as `host.box.internal:4259`. |
 
 A request the gateway refuses while the box runs gets an HTTP 403 with the header
 `x-strands-box-egress: refused`. The body says why:
@@ -318,10 +380,31 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 | The policy decision, naming the rule | `net:connect` or `http:request` refused the request. |
 | `blocked by egress control` | A request to a route's destinations lacks the placeholder, carries a different value, or can't be signed. A bare `aws://` chain that resolved at startup but later stops (a rotated-away credential, a `credential_process` that begins to fail) can't be signed and refuses here; one that is already broken at startup stops `box run` instead. |
 | `credential not permitted on a plaintext request` | A plain `http://` request went to a route's destination, including one the gateway [upgrades to HTTPS](#upgrade-plain-http-to-https). |
+| `... the gateway's own listener ...` | The request named the gateway's own port. |
 | `request authority rejected` | The request inside a `CONNECT` named a different host. |
 | `response blocked by egress control` | The server sent a compressed response to a credentialed request. |
 
-A 502 with no `x-strands-box-egress` header means the gateway couldn't resolve or reach the server.
+A request inside a `CONNECT` that the gateway can't read gets an HTTP 400 with the same header. The
+body says why, such as `response limit exceeded: body length exceeds limit 16777216` for a body over
+the request limit, or `intercept error: malformed Connection header`. Nothing reaches the server.
+
+A request the gateway doesn't refuse but can't complete gets an HTTP 502 with the header
+`x-strands-box-egress: failed`. The body says why, for example:
+
+| Body | Cause |
+|---|---|
+| `io error: upstream TLS handshake: <reason>` | The server's certificate chains to no root the gateway trusts, or the TLS handshake failed. See [networks that re-sign TLS](#networks-that-re-sign-tls). |
+| `io error: upstream exchange: <reason>` | The server closed the connection before it replied. |
+| `io error: upstream deadline passed` | The server didn't reply within the upstream deadline. |
+| `effect interceptor unavailable` | The box's policy check failed. |
+
+Except for `effect interceptor unavailable`, policy permitted the request, so it may have reached
+the server. The box also prints the reason on stderr, naming the backend when the destination
+re-routes to one:
+`strands-box: warning: egress request to <host>:<port> failed: <reason>`.
+
+A 502 with no `x-strands-box-egress` header answers a `CONNECT`, or a plain `http://` request, that
+the gateway couldn't resolve or connect to. Any other 502 without the header comes from the server.
 
 Responses arrive progressively, including on credentialed routes. Credential redaction retains a
 short tail until more bytes arrive or the response completes cleanly. Requests and HTTP MCP

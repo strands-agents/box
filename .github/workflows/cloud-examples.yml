@@ -91,7 +91,7 @@ jobs:
         with:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Build Box and its helpers
-        run: cargo build --workspace --locked --all-features --bins
+        run: cargo build -p strands-box -p strands-box-containment --locked --all-features --bins
       - name: Verify repeated cooldowns
         run: |
           /usr/bin/python3.12 examples/cloud-deployments/eks/claude/test_deployment_policy.py \

@@ -95,8 +95,8 @@ report it as `can hang`: a test that hangs instead of failing is not a pin.
 
 ### Core area
 
-Paths: each crate under `crates/`, `test-integ/`, `test-native-filesystem/`, `test-common/`, and
-`test-workload/`.
+Paths: each crate under `crates/` outside `crates/cli/`, `test-integ/`, `test-native-filesystem/`,
+`test-common/`, and `test-workload/`.
 
 - **Build step:**
 
@@ -133,6 +133,42 @@ Paths: each crate under `crates/`, `test-integ/`, `test-native-filesystem/`, `te
   `*tests.rs` file, and `test-integ/`.
 - **Enforced outside the diff:** the operating system's sandbox (Seatbelt on macOS, namespaces on
   Linux), and the pinned Strands Shell.
+
+### CLI area
+
+Paths: `crates/cli/`, `resources/`, `test-corpus/`, and the CLI's scripts and their tests in
+`scripts/`: `scripts/try-build.sh`, each `scripts/*-cli.py`, `scripts/test_try_build.py`, and
+`scripts/test_ci_workflow.py`.
+
+- **Build step:**
+
+  ```sh
+  cargo build --locked -p strands-box-cli -p strands-box -p strands-box-containment \
+    --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline
+  ```
+
+  An engine test needs both helpers beside `box`. Without them, every engine test fails at its
+  first `succeeded`. An engine test that needs Box Core's `strands-box` and finds none prints
+  `skipping:` and passes.
+- **A unit test:** `cargo test -p <crate> --lib -- --exact <path>`, where `<crate>` is
+  `strands-box-cli-profile` for a test in `crates/cli/profile/src`, `strands-box-cli-telemetry` for
+  one in `crates/cli/telemetry/src` or `crates/cli/telemetry/build.rs`, `strands-box-cli-pack-tests`
+  for one in `crates/cli/pack-tests/src`, and `strands-box-cli` for one in `crates/cli/app/src`. Take the
+  path from `cargo test -p <crate> --lib -- --list`, without its trailing `: test`, because some
+  tests sit in nested modules (`profile_tests::on_the_host::<name>`, `starter::tests::<name>`,
+  `codex::<name>`).
+- **An engine test:** `cargo test -p strands-box-cli --test engine -- --exact <name>`. `engine.rs`
+  compiles only on macOS and on Linux on aarch64. On any other host, list each engine test under
+  `not reached`. It is not a missing pin. An engine test that fails at `succeeded` counts as a fail
+  when `strands-box` and both helpers are built and its error output names the undone behavior.
+- **A script test:** `python3 -m unittest <module>.<Class>.<test>` from `scripts/`, with Python
+  3.11 or later. `python3 -m unittest discover -s scripts -p 'test_*.py'` runs them all. They need
+  no Rust build.
+- **Files that hold tests:** `grep -rlE "mod [a-z_]*tests" crates/cli/app/src crates/cli/profile/src crates/cli/telemetry/src`.
+  `starter.rs` declares `starter_tests.rs` this way.
+- **Test-support files:** `crates/cli/app/src/test_support.rs`, `crates/cli/profile/src/fixtures.rs`, each
+  `*tests.rs` file, `crates/cli/app/tests/`, and `crates/cli/pack-tests/`.
+- **Enforced outside the diff:** Box Core.
 
 ## Scratch work
 

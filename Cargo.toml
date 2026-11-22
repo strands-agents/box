@@ -16,6 +16,11 @@ members = [
     "crates/egress-gateway",
     "crates/ingress",
     "crates/telemetry",
+    # The box CLI. Its rules are in crates/cli/AGENTS.md.
+    "crates/cli/app",
+    "crates/cli/pack-tests",
+    "crates/cli/profile",
+    "crates/cli/telemetry",
 ]
 # `test-integ` is the black-box deterministic containment suite. It is excluded
 # deliberately, not overlooked: it drives the BUILT `strands-box` binary as a

@@ -163,6 +163,7 @@ pub(crate) fn judge_lists(
         operator_home: &canonical_home,
         policy: policy.as_deref(),
         authority_directories,
+        upstream_trust: upstream_trust().to_vec(),
         // Only when the box declares a server at all: the search path matters because
         // `broker/mcp` execs the declared name against the operator's own `PATH`, outside
         // containment, and every declared name is bare.
@@ -174,6 +175,60 @@ pub(crate) fn judge_lists(
         source_paths: &tables.source_paths,
     };
     Ok(filesystem::direct_grants(&spec.filesystem, &context)?)
+}
+
+/// The host trust the egress gateway reads this run, judged once for every table and interpreter.
+pub(crate) fn upstream_trust() -> &'static [PathBuf] {
+    static PATHS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    PATHS.get_or_init(|| {
+        upstream_trust_paths(
+            std::env::var_os("SSL_CERT_FILE"),
+            std::env::var_os("SSL_CERT_DIR"),
+        )
+    })
+}
+
+/// The paths `SSL_CERT_FILE` and `SSL_CERT_DIR` name, and each entry of a named directory.
+fn upstream_trust_paths(
+    file: Option<std::ffi::OsString>,
+    directories: Option<std::ffi::OsString>,
+) -> Vec<PathBuf> {
+    let absolute = |path: PathBuf| std::path::absolute(&path).unwrap_or(path);
+    let file = file
+        .filter(|file| !file.is_empty())
+        .map(|file| absolute(PathBuf::from(file)));
+    let directories: Vec<PathBuf> = directories
+        .iter()
+        .flat_map(std::env::split_paths)
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(absolute)
+        .collect();
+    // The gateway reads each entry of a named directory, following a link to its target, as
+    // `rustls-native-certs` does, so each entry is judged too.
+    let entries: Vec<PathBuf> = directories
+        .iter()
+        .filter_map(|directory| std::fs::read_dir(directory).ok())
+        .flatten()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for path in file.into_iter().chain(directories).chain(entries) {
+        // Where the name sits, so a write that swaps a link is judged, and where it resolves, so
+        // a write to the link's target is judged.
+        let sits = match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) => {
+                crate::record::layout::resolved_to_its_deepest_existing_ancestor(parent).join(name)
+            }
+            _ => path.clone(),
+        };
+        let resolves = crate::record::layout::resolved_to_its_deepest_existing_ancestor(&path);
+        for candidate in [sits, resolves] {
+            if !paths.contains(&candidate) {
+                paths.push(candidate);
+            }
+        }
+    }
+    paths
 }
 
 /// Where a process's network egress goes.
@@ -1742,6 +1797,48 @@ mod tests {
     use crate::record::config::mcp::McpServer;
     use crate::record::config::process::{ContainedMcp, Filesystem};
     use crate::run::credential::ProvisionedVariable;
+
+    /// **Each named trust path is judged where it sits and where it resolves.** A link is judged at
+    /// its own place and at its target, each entry of a `SSL_CERT_DIR` directory is judged, and a
+    /// relative name resolves against the working directory.
+    #[test]
+    fn upstream_trust_names_a_link_and_its_target() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let root = directory.path().canonicalize().expect("it resolves");
+        for made in ["store", "links", "certs-a", "certs-b"] {
+            std::fs::create_dir_all(root.join(made)).expect("a directory");
+        }
+        std::fs::write(root.join("store/roots.pem"), "").expect("a trust file");
+        std::fs::write(root.join("store/corp.pem"), "").expect("a linked root");
+        std::os::unix::fs::symlink(root.join("store/roots.pem"), root.join("links/roots.pem"))
+            .expect("a link to it");
+        std::os::unix::fs::symlink(root.join("store/corp.pem"), root.join("certs-a/1a2b3c4d.0"))
+            .expect("a hashed link in a certificate directory");
+        let dirs = std::env::join_paths([root.join("certs-a"), root.join("certs-b")])
+            .expect("a directory list");
+
+        let paths = upstream_trust_paths(Some(root.join("links/roots.pem").into()), Some(dirs));
+        assert_eq!(
+            paths,
+            [
+                root.join("links/roots.pem"),
+                root.join("store/roots.pem"),
+                root.join("certs-a"),
+                root.join("certs-b"),
+                root.join("certs-a/1a2b3c4d.0"),
+                root.join("store/corp.pem"),
+            ]
+        );
+        assert!(upstream_trust_paths(Some("".into()), None).is_empty());
+
+        let relative = upstream_trust_paths(Some("roots-not-there.pem".into()), None);
+        let expected = std::env::current_dir()
+            .expect("a working directory")
+            .canonicalize()
+            .expect("it resolves")
+            .join("roots-not-there.pem");
+        assert_eq!(relative, [expected]);
+    }
 
     #[cfg(all(
         target_os = "linux",

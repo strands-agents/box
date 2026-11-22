@@ -125,16 +125,12 @@ impl Vault {
         // audit record, exactly like a load-time one. A signed route resolves nothing at open,
         // so without this an AWS credential acquisition would never be audited at all.
         let resolution = self.audit_aws_resolve(config)?;
-        if let Some(warning) = resolution.acquisition.warning() {
-            // An ambient fallback is allowed but not silent: it means the request is being signed with
-            // whatever identity the host happens to carry rather than a declared scoped one.
-            self.warn(warning);
-        }
         // The source's return type is the credentials themselves, so there is no "wrong material kind"
         // branch left to get wrong here.
         let credentials = &*resolution.credentials;
 
-        // Strip-then-sign: assemble the cleaned header set, then sign over exactly those headers.
+        // Strip-then-sign: assemble the cleaned header set. The signer signs these headers, but not
+        // the headers in `UNSIGNED_HEADERS`.
         let clean_headers: Vec<(String, String)> = req
             .headers
             .iter()
@@ -449,55 +445,193 @@ mod tests {
         }
     }
 
-    /// Open a signed-`aws://` vault with the fake provider injected, sign one request to an AWS
-    /// host, and return the warnings `sign_aws` emitted. Drives the real `Vault::sign_aws` path end
-    /// to end — the seam that a hardcoded process-wide provider did not allow.
-    fn sign_through_fake(locator: &str) -> Vec<String> {
+    /// Open a signed-`aws://` vault over `pattern` with the fake provider injected, sign `requests`
+    /// requests to an AWS host, and return the warnings emitted at open and while signing. Drives the real
+    /// `Vault::sign_aws` path end to end, through the seam a process-wide provider did not allow.
+    fn sign_through_fake(
+        pattern: &str,
+        locator: &str,
+        requests: usize,
+    ) -> (Vec<String>, Vec<String>) {
         let _ = drain_captured_warnings();
         let opened = Vault::open_with_aws_provider(
             VaultConfig::new(Backend::local(), "tenant-a").route(RouteSpec::signed_aws(
-                DestinationPattern::parse("*.amazonaws.com").unwrap(),
+                DestinationPattern::parse(pattern).unwrap(),
                 Locator::parse_uri(locator).unwrap(),
             )),
             Arc::new(FixedProvider),
         )
         .expect("the signed route opens with the injected provider");
+        let at_open = drain_captured_warnings();
         let vault = opened.into_vault();
-        vault
-            .attach_for(Outbound {
-                destination: Destination {
-                    host: "s3.us-west-2.amazonaws.com",
-                    port: 443,
-                    path: "/",
-                },
-                method: "GET",
-                url: "https://s3.us-west-2.amazonaws.com/",
-                query: "",
-                headers: &[],
-                body: b"",
-            })
-            .expect("the signed route attaches")
-            .expect("a credential is bound for this destination");
-        drain_captured_warnings()
+        for _ in 0..requests {
+            vault
+                .attach_for(Outbound {
+                    destination: Destination {
+                        host: "s3.us-west-2.amazonaws.com",
+                        port: 443,
+                        path: "/",
+                    },
+                    method: "GET",
+                    url: "https://s3.us-west-2.amazonaws.com/",
+                    query: "",
+                    headers: &[],
+                    body: b"",
+                })
+                .expect("the signed route attaches")
+                .expect("a credential is bound for this destination");
+        }
+        (at_open, drain_captured_warnings())
     }
 
-    /// End to end through `Vault::sign_aws`: a bare `aws://` warns once per sign (the ambient
-    /// identity), and a scoped `aws://PROFILE` warns not at all. Hermetic because the injected
+    /// End to end through `Vault::sign_aws`: a bare `aws://` warns once when the vault opens and
+    /// never on a sign, and a scoped `aws://PROFILE` warns not at all. Hermetic because the injected
     /// provider resolves the credentials, so no SDK, worker, or `AWS_*` environment is reached.
     #[test]
     fn sign_aws_warns_on_bare_and_not_on_scoped() {
-        let bare = sign_through_fake("aws://");
-        assert_eq!(bare.len(), 1, "a bare sign warns exactly once: {bare:?}");
-        assert!(
-            bare[0].contains("ambient"),
-            "the warning names the ambient identity: {}",
-            bare[0]
+        let (at_open, signing) = sign_through_fake("s3.us-west-2.amazonaws.com:443", "aws://", 1);
+        assert_eq!(
+            at_open.len(),
+            1,
+            "a bare route warns once at open: {at_open:?}"
         );
-
-        let scoped = sign_through_fake("aws://prod");
         assert!(
-            scoped.is_empty(),
-            "a scoped-profile sign emits no warning: {scoped:?}"
+            at_open[0]
+                .starts_with("strands-box: warning: aws:// for s3.us-west-2.amazonaws.com:443 "),
+            "the warning keeps its prefix and names its destination: {}",
+            at_open[0]
+        );
+        assert!(signing.is_empty(), "a bare sign warns no more: {signing:?}");
+
+        let (at_open, signing) = sign_through_fake("*.amazonaws.com", "aws://prod", 1);
+        assert!(
+            at_open.is_empty() && signing.is_empty(),
+            "a scoped profile emits no warning: {at_open:?} {signing:?}"
+        );
+    }
+
+    /// Each bare route in a vault warns once at open and names its host, and a scoped route warns not.
+    #[test]
+    fn each_bare_route_names_its_host_at_open() {
+        let _ = drain_captured_warnings();
+        let route = |pattern: &str, locator: &str| {
+            RouteSpec::signed_aws(
+                DestinationPattern::parse(pattern).unwrap(),
+                Locator::parse_uri(locator).unwrap(),
+            )
+        };
+        let _opened = Vault::open_with_aws_provider(
+            VaultConfig::new(Backend::local(), "tenant-a")
+                .route(route("bedrock-runtime.us-west-2.amazonaws.com", "aws://"))
+                .route(route("logs.us-west-2.amazonaws.com", "aws://"))
+                .route(route("s3.us-west-2.amazonaws.com", "aws://prod")),
+            Arc::new(FixedProvider),
+        )
+        .expect("the signed routes open with the injected provider");
+        let warnings = drain_captured_warnings();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        for destination in [
+            "bedrock-runtime.us-west-2.amazonaws.com",
+            "logs.us-west-2.amazonaws.com",
+        ] {
+            assert!(
+                warnings.iter().any(|warning| warning.contains(destination)),
+                "{destination} is not named: {warnings:?}"
+            );
+        }
+    }
+
+    /// Two vaults that open the same bare destination, as a telemetry target and its preflight
+    /// do, print its warning once.
+    #[test]
+    fn a_destination_warns_once_across_vaults() {
+        let (first, _) = sign_through_fake("*.us-west-2.amazonaws.com", "aws://", 0);
+        let (second, _) = sign_through_fake("*.us-west-2.amazonaws.com", "aws://", 0);
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(
+            second.is_empty(),
+            "the second vault warns again: {second:?}"
+        );
+    }
+
+    /// Many signed requests through a bare `aws://` leave exactly one ambient-identity warning.
+    #[test]
+    fn many_bare_signs_leave_one_ambient_warning() {
+        let (at_open, signing) = sign_through_fake("s3.us-west-2.amazonaws.com", "aws://", 7);
+        let all: Vec<&String> = at_open.iter().chain(&signing).collect();
+        assert_eq!(
+            all.iter()
+                .filter(|warning| warning.contains("machine's AWS identity"))
+                .count(),
+            1,
+            "{all:?}"
+        );
+    }
+
+    /// A signed route strips no trace, agent, or hop-by-hop header, and signs none of them.
+    #[test]
+    fn a_signed_route_keeps_unsigned_headers_on_the_request_and_out_of_the_signature() {
+        let unsigned = [
+            "X-Amzn-Trace-Id",
+            "traceparent",
+            "TraceState",
+            "Baggage",
+            "User-Agent",
+            "Expect",
+            "Keep-Alive",
+        ];
+        let mut headers = vec![
+            (
+                "Host".to_string(),
+                "bedrock-runtime.us-east-1.amazonaws.com".to_string(),
+            ),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+        headers.extend(
+            unsigned
+                .iter()
+                .map(|name| (name.to_string(), "workload-value".to_string())),
+        );
+        let vault = Vault::open_with_aws_provider(
+            VaultConfig::new(Backend::local(), "tenant-a").route(RouteSpec::signed_aws(
+                DestinationPattern::parse("*.amazonaws.com").unwrap(),
+                Locator::parse_uri("aws://prod").unwrap(),
+            )),
+            Arc::new(FixedProvider),
+        )
+        .expect("the signed route opens with the injected provider")
+        .into_vault();
+        let attachment = vault
+            .attach_for(Outbound {
+                destination: Destination {
+                    host: "bedrock-runtime.us-east-1.amazonaws.com",
+                    port: 443,
+                    path: "/model/m/invoke",
+                },
+                method: "POST",
+                url: "https://bedrock-runtime.us-east-1.amazonaws.com/model/m/invoke",
+                query: "",
+                headers: &headers,
+                body: b"{}",
+            })
+            .expect("the signed route attaches")
+            .expect("a credential is bound for this destination");
+
+        let stripped: Vec<&str> = attachment.strip_headers().collect();
+        for name in unsigned {
+            assert!(
+                !stripped.iter().any(|s| s.eq_ignore_ascii_case(name)),
+                "{name} must stay on the request: {stripped:?}"
+            );
+        }
+        let authorization = attachment
+            .set_headers()
+            .find(|(name, _)| *name == "Authorization")
+            .map(|(_, value)| value.to_string())
+            .expect("a signature");
+        assert!(
+            authorization.contains("SignedHeaders=content-type;host;x-amz-date,"),
+            "{authorization}"
         );
     }
 

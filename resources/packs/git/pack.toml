@@ -1,0 +1,49 @@
+# git, as the operator's PATH finds it: dnf or Homebrew. For Apple's /usr/bin stub, box runs the
+# git in the developer folder, which this pack reads.
+# Tested on macOS with Homebrew git 2.56.0.
+[pack]
+name = "@box/git"
+version = 1
+kind = "tool"
+
+[inputs.git.path]
+description = "The git program."
+type = "program"
+program = "git"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.git.path }}"]
+
+[inputs.homebrew.prefix]
+description = "Where Homebrew is installed: its kegs, and the opt links that git and its libraries are found through."
+from = "env:HOMEBREW_PREFIX"
+default = "/opt/homebrew"
+
+[env]
+GIT_CONFIG_NOSYSTEM = "1"
+GIT_CONFIG_GLOBAL = "/dev/null"
+# The box has no ssh and no ~/.ssh, so a github.com SSH remote goes over HTTPS.
+GIT_CONFIG_COUNT = "2"
+GIT_CONFIG_KEY_0 = "url.https://github.com/.insteadOf"
+GIT_CONFIG_VALUE_0 = "git@github.com:"
+GIT_CONFIG_KEY_1 = "url.https://github.com/.insteadOf"
+GIT_CONFIG_VALUE_1 = "ssh://git@github.com/"
+GIT_AUTHOR_NAME = "Box Workload"
+GIT_AUTHOR_EMAIL = "workload@example.invalid"
+GIT_COMMITTER_NAME = "Box Workload"
+GIT_COMMITTER_EMAIL = "workload@example.invalid"
+GIT_EDITOR = "/usr/bin/true"
+GIT_SEQUENCE_EDITOR = "/usr/bin/true"
+
+[filesystem]
+read = [
+    "${{ root.parent }}/libexec/git-core",
+    "${{ root.parent }}/share/git-core",
+    { path = "${{ macos.developer_dir }}", when = "macos" },
+    # Homebrew git's exec path is opt/git/libexec/git-core, a link into Cellar, so git finds
+    # `git branch` and `git remote-https` only through opt. Box Core loads the libraries of git
+    # itself, but git-remote-https loads curl's from opt/curl.
+    { path = "${{ inputs.homebrew.prefix }}/Cellar", when = "macos" },
+    { path = "${{ inputs.homebrew.prefix }}/opt", when = "macos" },
+]

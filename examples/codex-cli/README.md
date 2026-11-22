@@ -5,8 +5,7 @@ a Mac, with the project out of its own reach. Its shell tool is its only way to 
 each command it runs goes to the [box's shell](../../docs/user/shell.md), so the policy decides
 every command and every file a command reads, writes, or deletes. The task comes from the command line.
 
-[The tutorial](../../docs/user/tutorials/codex-cli.md) walks through this example step by step,
-with the output of each run.
+To run Codex in a box day to day, use the `box` CLI instead: see [Make a profile for another agent or provider](../../docs/cli/profiles.md#make-a-profile-for-another-agent-or-provider).
 
 ## Files
 

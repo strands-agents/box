@@ -5,7 +5,7 @@ a consumer. The `docs-writer`, `docs-reviewer`, and `docs-audit` skills apply it
 order.
 
 For a wording-only rewrite in `docs/dev/`, apply the sentence rules in Layers 4 and 5. Keep the
-page's structure, source and test references, and Simplified Technical English register.
+page's structure, source and test references, and plain technical register.
 
 ## Contents
 

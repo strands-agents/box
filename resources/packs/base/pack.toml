@@ -1,0 +1,20 @@
+# What every agent shares: terminal settings and a starting PATH.
+[pack]
+name = "@box/base"
+version = 1
+kind = "support"
+
+[inputs.terminal.term]
+description = "The terminal type the agent draws for."
+from = "env:TERM"
+default = "xterm-256color"
+
+[inputs.terminal.colorterm]
+description = "Whether the terminal shows true color."
+from = "env:COLORTERM"
+default = "truecolor"
+
+[agent.env]
+TERM = "${{ inputs.terminal.term }}"
+COLORTERM = "${{ inputs.terminal.colorterm }}"
+PATH = "/usr/bin:/bin"

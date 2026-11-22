@@ -165,6 +165,62 @@ pub(super) fn validate_egress_and_remote(
     validate_pairs(&union_pairs(egress, remote_mcp), sources)
 }
 
+/// The reserved name of the surrounding OS's loopback, which Box maps for the gateway and guards here.
+pub(crate) const HOST_LOOPBACK_NAME: &str = "host.box.internal";
+
+/// Refuse a secret on `host.box.internal` that names no port, or names a port that leads back to
+/// the agent: an `[[agent.ingress]]` `listen` port or `workload_port`.
+pub(super) fn validate_host_loopback_secrets(
+    egress: &BTreeMap<String, EgressEntry>,
+    remote_mcp: &BTreeMap<String, EgressEntry>,
+    ingress: &[super::ingress::Ingress],
+) -> Result<(), ConfigError> {
+    // A plain request to this name carries the real secret to whatever process holds the port
+    // (docs/design/decisions.md#a-secret-rides-only-tls), and an ingress port relays to the agent.
+    let agent_ports: Vec<u16> = ingress
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .listen_address()
+                .map(|address| address.port())
+                .into_iter()
+                .chain([entry.workload_port])
+        })
+        .collect();
+    for (origin, name, entry) in union_pairs(egress, remote_mcp) {
+        if entry.secret.is_none() || !entry.backends.is_empty() {
+            continue;
+        }
+        for destination in &entry.destinations {
+            let authority = destination.split('/').next().unwrap_or_default();
+            let (host, port) = match authority.rsplit_once(':') {
+                Some((host, port)) => (host, port.parse::<u16>().ok()),
+                None => (authority, None),
+            };
+            if !host.eq_ignore_ascii_case(HOST_LOOPBACK_NAME) {
+                continue;
+            }
+            let reason = match port {
+                None => format!(
+                    "destination {destination:?} carries a secret to `{HOST_LOOPBACK_NAME}` with no \
+                     port; name the port of the service, such as \"{HOST_LOOPBACK_NAME}:4259\""
+                ),
+                Some(port) if agent_ports.contains(&port) => format!(
+                    "destination {destination:?} carries a secret to port {port}, which an \
+                     `[[agent.ingress]]` entry uses, so the secret would reach the agent; use the \
+                     port of the service"
+                ),
+                Some(_) => continue,
+            };
+            return Err(ConfigError::Credential {
+                host: origin.table(name),
+                reason,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Refuse a secret reference that the declared sources do not allow: one in a scheme that no
 /// `[secret-source.<scheme>]` table declares, or one that reads the credential of a source's vault.
 fn validate_against_sources(
@@ -184,10 +240,9 @@ fn validate_against_sources(
             if !sources.declares(&scheme) {
                 return refuse(format!(
                     "secret scheme {scheme:?} has no `[secret-source.{scheme}]` table: declare \
-                     the secret source that reads it, which Box loads on macOS only, or use \
-                     env://NAME for a credential the workload presents as a placeholder, \
-                     aws://profile for one signed in the boundary, or credsd://<environment> \
-                     for a credsd-vended credential"
+                     the secret source that reads it, or use env://NAME for a credential the \
+                     workload presents as a placeholder, aws://profile for one signed in the \
+                     boundary, or credsd://<environment> for a credsd-vended credential"
                 ));
             }
         }
@@ -2434,9 +2489,9 @@ mod tests {
                 format!(
                     "invalid credential entry for host \"api.test\": secret scheme {scheme:?} \
                      has no `[secret-source.{scheme}]` table: declare the secret source that \
-                     reads it, which Box loads on macOS only, or use env://NAME for a credential \
-                     the workload presents as a placeholder, aws://profile for one signed in the \
-                     boundary, or credsd://<environment> for a credsd-vended credential"
+                     reads it, or use env://NAME for a credential the workload presents as a \
+                     placeholder, aws://profile for one signed in the boundary, or \
+                     credsd://<environment> for a credsd-vended credential"
                 )
             );
         }
@@ -2972,10 +3027,10 @@ mod tests {
                 .expect_err("no table declares `op`")
                 .to_string(),
             "invalid credential entry for host \"api.github.com\": secret scheme \"op\" has no \
-             `[secret-source.op]` table: declare the secret source that reads it, which Box \
-             loads on macOS only, or use env://NAME for a credential the workload presents as \
-             a placeholder, aws://profile for one signed in the boundary, or \
-             credsd://<environment> for a credsd-vended credential"
+             `[secret-source.op]` table: declare the secret source that reads it, or use \
+             env://NAME for a credential the workload presents as a placeholder, aws://profile \
+             for one signed in the boundary, or credsd://<environment> for a credsd-vended \
+             credential"
         );
         assert_eq!(
             declared_refusal(&entry(
@@ -4112,5 +4167,45 @@ mod tests {
             entries["a"].backends.is_empty(),
             "an absent backends key is an empty list"
         );
+    }
+
+    /// A secret on `host.box.internal` needs a port, and the port may not lead back to the agent
+    /// through an `[[agent.ingress]]` entry; a route without a secret, or with a backend, is not
+    /// checked.
+    #[test]
+    fn reserved_name_secret_port_not_ingress() {
+        let ingress = vec![crate::record::config::ingress::Ingress {
+            listen: "0.0.0.0:8080".to_string(),
+            workload_port: 8081,
+        }];
+        let check = |destination: &str, rest: &str| {
+            let fixture: Fixture = toml::from_str(&format!(
+                "[egress.local]\ndestinations = [\"{destination}\"]\n{rest}"
+            ))
+            .expect("test config parses");
+            validate_host_loopback_secrets(&fixture.egress, &BTreeMap::new(), &ingress)
+        };
+        let secret = "secret.ref = \"env://LOCAL_KEY\"\n";
+        check("host.box.internal:4259", secret).expect("a service port is accepted");
+        check("host.box.internal:4259/v1", secret).expect("a path keeps the port");
+        check("llm.local", secret).expect("another host is not checked");
+        check("host.box.internal", "").expect("a route with no secret is not checked");
+        check(
+            "host.box.internal",
+            "secret.ref = \"env://LOCAL_KEY\"\n[[egress.local.backends]]\nurl = \"https://gw.example.com\"\n",
+        )
+        .expect("a re-routed entry is not checked");
+        for (destination, expected) in [
+            ("host.box.internal", "with no port"),
+            ("HOST.box.internal", "with no port"),
+            ("host.box.internal:8080", "port 8080"),
+            ("host.box.internal:8081/v1", "port 8081"),
+        ] {
+            let refusal = check(destination, secret)
+                .expect_err(destination)
+                .to_string();
+            assert!(refusal.contains(expected), "{destination}: {refusal}");
+            assert!(refusal.contains("[egress.local]"), "{refusal}");
+        }
     }
 }

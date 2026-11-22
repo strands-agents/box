@@ -85,8 +85,8 @@ invalid configuration still fails before a workload starts.
 Every release, stable or Linux preview, includes macOS and Linux ARM64. The release workflow has no
 input that omits Linux ARM64, and only the Linux x86-64 archive is optional, through `publish_linux_x86`. An input
 that omits ARM64 would let a release drop a supported platform by accident.
-`test_stable_and_preview_publish_arm64_with_x86_off_by_default` pins the release contents. The
-release owner must establish Linux readiness before each release. Linux previews leave the latest
+The x86-64 archive is selected by default and can be omitted with `publish_linux_x86=false`.
+The release owner must establish Linux readiness before each release. Linux previews leave the latest
 stable release unchanged. Removing the startup flag does not authorize a release or establish security
 acceptance. The native filesystem policy experiment retains its separate configuration and Cargo
 feature controls.
@@ -719,7 +719,9 @@ first group runs from `fe80` to `febf`. EC2's IPv6 endpoint uses the single `ip6
 `fd00:ec2::254`, without the surrounding unique-local range.
 
 A box has this protection only if its policy contains the forbids. A policy without them can reach
-metadata. A new metadata endpoint is a policy change, not a Core release, and it reaches an existing
+metadata. The gateway's one fixed refusal is its own listening address, which is self-dial protection
+and not a destination choice ([the gateway never dials its own
+listener](#the-gateway-never-dials-its-own-listener)). A new metadata endpoint is a policy change, not a Core release, and it reaches an existing
 box only when that box's policy is edited.
 
 <a id="deny-overrides-composition-with-no-compiled-rule-tier"></a>
@@ -907,10 +909,11 @@ There is no credential action in the schema. An operator declares a binding in `
 binding says only which secret is attached to a request the policy already permits. Reachability
 stays the policy's decision alone, so a binding never opens a destination, and the two must name the
 same host. A bare `aws://` body parses and names the AWS default credential provider chain, so a
-binding can sign with the host's ambient identity; this is not silent, because the box warns on every
-such request and records a distinct default-chain acquisition. See
+binding can sign with the host's ambient identity; this is not silent, because the box warns once at
+startup and records a distinct default-chain acquisition for each request. See
 [a bare aws:// resolves the default credential chain](#a-bare-aws-resolves-the-default-credential-chain).
-A secret travels over TLS only. See [credentials require TLS](#a-secret-rides-only-tls).
+A secret travels over TLS only, except to `host.box.internal`. See [credentials require
+TLS](#a-secret-rides-only-tls).
 
 <a id="temporal-rules-ride-the-closed-context"></a>
 <a id="a-temporal-rule-rides-the-same-closed-context-as-an-ordinary-rule"></a>
@@ -1868,7 +1871,7 @@ interpreter.
 ### Box runs a pinned Strands Shell, never the host OS's shell
 
 Box runs every shell command the agent issues through Strands Shell, an open-source interpreter. Box
-builds against a pinned upstream revision, `39daa83`, and holds no copy of its source. It never runs
+builds against a pinned upstream revision, `754a534`, and holds no copy of its source. It never runs
 `bash` or `zsh` from the surrounding OS for the agent's sandbox. A tool's or MCP server's sandbox
 runs programs of the surrounding OS, a shell included, inside that sandbox. A harness runs a real
 shell for its command tool, so Box gives it something with the same exit codes, the same stdout and
@@ -1998,11 +2001,14 @@ is built in the Shell sources outside `vfs_kernel.rs`, but that check is a lint 
 
 The gateway issues the origin's leaf certificate when it intercepts a request. A refusal inside that
 tunnel would reach the Shell as an ordinary HTTP status. `curl` exits 0 for any status unless the
-caller passes `-f`. The gateway therefore adds a header to each response it writes. Box's kernel
-wrapper converts that response to a permission-denied error. `curl` then prints one reason line and
-exits 1. The marker identifies who wrote the refusal. It does not authorize the request, which the
-gateway already refused. `a_marked_refusal_fails_curl` pins it for `http://`, and
-`a_marked_refusal_inside_a_tunnel_fails_curl` for `https://`.
+caller passes `-f`. The gateway therefore adds a header to each response it writes: `refused` on a
+refusal, and `failed` on a request it didn't refuse but couldn't complete. Box's kernel wrapper
+converts a refusal to a permission-denied error, so `curl` prints one reason line and exits 1. It
+converts a failure to a transport error, so `curl` prints `curl: (6)` and the reason, and exits 6. A
+script can tell the two apart by exit status. The marker identifies who wrote the response. It does
+not authorize the request. `a_marked_refusal_fails_curl` pins it for `http://`,
+`a_marked_refusal_inside_a_tunnel_fails_curl` for `https://`, and
+`a_marked_failure_fails_curl_as_a_transport_error_on_both_schemes` for a failure.
 
 **The conversion is the kernel wrapper's alone, and Monty does not have it.** A Monty `fetch` builds
 its own client and never reads the marker, so a denied request reaches the script as an ordinary
@@ -2230,13 +2236,46 @@ cleartext hazard at once, but it also blocks a legitimate local `http://` endpoi
 reach any host the policy permits, including hosts beyond loopback. The accepted residual risk is
 that the box carries cleartext to a permitted host, so anything on that path can read the traffic.
 
-<a id="a-secret-rides-only-tls"></a>
-### Credentials require TLS
+<a id="host-box-internal-names-the-surrounding-oss-loopback"></a>
+### `host.box.internal` names the surrounding OS's loopback, and policy grants it per port
 
-A bare-host credential pattern matches port 80 as well as 443, and a target carries no scheme, so a
-cleartext request to a credential-bound host would otherwise receive the real secret. The plain-HTTP
-path therefore refuses with `403` when any credential control matches the destination, before the gateway applies request controls. The destination determines this refusal. Request content cannot opt out of it. An
-operator cannot bind a credential to a plain `http://` upstream, not even a local one.
+Inside a box, `localhost` stays the box's own loopback. The reserved name `host.box.internal` is the
+surrounding OS's loopback: the gateway decides the name, maps it to `127.0.0.1` with no DNS lookup,
+and decides that address before it dials. No starter policy permits it. The `box` label avoids a
+real machine named `host.internal`.
+
+**Rejected.** Letting an operator clear `NO_PROXY`: it sends all loopback traffic to the host,
+which breaks the agent's own servers, and it cannot name one port.
+
+**Cost.** IPv4 only. A loopback `ip4` forbid also refuses the name, and a wildcard host permit
+includes it.
+
+<a id="the-gateway-never-dials-its-own-listener"></a>
+### The gateway never dials its own listener
+
+The gateway refuses a dial to its own listening address before policy decides the address, because
+the gateway would connect to itself. The refusal is a deny-only floor and decides no other
+destination.
+
+**Rejected.** Leaving it to policy: the gateway's port changes on each run, so no rule can name it.
+
+**Cost.** The gateway holds one fixed refusal of its own. The telemetry collector's port stays
+reachable through the name when a policy permits it.
+
+<a id="a-secret-rides-only-tls"></a>
+### Credentials require TLS, except to `host.box.internal`
+
+A bare-host credential pattern matches port 80 as well as 443, so a cleartext request to a bound
+host would otherwise receive the real secret. The plain-HTTP path therefore refuses with `403` when
+any credential matches the destination, and request content cannot opt out. The one exception,
+which the maintainer approved, is `host.box.internal` when every matching route names it exactly,
+with a port, and no backend re-routes it, because a local LLM gateway seldom speaks TLS.
+
+**Rejected.** Exempting every loopback destination, which a literal address or a wildcard route
+could reach.
+
+**Cost.** Plain HTTP does not authenticate the server, so the secret goes to whatever process holds
+the port. Box refuses an `[[agent.ingress]]` port, which leads back to the agent.
 
 <a id="the-plain-path-binds-its-own-destination-and-reports-its-transport"></a>
 ### The plain path binds its own destination and reports its transport truthfully
@@ -2269,6 +2308,25 @@ rustup still checks each package against the SHA-256 hash in its channel manifes
 manifest itself reaches the workload through the gateway's TLS leg.
 `a_listed_plain_request_reaches_a_tls_upstream_judged_on_443` and
 `a_credential_on_an_upgraded_plain_request_is_refused` pin it.
+
+<a id="the-gateway-trusts-the-hosts-roots-and-no-grant-writes-them"></a>
+### The gateway trusts the host's roots for upstream servers, and no grant may write them
+
+The gateway checks each upstream certificate against its built-in roots and the roots the host
+trusts: the macOS keychain, the Linux system bundle, or the files that `SSL_CERT_FILE` and
+`SSL_CERT_DIR` name for `box run`. It reads them once, at start. A network that re-signs TLS puts its
+root in the host's store, so the box reaches what the host reaches with no setting. A writable grant
+that reaches a path those variables name stops the box, because a root written there would vouch for
+every upstream on a later run. The Shell and Python refuse to change those paths too, whatever policy
+permits.
+
+**Rejected.** A `box.toml` key that names a root file: it adds a frozen key and makes the operator
+export a root the host already trusts. The operating system's own verifier: on macOS it drops the
+built-in roots, and its revocation checks reach the network outside policy.
+
+**Cost.** Each root the host trusts can vouch for any host that policy permits, and a re-signing proxy
+reads every credential the gateway adds. A `box.toml` grant over a hard link elsewhere to a root file
+is not judged. On macOS, a set `SSL_CERT_FILE` replaces the keychain.
 
 <a id="a-remote-mcp-tool-call-passes-a-second-gate"></a>
 ### A remote MCP tool call passes a second gate after the transport gate
@@ -2381,12 +2439,12 @@ re-routed request AFTER it rewrites the `Host` to the backend and joins the path
 covers exactly the bytes the backend receives, under the service and region the `aws://` auth states
 ([where a re-route signs a backend auth](#where-a-re-route-signs-a-backend-auth-of-aws)). The backend
 host is a gateway or custom domain with no derivable scope, so the `aws://` auth states an explicit
-`aws.service` and `aws.region`, which the loader requires — Box never guesses a vendor's host shape.
+`aws.service` and `aws.region`, which the loader requires. Box never guesses a vendor's host shape.
 A `credsd://` backend `auth` stays refused (out of scope); an
 `auth` on a plaintext `http` backend is refused, because a credential must ride TLS; and a signed
 destination `secret` beside a backend is refused, because it mints no phantom to strip. Because the
 box never reads the destination secret's value, a re-routed entry launches with
-its variable unset — the case a backend exists for. When one `env://` variable is named by both a
+its variable unset, which is the case a backend exists for. When one `env://` variable is named by both a
 re-routed entry and a direct entry, the workload holds one placeholder: the direct route's
 Strict-checked phantom, which the re-routed host's unconditional strip removes just the same. The
 cost: a backend authenticates with an `env://` box-owned token or an `aws://` signature over the
@@ -2403,31 +2461,30 @@ crate's `box_owned_route_attaches_the_real_secret_with_no_phantom`,
 <a id="where-a-re-route-signs-a-backend-auth-of-aws"></a>
 ### A re-route signs an `aws://` backend auth in the gateway, after the Host rewrite, over the backend host
 
-A backend `auth` of `aws://` signs the request the backend receives, so the signature must cover the
-backend host, the joined path, the sent headers (including the rewritten `Host`), and the body hash.
-The gateway signs it in `run_l7_legs` AFTER it rewrites the `Host` to the backend and builds the
-forwarded target, and BEFORE it serializes the request — the one point where the bytes that leave are
-final. The box lowers the `aws://` auth to a signed route keyed on the backend host, held in the
-backend vault; the gateway applies it with an `Outbound` whose host is the backend, so the existing
-in-boundary SigV4 signer covers the backend host. The service and region are **stated explicitly** on
-the auth (`aws.service`, `aws.region`), carried on the route (`RouteSpec::aws_scope`) and used by the
-signer verbatim — a backend is a gateway or custom domain whose host carries no derivable scope, and
-inferring it would mean encoding each AWS product's host shape in Box. Host derivation
-(`derive_service_region`) stays only for an ordinary AWS destination, whose host is standard.
-Signing per request keeps expiring credentials fresh, and the inbound signing artifacts are
-stripped first, as for a destination signature. The signer covers only the headers that leave:
-`content-length` is left unsigned because the forwarding layer owns it — it refreshes the value and
-omits the header entirely on a bodyless request — so signing the workload's value would attest a
-header the request may not send, which a strict verifier rejects. Signing before the rewrite was rejected: the `Host`
-is a signed header, so signing while the request still names the original destination and then
-rewriting it desynchronizes the signature from the bytes sent. Signing in the box was rejected: only
-the gateway holds the per-request bytes. The env:// box-owned backend token keeps its pre-rewrite
-attach, because a static token does not depend on the `Host`. The limit: the signature covers the
-backend host as written in `backends.url`, so a future URL rewrite that changes the sent host must
-re-derive the service and region from the rewritten host.
-`a_backend_aws_auth_signs_over_the_backend_host`,
-`an_aws_backend_auth_without_an_explicit_scope_is_refused`, and the credentials crate's
-`a_gateway_host_is_not_derived_and_needs_an_explicit_scope` pin it.
+The gateway signs an `aws://` backend auth after it rewrites the `Host` to the backend and joins the
+path, so the signed `Host` and path are the ones the backend receives. As for a destination
+signature, it resolves the credentials for each request and strips the inbound signing headers
+before it signs. Eight headers that the gateway sends stay out of the signature. The gateway writes
+`Content-Length` and `Connection` itself when it forwards the request, so a signature over the
+workload's values could cover a value that isn't sent. `X-Amzn-Trace-Id`, `traceparent`,
+`tracestate`, `baggage`, `User-Agent`, and `Expect` can change between the box and AWS. For example,
+X-Ray rewrites `X-Amzn-Trace-Id` in transit, so a signature over it fails at an AgentCore Gateway.
+These six are among the 14 headers that botocore doesn't sign. The rest of the 14 are hop-by-hop
+headers, which the gateway removes before it signs. `Connection` is in both groups: the gateway
+removes the workload's value before it signs and writes its own when it forwards. An `env://`
+backend token still attaches before the rewrite, because a static token doesn't depend on the
+`Host`.
+
+**Rejected.** The earlier design signed every header that leaves except `Content-Length` and
+`Connection`, and an AgentCore Gateway refused each call that carried a trace header. Signing before
+the rewrite would sign the original destination as the `Host`, so the signature wouldn't match the
+bytes sent. Signing in the box instead of the gateway can't work, because only the gateway holds the
+bytes of each request.
+
+**Cost.** A proxy or a service that terminates TLS between the box and AWS can change an unsigned
+header, and the signature still verifies. The list is a copy of botocore's, so it must follow
+botocore's changes. The signature covers the backend host as written in `backends.url`, so a future
+URL rewrite that changes the sent host must derive the service and region again.
 
 ## Credentials
 
@@ -2572,7 +2629,7 @@ plaintext; and a workload with write access to `~/.aws` can name a `credential_p
 trusted process runs outside the sandbox, which is remote code execution
 ([how access choices change the risk](limitations.md#how-access-choices-change-the-risk)). This
 residual now covers a named profile as well as the bare form. The bare form also signs with the
-host's ambient identity, so the box warns on every such request; `require_scoped_aws_profile` refuses
+host's ambient identity, so the box warns once at startup; `require_scoped_aws_profile` refuses
 the bare form, but it does not gate a named profile that declares `credential_process`. The one
 mitigation that covers both is keeping `~/.aws` unwritable by the workload.
 
