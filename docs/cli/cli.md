@@ -1,8 +1,3 @@
----
-reader: Someone who knows which box command they want and needs its usage, its flags, or the output it prints.
-belongs: Each command, its flags, and the output a reader acts on, plus the BOX_* variables that box reads and its exit status. What a profile, pack, starter, or policy is goes to its topic page, the files under ~/.strands/box go to files.md, and a fix after an error goes to troubleshooting.md.
----
-
 # box command reference
 
 This page lists every `box` command, its flags, and the output you use. `box <command> --help`, or
@@ -57,8 +52,23 @@ box run [<profile>] [--box-id <box ID>] [--banner | --no-banner] [-- <agent argu
 | `--banner` | Show the banner, even when the profile or `~/.strands/box/config.toml` turns it off. |
 | `-- <agent arguments>` | Pass the rest of the line to the agent. `box run claude -- --continue` continues Claude Code's last conversation. |
 
-When the box starts, `box` prints the run's box ID. Keep it to run in the same box again or to see
-what the box denied:
+Once the terminal session starts, with or without the banner, `box` shows recent Box errors on exit,
+then a short summary of the run:
+
+```text
+box: run b-5b8e3d70c92f14ab ended
+  startup disclosure · 0 more messages
+  log      /Users/you/.strands/box/r/b-5b8e3d70c92f14ab/box.log
+  history  box runs history b-5b8e3d70c92f14ab
+  reuse    box run claude --box-id b-5b8e3d70c92f14ab
+```
+
+Box Core's startup disclosure, which names every grant the box gives the agent and its tools, is in
+the [log](files.md#profile-storage-and-runs). The messages are the other Box lines in the log that
+the summary didn't show. A new run that fails before its box starts shows only the errors.
+
+If input or output is redirected, including stderr, or `TERM=dumb`, `box` prints the box ID and
+these commands at startup:
 
 ```text
 box: running profile claude with box ID b-5b8e3d70c92f14ab (records: /Users/you/.strands/box/r/b-5b8e3d70c92f14ab/records.jsonl)
@@ -116,8 +126,8 @@ The file can list a [plugin](plugins.md), but it can't declare a secret source o
 ### Run in the same box again
 
 Each run gets a new box, so a rule such as "at most 50 model calls an hour" starts counting from
-zero. To keep counting, pass the box ID of an earlier run of the same profile, from the startup
-lines or [`box runs list`](#box-runs-list). A box ID doesn't name its profile, so match the
+zero. To keep counting, pass the box ID of an earlier run of the same profile, from the run's
+output or [`box runs list`](#box-runs-list). A box ID doesn't name its profile, so match the
 `PROFILE` column before you copy the `BOX ID`:
 
 ```sh
@@ -177,7 +187,7 @@ box profile edit <name>
 ## box profile show
 
 Check what a run will get, before you run it: the packs, each option and where its value came
-from, and notes about anything the run leaves out. Run it in your project, because some values
+from, and notes about anything the run leaves out. Run it in your project folder, not your home folder, because some values
 depend on the folder you're in. It starts no box and changes nothing in storage.
 
 ```sh
@@ -413,12 +423,12 @@ box runs list [<profile>] [--format json]
 | Flag | What it does |
 | --- | --- |
 | `<profile>` | Show only this profile's runs: the same boxes that [`box profile clean`](#box-profile-clean) removes for it. For a profile file, give the name in its `[profile]` table. |
-| `--format json` | Print one JSON array, for a script. Each object has `profile`, `updated`, and `id`. |
+| `--format json` | Print one JSON array, for a script. Each object has `profile`, `updated`, and `id`. `updated` keeps its nanoseconds. |
 
 ```text
 PROFILE	UPDATED (UTC)	BOX ID
-claude	2026-11-11T21:50:13.462635241Z	b-5b8e3d70c92f14ab
-claude	2026-11-11T21:50:12.342654166Z	b-287e61a2d05c93b7
+claude	2026-11-11T21:50:13Z	b-5b8e3d70c92f14ab
+claude	2026-11-11T21:50:12Z	b-287e61a2d05c93b7
 ```
 
 The most recently updated run comes first. The list holds runs that are still going and runs that
@@ -446,11 +456,11 @@ box runs history <box ID> [--deny | --would-deny] [--action <action>] [--resourc
 | `--resource <text>` | Show operations whose file or host contains this text, such as `/private` or `github.com`. |
 | `--since <time>` | Show operations at or after a time, such as `2026-11-11T12:26:41Z`. |
 | `--tail <count>` | Show only the last `count` matches. |
-| `--format json` | Print one JSON array, for a script. Each object has `time`, `result`, `enforced`, `action`, `resource`, `rule`, and `reason`. |
+| `--format json` | Print one JSON array, for a script. Each object has `time`, `result`, `enforced`, `action`, `resource`, `rule`, and `reason`. `time` keeps its nanoseconds. |
 
 ```text
 TIME (UTC)	RESULT	ACTION	RESOURCE	RULE	REASON
-2026-11-11T12:26:41.123456789Z	deny	fs:read	/private/file	<default-deny>	no permit matched
+2026-11-11T12:26:41Z	deny	fs:read	/private/file	<default-deny>	no permit matched
 ```
 
 The `RULE` column names the rule that decided, by its `@id`
@@ -464,8 +474,8 @@ you turn policy off or on, or apply a policy edit. Its `RESULT` is `installed` o
 
 ```text
 TIME (UTC)	RESULT	ACTION	RESOURCE	RULE	REASON
-2026-11-11T12:30:02.481516234Z	installed	policy	policy off	-	-
-2026-11-11T12:31:40.112358132Z	installed	policy	policy.dw	-	-
+2026-11-11T12:30:02Z	installed	policy	policy off	-	-
+2026-11-11T12:31:40Z	installed	policy	policy.dw	-	-
 ```
 
 ## box telemetry

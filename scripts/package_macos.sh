@@ -91,8 +91,7 @@ for version in (box["version"], core["version"]):
     if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version):
         sys.exit("package_macos.sh: release versions must use x.y.z")
 record = dict(box_version=box["version"], box_commit=sys.argv[2],
-              core_version=core["version"], core_commit=core_commit, target="aarch64-apple-darwin",
-              macos_minimum_version="27.0")
+              core_version=core["version"], core_commit=core_commit, target="aarch64-apple-darwin")
 (work / "payload/release.json").write_text(json.dumps(record, indent=2) + "\n")
 (work / "version").write_text(box["version"])
 (work / "target").write_text(metadata["target_directory"])
@@ -103,7 +102,7 @@ set --
 if [ "$box_native" = true ]; then
     set -- --features strands-box-cli/native-filesystem-policy
 fi
-MACOSX_DEPLOYMENT_TARGET=27.0 cargo build --release --locked --target aarch64-apple-darwin \
+MACOSX_DEPLOYMENT_TARGET=15.0 cargo build --release --locked --target aarch64-apple-darwin \
     -p strands-box-cli -p strands-box -p strands-box-containment \
     --bin box --bin strands-box-sock-alias --bin strands-box-contain-trampoline "$@"
 for box_binary in box strands-box-sock-alias strands-box-contain-trampoline; do

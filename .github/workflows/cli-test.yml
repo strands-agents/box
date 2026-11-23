@@ -111,12 +111,11 @@ jobs:
     if: inputs.macos
     permissions:
       contents: read
-    runs-on: xcode-27
+    runs-on: macos-latest
     timeout-minutes: 60
     env:
       # The checks' runs send no telemetry.
       BOX_TELEMETRY: "0"
-      MACOSX_DEPLOYMENT_TARGET: "27.0"
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -227,7 +226,7 @@ jobs:
     if: inputs.macos && inputs.package && inputs.suite == 'all'
     permissions:
       contents: read
-    runs-on: xcode-27
+    runs-on: macos-15
     timeout-minutes: 40
     steps:
       - name: Checkout code
@@ -239,7 +238,7 @@ jobs:
       - name: Check build host
         run: |
           test "$(uname -m)" = arm64
-          test "$(sw_vers -productVersion | cut -d. -f1)" -ge 27
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 15
 
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal
@@ -298,7 +297,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [xcode-27]
+        os: [macos-15, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:

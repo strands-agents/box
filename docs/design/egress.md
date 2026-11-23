@@ -293,7 +293,7 @@ forward each request. The route specifies which credential to add and grants no 
 |---|---|---|
 | An environment variable | `env://NAME` | Reads `NAME` from the environment of `box run` once, at startup, and swaps it in for a placeholder |
 | An AWS profile | `aws://PROFILE` | Signs each request with SigV4, resolving the named profile through the AWS SDK |
-| The AWS default chain | `aws://` (no profile) | Signs each request with SigV4, from the AWS SDK default credential provider chain (the host's ambient identity), and warns on every signed request |
+| The AWS default chain | `aws://` (no profile) | Signs each request with SigV4, from the AWS SDK default credential provider chain (the host's ambient identity), with a [warning](../user/egress.md#credential-sources) |
 
 ### The placeholder swap
 
@@ -349,7 +349,7 @@ request, and the gateway replaces the signature.
 
 Both forms resolve through the AWS SDK: `aws://PROFILE` resolves only the named profile (never the
 ambient env keys or instance metadata, and a missing profile is refused), and a bare `aws://`
-resolves the default chain, the host's ambient identity, which the box warns about on every request.
+resolves the default chain, the host's ambient identity, with a [warning](../user/egress.md#credential-sources).
 The decision
 [Both aws:// forms resolve through the AWS SDK and share one risk](decisions.md#a-bare-aws-resolves-the-default-credential-chain)
 states both forms and the writable-`~/.aws` cost.

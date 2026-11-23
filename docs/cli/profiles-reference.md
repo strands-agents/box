@@ -1,8 +1,3 @@
----
-reader: Someone who writes or reads a profile, knows the key or table they want, and needs what it does and which file may hold it.
-belongs: A key or table that a profile writes, and the rules that profiles and packs share, such as placeholders, when, and the merge. A rarer task goes here too, under the key it uses. A key that only a pack writes goes to packs-reference.md, a task that most users need in their first month goes to profiles.md, and a fix after an error goes to troubleshooting.md.
----
-
 # Profile reference
 
 This page lists every key that a `profile.toml` can hold, and what each one does. Packs write many
@@ -391,8 +386,8 @@ signs with the first credentials that the AWS SDK finds outside the box, in this
 4. The ECS or EKS container credentials endpoint.
 5. EC2 instance metadata.
 
-So on a cloud machine, `aws://` can sign as the machine's own role. The box prints a warning on
-each request it signs this way.
+So on a cloud machine, `aws://` can sign as the machine's own role. The box prints a
+[warning](../user/egress.md#credential-sources) about it.
 
 Neither form signs with an AWS SSO or `aws login` profile
 ([AWS credentials resolve to nothing](troubleshooting.md#aws-credentials-resolve-to-nothing)).
@@ -576,8 +571,7 @@ With native filesystem policy, your policy also decides the file operations that
 tools, and its local MCP servers make directly, on top of their filesystem grants. It needs a
 `box` built with the `native-filesystem-policy` Cargo feature, and:
 
-- On macOS: macOS 27 or later, and a `box` built with the macOS 27 SDK or later, with a valid
-  signature and Apple's Endpoint Security entitlement.
+- On macOS: the [native policy requirements](../user/native-filesystem-policy.md#macos-requirements).
 - On Linux: an ARM64 machine with the required kernel support, and the `CAP_BPF` and
   `CAP_PERFMON` capabilities for `box`, which a normal install does not give it. Linux x86-64
   refuses selection.
@@ -585,6 +579,9 @@ tools, and its local MCP servers make directly, on top of their filesystem grant
 See the
 [prerequisites in Box's own guide](../user/native-filesystem-policy.md)
 and the [build instructions](../dev/manual-testing.md#build-the-native-filesystem-policy-experiment).
+
+These prerequisites apply only when you enable this feature. With it disabled, the
+[standard installation requirements](install.md#requirements) apply.
 
 Turn it on in `profile.toml`. Only a profile holds this table:
 

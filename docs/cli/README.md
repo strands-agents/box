@@ -1,4 +1,4 @@
-# Box user guide
+# Box CLI guide
 
 Box runs a coding agent, such as Claude Code, in a box on your machine. The agent can change files
 in your project and reach what your profile allows, and the box stops everything else. This guide
@@ -91,6 +91,7 @@ fixes keeps them in a README, linked here.
 - [`@box/bedrock`](../../resources/packs/bedrock/README.md): Amazon Bedrock
 - `@box/bedrock-mantle`: Amazon Bedrock's OpenAI-compatible endpoint, for Codex
 - `@box/anthropic`: the Anthropic API
+- [`@box/claude-subscription`](../../resources/packs/claude-subscription/README.md): a claude.ai subscription, for Claude Code
 - `@box/openai`: the OpenAI API, for Codex
 
 **Tools**
@@ -105,6 +106,7 @@ fixes keeps them in a README, linked here.
 - [`@box/npx`](../../resources/packs/npx/README.md)
 - [`@box/pnpm`](../../resources/packs/pnpm/README.md)
 - [`@box/pnpx`](../../resources/packs/pnpx/README.md)
+- [`@box/rg`](../../resources/packs/rg/README.md)
 - [`@box/uv`](../../resources/packs/uv/README.md)
 - [`@box/uvx`](../../resources/packs/uvx/README.md)
 - [`@box/yarn`](../../resources/packs/yarn/README.md)

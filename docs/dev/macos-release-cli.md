@@ -38,18 +38,13 @@ filesystem policy into the Apple Silicon macOS and ARM64 Linux packages. The opt
 publishing. The x86_64 Linux job keeps its baseline build, so this path does not produce a
 native-enabled x86_64 package.
 
-macOS packages require macOS 27 or later, including when native enforcement is off. Builds and
-package checks use the `xcode-27` runner, and release binaries use `MACOSX_DEPLOYMENT_TARGET=27.0`.
-Both package producers write `macos_minimum_version: "27.0"` in `release.json`. See the
-[installer requirements](../cli/install.md#requirements) for version checks and older releases.
-When native support is selected, both the workflow and the
-local package script require macOS software development kit (SDK) version 27 or later before they build. They resolve
+The native macOS build uses the `xcode-27` runner. Both the workflow and the local package script
+require macOS software development kit (SDK) version 27 or later before they build. They resolve
 the SDK named by `SDKROOT`, if set,
 or `macosx` from the selected developer tools otherwise. They reject a missing SDK or an invalid
 or older version, then export the resolved absolute `SDKROOT` for Cargo. This keeps the SDK check
 and Core's C compilation on the same SDK, including when the caller sets `DEVELOPER_DIR`.
-The same minimum applies when `native_filesystem_policy=false`. That input omits native support;
-it does not select an older macOS baseline.
+Builds without the native option keep their existing runner and SDK selection.
 
 The option selects the CLI's `strands-box-cli/native-filesystem-policy` Cargo feature. It does
 not enable policy enforcement for every run. Each `profile.toml` must still select
@@ -66,7 +61,8 @@ and SHA-256 hash of the unsigned build archive. The macOS record also includes
 `macos_sdk_version`, the SDK version checked and selected for the build. The x86_64 record has an
 empty feature list.
 The record sets `runtime_qualified` to `false`: it is build evidence, not an enforcement test
-result. It stays outside the package, separate from the installation metadata in `release.json`. When `sign_macos=true`, the signing receipt records the signed archive's hash separately.
+result. It stays outside the package so the payload and `release.json` keep their existing
+format. When `sign_macos=true`, the signing receipt records the signed archive's hash separately.
 The existing signing environment and source restrictions still apply. The native signing path
 uses the shared [distribution profile](macos-release.md#configure-access). Signing and verification
 reject a missing or mismatched profile.

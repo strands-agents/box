@@ -1859,7 +1859,7 @@ mod tests {
             if libc::setresgid(!0, !0, !0) != 0 {
                 return 11;
             }
-            if libc::setresgid(!0, 0, !0) != -1
+            if libc::setresgid(!0, 1, !0) != -1
                 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
             {
                 return 12;
@@ -2543,7 +2543,7 @@ mod tests {
                 let credential_widening_refused = unsafe {
                     let uid_refused = libc::setresuid(0, 1, 0) == -1
                         && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-                    let gid_refused = libc::setresgid(!0, 0, !0) == -1
+                    let gid_refused = libc::setresgid(!0, 1, !0) == -1
                         && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
                     uid_refused && gid_refused
                 };

@@ -438,6 +438,28 @@ class ReleaseBundleTests(unittest.TestCase):
                 else:
                     self.assertEqual((root / "run.log").read_text(), "started\n")
 
+    def test_the_release_page_names_the_installer_repository_only_for_another_repository(self):
+        for repository, named in [("strands-agents/box", False), ("example/box", True)]:
+            for prerelease in ("true", "false"):
+                with self.subTest(repository=repository, prerelease=prerelease), \
+                        tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    environment = {
+                        **os.environ, "NEW_TAG": "v0.3.0-preview.1", "LINUX_PREVIEW": "false",
+                        "PRERELEASE": prerelease, "PUBLISH_LINUX_X86": "true",
+                        "GITHUB_REPOSITORY": repository,
+                    }
+                    composed = subprocess.run(
+                        ["bash", "-c", workflow_command("Compose release body (install block)")],
+                        cwd=root, env=environment, capture_output=True, text=True,
+                    )
+                    self.assertEqual(composed.returncode, 0, composed.stdout + composed.stderr)
+                    body = (root / "body.md").read_text()
+                    self.assertEqual("BOX_GITHUB_REPO" in body, named)
+                    installer = f"curl -fsSL https://raw.githubusercontent.com/{repository}/main/install.sh |"
+                    setting = f"BOX_GITHUB_REPO={repository} " if named else ""
+                    self.assertIn(f"{installer} {setting}BOX_VERSION=0.3.0-preview.1 sh\n", body)
+
     def test_collection_requires_all_built_archives(self):
         triples = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
         for publish_x86 in [False, True]:
@@ -572,7 +594,7 @@ class ReleaseBundleTests(unittest.TestCase):
                 self.assertEqual("BOX_GITHUB_REPO=example/box sh" in body, not preview)
                 self.assertIn(f"BOX_GITHUB_REPO=example/box BOX_VERSION={tag[1:]} sh", body)
                 self.assertLess(body.index("## Install box"), body.index("## Download Box Core"))
-                support = "macOS 27 or later on Apple silicon"
+                support = "macOS 15 or later on Apple silicon"
                 self.assertIn(support + (", ARM64 Linux, and x86-64 Linux" if publish_x86
                                          else " and ARM64 Linux"), body)
                 self.assertNotIn("experimental", body.lower())

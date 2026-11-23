@@ -117,7 +117,7 @@ fn tools_name_shipped_packs_and_npm_brings_node() {
         .create()
         .expect_err("base is no tool pack");
     assert!(
-        matches!(&error, Error::UnknownTool { known, .. } if known == "bunx, cargo, gh, git, go, node, npm, npx, pnpm, pnpx, uv, uvx, yarn"),
+        matches!(&error, Error::UnknownTool { known, .. } if known == "bunx, cargo, gh, git, go, node, npm, npx, pnpm, pnpx, rg, uv, uvx, yarn"),
         "{error}"
     );
 }

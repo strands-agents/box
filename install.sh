@@ -677,24 +677,6 @@ if [ "$box_system" = Darwin ]; then
     box_metadata="$box_work/metadata.plist"
     plutil -create xml1 "$box_metadata"
     plutil -insert release -json "$(cat "$box_payload/release.json")" "$box_metadata" || die "invalid release.json"
-    # Older archives omit this field and retain their original macOS 15 minimum.
-    # Inspect only the checksum-verified package, before running any bundled program.
-    box_minimum=15.0
-    if plutil -type release.macos_minimum_version "$box_metadata" >/dev/null 2>&1; then
-        box_minimum=$(metadata macos_minimum_version) || die "invalid macos_minimum_version"
-    fi
-    case "$box_minimum" in ''|*[!0-9.]*) die "invalid macos_minimum_version" ;; esac
-    awk -v minimum="$box_minimum" 'BEGIN {
-        exit !(minimum ~ /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?$/ &&
-               split(minimum, parts, ".") >= 2 && parts[1] >= 15)
-    }' || die "invalid macos_minimum_version"
-    awk -v installed="$box_os" -v minimum="$box_minimum" 'BEGIN {
-        split(installed, host, "."); split(minimum, required, ".")
-        for (i = 1; i <= 3; i++) {
-            if (host[i] + 0 > required[i] + 0) exit 0
-            if (host[i] + 0 < required[i] + 0) exit 1
-        }
-    }' || die "release v$box_version requires macOS $box_minimum or later; this Mac runs $box_os; set BOX_VERSION to a compatible earlier release (see https://github.com/strands-agents/box/blob/main/docs/cli/install.md#requirements)"
 fi
 [ "$(metadata box_version)" = "$box_version" ] ||
     die "metadata version does not match $box_version"
@@ -816,9 +798,11 @@ if [ "$box_drawing" -eq 1 ]; then
     printf '\n\033[?25h' >&2
     box_drawing=0
 fi
+box_welcome=1
 if [ -n "$box_previous" ]; then
     box_old_version=${box_previous%-$box_triple}
     if [ "$box_old_version" = "$box_version" ]; then
+        box_welcome=0
         log "box $box_version is already installed."
     else
         log "Updated box $box_old_version to $box_version."
@@ -841,7 +825,9 @@ case ":${PATH-}:" in
         esac
         ;;
 esac
-if [ -z "$box_previous" ]; then
+# Installs and updates both welcome, so an update also shows the commands and the telemetry
+# notice. A rerun of the installed version keeps that release and leaves the welcome out.
+if [ "$box_welcome" -eq 1 ]; then
     printf '\n' >&2
     welcome
 fi

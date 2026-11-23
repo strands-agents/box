@@ -226,7 +226,6 @@ def prepare_native_bundle(programs, kept, destination, version):
     with (app / "Contents/Info.plist").open("wb") as stream:
         plistlib.dump({"CFBundleIdentifier": IDENTIFIERS["box"], "CFBundleExecutable": "box",
                       "CFBundleName": "Box", "CFBundlePackageType": "APPL",
-                      "LSMinimumSystemVersion": "27.0",
                       "CFBundleVersion": version.split("-")[0],
                       "CFBundleShortVersionString": version.split("-")[0]}, stream)
     metadata = destination / "SIGNING_METADATA"

@@ -964,11 +964,16 @@ jobs:
           PUBLISH_LINUX_X86: ${{ needs.scan.outputs.publish_linux_x86 }}
         run: |
           set -euo pipefail
-          platforms="macOS 27 or later on Apple silicon and ARM64 Linux"
+          platforms="macOS 15 or later on Apple silicon and ARM64 Linux"
           if [ "$PUBLISH_LINUX_X86" = "true" ]; then
-            platforms="macOS 27 or later on Apple silicon, ARM64 Linux, and x86-64 Linux"
+            platforms="macOS 15 or later on Apple silicon, ARM64 Linux, and x86-64 Linux"
           fi
           installer="curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh |"
+          # The installer reads this repository by default, so only another repository names it.
+          repository_setting=""
+          if [ "$GITHUB_REPOSITORY" != "strands-agents/box" ]; then
+            repository_setting="BOX_GITHUB_REPO=${GITHUB_REPOSITORY} "
+          fi
           cat > body.md <<EOF
           ## Install box
 
@@ -982,8 +987,7 @@ jobs:
           Install the latest release:
 
           \`\`\`sh
-          ${installer}
-            BOX_GITHUB_REPO=${GITHUB_REPOSITORY} sh
+          ${installer} ${repository_setting}sh
           \`\`\`
 
           EOF
@@ -992,8 +996,7 @@ jobs:
           Install this exact release:
 
           \`\`\`sh
-          ${installer}
-            BOX_GITHUB_REPO=${GITHUB_REPOSITORY} BOX_VERSION=${NEW_TAG#v} sh
+          ${installer} ${repository_setting}BOX_VERSION=${NEW_TAG#v} sh
           \`\`\`
 
           The installer verifies the \`box-cli-\` archive for your platform against \`SHA256SUMS.txt\`, and on macOS its Apple signature, then puts \`box\` on your \`PATH\`.

@@ -824,8 +824,6 @@ class NativeMacOSReleaseTests(unittest.TestCase):
         embedded = Path(__file__).resolve().parents[1] / "crates/cli/app/Info.plist"
         self.assertEqual(plistlib.loads(embedded.read_bytes())["CFBundleIdentifier"],
                          "com.amazon.strands.box")
-        for plist in (app / "Contents/Info.plist", embedded):
-            self.assertEqual(plistlib.loads(plist.read_bytes())["LSMinimumSystemVersion"], "27.0")
         for name in release.BINARIES:
             self.assertEqual((app / "Contents/MacOS" / name).read_bytes(), b"code")
         for name, body in self.files.items():
@@ -1465,7 +1463,7 @@ class WorkflowGateTests(unittest.TestCase):
                             "-fsSL",
                             "https://raw.githubusercontent.com/strands-agents/box/main/install.sh"])
                         self.assertEqual((root / "install-options").read_text().splitlines(),
-                                         ["strands-agents/box", version, "0"])
+                                         ["", version, "0"])
 
 if __name__ == "__main__":
     unittest.main()
