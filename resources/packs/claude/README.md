@@ -18,6 +18,11 @@ one ahead of time.
 `/Library/Application Support/ClaudeCode/`. If your provider is set there, answer the question
 yourself.
 
+## Sign in with a Claude subscription
+
+To run Claude Code on your claude.ai Pro or Max plan instead of an API key, use
+[`@box/claude-subscription`](../claude-subscription/README.md) as the provider.
+
 ## How Claude Code asks before it acts
 
 Claude Code in the box starts with the permission settings from your machine. The first time you
@@ -307,16 +312,15 @@ on your machine after that first run don't come into the box. To bring them in, 
 `agent/config/settings.json` from the storage folder that `box profile show` prints, and the next
 run copies your file again.
 
-With the Anthropic API (`claude.host = "anthropic"`), the `@box/anthropic` route reaches
-`api.anthropic.com`, so the check stays on. A profile that you move from Bedrock to the Anthropic
-API keeps the setting from its earlier runs. To turn the check back on, remove
+With the Anthropic API (`claude.host = "anthropic"`), the box lets Claude Code reach
+`api.anthropic.com`, with an API key or a subscription, so the check stays on. A profile that you
+move from Bedrock to the Anthropic API keeps the setting from its earlier runs. To turn the check
+back on, remove
 `skipWebFetchPreflight` from `agent/config/settings.json` in the storage folder that
 `box profile show` prints.
 
 ## Limitations
 
-- Signing in with a claude.ai subscription doesn't work in a box. Use an Anthropic API key
-  (`@box/anthropic`) or Amazon Bedrock (`@box/bedrock`).
 - If your organization deploys `managed-mcp.json`, Claude Code uses only the MCP servers it lists,
   and those servers don't work in the box yet. Your own servers from `~/.claude.json` don't load
   either, because the policy turns them off.

@@ -1355,3 +1355,54 @@ fn a_claude_box_on_the_anthropic_api_keeps_webfetchs_domain_lookup_and_routes_it
         "Claude Code asks api.anthropic.com/api/web/domain_info before each WebFetch"
     );
 }
+
+#[test]
+fn the_claude_starter_offers_a_subscription_that_adds_its_pack_and_the_anthropic_host() {
+    let host = FakeHost::new();
+    let created = host
+        .profile()
+        .name("claude")
+        .with("claude")
+        .with("claude-subscription")
+        .policy("open")
+        .answer(None)
+        .expect("answered by --with")
+        .create()
+        .expect("a profile");
+    let file: toml::Table = toml::from_str(created.text()).expect("TOML");
+    assert_eq!(
+        strings(&file["packs"])[..2],
+        ["@box/claude", "@box/claude-subscription"],
+        "{}",
+        created.text()
+    );
+    assert!(
+        !created.text().contains("@box/anthropic"),
+        "{}",
+        created.text()
+    );
+    assert_eq!(
+        file["options"]["claude"]["host"].as_str(),
+        Some("anthropic"),
+        "{}",
+        created.text()
+    );
+    created.write(false).expect("a write");
+    let mut input: &[u8] = &[b'\n'; 32];
+    let mut output = Vec::new();
+    let edited = host
+        .profile()
+        .edit("claude")
+        .expect("an edit")
+        .answer(Some(Terminal::new(&mut input, &mut output)))
+        .expect("Enter keeps each answer")
+        .create()
+        .expect("a profile");
+    let shown = String::from_utf8_lossy(&output);
+    assert!(shown.contains("A Claude subscription"), "{shown}");
+    assert!(
+        edited.text().contains("@box/claude-subscription"),
+        "the edit keeps the subscription: {shown}\n{}",
+        edited.text()
+    );
+}
