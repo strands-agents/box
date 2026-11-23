@@ -605,6 +605,12 @@ pub(crate) fn still_chosen(real: &Path, resolved: &Resolved) -> Result<(), Strin
 
 /// The package manager whose launcher `box` does not resolve, by the launcher's real file.
 pub(crate) fn unsupported_launcher(real: &Path) -> Option<&'static str> {
+    if real.file_name().is_some_and(|name| name == "volta-shim") {
+        return Some("Volta");
+    }
+    if crate::program::shebang(real).is_empty() {
+        return None;
+    }
     let text = real.to_string_lossy();
     if text.contains("/node_modules/.pnpm/") {
         return Some("pnpm");
@@ -2156,6 +2162,19 @@ mod tests {
             "#!/usr/bin/env node\n",
         );
         assert_eq!(unsupported_launcher(&npm), None);
+        for native in [
+            ".bun/install/global/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex",
+            "Library/pnpm/global/5/node_modules/.pnpm/@openai+codex-linux-x64@0.171.0/node_modules/@openai/codex-linux-x64/bin/codex",
+            ".volta/tools/image/packages/@openai/codex/lib/node_modules/@openai/codex/bin/codex",
+        ] {
+            let path = root.join(native);
+            crate::fixtures::binary(&path);
+            assert_eq!(
+                unsupported_launcher(&path),
+                None,
+                "a native program: {native}"
+            );
+        }
     }
 
     #[test]

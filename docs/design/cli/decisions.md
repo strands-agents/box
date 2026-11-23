@@ -499,8 +499,7 @@ servers get every layout. The npm read boundary includes the containing `node_mo
 dependencies beside the package are readable. A layout can also resolve which file is the
 program: a `program` input's `installation = ["npm"]` replaces an npm launcher with the native
 program of its platform package, from npm's own metadata and the package's entry point, and adds
-no read. **Updated:** 2026-11-23, so that an agent pack names npm's launcher layout instead of
-its paths.
+no read.
 
 **Rejected.** Installation packs: matching rules add fields and patterns that can overgrant,
 while a pack that only names a layout repeats its name. Per-package grants from manifests:

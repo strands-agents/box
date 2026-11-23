@@ -232,7 +232,7 @@ as Homebrew in Codex's update messages. Bundled voice and its resources are not 
 | Installed with | In a box |
 | --- | --- |
 | npm (`npm i -g`) | Runs the program of the platform package for this machine. |
-| pnpm, Volta, Yarn Classic, Bun | Refused: `a launcher of <manager>, which box does not resolve to its program`. |
+| pnpm, Volta, Yarn Classic, Bun | Its launcher is refused: `a launcher of <manager>, which box does not resolve to its program`. Set `codex.path` to Codex's own program in that install. |
 | Codex's own program from its release page | Runs. |
 
 If the box says `npm installed @openai/codex without a platform package for ...`, install the npm
