@@ -175,9 +175,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   caller wanting determinism passes an absolute program path).
 
   **`tests/four_inputs.rs` is the guard.** It asserts both halves: no withheld flag is a box
-  argument, and `ConfigFile` carries exactly **fourteen** keys: `agent`, `box_dir`, `egress`, `mcp`,
+  argument, and `ConfigFile` carries exactly **fifteen** keys: `agent`, `box_dir`, `egress`, `mcp`,
   `name`, `policy`, `secret-source`, `telemetry`, `tool`, `experimental-features`,
-  `file-attributes`, `limits`, `gateway`, and `monty`. That is the `box.toml` key set, and it is
+  `file-attributes`, `limits`, `gateway`, `monty`, and `locations`. That is the `box.toml` key set, and it is
   **not** the stored `Record`'s key set: `Record` adds `version` and `box_id`, which no operator
   authors. Read
   which one a passage means before you change a count. The withheld-flag guard is split in two —
@@ -264,13 +264,15 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   about one box. **Do not reintroduce `--name`**; reconciling a flag against the file is the shape in
   which the file's key became silently dead once already.
 
-  **`box.toml` carries fourteen top-level keys: `name`, `box_dir`, `policy`, `[agent]`,
+  **`box.toml` carries fifteen top-level keys: `name`, `box_dir`, `policy`, `[agent]`,
   `[tool.<label>]`, `[egress.<name>]`, `[secret-source.<scheme>]`, `[mcp.<name>]`,
-  `[telemetry.<kind>]`, `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.** The experimental settings select native file
+  `[telemetry.<kind>]`, `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, `monty`, and `[locations]`.** The experimental settings select native file
   checks, tool grammars, ingress, and secret sources. They add no authority beyond the authored policy. `file-attributes` adds
   no grant: it widens what the workload's own `write` lists allow on macOS, so it is part of the
   workload input, and each process discloses it. `[gateway] upgrade_http` adds no grant either:
-  policy decides each upgraded request on port 443, as it decides a `CONNECT` to that host. `[agent]` and each
+  policy decides each upgraded request on port 443, as it decides a `CONNECT` to that host.
+  `[locations]` adds no grant: it names directories for the `locations` field of the `fs:*`
+  actions, and policy still decides each request. `[agent]` and each
   `[tool.<label>]` hold one `ProcessSpec`, which is six fields — `command`, `workspace`, `env`,
   `filesystem`, `native-filesystem-policy`, and `grammar`. Only a `[tool.<label>]` takes
   `grammar`, behind `[experimental-features] tool-grammars`, and `[agent]` refuses it. `filesystem` holds the path lists: nine for `[agent]`, seven

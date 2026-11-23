@@ -8,7 +8,7 @@ directory a name in `box.toml`, and write the policy against that name instead.
 ```toml
 # box.toml
 [locations]
-project = ["/Users/dev/src/app"]
+project = ["~/src/app"]
 ```
 
 ```text
@@ -46,37 +46,43 @@ characters in it can change what a rule means, so every value would have to be e
 
 ```toml
 [locations]
-project = ["/Users/dev/src/app"]
+project = ["~/src/app"]
 caches = ["~/.cache/my-agent", "~/.npm"]
 ```
 
 - Each key is a name. Each value is a list of one or more directories.
 - A name starts with a letter and holds only letters, digits and `_`, so a rule can write
-  `locations.my_cache`. Cedar's reserved words, such as `if` and `in`, aren't allowed.
-- A directory is an absolute path or starts with `~/`.
-- An empty list is an error, because the name would label nothing.
+  `locations.my_cache`. A name is at most 64 characters long. Cedar's reserved words, such as
+  `if` and `in`, aren't allowed.
+- A directory is written the way `context.input.path` spells a path: `~` for the whole home,
+  `~/…` below it, and an absolute path elsewhere.
+- An empty list is an error, because the name would label nothing. Listing the same directory
+  twice in one location is an error too.
 - Without a `[locations]` table, every file request carries an empty `locations`, and a policy
   that doesn't mention locations works as it does today.
 
-Box resolves each directory once, when it loads the policy, with the same rule it uses for a
-file's path. So `/Users/dev/src/app` and `~/src/app` name the same place, and a directory reached
-through a symlink, such as `/tmp/work` on macOS, matches the files under `/private/tmp/work`.
+Box doesn't resolve a directory (D6). When it loads the policy, it refuses one written
+differently from how a path in it is reported, and gives the spelling to write in one message:
 
-- **A directory that doesn't exist yet** is fine. Box resolves its nearest existing parent and adds
-  the missing names back, so `~/.cache/my-agent` matches once the agent creates it.
-- **A directory Box can't resolve** stops the box from starting, and the error names the location.
-  That covers a broken symlink, a folder Box has no permission to search, and a path that is a
-  file.
+- `/Users/dev/src/app`, under the home: write `~/src/app`.
+- `/tmp/work` on macOS, through a symlink: write `/private/tmp/work`.
+- `/Users`, which holds the home: a file in the home is spelled `~/…` and falls outside it, so add
+  `~` to include the home, or list the folders you mean, such as `/Users/Shared`.
+
+A directory that doesn't exist yet is fine when the folder it would be created in passes the same
+checks, so `~/.cache/my-agent` matches once the agent creates it. A directory Box can't check,
+such as a broken symlink, a folder Box has no permission to search, or a file, stops the box from
+starting, and the error names the location.
 
 ## 3. How does Box decide which locations a file is in?
 
-A file is in a location when it's one of the location's directories, or anywhere inside one.
+A file is in a location when its `context.input.path` is one of the location's directories, or
+anywhere inside one. That is exactly the rule an author would write by hand (D6).
 
-- **Whole folder names only.** `/work-old/notes.md` is not in `/work`. Box already checks paths
-  this way (`a_sibling_with_a_shared_prefix_is_not_inside_the_root`).
-- **Same path the rule already sees.** Box checks the path after following symlinks, the same path
-  that `context.input.path` holds. So a location and a path rule never disagree about where a file
-  is.
+- **Whole folder names only.** `/work-old/notes.md` is not in `/work`.
+- **Same text the rule already sees.** Box compares the text in `context.input.path`, which is the
+  path after following symlinks. A request and its recorded response carry the same text, so they
+  always agree.
 - **A file can be in several locations.** See D5.
 
 Box works this out in one place in the policy code. The Strands Shell, Monty, and the macOS native
@@ -112,8 +118,8 @@ one location. This counts every write in `project`, including writes that are al
 formerly within 1h ( Box::Action::"fs:write"::response{ input.locations.project: true } )
 ```
 
-**Rules that work with or without a location.** A starter may want to allow writes to `secrets`
-in boxes that declare it, and still load in boxes that don't. Cedar's `has` does that:
+**Rules that work with or without a location.** A starter may want a rule about `secrets` in
+boxes that declare it, and still load in boxes that don't. Cedar's `has` does that:
 
 ```text
 @id("secrets_write")
@@ -121,9 +127,9 @@ permit (principal, action == Box::Action::"fs:write", resource)
 when { context.input.locations has secrets && context.input.locations.secrets };
 ```
 
-In a box without `secrets`, this rule loads and matches nothing. Use this form on a `permit`, never
-on a `forbid`. If `box.toml` misspells `secrets`, a `forbid` written this way loads and protects
-nothing (see D2).
+In a box without `secrets`, this rule loads and matches nothing. Writing `has` says the location is
+optional, so Box neither refuses nor warns about it, for a `permit` or a `forbid`. A rule that must
+apply leaves out `has`, so a missing or misspelled location stops the box (see D2).
 
 ## 5. What does it cost?
 
@@ -139,8 +145,10 @@ One PR after this doc. It adds the `[locations]` table, the `locations` field, t
 - `/work-old` is not in `/work`.
 - A misspelled location name stops the box from starting.
 - A policy that uses a location stops the box from starting when `box.toml` declares none.
-- A location written as an absolute path under the home matches the `~/...` paths in requests.
-- A location under a symlinked folder matches, whether or not it exists yet.
+- A rule on a location decides every path the same way as the two `path` comparisons it stands
+  for.
+- A directory under the home written as an absolute path, one through a symlink, and one that
+  holds the home are each refused with the spelling to write.
 - A time-based budget on `project` counts writes that are also in `docs`.
 - A rule using `has` loads when the location isn't declared, and matches when it is.
 - A history from the previous release opens. Its events still count toward budgets that don't name
@@ -156,6 +164,11 @@ changes to them:
   declares locations.
 - What time-based rules see: each `fs:*` event in history records `locations`.
 - A newer stored record version for a box that declares locations, as other optional features do.
+- In the policy crate, `Operator::with_locations`, which declares the locations and returns an
+  error for a declaration Box can't use, and `Operator::locations`, which returns the directories
+  as written, which the startup message prints. Two new errors name the location and the
+  directory: `PolicyError::UnmatchableLocation`, for a directory no path could match, with the
+  spelling to write, and `PolicyError::UnresolvableLocation`, for one Box can't check.
 
 ## 7. Key decisions
 
@@ -231,6 +244,26 @@ The other option was to give each file only the most specific location. Then dec
 take files out of `project`, and the `project` rules would stop applying to them. With both,
 adding a location never changes what an existing rule matches.
 
+### D6. A location is shorthand for two path comparisons
+
+`context.input.locations.project` means exactly
+`context.input.path == "<root>" || context.input.path like "<root>/*"`, for each directory listed
+under `project`. The directories are written the way `path` spells a path and aren't resolved, so
+a location never matches more or less than the rule an author would write by hand. For example,
+with `project = ["~/src/app"]`, these two rules match the same files:
+
+```text
+when { context.input.locations.project };
+when { context.input.path == "~/src/app" || context.input.path like "~/src/app/*" };
+```
+
+This gives one way to think about a location. It also means a request and its recorded response
+compare the same text, so they always agree.
+
+It costs some spellings. A directory through a symlink, or one under the home written as an
+absolute path, would match nothing, and one that holds the home would miss the files in the home.
+Box refuses each when it loads the policy and says what to write instead (section 2).
+
 ## 8. Limitations
 
 1. **The policy alone doesn't show the paths.** Someone reviewing `policy.dw` sees `project`, not
@@ -248,7 +281,34 @@ adding a location never changes what an existing rule matches.
 
 1. **The name.** We picked "locations". We avoided "tags", because Dogwood and Cedar already use
    that word for other things.
-2. **Rules that can never match.** A `has` rule in a box without its location never matches.
-   Should Box print a warning for it at startup, so an operator can see which rules are off?
-3. **Denial messages.** Should the message the agent sees when it's refused list the file's
+2. **Denial messages.** Should the message the agent sees when it's refused list the file's
    locations, or should only the decision record have them?
+
+## 10. Later: names for other kinds of requests
+
+The same pattern could name other things a policy checks: a top-level `box.toml` table that maps
+names to matchers, and a record of true-or-false fields on the actions they apply to. Both ideas
+below are possibilities, not part of this design.
+
+**Credentialed HTTP routes.** `[egress.<name>]` already says which destinations get which secret.
+`http:request` could carry one field per egress table, true when Box attaches that table's secret:
+
+```text
+forbid (principal, action == Box::Action::"http:request", resource)
+when { context.input.egress.model && context.input.method == "DELETE" };
+```
+
+The binding still grants nothing. Policy just reads what `box.toml` already declares, so a rule can
+say "requests that carry the model key" without repeating its hosts.
+
+**Named destinations.** For hosts with no secret, such as `github`, a `[destinations]` table could
+use the same entry syntax as egress `destinations`, with a field on `net:connect` and
+`http:request`.
+
+Either one needs its own rules for:
+- **Paths at connect time.** `net:connect` sees no path, so an entry with a path prefix can't be
+  decided there. Treating it as false would let a `forbid` fail open.
+- **Host matching.** Case, `*.` wildcards, and IP addresses.
+
+We'd keep one table per kind instead of a single `[tags]` table. A name that held both paths and
+hosts would land on unrelated actions.

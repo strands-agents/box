@@ -344,6 +344,46 @@ rule) loads and is statically false, because Cedar permits `==` across entity ty
 A temporal predicate names the coarse action and may bind `operation` to keep the fine
 distinction: `Box::Action::"fs:read"::response{ input.path: …, input.operation: Box::FsReadOperation::"read_content" }`.
 
+#### Named locations
+
+`Operator::with_locations` gives roots a name. Every filesystem input carries `locations`, a
+closed record with one required `Bool` per declared name. A location is shorthand for two
+comparisons of `path`: the field is true exactly when
+`context.input.path == "<root>" || context.input.path like "<root>/*"` holds for one of its roots,
+with any `*` in a root read as a plain character. So `/work-old/notes.md` is not in `/work`, and a
+path can be in several locations. The record is empty for an operator with no location.
+
+```text
+permit (principal, action == Box::Action::"fs:write", resource)
+when { context.input.locations.project };
+```
+
+`context.input.locations has secrets && context.input.locations.secrets` loads for any operator,
+because Cedar types `has` on a closed record that lacks the field as false. The engine neither
+refuses nor reports such a rule, because `has` is the author marking the location optional.
+
+A location names roots and grants no reach. A root is written as `path` spells a path: `~` for the
+home (`~/` too), `~/…` below it, and absolute elsewhere. It is not expanded or resolved, so a
+request and its outcome compare the same reported text. `with_locations` returns
+`PolicyError::UnmatchableLocation` for a root that no reported path can match: one whose final
+reported spelling differs from it, such as an absolute root under the home or one through a
+symbolic link (`a path here is reported as "<final>"; write "<final>"`), and one with a trailing
+slash or an empty component. It returns `PolicyError::LocationHoldsHome` for a root that holds the
+home when its list lacks `~`, because a path in the home is reported as `~/…`. A root that does not exist yet passes when its nearest
+existing folder does. It returns `PolicyError::UnresolvableLocation` for a root it cannot check,
+such as a broken symbolic link, a file, or one below a folder that refuses to be searched, and
+`PolicyError::Schema` for a bad name, an empty list, or a root that is relative or has a `.` or
+`..` component. It refuses locations for an operator with no home, so call `Operator::anchored_at`
+first. `Operator::locations` returns the roots as written. A rule that reads an undeclared location
+without `has` is a load error in `open_staged`, `validate`, and `check`, also when the rule waits
+for an MCP schema. `open` and `open_with_mcp_schemas` declare no location.
+
+The response of a filesystem request records the record of the path it names, matched the same
+way. A temporal predicate reads one location as a field, so
+`Box::Action::"fs:write"::response{ input.locations.project: true }` matches every write in
+`project`, whatever other location also holds it. History keeps the names, so an event recorded
+before a location moved still counts under its name.
+
 How an effect ended is carried by the event kind: an effect that happened or may
 have happened records a `::response`, and one that definitely did not happen records
 a `::error`. A `read_metadata` that got an answer, in the Shell or in Python, has happened, even

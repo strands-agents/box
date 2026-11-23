@@ -205,6 +205,23 @@ program starts, Box checks that its launch directory matches the absolute direct
 the policy check.
 The caller's Shell keeps its own working directory.
 
+Every filesystem request and its `::response` or `::error` carry `input.locations`, a record with
+one Bool for each location that [`box.toml` declares](../user/config.md#locations), true when that
+location holds the path. A box that declares none carries an empty record. The record is closed,
+so a rule that reads an undeclared location, such as `context.input.locations.projcet`, refuses to
+load, and a rule that tests `has` first loads in any box. A location is shorthand for two
+comparisons of `path`: `locations.project` is true exactly when
+`path == "<root>" || path like "<root>/*"` holds for one of its roots, with `*` read as a plain
+character. Roots are written as `path` spells a path (`~/…` under the home) and are not resolved,
+so the request and its outcome compare the same reported text and always agree. A root no
+reported path can match, such as one through a symbolic link or an absolute one under the home, is
+refused at load with the spelling to write instead. A history rule
+reads one location as a field, such as `input.locations.project: true`, so a budget on `project`
+counts every write there, including one in a nested location too. History keeps the names, not the
+directories: if a later run points `project` somewhere else, the earlier events still count as
+`project`. An event that an earlier build recorded has no `locations` record, so a predicate on a
+location doesn't match it, while a predicate that doesn't read `locations` still counts it.
+
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as
 `completed`, `descriptor_issued`, or `indeterminate`, so a rule that counts certain completions can
 leave the other two out. A shell response carries the command's exit status as `output.status`, and
@@ -347,7 +364,9 @@ MCP tool's action or the actions of two servers, whether or not it reads the inp
 of mixed types, so the rule would stay pending until discovery finishes and then be dropped, and its
 other arms would go unenforced. It also
 refuses a temporal predicate on `mcp:call::error` or a per-tool `::error`, because an MCP call records only
-`::response`.
+`::response`. It also refuses a rule that reads a location that `box.toml` doesn't declare, even
+when the rule also waits for an MCP server's schema, because no server's schema can declare a
+location.
 
 The `run` verb validates the policy before it writes any box state. A box with no local MCP server
 validates against the complete action schema. Passing this check confirms the policy text;

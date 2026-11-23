@@ -262,6 +262,30 @@ fn write_bare_name_disclosures(
     Ok(())
 }
 
+/// One line for each `[locations]` name and its roots as written, the text a rule matches.
+fn write_location_disclosures(
+    locations: &crate::record::config::locations::LocationRoots,
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    for (name, roots) in locations {
+        let roots: Vec<String> = roots
+            .iter()
+            .map(|root| {
+                root.to_string_lossy()
+                    .chars()
+                    .flat_map(char::escape_default)
+                    .collect()
+            })
+            .collect();
+        writeln!(
+            output,
+            "strands-box: [locations] {name}: {}  (a name for policy rules; grants no access)",
+            roots.join(", ")
+        )?;
+    }
+    Ok(())
+}
+
 /// Run one contained agent from one locked configuration snapshot.
 pub(crate) async fn execute(
     config: &Path,
@@ -368,7 +392,7 @@ async fn hosted(
 ) -> Result<ExitCode, BoxError> {
     let sources: Vec<Policy> = locked.policy.into_iter().collect();
     let subject = telemetry::policy_subject(&sources);
-    let operator = crate::record::config::policy_operator()?;
+    let (operator, locations) = crate::record::config::policy_operator(&locked.record.locations)?;
     let policy = match HostedBox::prepare_policy(&locked.root, &operator, sources, locked.grammars)
     {
         Ok(engine) => {
@@ -521,6 +545,8 @@ async fn hosted(
         &site,
     )?;
     eprintln!("{}", boundary.disclosure());
+    write_location_disclosures(&locations, std::io::stderr().lock())
+        .map_err(|source| ConfigError::Disclosure { source })?;
     let contained = Contained::spawn(boundary, &locked.root, hosted, terminal, signals).await?;
     contained.wait().await
 }
@@ -687,6 +713,7 @@ mod tests {
             monty: true,
             gateway: Default::default(),
             limits: Default::default(),
+            locations: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/probe"),
             name: "probe".to_string(),
@@ -1042,5 +1069,34 @@ mod tests {
             String::from_utf8(output).expect("the announcement is UTF-8"),
             "strands-box: [tool.aws-suite]: exposes ~/.aws/\\u{1b}[2J\\u{202e} (read)\n"
         );
+    }
+
+    #[test]
+    fn startup_discloses_each_location_root_as_written() {
+        let locations = BTreeMap::from([
+            (
+                "project".to_string(),
+                vec![PathBuf::from("~/src/app"), PathBuf::from("/srv/shared")],
+            ),
+            ("home".to_string(), vec![PathBuf::from("~")]),
+            ("odd".to_string(), vec![PathBuf::from("/srv/\u{1b}[2J")]),
+        ]);
+        let mut output = Vec::new();
+
+        write_location_disclosures(&locations, &mut output).expect("the disclosure writes");
+
+        assert_eq!(
+            String::from_utf8(output).expect("the disclosure is UTF-8"),
+            "strands-box: [locations] home: ~  (a name for policy rules; grants no access)\n\
+             strands-box: [locations] odd: /srv/\\u{1b}[2J  (a name for policy rules; grants no access)\n\
+             strands-box: [locations] project: ~/src/app, /srv/shared  (a name for policy rules; grants no access)\n"
+        );
+    }
+
+    #[test]
+    fn startup_discloses_nothing_for_a_box_without_locations() {
+        let mut output = Vec::new();
+        write_location_disclosures(&BTreeMap::new(), &mut output).expect("the disclosure writes");
+        assert!(output.is_empty());
     }
 }

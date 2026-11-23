@@ -63,12 +63,45 @@ Ten actions in four categories, and one generated action per MCP tool:
 
 ## Filesystem
 
-The five `fs:*` actions carry the same two fields:
+The five `fs:*` actions carry the same three fields:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `path` | String | The resolved path, spelled `~/…` under the operator's home and absolute elsewhere. |
 | `operation` | `Box::Fs<Verb>Operation` | The exact verb. The table below gives the spelling and the values for each action. |
+| `locations` | Record of Bool | One field for each location that [`[locations]`](../config.md#locations) in `box.toml` declares, `true` when that location holds `path`. The record is empty when `box.toml` declares none. |
+
+A location is shorthand for two comparisons of `path`. With `project = ["/work"]`,
+`context.input.locations.project` is exactly
+`context.input.path == "/work" || context.input.path like "/work/*"`, with any `*` in a root read
+as a plain character, so `/work-old/notes.md` is not in `/work`. A root is written as `path` spells
+it, `~/…` under the operator's home, and is not resolved; `box.toml` refuses a root no path can
+match, as [`[locations]`](../config.md#locations) lists. A path can be in more than one location.
+A rule reads a location in one of two ways:
+
+- **Strict:** `context.input.locations.project`. The rule must apply, so a rule that names a
+  location `box.toml` does not declare refuses to load.
+- **Optional:** `context.input.locations has project && context.input.locations.project`. The
+  location may be missing, so the rule loads in every box and applies only where `project` is
+  declared. `has` makes only the `when` condition optional: a history predicate on a location,
+  such as `input.locations.project: true`, is always strict, so that rule still refuses to load
+  where `project` is not declared.
+
+```text
+@id("project_write")
+permit (principal, action == Box::Action::"fs:write", resource)
+when { context.input.locations.project };
+```
+
+Both forms work on a `permit` and on a `forbid`. Write a rule that must apply in the strict form,
+so a box that lacks the location, or misspells it, stops instead of running without the rule.
+
+A history rule reads one location as a field of the event, so a budget counts every write in
+`project`, whatever other locations also hold the path:
+
+```text
+formerly within 1h ( Box::Action::"fs:write"::response{ input.locations.project: true } )
+```
 
 A rule spells an operation with the action's own prefix, as `Box::FsReadOperation::"read_content"`:
 

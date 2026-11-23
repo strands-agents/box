@@ -210,6 +210,7 @@ fn record(text: &str) -> Record {
         experimental_features: Default::default(),
         file_attributes: false,
         gateway: Default::default(),
+        locations: Default::default(),
         limits: Default::default(),
         monty: true,
         box_id: "box-0123456789abcdef".to_string(),
