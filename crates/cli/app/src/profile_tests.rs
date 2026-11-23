@@ -14673,14 +14673,24 @@ fn the_shipped_node_pack_reads_the_hosts_file() {
 
 #[test]
 fn the_shipped_launchers_that_run_node_as_a_helper_read_the_hosts_file() {
-    for pack in [
-        include_str!("../../../../resources/packs/bunx/pack.toml"),
-        include_str!("../../../../resources/packs/pnpx/pack.toml"),
+    // Each pack also reads the interpreter that a package's bin names on its #! line.
+    for (pack, shebang) in [
+        (
+            include_str!("../../../../resources/packs/bunx/pack.toml"),
+            "/usr/bin/env",
+        ),
+        (
+            include_str!("../../../../resources/packs/pnpx/pack.toml"),
+            "/bin/sh",
+        ),
     ] {
         let table: toml::Table = pack.parse().expect("TOML");
         let read_file = table["filesystem"]["read_file"].as_array().expect("a list");
+        let plain: Vec<&str> = read_file.iter().filter_map(toml::Value::as_str).collect();
+        assert_eq!(plain, [shebang]);
         let paths: Vec<(&str, &str)> = read_file
             .iter()
+            .filter(|entry| entry.is_table())
             .map(|entry| {
                 (
                     entry["path"].as_str().expect("a path"),
