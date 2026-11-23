@@ -469,25 +469,25 @@ source      = "policy.dw"
 enforcement = "log_only"      # "enforce" is the default
 ```
 
-Each would-deny keeps `verdict = deny`, its cause, and its rules in the decision record, and adds
-`strands.box.policy.enforced = false`. The run's first one also carries
-`strands.box.policy.first_flip = true`. The `policy_installed` record states the mode on every run,
-so a clean log-only run can't be mistaken for an enforcing one. See [a decision](telemetry.md#a-decision).
+Each would-deny is recorded as a denial that Box didn't enforce, and it names every rule that would
+have blocked the action, across all its steps, so one trial finds them all. The `policy_installed`
+record states the mode on every run. [A decision](telemetry.md#a-decision) lists the keys.
 
 To list what a trial would have denied, filter the decision records on `enforced = false`. This
-prints each would-deny's action, resource, and the rule that decided it:
+prints each would-deny's action, resource, and the rules that would have blocked it:
 
 ```sh
 jq -r 'select(.resourceLogs) | .resourceLogs[].scopeLogs[]
   | select(.scope.name == "strands-box.policy") | .logRecords[]
-  | .attributes | map({(.key): (.value.stringValue // .value.boolValue)}) | add
+  | .attributes | map({(.key): (.value | if has("arrayValue") then (.arrayValue.values | map(.stringValue) | join(","))
+      elif has("boolValue") then .boolValue else .stringValue end)}) | add
   | select(.["strands.box.policy.enforced"] == false)
-  | "\(.["strands.box.policy.action"]) \(.["strands.box.policy.resource"]) \(.["strands.box.policy.rule"])"' \
+  | "\(.["strands.box.policy.action"]) \(.["strands.box.policy.resource"]) \(.["strands.box.policy.log_only.would_flip"])"' \
   <box_dir>/private/telemetry/records.jsonl
 ```
 
-A line such as `fs:write ~/agent-home/link.txt no-secret-read` is an action that ran in the trial
-and that the rule `no-secret-read` would block once you enforce the policy.
+A line such as `fs:move ~/agent-home/b.txt no-read-a,no-move-onto-b` is a move that ran in the
+trial, and that the rules `no-read-a` and `no-move-onto-b` would block once you enforce the policy.
 
 Some denials still block in log-only mode, so a missing or broken policy doesn't fail open:
 
@@ -500,6 +500,13 @@ An action log-only mode lets through really happens, so history records its real
 rule that depends on it, such as "allow `git push` only after `npm test` passed", sees what actually
 ran. After the first would-deny, a run can take a path an enforcing run wouldn't, so decisions after
 `first_flip` are an approximation.
+
+**A box keeps one history across modes.** When you switch the same box from `log_only` to
+`enforce`, the enforcing run inherits what the trial did, because those actions really happened. A
+budget over the last hour counts the bytes a trial sent, and an "only after the tests passed" rule
+is met by a trial's test run. To start enforcing with no trial behind it, run the trial in its own
+`box_dir`, or [start with fresh history](#start-with-fresh-history-after-a-dogwood-upgrade) before
+you enforce.
 
 **The policy protects nothing during a trial.** On the Shell and Monty path the policy is the only
 thing between the workload and your home directory, credential files, and cloud metadata. The egress

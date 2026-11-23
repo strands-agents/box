@@ -935,6 +935,15 @@ fn decisions_on(text: &str, resource: &str) -> Vec<Vec<String>> {
                                 .or_else(|| {
                                     value["boolValue"].as_bool().map(|flag| flag.to_string())
                                 })
+                                .or_else(|| {
+                                    value["arrayValue"]["values"].as_array().map(|items| {
+                                        items
+                                            .iter()
+                                            .filter_map(|item| item["stringValue"].as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(",")
+                                    })
+                                })
                                 .unwrap_or_default();
                             format!("{}={text}", attribute["key"].as_str().unwrap_or_default())
                         })
@@ -1088,6 +1097,51 @@ when { context.input.path like "{box_home}/secret.txt" };
             "{expected} is missing: {record:?}"
         );
     }
+}
+
+/// **In log-only mode a Shell `mv` whose source read and destination are each forbidden goes ahead, and
+/// its one record names both rules**, so one trial finds every rule the move would break.
+#[test]
+fn a_log_only_move_names_every_leg_that_would_have_denied_it() {
+    needs_a_box!("a_log_only_move_names_every_leg_that_would_have_denied_it");
+    let policy = r#"
+permit(principal, action, resource);
+@id("no-read-a")
+forbid(principal, action == Box::Action::"fs:read", resource)
+when { context.input.path like "{box_home}/a.txt" };
+@id("no-move-onto-b")
+forbid(principal, action == Box::Action::"fs:move", resource)
+when { context.input.path like "{box_home}/b.txt" };
+"#;
+    let trial = Request::with_policy("log-only-move", policy)
+        .log_only()
+        .expect();
+    std::fs::write(trial.box_home().join("a.txt"), "moved").expect("the source");
+    let output = trial.bash(r#"zsh -c 'cd "$HOME" && mv a.txt b.txt'"#);
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        trial.box_home().join("b.txt").exists(),
+        "the move went ahead: {output:?}"
+    );
+
+    let text = std::fs::read_to_string(default_records(&trial.root())).expect("the records");
+    let flipped: Vec<_> = decisions_on(&text, "")
+        .into_iter()
+        .filter(|record| {
+            record
+                .iter()
+                .any(|pair| pair == "strands.box.policy.enforced=false")
+        })
+        .collect();
+    let [record] = flipped.as_slice() else {
+        panic!("one unenforced decision: {flipped:#?}");
+    };
+    assert!(
+        record
+            .iter()
+            .any(|pair| pair == "strands.box.policy.log_only.would_flip=no-read-a,no-move-onto-b"),
+        "both rules are named: {record:?}"
+    );
 }
 
 /// **A target narrowed to refusals never fills with permits.**

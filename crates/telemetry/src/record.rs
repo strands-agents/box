@@ -513,6 +513,8 @@ pub struct DecisionRecord {
     enforced: bool,
     /// Whether this is the run's first denial that was not enforced.
     first_flip: bool,
+    /// Each rule that would have denied the action in log-only mode, across all its legs and gates.
+    would_flip: Vec<String>,
     unix_nanos: u128,
 }
 
@@ -570,26 +572,27 @@ impl DecisionRecord {
 
     /// State that Box did not apply this denial: log-only mode let the action go ahead.
     ///
-    /// # Panics
-    ///
-    /// When the record is a permit, because only a denial can go unenforced.
+    /// Only a denial can go unenforced, so a permit is left as it is, and a debug build asserts.
     #[must_use]
     pub fn not_enforced(mut self) -> Self {
-        assert!(!self.permitted, "only a denial can go unenforced");
-        self.enforced = false;
+        debug_assert!(!self.permitted, "only a denial can go unenforced");
+        if !self.permitted {
+            self.enforced = false;
+        }
         self
     }
 
     /// Mark this unenforced denial as the run's first, after which the run can drift from what
     /// enforcing would have done.
     ///
-    /// # Panics
-    ///
-    /// When the denial was enforced.
+    /// Only an unenforced denial can be a flip, so an enforced record is left as it is, and a debug
+    /// build asserts.
     #[must_use]
     pub fn first_flip(mut self) -> Self {
-        assert!(!self.enforced, "only an unenforced denial can be a flip");
-        self.first_flip = true;
+        debug_assert!(!self.enforced, "only an unenforced denial can be a flip");
+        if !self.enforced {
+            self.first_flip = true;
+        }
         self
     }
 
@@ -603,6 +606,20 @@ impl DecisionRecord {
     #[must_use]
     pub fn is_first_flip(&self) -> bool {
         self.first_flip
+    }
+
+    /// Name each rule that would have denied the action in log-only mode, one per leg or gate it
+    /// let through, in the order they were decided.
+    #[must_use]
+    pub fn flipped_by(mut self, rules: impl IntoIterator<Item = String>) -> Self {
+        self.would_flip = rules.into_iter().collect();
+        self
+    }
+
+    /// Each rule that would have denied the action in log-only mode.
+    #[must_use]
+    pub fn would_flip(&self) -> &[String] {
+        &self.would_flip
     }
 
     /// Name every policy that determined this decision. The first one governs, so it supplies
@@ -704,6 +721,9 @@ impl DecisionRecord {
         if self.first_flip {
             pairs.push(("strands.box.policy.first_flip", AnyValue::Boolean(true)));
         }
+        if !self.would_flip.is_empty() {
+            pairs.push((WOULD_FLIP, text_list(self.would_flip.iter().cloned())));
+        }
 
         // The governing rule, under this product's own namespace.
         let governing = self.governing();
@@ -789,6 +809,7 @@ impl DecisionRecord {
             subject: None,
             enforced: true,
             first_flip: false,
+            would_flip: Vec::new(),
             unix_nanos: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| since.as_nanos()),
@@ -798,6 +819,8 @@ impl DecisionRecord {
 
 /// The identifiers of every policy that determined one decision.
 const DETERMINING_IDS: &str = "strands.box.policy.determining.ids";
+/// Each rule that would have denied an action log-only mode let through.
+const WOULD_FLIP: &str = "strands.box.policy.log_only.would_flip";
 
 /// The rule that decided, by the identifier the operator authored.
 const RULE: &str = "strands.box.policy.rule";
@@ -1107,6 +1130,32 @@ mod tests {
             ]
         );
         assert_eq!(keys(&applied.not_enforced()).len(), 1);
+    }
+
+    /// Every rule that would have denied the action is listed, in order, and a record that names
+    /// none carries no such key.
+    #[test]
+    fn an_unenforced_denial_lists_every_rule_that_would_have_denied_it() {
+        let record = DecisionRecord::deny("Box::Action::\"fs:move\"", "/w/b", "r", "forbid")
+            .not_enforced()
+            .flipped_by(["no-read-a".to_string(), "no-move-onto-b".to_string()]);
+        assert_eq!(record.would_flip(), ["no-read-a", "no-move-onto-b"]);
+        let listed = record
+            .attributes()
+            .into_iter()
+            .find(|(key, _)| *key == "strands.box.policy.log_only.would_flip")
+            .map(|(_, value)| format!("{value:?}"))
+            .expect("the list is written");
+        assert!(
+            listed.contains("no-read-a") && listed.contains("no-move-onto-b"),
+            "{listed}"
+        );
+        assert!(
+            DecisionRecord::permit("Box::Action::\"fs:read\"", "/w/a", "r")
+                .attributes()
+                .iter()
+                .all(|(key, _)| *key != "strands.box.policy.log_only.would_flip")
+        );
     }
 
     /// The `policy_installed` record states how the policy's verdicts apply.

@@ -109,6 +109,8 @@ pub struct PolicyDecision {
     /// Whether this is the run's first denial that was not enforced. Later decisions can differ
     /// from what an enforcing run would decide.
     pub first_flip: bool,
+    /// Each rule that would have denied the action in log-only mode, across all its legs and gates.
+    pub would_flip: Vec<String>,
 }
 
 impl PolicyDecision {
@@ -124,6 +126,7 @@ impl PolicyDecision {
             reason: record.reason().map(str::to_string),
             enforced: record.enforced(),
             first_flip: record.is_first_flip(),
+            would_flip: record.would_flip().to_vec(),
         }
     }
 }

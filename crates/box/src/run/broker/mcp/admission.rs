@@ -197,7 +197,9 @@ pub(super) fn admit_tool_call(
                 // first denial log-only mode let through decides the record.
                 Decision::Allow { .. } if decision.would_deny().is_some() => {
                     return Ok(McpRequestAdmission::Allowed(
-                        coarse,
+                        coarse.flipped_by(crate::run::telemetry::would_flip_of([
+                            &decision, &refined,
+                        ])),
                         request_id,
                         tool_response,
                         tool_call,
@@ -1157,6 +1159,30 @@ mod tests {
             panic!("one determining policy");
         };
         assert_eq!(attribution.annotation_id.as_deref(), Some("coarse-forbid"));
+    }
+
+    /// **Both gates log-only mode let through are named on the record**, so one trial finds both.
+    #[test]
+    fn a_log_only_call_names_every_gate_that_would_have_denied_it() {
+        let policy = tool_policy(
+            r#"@id("coarse-forbid")
+               forbid(principal, action == Box::Action::"mcp:call", resource);
+               @id("tool-forbid")
+               forbid(principal, action == issues_mcp::Action::"SearchIssues", resource);"#,
+        )
+        .log_only();
+        let McpRequestAdmission::Allowed(decision, ..) = admit_tool_call(
+            &policy,
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "issues-mcp",
+            SEARCH,
+            &crate::run::telemetry::DecisionRecorder::discarding(),
+        )
+        .expect("valid tool call") else {
+            panic!("log-only mode lets the call through");
+        };
+        assert_eq!(decision.would_flip(), ["coarse-forbid", "tool-forbid"]);
     }
 
     #[test]

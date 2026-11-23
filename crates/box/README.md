@@ -15,8 +15,8 @@ state, and one selects the workload:
 
 | Input | Kind | Spelled | What it decides |
 |---|---|---|---|
-| Policy | authority | `policy` in the config file | Which effects this box may cause, decided per request. Scoped to this box |
-| Credentials | authority | `[egress.<name>]` in the config file | Which secret is attached once a request is permitted |
+| Policy | authority | `policy` in the config file | Which effects this box may cause, decided per request. Scoped to this box. In log-only mode a denial is recorded and the effect goes ahead |
+| Credentials | authority | `[egress.<name>]` in the config file | Which secret is attached once a request is permitted, which in log-only mode includes a request the policy would deny |
 | Identity and state | state | `name` in the config file, and `RunOptions::box_id` for a library caller | Which box this is, and where it keeps its persistent state |
 | Workload | selection | `[agent] command` in the config file, and `run`'s trailing argv | Which process runs |
 
