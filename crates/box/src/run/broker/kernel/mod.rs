@@ -95,7 +95,7 @@ fn needs_zero_length(req: &HttpRequest) -> bool {
             .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
 }
 
-/// The Shell's view of a gateway `response`; a refusal the gateway wrote becomes an error.
+/// The Shell's view of a gateway `response`; a response the gateway wrote becomes an error.
 async fn shell_response<B>(
     response: hyper::Response<B>,
     max_response: usize,
@@ -104,11 +104,8 @@ where
     B: hyper::body::Body<Data = bytes::Bytes>,
     B::Error: std::fmt::Display,
 {
-    if response
-        .headers()
-        .contains_key(egress_gateway::PROXY_ORIGIN_HEADER)
-    {
-        return Err(read_refusal(response.into_body()).await);
+    if let Some(kind) = gateway_error_kind(response.headers()) {
+        return Err(read_gateway_error(kind, response.into_body()).await);
     }
     let status = response.status();
     let version = match response.version() {
@@ -131,26 +128,37 @@ where
     })
 }
 
-/// The most bytes of a refusal body read before its first line is reported.
-const MAX_REFUSAL: usize = 16 * 1024;
+/// The error kind of a response the gateway wrote, or `None` for one it relayed: `PermissionDenied`
+/// for a refusal, so `curl` exits 1, and `Other` for a failure, so `curl` exits 6.
+fn gateway_error_kind(headers: &hyper::HeaderMap) -> Option<io::ErrorKind> {
+    let origin = headers.get(egress_gateway::PROXY_ORIGIN_HEADER)?;
+    Some(if origin == egress_gateway::PROXY_ORIGIN_VALUE {
+        io::ErrorKind::PermissionDenied
+    } else {
+        io::ErrorKind::Other
+    })
+}
 
-/// The refusal a gateway-originated `body` states, read to `MAX_REFUSAL` bytes at most.
-async fn read_refusal<B>(body: B) -> io::Error
+/// The most bytes of a gateway-originated body read before its first line is reported.
+const MAX_GATEWAY_ERROR: usize = 16 * 1024;
+
+/// The `kind` error a gateway-originated `body` states, read to `MAX_GATEWAY_ERROR` bytes at most.
+async fn read_gateway_error<B>(kind: io::ErrorKind, body: B) -> io::Error
 where
     B: hyper::body::Body<Data = bytes::Bytes>,
 {
     use http_body_util::BodyExt as _;
     let mut body = std::pin::pin!(body);
     let mut read = Vec::new();
-    while read.len() < MAX_REFUSAL
+    while read.len() < MAX_GATEWAY_ERROR
         && let Some(Ok(frame)) = body.frame().await
     {
         if let Ok(chunk) = frame.into_data() {
-            let room = MAX_REFUSAL - read.len();
+            let room = MAX_GATEWAY_ERROR - read.len();
             read.extend_from_slice(&chunk[..chunk.len().min(room)]);
         }
     }
-    refusal(&String::from_utf8_lossy(&read))
+    gateway_error(kind, &String::from_utf8_lossy(&read))
 }
 
 /// Read `body`, refusing one longer than `limit` bytes when `limit` is not zero.
@@ -174,12 +182,17 @@ where
     Ok(read)
 }
 
-/// The refusal a gateway-originated `body` states, as the workload reads it.
-fn refusal(body: &str) -> io::Error {
+/// The `kind` error a gateway-originated `body` states, as the workload reads it.
+fn gateway_error(kind: io::ErrorKind, body: &str) -> io::Error {
+    let fallback = if kind == io::ErrorKind::PermissionDenied {
+        "the egress gateway refused this request"
+    } else {
+        "the egress gateway could not complete this request"
+    };
     let reason = body
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .unwrap_or("the egress gateway refused this request");
-    io::Error::new(io::ErrorKind::PermissionDenied, reason)
+        .unwrap_or(fallback);
+    io::Error::new(kind, reason)
 }

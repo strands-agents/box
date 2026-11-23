@@ -1,0 +1,18 @@
+# expect: `<grammar>.shell.publish.options.index`: has the name of the `anywhere` option `<grammar>.global.options.index`, so it must have the same `flag`, `value`, and `repeated`
+# The override takes an optional value, and the global option needs one.
+
+name    = "uv"
+program = "uv"
+format  = 1
+version = 1
+
+[effects]
+network = "uv may contact a package index"
+
+[global]
+options.offline = { flag = ["--offline"], removes = ["network"], anywhere = true }
+options.index   = { flag = ["--index"], value = "required", anywhere = true }
+
+[shell.publish]
+usage = "uv [global options] publish [options]"
+options.index = { flag = ["--index"], value = "optional", overrides = true }

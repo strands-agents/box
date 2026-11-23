@@ -1,0 +1,36 @@
+# The uvx tool and MCP launcher requirements.
+# MCP compatibility on macOS arm64:
+# Pass: uv 0.13.7 / Python 3.11.18 (uv-managed) and 3.14.3 (Homebrew).
+# Pass: uv 0.13.5 / CI-installed Python; uv has no documented LTS track.
+# uv 0.10.11 also passes; its Python version is not recorded.
+# Test scope and fixtures: docs/dev/engine-tests.md, Launcher tests.
+[pack]
+name = "@box/uvx"
+version = 1
+kind = "tool"
+
+[inputs.uvx.path]
+description = "The uvx program."
+type = "program"
+program = "uvx"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.uvx.path }}"]
+helpers = ["python3", "dirname", "realpath"]
+hosts = ["pypi.org", "files.pythonhosted.org"]
+
+[env]
+UV_CACHE_DIR = "${{ cache }}"
+# The tool state stays in the cache, and uvx uses an installed Python. @box/uv installs the
+# agent's tools into this folder too (docs/design/cli/decisions.md#uv-installs-into-the-uvx-tool-folder).
+# An MCP server's cache stays in profile storage
+# (docs/design/cli/decisions.md#launcher-caches-are-separate-from-agent-tool-caches).
+UV_TOOL_DIR = "${{ cache }}/tools"
+UV_PYTHON_DOWNLOADS = "never"
+
+[filesystem]
+# root, never root.parent: a standalone uv can share its parent folder with other tools.
+read = ["${{ root }}", "${{ home }}/.local/share/uv/python"]
+# uv's tool scripts start with #!/bin/sh.
+read_file = ["/bin/sh"]

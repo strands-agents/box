@@ -2,8 +2,9 @@
 
 This guide explains how Box works and how it restricts an untrusted agent. It is for security
 evaluators who decide whether to run agents under Box, contributors who change it, and readers
-who want to understand the design. For how to configure
-and run a box, read [getting started](../user/getting-started.md).
+who want to understand the design. To run a coding agent in a box, read
+[Get started with Box](../cli/getting-started.md). To configure Box Core yourself, read
+[Run an agent with box.toml](../user/getting-started.md).
 
 This guide also states how we think an agent sandbox should work. The principles and the
 decisions are meant to hold for any agent sandbox. Box is the example that follows them.

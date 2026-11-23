@@ -26,6 +26,7 @@ pub use effect::{
     EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, McpFrame, McpListReply,
     ReplyObserver,
 };
+pub(crate) use error::PROXY_FAILURE_VALUE;
 pub use error::{PROXY_ORIGIN_HEADER, PROXY_ORIGIN_VALUE, ProxyError, Result};
 pub use mcp::{
     McpTarget, McpTargetIdentity, canonicalize_mcp_frame, mcp_denial_response,

@@ -1,0 +1,36 @@
+# yarn, run by the node of @box/node: Yarn 1 from npm or Homebrew, or a Corepack shim that fetches
+# the Yarn a project's `packageManager` names.
+[pack]
+name = "@box/yarn"
+version = 1
+kind = "tool"
+extend = ["@box/node"]
+include = ["@box/node"]
+
+[inputs.yarn.path]
+description = "The yarn program."
+type = "program"
+program = "yarn"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.yarn.path }}"]
+hosts = ["registry.npmjs.org", "registry.yarnpkg.com", "repo.yarnpkg.com"]
+
+[env]
+YARN_GLOBAL_FOLDER = "${{ cache }}/global"
+YARN_CACHE_FOLDER = "${{ cache }}/cache"
+YARN_ENABLE_TELEMETRY = "0"
+YARN_ENABLE_GLOBAL_CACHE = "false"
+COREPACK_HOME = "${{ cache }}/corepack"
+# Yarn 2 and later read their own proxy settings, not HTTPS_PROXY, and fill in each `${...}` from
+# the environment, where the box sets the proxy. This relies on Yarn 4 mapping YARN_HTTPS__PROXY
+# and YARN_HTTP__PROXY to its `httpsProxy` and `httpProxy` settings. Yarn 1 reads those names as no
+# setting it knows, and uses HTTPS_PROXY and HTTP_PROXY. The single-underscore names would reach
+# Yarn 1, and the package scripts it runs, as literal text, so they are not used.
+YARN_HTTPS__PROXY = "${HTTPS_PROXY:-}"
+YARN_HTTP__PROXY = "${HTTP_PROXY:-}"
+COREPACK_ENABLE_DOWNLOAD_PROMPT = "0"
+
+[filesystem]
+read = ["${{ root.parent }}"]

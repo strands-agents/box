@@ -1,0 +1,343 @@
+name: "CLI: Test"
+
+# The CLI's test jobs: build, test, and lint on Linux, every macOS check in one job, and the
+# macOS package. A reusable workflow (`workflow_call`): ci.yml calls it, and the release workflow
+# calls it to gate a release. Every job tests `ref`, or the commit that triggered the caller
+# (`github.sha`) when `ref` is empty.
+#
+# `suite` picks what runs:
+#   all     every job below.
+#   core    for a Box Core change: the Linux build and tests, whose tests call Box Core's
+#           library, and the engine suite (crates/cli/app/tests/engine.rs) on macOS.
+
+on:
+  workflow_call:
+    inputs:
+      suite:
+        description: "all or core."
+        required: false
+        type: string
+        default: all
+      macos:
+        description: "Run the macOS jobs. ci.yml sets it false for a draft pull request."
+        required: false
+        type: boolean
+        default: true
+      package:
+        description: "Build the macOS package and run it on each supported macOS."
+        required: false
+        type: boolean
+        default: false
+      ref:
+        description: "The commit to test. Empty tests github.sha."
+        required: false
+        type: string
+        default: ''
+
+env:
+  CARGO_TERM_COLOR: always
+  # Drop DWARF: the dev profile (which cargo test inherits) can push target/ over the runner's disk.
+  RUSTFLAGS: "-C debuginfo=0"
+
+jobs:
+  check-suite:
+    name: Check the suite input
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Refuse an unknown suite
+        env:
+          SUITE: ${{ inputs.suite }}
+        run: |
+          case "$SUITE" in
+            all|core) ;;
+            *) echo "::error::unknown suite: $SUITE"; exit 1 ;;
+          esac
+
+  build-test-lint:
+    # A fixed name, so the check's name does not change with the runner label.
+    name: Build, test, lint
+    needs: check-suite
+    permissions:
+      contents: read
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-24.04' }}
+    timeout-minutes: 20
+    # The host tests on Linux x86_64, including the telemetry tests that start a real box. The
+    # `macos` job runs them on macOS, with the engine suite: CI runs the engine suite only on macOS.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      # Ubuntu 24.04's AppArmor default refuses the user namespaces a box needs.
+      - name: Allow unprivileged user namespaces
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      # rust-test-lint.yml lints the workspace for a Core change, so `core` skips the lint here.
+      - name: Format
+        if: inputs.suite == 'all'
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        if: inputs.suite == 'all'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --locked --all-features -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline
+
+      # The CLI's packages only: Box Core's tests run in rust-test-lint.yml.
+      - name: Test
+        run: cargo test -p strands-box-cli -p strands-box-cli-pack-tests -p strands-box-cli-profile -p strands-box-cli-telemetry --all-features
+
+  # Every macOS check in one job, so a pull request waits for one macOS runner. The host tests and
+  # the engine suite run last, because they rebuild box with test-support.
+  macos:
+    name: macOS checks
+    needs: check-suite
+    if: inputs.macos
+    permissions:
+      contents: read
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      # The checks' runs send no telemetry.
+      BOX_TELEMETRY: "0"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Build Box and helpers
+        id: build
+        run: cargo build --locked -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline
+
+      # The test build that scripts/try-build.sh downloads. A tarball keeps the execute bits that
+      # the artifact zip drops.
+      - name: Pack the test build
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        run: |
+          build="$RUNNER_TEMP/box-build"
+          mkdir -p "$build"
+          cp target/debug/box target/debug/strands-box-sock-alias target/debug/strands-box-contain-trampoline "$build/"
+          cp -R resources "$build/resources"
+          # Without this, macOS tar adds a ._ file for each extended attribute.
+          COPYFILE_DISABLE=1 tar -czf "$RUNNER_TEMP/box.tar.gz" -C "$build" .
+
+      - name: Upload the test build
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: box-${{ github.event.pull_request.head.sha || github.sha }}-aarch64-apple-darwin
+          path: ${{ runner.temp }}/box.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.22.2"
+          package-manager-cache: false
+
+      - name: Install fish for installer tests
+        if: ${{ !cancelled() && inputs.suite == 'all' }}
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install fish
+
+      - name: Distribution scripts
+        if: ${{ !cancelled() && inputs.suite == 'all' }}
+        run: |
+          sh -n install.sh scripts/package_macos.sh
+          python3 scripts/test_distribution.py
+
+      # Lint runs after the build, so a lint failure does not skip the tests. Format runs on Linux
+      # only.
+      - name: Clippy
+        if: ${{ !cancelled() && inputs.suite == 'all' }}
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Install launcher test prerequisites
+        if: ${{ !cancelled() }}
+        run: |
+          brew install uv python
+          launcher_node_bin="$(dirname "$(command -v node)")"
+          launcher_brew_bin="$(brew --prefix)/bin"
+          export PATH="$launcher_node_bin:$launcher_brew_bin:$PATH"
+          npm install --global npm@10.9.7
+          npm install --global pnpm@10.34.9 bun@1.4.4
+          # crates/cli/app/tests/pi_box_shell.rs runs @box/pi's extension in the pi that the pack names.
+          npm install --global --ignore-scripts @earendil-works/pi-coding-agent@1.5.2
+          printf '%s\n' "$launcher_brew_bin" "$launcher_node_bin" >> "$GITHUB_PATH"
+          node --version
+          npm --version
+          command -v npx uvx bunx pnpx python3 node pi
+
+      # The host tests and the engine suite (crates/cli/app/tests/engine.rs). The test-support build
+      # of box replaces the one built above. The engine suite runs Apple's /usr/bin/git
+      # stub, so the step refuses a runner that does not select full Xcode.
+      - name: Test
+        if: ${{ !cancelled() }}
+        env:
+          BOX_REQUIRE_PI: "1"
+          SUITE: ${{ inputs.suite }}
+        run: |
+          developer_dir="$(xcode-select -p)"
+          case "$developer_dir" in
+            *.app/Contents/Developer) echo "developer folder: $developer_dir" ;;
+            *) echo "::error::full Xcode is not selected: $developer_dir"; exit 1 ;;
+          esac
+          if [ "$SUITE" = core ]; then
+            cargo test -p strands-box-cli --all-features --test engine
+          else
+            cargo test -p strands-box-cli -p strands-box-cli-pack-tests -p strands-box-cli-profile -p strands-box-cli-telemetry --all-features
+          fi
+
+  # The macOS package, built as the release builds it, then run on each supported macOS.
+  package:
+    name: Build macOS package
+    needs: check-suite
+    if: inputs.macos && inputs.package && inputs.suite == 'all'
+    permissions:
+      contents: read
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Check build host
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 15
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Build archive
+        run: |
+          set -o pipefail
+          sh scripts/package_macos.sh "$RUNNER_TEMP/distribution" 2>&1 | tee "$RUNNER_TEMP/package-build.log"
+
+      - name: Save build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-package-build-log
+          path: ${{ runner.temp }}/package-build.log
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Save unsigned package
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-package
+          path: ${{ runner.temp }}/distribution/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Save package test and expected source inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-package-test
+          path: |
+            scripts/test_macos_package.py
+            scripts/smoke_telemetry.py
+            install.sh
+            crates/cli/app/Cargo.toml
+            Cargo.lock
+            resources/config.toml
+            resources/editing-box-profile.md
+            resources/packs/
+            resources/plugins/
+            resources/policies/
+            resources/starters/
+          if-no-files-found: error
+          retention-days: 7
+
+  verify-package:
+    name: Run macOS package (${{ matrix.os }})
+    needs: package
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download unsigned package
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-package
+          path: ${{ runner.temp }}/distribution
+
+      - name: Download package test and expected source inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-package-test
+          path: ${{ runner.temp }}/package-test
+
+      - name: Verify and run package
+        working-directory: ${{ runner.temp }}
+        env:
+          BOX_TEST_INSTALLATION_ID: ${{ vars.BOX_TEST_INSTALLATION_ID }}
+          # The package job checks out this commit, so release.json records it.
+          SOURCE_SHA: ${{ inputs.ref || github.sha }}
+        run: |
+          set -o pipefail
+          caller_home="$RUNNER_TEMP/package-test-home"
+          mkdir -p "$caller_home/.strands/box"
+          python3 -c 'import json, os; print("installation_id = " + json.dumps(os.environ.get("BOX_TEST_INSTALLATION_ID", "")))' \
+            > "$caller_home/.strands/box/installation.toml"
+          HOME="$caller_home" python3 "$RUNNER_TEMP/package-test/scripts/test_macos_package.py" \
+            "$RUNNER_TEMP/distribution/"*.tar.gz "$SOURCE_SHA" 2>&1 | tee "$RUNNER_TEMP/package-verification.log"
+
+      - name: Save verification log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-package-verification-${{ matrix.os }}
+          path: ${{ runner.temp }}/package-verification.log
+          if-no-files-found: error
+          retention-days: 7

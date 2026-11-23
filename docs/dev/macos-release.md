@@ -1,5 +1,9 @@
 # Release signed and notarized macOS builds
 
+One `Release Box` run signs two macOS packages: Box Core's, with `scripts/macos-release.py`, and the CLI's, with `scripts/macos-release-cli.py`.
+This guide covers Box Core's package and the signing setup that both share.
+The [CLI macOS release guide](macos-release-cli.md) covers the CLI's package.
+
 The `Release Box` workflow builds the macOS product with `native-filesystem-policy`.
 The runtime experiment remains opt-in through `box.toml`.
 Signing authorizes Endpoint Security access. It does not activate the experiment.
@@ -65,6 +69,11 @@ The signed application includes the profile, and verification checks its identit
 This supplies the Apple authorization needed by the native Endpoint Security feature.
 It does not enable the runtime experiment or replace native enforcement tests.
 Unsigned dry runs do not need these signing variables.
+
+The CLI's signing job runs in the same `macos-signing` environment and reads the same variables.
+Its experimental native-policy dry run uses the same `CD_SIGNER_PROFILE_NAME` for the shared `com.amazon.strands.box` identity.
+Its ordinary package signs the programs without embedding a profile.
+The [CLI macOS release guide](macos-release-cli.md#the-macos-signing-variables) describes native CLI signing and verification.
 Account-specific values and access requests belong in the team's internal runbook.
 
 ## Run a dry run
@@ -76,8 +85,8 @@ The protected premerge mode below also permits a signed test from one upstream w
 
 For the complete signing test, dispatch from upstream `main` with `dry_run=true` and `sign_macos=true`.
 Select a source commit in `main` history.
-Approve the `macos-signing` environment request.
-This run signs, notarizes, and tests the package, but does not publish a GitHub release.
+Approve the `macos-signing` environment requests, one for Box Core's signing job and one for the CLI's.
+This run signs, notarizes, and tests both packages, but does not publish a GitHub release.
 
 The macOS jobs use the `xcode-27` hosted runner.
 The macOS build needs the macOS 27 SDK or later.
@@ -162,7 +171,7 @@ The package hash identifies the exact distributed bytes.
 ## Publish
 
 Run `Release Box` from upstream `main` with `dry_run=false`.
-Signing, notarization, and native tests are mandatory in this mode.
+Signing, notarization, and native tests are mandatory in this mode, and so are the CLI's signing and checks.
 After all checks pass, approve `release-gate` to publish.
 The release job publishes the verified package without rebuilding it.
 The final checksum file covers the signed and notarized archive.

@@ -67,3 +67,9 @@ __pycache__/
 # Probe reports from a workload-suite run. Generated per run and uploaded as a
 # GitHub artifact, so they stay local. Anchored, to match only this one dir.
 /test-workload/run-reports/
+
+# Local plans for CLI work. Never committed.
+/.agents/plans/
+
+# Fetched box release binaries.
+/.box-bin/

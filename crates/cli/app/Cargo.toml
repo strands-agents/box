@@ -1,0 +1,55 @@
+[package]
+name = "strands-box-cli"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The Strands Box product CLI: configure a box from the host and run a workload in it."
+
+# The command is `box`: docs/design/cli/decisions.md#the-command-is-box.
+[[bin]]
+name = "box"
+path = "src/main.rs"
+
+[lib]
+name = "strands_box_cli"
+path = "src/lib.rs"
+
+[dependencies]
+alacritty_terminal = { version = "=0.26.0", default-features = false }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+clap = { version = "4", features = ["derive", "wrap_help"] }
+nix = { version = "0.28", features = ["dir", "resource", "term", "user"] }
+notify = "8"
+ratatui = { version = "0.30", default-features = false }
+ratatui-termion = { version = "0.1", default-features = false }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+signal-hook = "0.4"
+strands-box = { path = "../../box" }
+strands-box-cli-profile = { path = "../profile" }
+strands-box-cli-telemetry = { path = "../telemetry" }
+tempfile = "3"
+toml = "1"
+toml_edit = "0.25"
+unicode-segmentation = "1"
+
+[dev-dependencies]
+jsonschema = { version = "0.61.1", default-features = false }
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
+strands-box-cli-telemetry = { path = "../telemetry", features = ["test-transport"] }
+nix = { version = "0.28", features = ["resource", "signal"] }
+strands-box-cli-profile = { path = "../profile", features = ["test-support"] }
+vt100 = "0.16"
+
+[features]
+native-filesystem-policy = ["strands-box/native-filesystem-policy"]
+# Exposes fake host state so tests do not read the developer's own toolchains.
+test-support = ["strands-box-cli-profile/test-support"]
+# Restricts telemetry delivery to a local receiver for automated checks.
+test-transport = ["strands-box-cli-telemetry/test-transport"]
+
+[lints.rust]
+unused_must_use = "deny"

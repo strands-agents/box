@@ -12,7 +12,8 @@ body:
       label: Component
       description: Which part of Strands Box is this feature for?
       options:
-        - box CLI / binary
+        - "box CLI (profiles, packs, `box run`)"
+        - "Box Core (`box.toml`, `policy.dw`, the Rust library)"
         - Containment / boundary
         - Egress proxy / credentials
         - Not component-specific
