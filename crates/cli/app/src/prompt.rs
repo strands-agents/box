@@ -989,9 +989,10 @@ fn select_choice(
             let section = terminal.session.as_ref().map(|session| {
                 section_lines(session, width, section_budget, scroll, compact, base_budget)
             });
+            // The last layout also uses the spare bottom row, rather than hide a choice.
             let menu_height = section.as_ref().map_or(
                 height.saturating_sub(content_room + usize::from(content.is_some())),
-                |lines| height.saturating_sub(lines.len() + 1),
+                |lines| height.saturating_sub(lines.len() + 1 - usize::from(level == 3)),
             );
             let (lines, hidden) = if name_entry {
                 if choices.is_empty() {
