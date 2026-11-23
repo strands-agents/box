@@ -191,7 +191,7 @@ impl Panel {
         let width = display_width(&command);
         let Some(label) = [format!(" {label}: "), " ".to_string()]
             .into_iter()
-            .find(|prefix| display_width(prefix) + width + 1 <= room)
+            .find(|prefix| display_width(prefix) + width < room)
         else {
             return;
         };
