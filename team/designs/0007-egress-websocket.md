@@ -118,7 +118,7 @@ These rules differ from today:
 - `none_after_key` names both actions, so it refuses each HTTP request and each new WebSocket after the read. It cannot close a WebSocket that opened before the read. "Nothing leaves after the read" therefore holds only in a policy that permits no `websocket:connect`.
 - `realtime` is new. It lets a WebSocket through to `realtime.example.com/v1/realtime`.
 
-An existing policy needs no change to keep every WebSocket out, unless one of its permits covers every action. Before an operator adds a permit on `websocket:connect`, each `forbid` that must also stop a WebSocket must name `websocket:connect`.
+An existing policy needs no change to keep every WebSocket out, unless one of its permits covers every action. A box made from the `@box/open` starter after #476 lets a WebSocket through to any host. Before an operator adds a permit on `websocket:connect`, each `forbid` that must also stop a WebSocket must name `websocket:connect`.
 
 ## 5. What does it cost?
 
@@ -128,7 +128,7 @@ The gateway holds no message. It copies bytes through one 16 KiB buffer in each 
 
 ## 6. How do we deliver it?
 
-The work lands in one PR, #476, after this doc. #476 refuses any case that it does not handle. It adds `websocket:connect`, the handshake rules, the byte copy, and the idle limit.
+The work lands in one PR, #476, after this doc. #476 refuses any case that it does not handle. It adds `websocket:connect`, the handshake rules, the byte copy, and the idle limit. It also adds a permit on `websocket:connect` to the `@box/open` starter policy, which lets the agent reach any host.
 
 #476 tests the WebSocket path through a real gateway, with a TLS agent and a TLS echo server, in `crates/egress-gateway/tests/websocket_e2e.rs`.
 
