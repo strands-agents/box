@@ -80,6 +80,8 @@ pub(super) struct Authority {
     warnings: Vec<PolicyWarning>,
     /// Whether a policy denial is recorded and let through instead of enforced.
     log_only: bool,
+    /// Whether an authored policy is installed; with none, log-only mode lets nothing through.
+    installed_policy: std::sync::atomic::AtomicBool,
 }
 
 impl Authority {
@@ -116,6 +118,7 @@ impl Authority {
             }),
             warnings,
             log_only: false,
+            installed_policy: std::sync::atomic::AtomicBool::new(!sources.is_empty()),
         })
     }
 
@@ -227,6 +230,7 @@ impl Authority {
             }),
             warnings,
             log_only: false,
+            installed_policy: std::sync::atomic::AtomicBool::new(!sources.is_empty()),
         })
     }
 
@@ -282,6 +286,8 @@ impl Authority {
         live.pending_tools = BTreeSet::new();
         live.degraded_tools.clear();
         drop(live);
+        self.installed_policy
+            .store(!sources.is_empty(), std::sync::atomic::Ordering::SeqCst);
         *proposal_guard = Some(proposed);
         Ok(())
     }
@@ -469,9 +475,18 @@ impl Authority {
     ) -> (Decision, Option<RequestId>) {
         let (decision, request_id) = self.decide_as_authored(governed, principal, request);
         (
-            decision.unenforced_when(self.log_only, request_id.is_some()),
+            decision.unenforced_when(self.lets_denials_through(), request_id.is_some()),
             request_id,
         )
+    }
+
+    /// Whether log-only mode applies: it is on, and an authored policy is installed, so an absent
+    /// policy still denies by default.
+    fn lets_denials_through(&self) -> bool {
+        self.log_only
+            && self
+                .installed_policy
+                .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Decides through a ready live authority and denies every other state.
@@ -639,7 +654,7 @@ impl Authority {
             },
             // An explicit `forbid`, an internal fault, or an allow — enforce as decided, unless
             // log-only mode lets a recorded `forbid` through.
-            other => other.unenforced_when(self.log_only, pending.is_some()),
+            other => other.unenforced_when(self.lets_denials_through(), pending.is_some()),
         };
         // Only a call that goes on to the server owes a response.
         let pending = pending.filter(|_| decision.is_allow());
@@ -682,6 +697,7 @@ impl Authority {
             }),
             warnings: Vec::new(),
             log_only: false,
+            installed_policy: std::sync::atomic::AtomicBool::new(!sources.is_empty()),
         })
     }
 
@@ -710,6 +726,7 @@ impl Authority {
             }),
             warnings: Vec::new(),
             log_only: false,
+            installed_policy: std::sync::atomic::AtomicBool::new(!sources.is_empty()),
         })
     }
 

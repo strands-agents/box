@@ -708,8 +708,8 @@ engine itself lets a recorded policy denial go ahead.
 `PolicyEngine::log_only` lets an engine return `Allow` for a `forbid` or a missing `permit`, so a
 builder can trial a policy on real work. It does so only for a request that entered history, so
 the outcome is recorded as it happened. The `Allow` carries `would_deny` and the denial's rule, and
-the observer sees that same verdict. A pending policy, an evaluation fault, and a degraded MCP tool
-still deny, so a missing or broken policy never fails open.
+the observer sees that same verdict. An absent policy, a pending one, an evaluation fault, and a
+degraded MCP tool still deny, so a missing or broken policy never fails open.
 
 **Rejected.** Showing the observer the real denial while the caller gets the allow, because every
 record would then reconcile two answers for one request. A new `Decision` variant, which every

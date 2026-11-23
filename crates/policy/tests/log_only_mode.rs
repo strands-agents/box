@@ -280,3 +280,68 @@ fn a_reload_keeps_log_only_mode() {
         "the reloaded forbid is let through: {decision:?}"
     );
 }
+
+/// An engine with no authored policy denies by default even in log-only mode, so turning the mode
+/// on while the policy is missing never makes a permit-all box.
+#[test]
+fn an_absent_policy_still_denies_in_log_only_mode() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let engine = PolicyEngine::open(Vec::new(), &directory.path().join("dogwood.redb"))
+        .expect("an empty policy set opens")
+        .log_only();
+    let connect = Request::Connect {
+        host: "169.254.169.254",
+        ip: None,
+        port: 80,
+    };
+    let (decision, _) = engine.decide(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        &connect,
+    );
+    assert!(
+        matches!(
+            decision,
+            Decision::Deny {
+                reason: DenyReason::NoMatch,
+                ..
+            }
+        ),
+        "{decision:?}"
+    );
+}
+
+/// A reload that removes every authored source takes log-only mode with it, as an absent policy
+/// never lets a request through.
+#[test]
+fn a_reload_to_no_policy_stops_letting_denials_through() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let engine = PolicyEngine::open_staged(
+        &policy::Operator::unanchored(),
+        vec![source(
+            r#"permit(principal, action == Box::Action::"fs:read", resource);"#,
+        )],
+        &directory.path().join("dogwood.redb"),
+    )
+    .expect("the policy opens")
+    .log_only();
+    engine
+        .finish_mcp_discovery()
+        .expect("discovery finishes with no server");
+    let connect = Request::Connect {
+        host: "example.com",
+        ip: None,
+        port: 443,
+    };
+    let governed = GovernedBox::assigned("test-box");
+    let (before, _) = engine.decide(&governed, &Principal::agent(), &connect);
+    assert_eq!(
+        before.would_deny(),
+        Some(&DenyReason::NoMatch),
+        "{before:?}"
+    );
+
+    engine.reload(&[]).expect("the empty set reloads");
+    let (after, _) = engine.decide(&governed, &Principal::agent(), &connect);
+    assert!(!after.is_allow(), "{after:?}");
+}

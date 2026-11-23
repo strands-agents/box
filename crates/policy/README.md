@@ -78,8 +78,8 @@ treat it as recorded: record a tool call's own response after it too.
 `PolicyEngine::log_only()` returns the same engine in log-only mode, for its whole life. A
 `Forbidden` or `NoMatch` denial for a request that has a `RequestId` (or, for a per-tool call, a
 pending response) comes back as `Decision::Allow` with `would_deny` set to the denial's reason,
-attribution and rule unchanged. A `PolicyPending` or `InternalFault` denial, a degraded MCP tool,
-and a denial without a token still deny. The observer sees the same verdict the caller gets.
+attribution and rule unchanged. An engine with no authored policy, a `PolicyPending` or
+`InternalFault` denial, a degraded MCP tool, and a denial without a token still deny. The observer sees the same verdict the caller gets.
 `Decision::would_deny()` reads it, and `None` means the verdict was applied.
 
 Two calls sit off the lifecycle:
