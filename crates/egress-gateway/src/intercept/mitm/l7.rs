@@ -131,7 +131,8 @@ async fn run_l7_legs(
     revalidate: impl FnOnce(&str, &str, &HeaderMap) -> Result<()>,
 ) -> Result<WorkloadResponse> {
     let correlation = correlation.with_headers(&req.headers);
-    let correlation = if state.mcp_server_for(&connect.host).is_some() {
+    let mcp = state.mcp_server_for(&connect.host).is_some();
+    let correlation = if mcp {
         correlation.with_mcp(&req.body)
     } else {
         correlation
@@ -180,7 +181,7 @@ async fn run_l7_legs(
             let refusal = WorkloadResponse::refusal(400, b"malformed WebSocket handshake");
             return Ok(refuse(why, refusal));
         }
-        Handshake::WebSocket if state.mcp_server_for(&connect.host).is_some() => {
+        Handshake::WebSocket if mcp => {
             let refusal = WorkloadResponse::refusal(403, b"WebSocket refused for an MCP server");
             return Ok(refuse(
                 "websocket: handshake to a remote MCP server",
@@ -501,10 +502,10 @@ async fn run_l7_legs(
         Ok(permit) => permit,
         Err(error) => return Ok(interceptor_error(&error, None)),
     };
-    let relay = upgraded.inspect(|_| {
+    if upgraded.is_some() {
         head.headers.set("Upgrade", "websocket");
         head.headers.set("Connection", "Upgrade");
-    });
+    }
 
     Ok(WorkloadResponse {
         status: head.status,
@@ -514,7 +515,7 @@ async fn run_l7_legs(
         release: Some(response_permit),
         header_case: head.header_case,
         progress,
-        relay,
+        relay: upgraded,
     })
 }
 

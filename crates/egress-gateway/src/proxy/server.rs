@@ -110,8 +110,8 @@ async fn first_request(
     }
 
     // A plain `http://` request: the same decisions, with no TLS and no CONNECT ack.
-    let handshake = websocket::classify(&request) != Handshake::None;
-    let method = request.method().clone();
+    let handshake =
+        (websocket::classify(&request) != Handshake::None).then(|| request.method().clone());
     let max_body = state.config.response_limits.max_body_bytes;
     let Ok(parsed) = http1::read_request(&head, request.into_body(), max_body).await else {
         return Ok(WorkloadResponse::bare(400));
@@ -123,13 +123,15 @@ async fn first_request(
     // A listed host's port 80 is decided and sent as port 443 over TLS, exactly as a CONNECT to it.
     let (connect, upgraded) = connect::plain_destination(&state.config.upgrade_http, host, port);
     let correlation = RequestId::unique().with_headers(&parsed.headers);
-    let path = handshake.then(|| l7::judged_path(&origin_target));
-    let handshake = path.as_deref().map(|path| (method.as_str(), path));
-    let (upstream, backend) =
-        match admit(state, &connect, token.as_deref(), &correlation, handshake) {
-            Ok(opened) => opened,
-            Err(refusal) => return Ok(*refusal),
-        };
+    let refused = handshake.map(|method| (method, l7::judged_path(&origin_target)));
+    let refused = refused
+        .as_ref()
+        .map(|(method, path)| (method.as_str(), path.as_str()));
+    let (upstream, backend) = match admit(state, &connect, token.as_deref(), &correlation, refused)
+    {
+        Ok(opened) => opened,
+        Err(refusal) => return Ok(*refusal),
+    };
     let forwarded = l7::forward_plain(
         upstream,
         backend.as_ref(),
@@ -210,7 +212,7 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
     let (completion, pending) = (&completion, &Cell::new(None));
     serve(client, completion, |mut request, head| async move {
         let handshake = websocket::classify(&request);
-        let upgrade = hyper::upgrade::on(&mut request);
+        let upgrade = (handshake == Handshake::WebSocket).then(|| hyper::upgrade::on(&mut request));
         let max_body = state.config.response_limits.max_body_bytes;
         let parsed = match http1::read_request(&head, request.into_body(), max_body).await {
             Ok(parsed) => parsed,
@@ -230,7 +232,7 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
         )
         .await;
         let mut response = answered(&connect, backend.as_ref(), forwarded);
-        if let Some(relay) = response.relay.take() {
+        if let (Some(upgrade), Some(relay)) = (upgrade, response.relay.take()) {
             pending.set(Some((upgrade, relay)));
         }
         Ok(response)

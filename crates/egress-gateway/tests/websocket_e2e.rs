@@ -154,7 +154,7 @@ impl Session {
             credential,
             limit,
             Route::Direct,
-            Duration::from_secs(300),
+            MitmConfig::default().upstream_read_deadline,
             handler,
         )
     }
@@ -174,11 +174,8 @@ impl Session {
         let port = upstream.port();
         let (controls, phantom) = match (credential, backend) {
             (false, _) => (CapabilitySet::default(), None),
-            (true, None) => {
-                let (controls, phantom) = bearer(port);
-                (controls, Some(phantom))
-            }
-            (true, Some(_)) => (box_owned(port), None),
+            (true, None) => controls(port, RouteSpec::opaque),
+            (true, Some(_)) => controls(port, RouteSpec::box_owned),
         };
         let backends = backend.map(|host| {
             let dial = BackendDial {
@@ -342,7 +339,7 @@ fn a_handshake_to_an_mcp_server_host_is_refused_with_403() {
         false,
         LIMIT,
         Route::Mcp,
-        Duration::from_secs(300),
+        MitmConfig::default().upstream_read_deadline,
         echo(Arc::default()),
     );
     let head = session.handshake("");
@@ -388,22 +385,20 @@ fn secret(port: u16) -> Locator {
     Locator::parse_uri(&format!("env://{variable}")).unwrap()
 }
 
-fn bearer(port: u16) -> (CapabilitySet, String) {
+fn controls(
+    port: u16,
+    route: fn(DestinationPattern, Locator, InjectMode) -> RouteSpec,
+) -> (CapabilitySet, Option<String>) {
     let inject = InjectMode::header("Bearer {}".to_string(), None).unwrap();
-    let route = RouteSpec::opaque(destination(port), secret(port), inject);
+    let route = route(destination(port), secret(port), inject);
     let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(route)).unwrap();
-    let phantom = opened.phantoms()[0].token().to_string();
+    let phantom = opened
+        .phantoms()
+        .first()
+        .map(|phantom| phantom.token().to_string());
     let store = Arc::new(opened.into_vault());
     let controls = CapabilitySet::new(vec![CredentialCapability::new(destination(port), store)]);
     (controls, phantom)
-}
-
-fn box_owned(port: u16) -> CapabilitySet {
-    let inject = InjectMode::header("Bearer {}".to_string(), None).unwrap();
-    let route = RouteSpec::box_owned(destination(port), secret(port), inject);
-    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(route)).unwrap();
-    let store = Arc::new(opened.into_vault());
-    CapabilitySet::new(vec![CredentialCapability::new(destination(port), store)])
 }
 
 #[test]
@@ -412,7 +407,7 @@ fn a_websocket_through_a_backend_reroute_reaches_the_backend_and_is_judged_on_th
         true,
         LIMIT,
         Route::Backend,
-        Duration::from_secs(300),
+        MitmConfig::default().upstream_read_deadline,
         echo(Arc::default()),
     );
     let head = session.handshake("");
@@ -464,4 +459,26 @@ fn an_idle_websocket_ends_both_connections() {
     assert_eq!(read_frame(&mut session.client), None);
     assert!(ended(&frames));
     assert!(session.denials().is_empty());
+}
+
+#[test]
+fn a_101_that_does_not_switch_to_websocket_is_refused() {
+    let mut session = Session::start(false, LIMIT, |tls, _| {
+        tls.write_all(
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n",
+        )
+        .unwrap();
+    });
+    let head = session.handshake("");
+    assert!(head.starts_with("HTTP/1.1 502"), "{head}");
+}
+
+#[test]
+fn a_reply_to_a_handshake_with_no_body_framing_is_refused() {
+    let mut session = Session::start(false, LIMIT, |tls, _| {
+        tls.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\nno").unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+    });
+    let head = session.handshake("");
+    assert!(head.starts_with("HTTP/1.1 502"), "{head}");
 }

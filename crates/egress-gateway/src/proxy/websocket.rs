@@ -56,16 +56,12 @@ pub(crate) async fn run(workload: Upgraded, upstream: Upgraded, state: &SharedSt
     let (mut from_workload, mut to_workload) = tokio::io::split(TokioIo::new(workload));
     let (mut from_server, mut to_server) = tokio::io::split(TokioIo::new(upstream));
     let active = Cell::new(Instant::now());
-    {
-        let up = copy(&active, &mut from_workload, &mut to_server);
-        let down = copy(&active, &mut from_server, &mut to_workload);
-        tokio::select! {
-            _ = async { tokio::try_join!(up, down) } => {}
-            () = idle(&active, state.config.upstream_read_deadline) => {}
-        }
+    let up = copy(&active, &mut from_workload, &mut to_server);
+    let down = copy(&active, &mut from_server, &mut to_workload);
+    tokio::select! {
+        _ = async { tokio::try_join!(up, down) } => {}
+        () = idle(&active, state.config.upstream_read_deadline) => {}
     }
-    let closing = async { tokio::join!(to_workload.shutdown(), to_server.shutdown()) };
-    let _ = tokio::time::timeout(state.config.upstream_read_deadline, closing).await;
 }
 
 async fn copy<R, W>(active: &Cell<Instant>, from: &mut R, to: &mut W) -> std::io::Result<()>
@@ -133,13 +129,10 @@ mod tests {
         assert!(malformed(handshake(
             |request| request.header("Sec-WebSocket-Version", "8")
         )));
-        let without_connection = hyper::Request::get("/")
-            .header("Upgrade", "websocket")
-            .header("Sec-WebSocket-Version", "13")
-            .header("Sec-WebSocket-Key", KEY)
-            .body(Empty::<Bytes>::new())
-            .unwrap();
-        assert!(malformed(classify(&without_connection)));
+        assert!(malformed(handshake(|mut request| {
+            request.headers_mut().unwrap().remove("Connection");
+            request
+        })));
         let with_body = hyper::Request::get("/")
             .header("Upgrade", "websocket")
             .header("Connection", "Upgrade")

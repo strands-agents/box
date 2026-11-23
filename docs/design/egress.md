@@ -186,7 +186,9 @@ A WebSocket handshake inside a `CONNECT` is one `websocket:connect`, in place of
 gateway answers 400 to a handshake that isn't an HTTP/1.1 `GET` with `Connection: upgrade`,
 `Sec-WebSocket-Version: 13`, and no body. It answers 403 to a plain HTTP handshake, before any
 decision, and to a handshake to an HTTP MCP server. It adds the credential to
-the handshake and redacts the credential in the `101`, as for any request.
+the handshake and redacts the credential in the `101`, as for any request. It answers 502 to a
+`101` that doesn't name `websocket` as its `Upgrade`, and to a reply to a handshake that has no
+body framing, because the upstream connection stays open after a handshake.
 
 After the `101`, the gateway copies bytes both ways, unchanged, on every host, and asks policy
 nothing more. It doesn't read WebSocket frames, so it doesn't redact a credential in a message. A

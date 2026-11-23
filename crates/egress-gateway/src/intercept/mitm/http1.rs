@@ -286,6 +286,11 @@ pub(crate) fn read_response_head<B>(
             "HTTP protocol upgrades are not supported".to_string(),
         ));
     }
+    if status == 101 && !switches_to_websocket(&head.headers) {
+        return Err(ProxyError::Intercept(
+            "a 101 reply to a WebSocket handshake did not switch to WebSocket".to_string(),
+        ));
+    }
     let mut headers = HeaderMap::from_pairs(head.headers.iter().map(|(name, value)| {
         (
             name.as_str().to_string(),
@@ -293,6 +298,11 @@ pub(crate) fn read_response_head<B>(
         )
     }));
     let framing = explicit_body_framing(&headers)?;
+    if websocket && framing.is_none() && !matches!(status, 101 | 204 | 304) {
+        return Err(ProxyError::Intercept(
+            "a reply to a WebSocket handshake has no body framing".to_string(),
+        ));
+    }
     validate_transfer_coding_version(
         Some(u8::from(head.version == hyper::Version::HTTP_11)),
         framing,
@@ -308,6 +318,15 @@ pub(crate) fn read_response_head<B>(
         },
         body,
     ))
+}
+
+/// Whether a `101` reply names `websocket` as its only `Upgrade` protocol.
+fn switches_to_websocket(headers: &hyper::HeaderMap) -> bool {
+    let mut upgrades = headers.get_all(hyper::header::UPGRADE).iter();
+    matches!(
+        (upgrades.next().map(|value| value.to_str().map(str::trim)), upgrades.next()),
+        (Some(Ok(protocol)), None) if protocol.eq_ignore_ascii_case("websocket")
+    )
 }
 
 /// Build a [`HeaderMap`] from parsed httparse headers (preserving order + casing).

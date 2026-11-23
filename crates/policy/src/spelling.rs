@@ -416,9 +416,7 @@ impl Scope {
             Some(Self::Filesystem)
         } else if id.starts_with("shell:") {
             Some(Self::Shell)
-        } else if ["net:", "http:", "websocket:"]
-            .iter()
-            .any(|prefix| id.starts_with(prefix))
+        } else if id.starts_with("net:") || id.starts_with("http:") || id.starts_with("websocket:")
         {
             Some(Self::Network)
         } else {

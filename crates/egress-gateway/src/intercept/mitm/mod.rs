@@ -158,7 +158,7 @@ pub(crate) const HOST_LOOPBACK_NAME: &str = "host.box.internal";
 /// The shared, read-only state every connection handler borrows (behind an `Arc`).
 pub(crate) struct SharedState {
     /// Part B — the controls this adapter drives.
-    pub(crate) controls: CapabilitySet,
+    controls: CapabilitySet,
     /// The adapter config.
     pub(crate) config: MitmConfig,
     /// The ephemeral session CA.
