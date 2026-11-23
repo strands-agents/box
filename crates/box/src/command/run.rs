@@ -522,22 +522,23 @@ async fn hosted(
         &site,
     )?;
     eprintln!("{}", boundary.disclosure());
-    #[cfg_attr(not(unix), allow(unused_mut))]
-    let mut contained = Contained::spawn(boundary, &locked.root, hosted, terminal, signals).await?;
     // The record waits for the trampoline's `exec` to succeed, so a containment or `exec` failure
     // after the spawn writes none.
-    #[cfg(unix)]
-    {
-        let name = locked.root.name().to_string();
-        contained.watch_launch(move || {
+    let name = locked.root.name().to_string();
+    let contained = Contained::spawn(
+        boundary,
+        &locked.root,
+        hosted,
+        terminal,
+        signals,
+        move || {
             control.control(telemetry::ControlRecord::completed(
                 telemetry::ControlOperation::WorkloadStarted,
                 &name,
             ));
-        })?;
-    }
-    #[cfg(not(unix))]
-    drop(control);
+        },
+    )
+    .await?;
     contained.wait().await
 }
 
