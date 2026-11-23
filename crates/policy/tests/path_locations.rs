@@ -519,11 +519,11 @@ fn a_location_above_the_home_holds_home_relative_paths() {
         panic!("a root that holds the home must refuse");
     };
     assert!(
-        matches!(error, policy::PolicyError::UnmatchableLocation { .. }),
+        matches!(error, policy::PolicyError::LocationHoldsHome { .. }),
         "{error:?}"
     );
     assert!(
-        error.to_string().contains("add \"~\" to the list"),
+        error.to_string().contains("add \"~\" to include the home"),
         "{error}"
     );
 
@@ -778,7 +778,7 @@ fn a_root_that_does_not_exist_yet_under_a_linked_parent_refuses_with_its_resolve
         &link.join("new/deeper"),
         Path::new(HOME),
         &format!(
-            "it crosses a symbolic link, and a path is reported as resolved; write \"{}\"",
+            "a path here is reported as \"{0}\"; write \"{0}\"",
             written.display()
         ),
     );
@@ -847,43 +847,26 @@ fn a_root_no_reported_path_can_match_is_refused_with_the_spelling_to_write() {
     std::os::unix::fs::symlink(canonical.join("private/tmp"), canonical.join("tmp"))
         .expect("a linked tmp");
 
-    assert_unmatchable(
-        &home.join("src/app"),
-        &home,
-        "a path under the operator home is reported as `~/…`; write \"~/src/app\"",
-    );
-    assert_unmatchable(
-        &home,
-        &home,
-        "a path under the operator home is reported as `~/…`; write \"~\"",
-    );
+    let here = |final_spelling: &str| {
+        format!("a path here is reported as \"{final_spelling}\"; write \"{final_spelling}\"")
+    };
+    assert_unmatchable(&home.join("src/app"), &home, &here("~/src/app"));
+    assert_unmatchable(&home, &home, &here("~"));
+    let private_tmp = canonical.join("private/tmp");
     assert_unmatchable(
         &canonical.join("tmp/work"),
         &home,
-        &format!(
-            "it crosses a symbolic link, and a path is reported as resolved; write \"{}\"",
-            canonical.join("private/tmp/work").display()
-        ),
+        &here(&private_tmp.join("work").display().to_string()),
     );
     assert_unmatchable(
         &canonical.join("tmp/later"),
         &home,
-        &format!(
-            "it crosses a symbolic link, and a path is reported as resolved; write \"{}\"",
-            canonical.join("private/tmp/later").display()
-        ),
+        &here(&private_tmp.join("later").display().to_string()),
     );
-    assert_unmatchable(
-        Path::new("~/what"),
-        &home,
-        "it crosses a symbolic link, and a path is reported as resolved; write \"~/real\"",
-    );
-    assert_unmatchable(
-        &canonical.join("users"),
-        &home,
-        "it holds the operator home, and a path in the home is reported as `~/…`, so this root \
-         matches none of them; add \"~\" to the list",
-    );
+    assert_unmatchable(Path::new("~/what"), &home, &here("~/real"));
+    // An absolute root under the home that also crosses a link refuses once, with the final
+    // spelling.
+    assert_unmatchable(&home.join("what/app"), &home, &here("~/real/app"));
     assert_unmatchable(
         Path::new("/srv/data/"),
         &home,
@@ -895,8 +878,28 @@ fn a_root_no_reported_path_can_match_is_refused_with_the_spelling_to_write() {
         "a reported path has no empty component; write \"/srv/data\"",
     );
 
+    std::fs::create_dir_all(canonical.join("users/Shared")).expect("a folder beside the home");
+    let users = canonical.join("users");
+    let Err(error) = Operator::unanchored()
+        .anchored_at(&home)
+        .with_locations([("shared".to_string(), vec![users.clone()])])
+    else {
+        panic!("a root that holds the home must refuse");
+    };
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "policy fails schema validation: location \"shared\": {} holds the operator home, and \
+             a path in the home is reported as `~/…`, outside this root; add \"~\" to include the \
+             home, or list the folders you mean, such as \"{}\"",
+            users.display(),
+            users.join("Shared").display()
+        )
+    );
+
     for accepted in [
         PathBuf::from("~"),
+        PathBuf::from("~/"),
         PathBuf::from("~/real"),
         PathBuf::from("~/not/yet"),
         canonical.join("private/tmp/work"),
@@ -908,6 +911,15 @@ fn a_root_no_reported_path_can_match_is_refused_with_the_spelling_to_write() {
             .with_locations([("project".to_string(), vec![accepted.clone()])])
             .unwrap_or_else(|error| panic!("{} is accepted: {error}", accepted.display()));
     }
+    let slashed = Operator::unanchored()
+        .anchored_at(&home)
+        .with_locations([("home".to_string(), vec![PathBuf::from("~/")])])
+        .expect("`~/` is accepted");
+    assert_eq!(
+        slashed.locations()["home"],
+        [PathBuf::from("~")],
+        "`~/` names the whole home, as `~` does"
+    );
 }
 
 /// A rule on a location decides every path exactly as the two path comparisons it stands for.

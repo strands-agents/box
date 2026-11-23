@@ -92,6 +92,17 @@ impl Locations {
                         directory.display().to_string()
                     ),
                 },
+                policy::PolicyError::LocationHoldsHome {
+                    name,
+                    directory,
+                    advice,
+                } => ConfigError::Contract {
+                    reason: format!(
+                        "`[locations] {name}` entry {:?} holds the operator home, and a path in \
+                         the home is reported as `~/…`, outside this root; {advice}",
+                        directory.display().to_string()
+                    ),
+                },
                 other => ConfigError::Contract {
                     reason: format!("`[locations]` is refused: {other}"),
                 },
@@ -132,7 +143,8 @@ fn invalid_name(name: &str) -> Option<&'static str> {
 
 /// Why `entry` is not a directory a location can name, or `None` when it is one.
 fn invalid_directory(entry: &str) -> Option<&'static str> {
-    if entry == "~" {
+    // `~` and `~/` both name the whole home.
+    if entry == "~" || entry == "~/" {
         return None;
     }
     let rest = match entry.strip_prefix("~/") {
@@ -248,7 +260,7 @@ mod tests {
             );
             assert!(error.contains(reason), "{entry:?}: {error}");
         }
-        for entry in ["/work/.app", "/work/..app", "~/.cache", "~"] {
+        for entry in ["/work/.app", "/work/..app", "~/.cache", "~", "~/"] {
             locations(&[("project", &[entry])])
                 .validate()
                 .unwrap_or_else(|error| panic!("{entry:?}: {error}"));
@@ -304,13 +316,11 @@ mod tests {
         for (entry, reason) in [
             (
                 "~/link",
-                "it crosses a symbolic link, and a path is reported as resolved; write \
-                 \"~/real\""
-                    .to_string(),
+                "a path here is reported as \"~/real\"; write \"~/real\"",
             ),
             (
                 absolute.as_str(),
-                "a path under the operator home is reported as `~/…`; write \"~/real\"".to_string(),
+                "a path here is reported as \"~/real\"; write \"~/real\"",
             ),
         ] {
             let error = locations(&[("project", &["~/fine", entry])])
@@ -325,6 +335,32 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn an_entry_that_holds_the_home_is_refused_by_its_key_with_its_own_wording() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let users = directory.path().canonicalize().expect("canonical");
+        let home = users.join("me");
+        std::fs::create_dir_all(&home).expect("the home");
+        std::fs::create_dir(users.join("Shared")).expect("a folder beside the home");
+        let entry = users.display().to_string();
+        let error = locations(&[("shared", &[entry.as_str()])])
+            .operator(&home)
+            .expect_err("a root that holds the home")
+            .to_string();
+        assert_eq!(
+            error,
+            format!(
+                "invalid Box configuration: `[locations] shared` entry {entry:?} holds the \
+                 operator home, and a path in the home is reported as `~/…`, outside this root; \
+                 add \"~\" to include the home, or list the folders you mean, such as \"{}\"",
+                users.join("Shared").display()
+            )
+        );
+        locations(&[("shared", &[entry.as_str(), "~"])])
+            .operator(&home)
+            .expect("listing `~` beside it is accepted");
     }
 
     #[test]

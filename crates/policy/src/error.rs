@@ -40,6 +40,21 @@ pub enum PolicyError {
         reason: String,
     },
 
+    /// A declared location's root holds the operator home, whose paths are reported as `~/…`.
+    #[error(
+        "policy fails schema validation: location {name:?}: {} holds the operator home, and a \
+         path in the home is reported as `~/…`, outside this root; {advice}",
+        directory.display()
+    )]
+    LocationHoldsHome {
+        /// The location's name.
+        name: String,
+        /// The root as the caller passed it.
+        directory: std::path::PathBuf,
+        /// What to write instead.
+        advice: String,
+    },
+
     /// Strict schema validation reported an unknown action — e.g. a typo like
     /// `Box::Action::"fs:raed"`. Failing loud at load forecloses the silent
     /// no-match class a typo would otherwise reach.

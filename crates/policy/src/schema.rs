@@ -110,7 +110,7 @@ pub(crate) fn refuse_bad_locations(locations: &Locations) -> Result<(), PolicyEr
         for directory in directories {
             let text = directory.to_string_lossy();
             let shaped = match text.strip_prefix("~/") {
-                Some(rest) => !rest.is_empty() && is_normal(Path::new(rest)),
+                Some(rest) => rest.is_empty() || is_normal(Path::new(rest)),
                 None => text == "~" || (directory.is_absolute() && is_normal(directory)),
             };
             if !shaped {

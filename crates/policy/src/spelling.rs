@@ -57,6 +57,23 @@ impl Operator {
                     .to_string(),
             ));
         };
+        // `~/` names the whole home, as `~` does.
+        let declared: BTreeMap<String, Vec<PathBuf>> = declared
+            .into_iter()
+            .map(|(name, roots)| {
+                let roots = roots
+                    .into_iter()
+                    .map(|root| {
+                        if root.as_os_str() == "~/" {
+                            PathBuf::from("~")
+                        } else {
+                            root
+                        }
+                    })
+                    .collect();
+                (name, roots)
+            })
+            .collect();
         crate::schema::refuse_bad_locations(&declared)?;
         let mut written_locations = BTreeMap::new();
         for (name, roots) in declared {
@@ -924,18 +941,6 @@ fn judge_location_root(
     } else if let Some(rest) = text.strip_prefix("~/") {
         home.join(rest)
     } else {
-        if let Some(reported) = home_relative_spelling(root, &homes) {
-            return Err(unmatchable(format!(
-                "a path under the operator home is reported as `~/…`; write \"{reported}\""
-            )));
-        }
-        if !lists_home && homes.iter().any(|spelling| spelling.starts_with(root)) {
-            return Err(unmatchable(
-                "it holds the operator home, and a path in the home is reported as `~/…`, so \
-                 this root matches none of them; add \"~\" to the list"
-                    .to_string(),
-            ));
-        }
         root.to_path_buf()
     };
     let resolved = crate::path::resolve_host_directory(&on_disk).map_err(|reason| {
@@ -949,10 +954,37 @@ fn judge_location_root(
         .unwrap_or_else(|| resolved.to_string_lossy().into_owned());
     if reported != text {
         return Err(unmatchable(format!(
-            "it crosses a symbolic link, and a path is reported as resolved; write \"{reported}\""
+            "a path here is reported as \"{reported}\"; write \"{reported}\""
         )));
     }
+    if !lists_home
+        && !reported.starts_with('~')
+        && homes.iter().any(|spelling| spelling.starts_with(&resolved))
+    {
+        let example = folder_beside_the_home(&resolved, &homes)
+            .map(|folder| format!(", such as \"{}\"", folder.display()))
+            .unwrap_or_default();
+        return Err(PolicyError::LocationHoldsHome {
+            name: name.to_string(),
+            directory: root.to_path_buf(),
+            advice: format!("add \"~\" to include the home, or list the folders you mean{example}"),
+        });
+    }
     Ok(())
+}
+
+/// A folder directly in `root` that holds no spelling of the home, for the advice on a root that
+/// holds the home.
+fn folder_beside_the_home(root: &Path, homes: &[PathBuf]) -> Option<PathBuf> {
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(root)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.path())
+        .filter(|folder| !homes.iter().any(|home| home.starts_with(folder)))
+        .collect();
+    folders.sort();
+    folders.into_iter().next()
 }
 
 /// The operator home as stated and, when it differs, as canonical.
