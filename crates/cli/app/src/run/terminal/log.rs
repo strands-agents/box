@@ -154,11 +154,12 @@ impl Log {
         let id = launch.name();
         format!(
             "\n{preview}box: run {id} ended\n  startup disclosure \u{b7} {}\n  log      {log}\n  \
-             history  box runs history {id}\n  reuse    {}\n\n",
+             history  {}\n  reuse    {}\n\n",
             match self.unshown {
                 1 => "1 more message".to_owned(),
                 count => format!("{count} more messages"),
             },
+            launch.history_command(false),
             launch.reuse_command(),
         )
     }
