@@ -7,8 +7,9 @@ walks through a first run. This page covers what's different about Claude Code.
 
 `box profile create claude` asks which model provider Claude Code uses, then the region, whether
 to bring in your MCP servers (`claude.import-mcp`), whether to run your command hooks
-(`claude.import-hooks`), and the policy. It skips the provider and region questions when your
-Claude Code settings already answer them, as
+(`claude.import-hooks`), and the policy. When your Claude Code settings already name Bedrock, the
+provider question starts with Bedrock selected and still lists the Anthropic API and a Claude
+subscription. It skips the region question when your settings already answer it, as
 [Starters](../../../docs/cli/starters.md#skip-questions-the-agents-settings-already-answer)
 shows. It always asks the MCP and hooks questions at a terminal, because each one shows a warning
 first; pass `--option claude.import-mcp=false` or `--option claude.import-hooks=false` to answer

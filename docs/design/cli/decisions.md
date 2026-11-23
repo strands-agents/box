@@ -1907,8 +1907,10 @@ folder, so an entry there that is not a profile goes too.
 <a id="box-asks-only-at-a-terminal"></a>
 ### A starter answers from the host first, and `box` asks only at a terminal
 
-A starter first answers what the agent's host settings decide, at a terminal and without one
-([detection](detection.md)). `box` then asks only when stdin and stderr are terminals. With no
+A starter first answers what the agent's host settings decide ([detection](detection.md)). `box`
+then asks only when stdin and stderr are terminals. At a terminal it still asks each question that
+detection answered, with the detected choice as the preset, because detection sees only some
+choices: it reads no key, so it never picks the Anthropic or OpenAI API. With no
 terminal, `box profile reset` and `box profile clean` refuse unless the operator gives
 `--no-ask`, and a starter takes defaults or stops with the flag that answers
 ([starters](starters.md#without-a-terminal)). The policy question has no default there, so it
@@ -1916,10 +1918,11 @@ stops `box` until `--policy` answers it. A profile that runs the agent the way t
 it is worth more than one script writing the same profile on every machine.
 
 **Rejected.** Remove without asking when there is no terminal: a script could then delete a
-profile by accident. Detection only as the prompt's default: the operator would confirm each
-detected answer at a terminal, but a script would then get a different profile than a terminal on
-the same host. Earlier this entry rejected a starter that answers before it asks, because only a
-prompt could name a provider; a starter's choices now name it.
+profile by accident. Skip a question that detection answered at a terminal: a Bedrock setting
+then hid the API-key choices, and only Review showed what was picked. Detection only as the
+prompt's default, with no answer without a terminal: a script would then get a different profile
+than Enter at a terminal on the same host. Earlier this entry rejected a starter that answers
+before it asks, because only a prompt could name a provider; a starter's choices now name it.
 
 **Cost.** One script writes different profiles on two hosts whose agent settings differ, and no
 one confirms the detected answers. A script that removes state passes `--no-ask`, and a script

@@ -16,7 +16,7 @@ profile never refers to the starter again. You edit it like any other profile, a
 to the starter doesn't reach it.
 
 A starter can also read answers from the agent's own settings, so if Claude Code on your machine
-already uses Bedrock, `box` doesn't ask again.
+already uses Bedrock, `box` selects Bedrock for you and still lists every provider.
 
 ## Where starters are defined
 
@@ -391,8 +391,11 @@ first.
 
 ### Skip questions the agent's settings already answer
 
-Before it asks anything, the starter reads the agent's settings and answers each question they
-decide. Review shows each detected answer and where it came from:
+Before it asks anything, the starter reads the agent's settings. At a terminal, it still asks each
+question that they decide, such as the provider, with the found choice selected, so Enter keeps it
+and every other choice stays in view. It fills an input that they decide, such as the region,
+without asking. Without a terminal, a found choice is the answer. Review shows each detected answer
+and where it came from:
 
 ```text
 DETECTED OPTIONS

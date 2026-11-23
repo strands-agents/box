@@ -201,7 +201,8 @@ For a new profile, the step resolves each `--with` entry as a starter first, thr
    list, so `--with node` works beside a starter. An entry
    that matches choices in two questions is an error that names them.
 2. **Detection.** The step reads the starter's host sources and answers each question and input
-   that they decide ([detection](detection.md)).
+   that they decide ([detection](detection.md)). At a terminal, a detected question is still asked,
+   with the detected choice as its preset.
 3. **Prompts.** The step asks each question that has no answer and whose `when` holds, in file
    order. A `--with` entry that answers a question whose `when` does not hold is an error, so a
    profile never gets half a choice. A question with one choice takes that choice and shows no
@@ -227,8 +228,8 @@ replaces that value, and the step does not check that the two agree.
 ### Without a terminal
 
 `box` asks only when stdin and stderr are terminals
-([decisions](decisions.md#box-asks-only-at-a-terminal)). A detected answer is the same with and
-without one. Without one:
+([decisions](decisions.md#box-asks-only-at-a-terminal)). A detected answer is the answer without
+one, and the preset of its question at one. Without one:
 
 - An input with a `default` takes the default, including an input in `ask`. The step writes the
   default of an input with a `warning` to the profile.

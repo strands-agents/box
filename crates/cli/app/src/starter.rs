@@ -1348,9 +1348,11 @@ pub(crate) fn answer(
         if answers[index].is_some() {
             continue;
         }
+        // A detected choice is only the default: at a terminal the question still lists every
+        // choice, so an answer that detection cannot see, such as an API key, stays in view.
         if let Some(choice) = detect_choice(starter, question, &readings, &mut lines) {
             answers[index] = Some(choice);
-            if reviewing && let Some(terminal) = terminal.as_deref_mut() {
+            if let Some(terminal) = terminal.as_deref_mut() {
                 refuse(&mut asked)?;
                 let choice = ask_question(question, terminal, Some(choice))?;
                 answers[index] = Some(choice);
