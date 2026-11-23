@@ -473,15 +473,16 @@ Each would-deny is recorded as a denial that Box didn't enforce, and it names ev
 have blocked the action, across all its steps, so one trial finds them all. The `policy_installed`
 record states the mode on every run. [A decision](telemetry.md#a-decision) lists the keys.
 
-To list what a trial would have denied, filter the decision records on `enforced = false`. This
-prints each would-deny's action, resource, and the rules that would have blocked it:
+To list what a trial would have denied, filter the decision records on
+`strands.box.policy.log_only.would_flip`. This prints each record's action, resource, and the rules
+that would have blocked it:
 
 ```sh
 jq -r 'select(.resourceLogs) | .resourceLogs[].scopeLogs[]
   | select(.scope.name == "strands-box.policy") | .logRecords[]
   | .attributes | map({(.key): (.value | if has("arrayValue") then (.arrayValue.values | map(.stringValue) | join(","))
       elif has("boolValue") then .boolValue else .stringValue end)}) | add
-  | select(.["strands.box.policy.enforced"] == false)
+  | select(has("strands.box.policy.log_only.would_flip"))
   | "\(.["strands.box.policy.action"]) \(.["strands.box.policy.resource"]) \(.["strands.box.policy.log_only.would_flip"])"' \
   <box_dir>/private/telemetry/records.jsonl
 ```

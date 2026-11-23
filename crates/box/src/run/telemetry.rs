@@ -261,10 +261,8 @@ impl EffectiveDecision {
         )
     }
 
-    /// One check of a native filesystem operation the kernel refused overall.
-    ///
-    /// A check log-only mode let through keeps the policy's denial and rules, applied, because the
-    /// operation did not happen; a real permit is reported as the gate's refusal.
+    /// One check of a native filesystem operation the kernel refused overall: the gate's refusal,
+    /// naming in `would_flip` the rule of a check log-only mode let through.
     pub(crate) fn refused_check(
         action: impl Into<String>,
         resource: impl Into<String>,
@@ -272,13 +270,7 @@ impl EffectiveDecision {
         gate: &'static str,
         reason: impl Into<String>,
     ) -> Self {
-        if decision.would_deny().is_some() {
-            let mut refused = Self::from_policy(action, resource, decision);
-            refused.enforced = true;
-            refused
-        } else {
-            Self::enforcement_deny(action, resource, gate, reason)
-        }
+        Self::enforcement_deny(action, resource, gate, reason).flipped_by(would_flip_of([decision]))
     }
 
     /// Name every rule log-only mode let through across the attempt, when there are any; a
@@ -1299,9 +1291,9 @@ mod tests {
         );
     }
 
-    /// **A native check log-only mode let through, in an operation the kernel refused overall, keeps
-    /// the policy's denial and rules, applied**, so a trial loses no rule id there; a real permit in
-    /// that operation is still the gate's refusal.
+    /// **A native check log-only mode let through, in an operation the kernel refused overall, is
+    /// the gate's refusal that still names the rule in `would_flip`**, so a trial loses no rule and
+    /// no record says a log-only policy blocked something; a real permit is the gate's refusal.
     #[test]
     fn a_refused_native_check_keeps_the_rule_log_only_let_through() {
         let flipped = connect_decision(
@@ -1318,15 +1310,17 @@ mod tests {
             "refused",
         );
         assert_eq!(refused.parts().3, EffectiveVerdict::Deny);
-        assert_eq!(refused.cause(), DecisionCause::Forbidden);
-        assert!(
-            refused.enforced,
-            "the operation did not happen, so the denial applied"
+        assert_eq!(
+            refused.cause(),
+            DecisionCause::Enforcement,
+            "the kernel refused it, not the log-only policy"
         );
-        let [attribution] = refused.attribution() else {
-            panic!("the policy's rule is kept");
-        };
-        assert_eq!(attribution.annotation_id.as_deref(), Some("no-connect"));
+        assert!(refused.enforced);
+        assert_eq!(
+            refused.would_flip,
+            ["no-connect"],
+            "the rule is still named"
+        );
 
         let permit = connect_decision("permit(principal, action, resource);", false);
         let gate = EffectiveDecision::refused_check(
@@ -1337,6 +1331,33 @@ mod tests {
             "refused",
         );
         assert_eq!(gate.cause(), DecisionCause::Enforcement);
+    }
+
+    /// **A real block after a let-through leg names that leg's rule**, on a record Box applied: it
+    /// carries `would_flip` and no `enforced = false`, so a trial still finds the rule.
+    #[test]
+    fn a_real_block_after_a_let_through_leg_still_names_its_rule() {
+        let flipped = connect_decision(
+            r#"permit(principal, action, resource);
+               @id("no-connect")
+               forbid(principal, action == Box::Action::"net:connect", resource);"#,
+            true,
+        );
+        let capture = ObservationCapture::begin();
+        PolicyDecisionObserver.observed(r#"Box::Action::"fs:read""#, "/w/a", &flipped);
+        let deciding = capture.last().expect("a verdict was observed");
+        let blocked = EffectiveDecision::gate_deny(
+            r#"Box::Action::"fs:read""#,
+            "/w/a",
+            "floor",
+            "refused",
+            Some(&deciding),
+        );
+        assert!(blocked.enforced);
+        assert_eq!(blocked.would_flip, ["no-connect"]);
+        let record = blocked.into_record();
+        assert!(record.enforced());
+        assert_eq!(record.would_flip(), ["no-connect"]);
     }
 
     /// One `net:connect` decided by an engine over `policy`, in log-only mode when `log_only` holds.
