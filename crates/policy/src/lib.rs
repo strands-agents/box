@@ -18,6 +18,8 @@ mod error;
     )
 )]
 mod grammar;
+#[cfg(feature = "experimental-idle-flush")]
+mod history_flush;
 mod mcp_input;
 mod mcp_schema;
 mod observe;
@@ -38,7 +40,7 @@ mod test_event_schema;
 mod test_history;
 
 #[cfg(feature = "egress-adapter")]
-pub use adapters::egress::EgressPolicyInterceptor;
+pub use adapters::egress::{EgressPolicyInterceptor, ReplyReader};
 #[cfg(feature = "script-adapter")]
 pub use adapters::script::{
     RenameDestination, ScriptPermit, ScriptPolicyInterceptor, ScriptRefusal,
@@ -66,3 +68,6 @@ pub use policy::{
 pub use request::{FsAccess, FsOperation, Principal, Request, RequestId};
 pub use schema::GovernedBox;
 pub use spelling::{Operator, PolicyWarning};
+
+#[cfg(feature = "experimental-idle-flush")]
+pub use history_flush::{HistoryFlushSnapshot, HistoryFlusher};

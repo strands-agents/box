@@ -26,9 +26,9 @@ Each has one reader and one test for what belongs there. The `docs-writer`, `doc
 |---|---|---|---|
 | `docs/user/` | An operator who runs a box | How do I use it? | An operator needs it to run Box, without the source and without the design guide. |
 | `docs/design/<topic>.md` | A security evaluator or a contributor | How does it work, and why trust it? | A reader must trust the mechanism, or a new contributor loses an hour to rediscover it. |
-| `docs/design/decisions.md` | A contributor or a reviewer | Why is it like this? | The user decides a choice through `/kd`. The page is a dated record and it ages, so a code change adds no entry here. |
+| `docs/design/decisions.md` | A contributor or a reviewer | Why is it like this? | The user decides, through `/kd`, a choice that refuses or redirects a later change to a different part of Box. The log can lag the code. A code change owes no entry, and a pull request that changes what an entry says fixes that entry. |
 | `docs/dev/` | A contributor | How do I work on this repository? | A build, test, or debug step needs more than the command. |
-| `docs/site-manifest.json` | An external documentation publisher | Which user pages publish, and at which routes and navigation positions? | A publishable page is added, removed, or moved, or its H1, purpose, route, or navigation changes. |
+| `docs/site-manifest.json` | An external documentation publisher | Which user pages in `docs/user/` and `docs/cli/` publish, and at which routes and navigation positions? | A publishable page is added, removed, or moved, or its H1, purpose, route, or navigation changes. |
 | `docs/conventions.md` | A contributor who adds a crate or public surface | What does house style require? | The rule is mechanical, so a reviewer or a gate can check it. |
 | `README.md`, here and in each crate | Someone who builds Box, and a consumer of that crate | What is this, and what is its surface? | The purpose, the `pub use` facade, or a gate changes. `crates/box/README.md` also holds the CLI verbs, the four box inputs, and the config keys, and two tests pin it. |
 | `AGENTS.md`, here and in each crate | A coding agent | What must I not break here? | A frozen surface, a premise, or a gate moves. |
@@ -49,7 +49,7 @@ it.
 | When a change ... | Update |
 |---|---|
 | Adds, removes, or renames a CLI verb or a flag | `crates/box/README.md`, which `documented_commands.rs` pins, and each `docs/user/` page that spells that verb. |
-| Adds, removes, or moves a publishable `docs/user/` page, or changes its H1, purpose, or external navigation | `docs/site-manifest.json`. Keep an existing page's `id` and `slug`; make `title` match the H1; update `description` and `nav` when the page's purpose or placement changes. |
+| Adds, removes, or moves a publishable `docs/user/` or `docs/cli/` page, or changes its H1, purpose, or external navigation | `docs/site-manifest.json`. Keep an existing page's `id` and `slug`; make `title` match the H1; update `description` and `nav` when the page's purpose or placement changes. |
 | Changes the site manifest shape, required fields, allowed values, or field meanings | `docs/dev/site-manifest.md`, and bump `schemaVersion` before an existing consumer must change. |
 | Adds, removes, renames, or retypes a `box.toml` key, or a field in `[agent]` or `[tool.<name>]` | `docs/user/config.md`, and `crates/box/README.md`, which `documented_inputs.rs` pins. Also the key's own page when it has one: `egress.md`, `mcp.md`, `telemetry.md`, or `native-filesystem-policy.md`. |
 | Changes what a filesystem list grants, or adds or removes a list | `docs/user/config.md`, in the `[agent.filesystem]` section and in what is refused, and `docs/design/containment.md`. |
@@ -63,7 +63,8 @@ it.
 | Adds or removes an environment name that the box reserves or composes | `docs/user/config.md` for the refusal the operator meets, and `docs/design/egress.md` for a proxy or a certificate name. |
 | Changes how a part works: the order a run comes up, which process decides, what a sandbox grants, what reaches the gateway | The `docs/design/` page for that part. `docs/design/README.md` maps each page to the question it answers. |
 | Changes a step in getting started, or a command a tutorial runs | `docs/user/getting-started.md`, and each page under `docs/user/tutorials/` that runs that step. |
-| Changes a build, test, or debug command, or a gate | `README.md`, the [verification rules](../../AGENTS.md#verify-before-commit), and `docs/dev/` when the step needs a guide. |
+| Changes a build, test, or debug command, or a gate | `CONTRIBUTING.md`, the build command in `README.md`, the [verification rules](../../AGENTS.md#verify-before-commit), and `docs/dev/` when the step needs a guide. |
 | Adds a crate, or changes a crate's `pub use` facade | That crate's `README.md`, and `docs/conventions.md` when the change sets a new house rule. Recount the names from `src/lib.rs` and correct every count in the `README.md` and in the crate's `AGENTS.md`, because each states one. |
 | Changes the policy load, the policy grammar, or what a rule may spell | Each committed policy under `examples/` must still load, and each one a page shows must still match that page. |
-| Settles a choice that a reader could question or undo | No page in this commit. Offer `/kd` to the user, because an entry enters `docs/design/decisions.md` only after the user decides it. |
+| Settles a choice that passes the `kd` skill's test | No page in this commit. Offer `/kd` to the user, because an entry enters `docs/design/decisions.md` only after the user decides it. Every other choice is a sentence in the pull request. |
+| Goes against what an entry says | Fit the code to the entry, or rewrite the entry with `/kd`, and the user approves the rewrite. |

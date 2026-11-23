@@ -137,6 +137,17 @@ A per-tool rule names a tool as `<server>::Action::"<tool>"`, and reads that too
 `context.input.<argument>`. The namespace is the server name with each character other than a
 letter, a digit, or `_` changed to `_`, so `my-server` becomes `my_server`.
 
+An argument keeps its exact name, even when it isn't a plain name such as `zone-id`, `x-api-key`,
+or `if`. Quote that name, with `has` and with brackets:
+
+```cedar
+forbid (principal, action == dns::Action::"list_records", resource)
+when { context.input has "zone-id" && context.input["zone-id"] == "private-zone" };
+```
+
+A `when temporal` or `unless temporal` clause can't name an argument like this: it reads only
+arguments with plain names.
+
 `policy generate-schema` starts each declared server, reads its `tools/list`, and writes the
 per-tool actions and their argument types:
 
@@ -268,18 +279,22 @@ Key it on `::response`, and require `output.reply` to be `result`:
   unreadable reply fails. A `forbid` that fires when an earlier output said something can be
   avoided that way.
 - Tool outputs are stored in local history in `box_dir`, next to the inputs Box already stores.
-  They never go to telemetry.
+  They reach telemetry, in clear text, only on a target that names `mcp_tool_calls`. See
+  [a tool call](telemetry.md#a-tool-call).
 
 Box doesn't record `::error` for an MCP call, and the load refuses a rule that reads one, or that
 compares `output.reply` with a value other than the five above.
 
-The count carries over when the box restarts. That's also true of a rule written on a tool's own
+The persisted count carries over when the box restarts. That's also true of a rule written on a tool's own
 action, such as `github::Action::"create_issue"`, as long as the rule only decides tool calls and
 you didn't edit it. Box keeps that rule while the server lists its tools again. It starts with an
 empty count if you edit it, if the server's new tool list no longer fits it, or if the server
 doesn't list its tools in that run. A rule that decides a Box action, such as `http:request`, and
 counts a tool's calls in `when temporal` starts with an empty count at each run. Write that rule
 over `mcp:call` and its `tool` field, as above, to keep its count.
+
+A process crash can lose recent events; see
+[history persistence](policy.md#history-persistence-and-process-crashes).
 
 ## Result
 

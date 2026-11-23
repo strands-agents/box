@@ -13,6 +13,8 @@ const RETIREMENTS: &str = "docs/site-manifest-retirements.json";
 const RETIREMENTS_ENV: &str = "SITE_MANIFEST_RETIREMENTS";
 const BASE_MANIFEST_ENV: &str = "SITE_MANIFEST_BASE";
 const BASE_RETIREMENTS_ENV: &str = "SITE_MANIFEST_RETIREMENTS_BASE";
+/// The directories whose pages the manifest publishes.
+const PUBLISHED_DIRECTORIES: [&str; 2] = ["docs/user", "docs/cli"];
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -52,8 +54,29 @@ struct Page {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Navigation {
-    group: String,
+    group: NavigationGroup,
     order: u32,
+}
+
+/// A top-level group name, or the path of nested groups, outermost first.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+enum NavigationGroup {
+    Name(String),
+    Path(Vec<String>),
+}
+
+impl NavigationGroup {
+    fn path(&self) -> &[String] {
+        match self {
+            Self::Name(name) => std::slice::from_ref(name),
+            Self::Path(path) => path,
+        }
+    }
+
+    fn top_level(&self) -> &str {
+        self.path().first().map_or("", String::as_str)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -177,17 +200,20 @@ fn is_safe_slug(value: &str) -> bool {
 fn validate_source(root: &Path, source: &str, location: &str) -> Result<(), String> {
     validate_text(source, location)?;
     let parts = source.split('/').collect::<Vec<_>>();
+    let directory = PUBLISHED_DIRECTORIES
+        .into_iter()
+        .find(|directory| parts.len() >= 3 && parts[..2].join("/") == *directory);
     require(
-        parts.len() >= 3
-            && parts[..2] == ["docs", "user"]
+        directory.is_some()
             && parts
                 .iter()
                 .all(|part| !part.is_empty() && *part != "." && *part != "..")
             && !source.contains('\\')
             && source.ends_with(".md")
             && parts.last() != Some(&"README.md"),
-        format!("{location} must be a safe Markdown path under docs/user"),
+        format!("{location} must be a safe Markdown path under docs/user or docs/cli"),
     )?;
+    let directory = directory.expect("checked above");
 
     let path = root.join(source);
     let metadata = fs::symlink_metadata(&path)
@@ -197,13 +223,13 @@ fn validate_source(root: &Path, source: &str, location: &str) -> Result<(), Stri
         format!("{location} does not name a regular source file"),
     )?;
 
-    let docs_root = fs::canonicalize(root.join("docs/user"))
-        .map_err(|error| format!("cannot resolve docs/user: {error}"))?;
+    let docs_root = fs::canonicalize(root.join(directory))
+        .map_err(|error| format!("cannot resolve {directory}: {error}"))?;
     let resolved = fs::canonicalize(&path)
         .map_err(|error| format!("cannot resolve {}: {error}", path.display()))?;
     require(
         resolved.starts_with(docs_root),
-        format!("{location} resolves outside docs/user"),
+        format!("{location} resolves outside {directory}"),
     )
 }
 
@@ -266,36 +292,72 @@ fn validate_page(
     )?;
 
     validate_text(&page.description, &format!("{location}.description"))?;
-    validate_text(&page.nav.group, &format!("{location}.nav.group"))?;
+    let group = page.nav.group.path();
+    require(
+        !group.is_empty(),
+        format!("{location}.nav.group must name a group"),
+    )?;
+    for (level, name) in group.iter().enumerate() {
+        validate_text(name, &format!("{location}.nav.group[{level}]"))?;
+    }
     require(
         page.nav.order > 0,
         format!("{location}.nav.order must be a positive integer"),
     )?;
+    let top_level = page.nav.group.top_level();
     require(
-        nav_positions.insert((page.nav.group.clone(), page.nav.order)),
+        nav_positions.insert((top_level.to_string(), page.nav.order)),
         format!(
-            "{location}.nav duplicates {} order {}",
-            page.nav.group, page.nav.order
+            "{location}.nav duplicates {top_level} order {}",
+            page.nav.order
         ),
     )
 }
 
+/// Each group, at each level, and the pages directly in a group, take one block of the list.
 fn validate_group_blocks(pages: &[Page]) -> Result<(), String> {
-    let mut active_group = None;
-    let mut closed_groups = HashSet::new();
+    let depth = pages
+        .iter()
+        .map(|page| page.nav.group.path().len())
+        .max()
+        .unwrap_or(0);
+    for level in 1..=depth {
+        let mut active_group = None;
+        let mut closed_groups = HashSet::new();
+        for (index, page) in pages.iter().enumerate() {
+            let path = page.nav.group.path();
+            let group = &path[..level.min(path.len())];
+            if active_group == Some(group) {
+                continue;
+            }
+            if let Some(group) = active_group {
+                closed_groups.insert(group);
+            }
+            require(
+                !closed_groups.contains(group),
+                format!("pages[{index}].nav.group must use one contiguous block"),
+            )?;
+            active_group = Some(group);
+        }
+    }
+    Ok(())
+}
 
-    for (index, page) in pages.iter().enumerate() {
-        if active_group == Some(page.nav.group.as_str()) {
-            continue;
+/// Orders increase down each top-level group, so the site's sort keeps the manifest's order.
+fn validate_group_order(pages: &[Page]) -> Result<(), String> {
+    for (index, pair) in pages.windows(2).enumerate() {
+        let [previous, page] = pair else {
+            unreachable!("windows of two")
+        };
+        if previous.nav.group.top_level() == page.nav.group.top_level() {
+            require(
+                page.nav.order > previous.nav.order,
+                format!(
+                    "pages[{}].nav.order must increase down its group",
+                    index + 1
+                ),
+            )?;
         }
-        if let Some(group) = active_group {
-            closed_groups.insert(group);
-        }
-        require(
-            !closed_groups.contains(page.nav.group.as_str()),
-            format!("pages[{index}].nav.group must use one contiguous block"),
-        )?;
-        active_group = Some(page.nav.group.as_str());
     }
     Ok(())
 }
@@ -308,7 +370,8 @@ fn collect_published_sources(
     for entry in fs::read_dir(directory)
         .map_err(|error| format!("cannot read {}: {error}", directory.display()))?
     {
-        let entry = entry.map_err(|error| format!("cannot read docs/user entry: {error}"))?;
+        let entry = entry
+            .map_err(|error| format!("cannot read an entry of {}: {error}", directory.display()))?;
         let file_type = entry
             .file_type()
             .map_err(|error| format!("cannot inspect {}: {error}", entry.path().display()))?;
@@ -336,7 +399,9 @@ fn collect_published_sources(
 
 fn validate_coverage(root: &Path, sources: &HashSet<String>) -> Result<(), String> {
     let mut published = HashSet::new();
-    collect_published_sources(&root.join("docs/user"), root, &mut published)?;
+    for directory in PUBLISHED_DIRECTORIES {
+        collect_published_sources(&root.join(directory), root, &mut published)?;
+    }
     let mut missing = published.difference(sources).cloned().collect::<Vec<_>>();
     let mut extra = sources.difference(&published).cloned().collect::<Vec<_>>();
     missing.sort();
@@ -373,6 +438,7 @@ fn validate_manifest(root: &Path, manifest: &SiteManifest) -> Result<(), String>
         )?;
     }
     validate_group_blocks(&manifest.pages)?;
+    validate_group_order(&manifest.pages)?;
     validate_coverage(root, &sources)
 }
 
@@ -563,30 +629,7 @@ fn repository_manifest_is_valid() {
 fn ci_runs_validation_for_manifest_and_user_page_changes() {
     let root = repository_root();
     let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read CI");
-    let rust_filter = workflow
-        .split_once("            rust:\n")
-        .and_then(|(_, remainder)| remainder.split_once("            site_manifest:\n"))
-        .map(|(filter, _)| filter)
-        .expect("Rust path filter");
-    let site_manifest_filter = workflow
-        .split_once("            site_manifest:\n")
-        .and_then(|(_, remainder)| remainder.split_once("            containment:\n"))
-        .map(|(filter, _)| filter)
-        .expect("site manifest path filter");
-    for path in [
-        "docs/site-manifest.json",
-        "docs/site-manifest-retirements.json",
-        "docs/user/**/*.md",
-    ] {
-        assert!(
-            site_manifest_filter.contains(&format!("- '{path}'")),
-            "site manifest CI must run for {path}"
-        );
-        assert!(
-            !rust_filter.contains(&format!("- '{path}'")),
-            "Rust CI must not run for {path}"
-        );
-    }
+    assert_only_the_site_manifest_filter_runs_for_docs(&workflow);
     assert!(
         workflow.contains("\n  site-manifest:\n"),
         "CI must have a focused site manifest job"
@@ -630,6 +673,112 @@ fn ci_runs_validation_for_manifest_and_user_page_changes() {
             ),
         "pull-request CI must compare the manifest with its base revision"
     );
+}
+
+/// The `site_manifest` paths filter names the manifest, its retirements and the user pages, and no
+/// other filter does, whatever the filters are called and in whatever order they appear.
+fn assert_only_the_site_manifest_filter_runs_for_docs(workflow: &str) {
+    let filters = path_filters(workflow);
+    let site_manifest_filter = filters
+        .iter()
+        .find(|(name, _)| name == "site_manifest")
+        .map(|(_, patterns)| patterns)
+        .expect("site manifest path filter");
+    for path in [
+        "docs/site-manifest.json",
+        "docs/site-manifest-retirements.json",
+        "docs/user/**/*.md",
+        "docs/cli/**/*.md",
+    ] {
+        assert!(
+            site_manifest_filter.iter().any(|pattern| pattern == path),
+            "site manifest CI must run for {path}"
+        );
+        for (name, patterns) in filters.iter().filter(|(name, _)| name != "site_manifest") {
+            assert!(
+                !patterns.iter().any(|pattern| pattern == path),
+                "the {name} Rust or test filter must not run for {path}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_docs_filter_check_reads_renamed_and_reordered_filters() {
+    let filter = |name: &str, patterns: &[&str]| {
+        let mut text = format!("            {name}:\n");
+        for pattern in patterns {
+            text.push_str(&format!("              - '{pattern}'\n"));
+        }
+        text
+    };
+    let docs = [
+        "docs/site-manifest.json",
+        "docs/site-manifest-retirements.json",
+        "docs/user/**/*.md",
+        "docs/cli/**/*.md",
+    ];
+    let workflow = |filters: &[String]| {
+        format!(
+            "      - uses: dorny/paths-filter@v4\n        with:\n          filters: |\n{}",
+            filters.concat()
+        )
+    };
+    // The docs filter first, and Rust filters with other names after it.
+    assert_only_the_site_manifest_filter_runs_for_docs(&workflow(&[
+        filter("site_manifest", &docs),
+        filter("core", &["crates/**"]),
+        filter("cli", &["crates/cli/**"]),
+    ]));
+    // A renamed Rust filter that also names the user pages is still caught.
+    let leaky = workflow(&[
+        filter("core", &["crates/**"]),
+        filter("site_manifest", &docs),
+        filter("cli", &["crates/cli/**", "docs/user/**/*.md"]),
+    ]);
+    assert!(
+        std::panic::catch_unwind(|| assert_only_the_site_manifest_filter_runs_for_docs(&leaky))
+            .is_err(),
+        "a non-docs filter naming the user pages must fail the check"
+    );
+}
+
+/// The named path filters of every `dorny/paths-filter` `filters:` block in a workflow.
+fn path_filters(workflow: &str) -> Vec<(String, Vec<String>)> {
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let mut filters: Vec<(String, Vec<String>)> = Vec::new();
+    // The `filters:` key's indent while inside its block, and the indent of its filter names.
+    let mut block: Option<(usize, Option<usize>)> = None;
+    for line in workflow.lines() {
+        let content = line.trim();
+        if content.is_empty() || content.starts_with('#') {
+            continue;
+        }
+        if let Some((key_indent, name_indent)) = block.as_mut()
+            && indent(line) > *key_indent
+        {
+            if indent(line) == *name_indent.get_or_insert(indent(line)) {
+                let name = content
+                    .strip_suffix(':')
+                    .unwrap_or_else(|| panic!("a filter name, found {content:?}"));
+                filters.push((name.to_string(), Vec::new()));
+            } else {
+                let pattern = content
+                    .strip_prefix("- ")
+                    .unwrap_or_else(|| panic!("a filter pattern, found {content:?}"))
+                    .trim_matches(|quote| quote == '\'' || quote == '"');
+                filters
+                    .last_mut()
+                    .expect("a pattern belongs to a filter")
+                    .1
+                    .push(pattern.to_string());
+            }
+            continue;
+        }
+        block = matches!(content, "filters: |" | "filters: |-").then(|| (indent(line), None));
+    }
+    assert!(!filters.is_empty(), "CI names no paths-filter filter");
+    filters
 }
 
 #[test]
@@ -1071,10 +1220,51 @@ fn invalid_navigation_is_refused() {
             .contains("nav duplicates")
     );
 
-    let mut split_group = manifest;
-    split_group.pages[2].nav.group = split_group.pages[0].nav.group.clone();
+    assert_a_split_group_is_refused(&root, manifest.clone());
+
+    // A first group with two pages: the split case must not assume where the second group starts.
+    let mut two_first = manifest;
+    let first_group = two_first.pages[0].nav.group.top_level().to_string();
+    let next_order = two_first.pages[0].nav.order + 1;
+    if two_first.pages[1].nav.group.top_level() != first_group {
+        for page in two_first
+            .pages
+            .iter_mut()
+            .filter(|page| page.nav.group.top_level() == first_group)
+        {
+            if page.nav.order >= next_order {
+                page.nav.order += 1;
+            }
+        }
+        two_first.pages[1].nav.group = NavigationGroup::Name(first_group);
+        two_first.pages[1].nav.order = next_order;
+    }
+    validate_manifest(&root, &two_first).expect("a two-page first group is valid");
+    assert_a_split_group_is_refused(&root, two_first);
+}
+
+/// Moving the first page of a later group into the first group splits that group's block.
+fn assert_a_split_group_is_refused(root: &Path, mut split_group: SiteManifest) {
+    let first_group = split_group.pages[0].nav.group.top_level().to_string();
+    let separated = (1..split_group.pages.len())
+        .find(|&index| {
+            let pages = &split_group.pages;
+            pages[index].nav.group.top_level() != pages[index - 1].nav.group.top_level()
+                && pages[index - 1].nav.group.top_level() != first_group
+        })
+        .expect("the first page of a group whose block does not follow the first group's");
+    let free_order = split_group
+        .pages
+        .iter()
+        .filter(|page| page.nav.group.top_level() == first_group)
+        .map(|page| page.nav.order)
+        .max()
+        .expect("the first group has a page")
+        + 1;
+    split_group.pages[separated].nav.group = NavigationGroup::Name(first_group);
+    split_group.pages[separated].nav.order = free_order;
     assert!(
-        validate_manifest(&root, &split_group)
+        validate_manifest(root, &split_group)
             .expect_err("split navigation group must fail")
             .contains("must use one contiguous block")
     );
@@ -1218,6 +1408,201 @@ fn every_user_page_must_be_declared() {
         validate_manifest(&root, &manifest)
             .expect_err("missing page declaration must fail")
             .contains("do not cover published sources")
+    );
+}
+
+/// A repository with `docs/user/` and `docs/cli/`, one page per entry, and the manifest that
+/// lists them in the given order. Each entry is a source and its `nav.group` value.
+fn fixture(pages: &[(&str, serde_json::Value, u32)]) -> (tempfile::TempDir, serde_json::Value) {
+    let root = tempfile::tempdir().expect("temporary repository");
+    for directory in ["docs/user", "docs/cli"] {
+        fs::create_dir_all(root.path().join(directory)).expect("create docs directory");
+    }
+    let mut entries = Vec::new();
+    for (index, (source, group, order)) in pages.iter().enumerate() {
+        let path = root.path().join(source);
+        fs::create_dir_all(path.parent().expect("source parent")).expect("create source parent");
+        fs::write(&path, format!("# Page {index}\n\nText.\n")).expect("write source");
+        entries.push(serde_json::json!({
+            "id": format!("page-{index}"),
+            "source": source,
+            "slug": format!("page-{index}"),
+            "title": format!("Page {index}"),
+            "description": "A page.",
+            "nav": {"group": group, "order": order},
+        }));
+    }
+    let manifest = serde_json::json!({
+        "schemaVersion": 1,
+        "product": {"id": "strands-box", "name": "Strands Box", "status": "preview"},
+        "pages": entries,
+    });
+    (root, manifest)
+}
+
+fn validate_fixture(root: &tempfile::TempDir, manifest: serde_json::Value) -> Result<(), String> {
+    let manifest = serde_json::from_value::<SiteManifest>(manifest).map_err(|e| e.to_string())?;
+    validate_manifest(root.path(), &manifest)
+}
+
+#[test]
+fn cli_pages_publish_from_docs_cli() {
+    let (root, manifest) = fixture(&[
+        ("docs/cli/getting-started.md", "Get started".into(), 1),
+        ("docs/user/policy.md", "Reference".into(), 1),
+    ]);
+    validate_fixture(&root, manifest.clone()).expect("pages under docs/cli and docs/user publish");
+
+    fs::write(root.path().join("docs/cli/unlisted.md"), "# Unlisted\n").expect("write page");
+    assert!(
+        validate_fixture(&root, manifest)
+            .expect_err("an unlisted docs/cli page must fail")
+            .contains("missing [\"docs/cli/unlisted.md\"]")
+    );
+
+    for source in [
+        "docs/design/policy.md",
+        "docs/cli/README.md",
+        "docs/clix/page.md",
+    ] {
+        let (root, manifest) = fixture(&[(source, "Get started".into(), 1)]);
+        assert!(
+            validate_fixture(&root, manifest)
+                .expect_err("a source outside docs/user and docs/cli must fail")
+                .contains("safe Markdown path"),
+            "{source} was accepted"
+        );
+    }
+}
+
+#[test]
+fn a_source_with_front_matter_is_refused() {
+    let (root, manifest) = fixture(&[("docs/cli/install.md", "Get started".into(), 1)]);
+    fs::write(
+        root.path().join("docs/cli/install.md"),
+        "---\nreader: Someone.\n---\n\n# Page 0\n",
+    )
+    .expect("write page");
+    assert!(
+        validate_fixture(&root, manifest)
+            .expect_err("front matter must fail, because the site refuses it")
+            .contains("must start with an H1 heading")
+    );
+}
+
+#[test]
+fn a_nested_group_publishes_and_each_level_is_one_block() {
+    let core = |subgroup: &str| serde_json::json!(["Box Core", subgroup]);
+    let (root, manifest) = fixture(&[
+        ("docs/cli/a.md", "Get started".into(), 1),
+        ("docs/user/b.md", serde_json::json!(["Box Core"]), 1),
+        ("docs/user/c.md", core("Guides"), 2),
+        ("docs/user/d.md", core("Guides"), 3),
+        ("docs/user/e.md", core("Deploy"), 4),
+    ]);
+    validate_fixture(&root, manifest).expect("a nested group is valid");
+
+    // A subgroup that comes back after another subgroup splits its block.
+    let (root, manifest) = fixture(&[
+        ("docs/user/c.md", core("Guides"), 1),
+        ("docs/user/e.md", core("Deploy"), 2),
+        ("docs/user/d.md", core("Guides"), 3),
+    ]);
+    assert!(
+        validate_fixture(&root, manifest)
+            .expect_err("a split subgroup must fail")
+            .contains("must use one contiguous block")
+    );
+
+    // A top-level group that comes back after another group splits its block.
+    let (root, manifest) = fixture(&[
+        ("docs/user/c.md", core("Guides"), 1),
+        ("docs/cli/a.md", "Get started".into(), 1),
+        ("docs/user/e.md", core("Deploy"), 2),
+    ]);
+    assert!(
+        validate_fixture(&root, manifest)
+            .expect_err("a split top-level group must fail")
+            .contains("must use one contiguous block")
+    );
+
+    // The pages directly in a group come back after its subgroup and split their block.
+    let (root, manifest) = fixture(&[
+        ("docs/user/b.md", serde_json::json!(["Box Core"]), 1),
+        ("docs/user/c.md", core("Guides"), 2),
+        ("docs/user/d.md", serde_json::json!(["Box Core"]), 3),
+    ]);
+    assert!(
+        validate_fixture(&root, manifest)
+            .expect_err("direct pages split by a subgroup must fail")
+            .contains("must use one contiguous block")
+    );
+
+    for group in [serde_json::json!([]), serde_json::json!(["Box Core", ""])] {
+        let (root, manifest) = fixture(&[("docs/user/c.md", group.clone(), 1)]);
+        assert!(
+            validate_fixture(&root, manifest).is_err(),
+            "{group} was accepted"
+        );
+    }
+}
+
+#[test]
+fn a_group_name_is_the_same_group_as_an_array_of_it() {
+    let (root, manifest) = fixture(&[
+        ("docs/user/b.md", "Box Core".into(), 1),
+        ("docs/user/c.md", serde_json::json!(["Box Core"]), 2),
+    ]);
+    validate_fixture(&root, manifest).expect("a name and its array are one block");
+
+    let (root, manifest) = fixture(&[
+        ("docs/user/b.md", "Box Core".into(), 1),
+        ("docs/user/c.md", serde_json::json!(["Box Core"]), 1),
+    ]);
+    assert!(
+        validate_fixture(&root, manifest)
+            .expect_err("one order in a name and its array must fail")
+            .contains("nav duplicates Box Core order 1")
+    );
+
+    let (root, manifest) = fixture(&[
+        ("docs/user/b.md", "Box Core".into(), 1),
+        ("docs/cli/a.md", "Get started".into(), 1),
+        ("docs/user/c.md", serde_json::json!(["Box Core"]), 2),
+    ]);
+    assert!(
+        validate_fixture(&root, manifest)
+            .expect_err("a name and its array split by another group must fail")
+            .contains("must use one contiguous block")
+    );
+}
+
+#[test]
+fn orders_increase_down_a_top_level_group() {
+    // One order per top-level group, across its subgroups, so the site's sort keeps the
+    // manifest's order.
+    let (root, manifest) = fixture(&[
+        ("docs/user/b.md", serde_json::json!(["Box Core"]), 1),
+        (
+            "docs/user/c.md",
+            serde_json::json!(["Box Core", "Guides"]),
+            1,
+        ),
+    ]);
+    assert!(
+        validate_fixture(&root, manifest)
+            .expect_err("a repeated order in one top-level group must fail")
+            .contains("nav duplicates Box Core order 1")
+    );
+
+    let (root, manifest) = fixture(&[
+        ("docs/user/b.md", "Reference".into(), 2),
+        ("docs/user/c.md", "Reference".into(), 1),
+    ]);
+    assert!(
+        validate_fixture(&root, manifest)
+            .expect_err("a decreasing order must fail")
+            .contains("must increase down its group")
     );
 }
 

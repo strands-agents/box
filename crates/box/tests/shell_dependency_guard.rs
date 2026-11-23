@@ -48,6 +48,7 @@ const KERNEL_METHODS: &[(&str, Served)] = &[
     ("set_permissions", Served::Box),
     ("set_times", Served::Box),
     ("now", Served::Box),
+    ("uname", Served::Box),
     ("check_url", Served::Box),
     ("resolve_credential", Served::Default),
     ("http_request", Served::Box),

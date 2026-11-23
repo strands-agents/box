@@ -187,7 +187,7 @@ jq -r '.resourceSpans[]?.scopeSpans[]
 
 ```text
 box    deny  net:connect  telemetry.strandsagents.com
-box    deny  shell:spawn  /usr/bin/uname -s
+box    permit  shell:exec  uname -s
 box    permit  shell:exec  pwd
 agent  memory.search
 agent  memory.inject
@@ -198,8 +198,9 @@ agent  execute_agent_loop_cycle
 agent  invoke_agent Strands harness
 ```
 
-That is one turn: the box refuses two probes nobody asked for, runs `pwd`, reaches Bedrock twice, and the
-agent files the spans for the same work. Change `box-tutorial` to whatever you set `OTEL_SERVICE_NAME` to.
+That is one turn: the box refuses a version ping nobody asked for, runs the CLI's `uname` and `pwd`,
+reaches Bedrock twice, and the agent files the spans for the same work. Change `box-tutorial` to
+whatever you set `OTEL_SERVICE_NAME` to.
 
 ## What you have
 

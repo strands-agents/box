@@ -77,6 +77,7 @@ pub(crate) struct ShellOption {
     pub(super) value: OptionValue,
     pub(super) repeated: bool,
     pub(super) anywhere: bool,
+    pub(super) overrides: bool,
     pub(super) effects: EffectChanges,
 }
 
@@ -291,11 +292,15 @@ impl ShellOption {
         if spec.anywhere && !global {
             return refuse(OptionFault::AnywhereOnAction);
         }
+        if spec.overrides && global {
+            return refuse(OptionFault::OverridesOnGlobal);
+        }
         Ok(Self {
             flags: spec.flag,
             value,
             repeated: spec.repeated,
             anywhere: spec.anywhere,
+            overrides: spec.overrides,
             effects: EffectChanges::read(
                 place,
                 spec.like,
@@ -358,15 +363,26 @@ impl EffectChanges {
     }
 }
 
-/// Whether `word` is a command word: lowercase ASCII letters, digits, and `-`, not first a `-`.
+/// Whether `word` is a command word: spelled like one, and not all uppercase.
 pub(super) fn command_word(word: &str) -> bool {
-    let mut characters = word.chars();
+    spelled_like_a_command_word(word) && !all_uppercase(word)
+}
+
+/// Whether `word` is one optional `+`, then `[A-Za-z0-9][A-Za-z0-9_-]*`.
+pub(super) fn spelled_like_a_command_word(word: &str) -> bool {
+    let mut characters = word.strip_prefix('+').unwrap_or(word).chars();
     characters
         .next()
-        .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        .is_some_and(|first| first.is_ascii_alphanumeric())
         && characters.all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
         })
+}
+
+/// Whether `word` has an uppercase letter and no lowercase letter, as `FILE` does.
+pub(super) fn all_uppercase(word: &str) -> bool {
+    word.chars().any(|character| character.is_ascii_uppercase())
+        && !word.chars().any(|character| character.is_ascii_lowercase())
 }
 
 /// Whether a command line can give `flag`: `--` and a name with no `=`, or `-` and one character.
@@ -457,6 +473,30 @@ mod tests {
     }
 
     #[test]
+    fn a_command_word_is_literal_and_may_start_with_one_plus() {
+        for word in [
+            "push",
+            "payment_intents",
+            "test_helpers",
+            "emptyTrash",
+            "batchUpdate",
+            "Xy",
+            "3d",
+            "3D_x",
+            "+send",
+            "+Send_2-x",
+        ] {
+            assert!(command_word(word), "{word:?} is a command word");
+        }
+        for word in [
+            "", "+", "++send", "+-send", "+_send", "-send", "_send", "send+", "a.b", "a/b", "é",
+            "<send>", "+<send>", "X", "FILE", "DEP_ID", "+SEND", "3D",
+        ] {
+            assert!(!command_word(word), "{word:?} is not a command word");
+        }
+    }
+
+    #[test]
     fn every_nested_field_reads_into_its_own_place() {
         let text = r#"
 name = "git"
@@ -486,6 +526,7 @@ operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], 
             value,
             repeated,
             anywhere,
+            overrides: false,
             effects,
         };
         let lease = EffectChanges {

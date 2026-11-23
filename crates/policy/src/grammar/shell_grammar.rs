@@ -108,7 +108,7 @@ pub(crate) enum FieldKind {
 pub(super) enum FieldSource {
     Option(EffectChanges),
     Operand(usize, EffectChanges),
-    Toolchain,
+    Toolchain(EffectChanges),
 }
 
 impl ShellGrammar {
@@ -135,6 +135,24 @@ impl ShellGrammar {
                 &anywhere,
                 &mut spellings,
             )?);
+        }
+        if let Some(selector) = compiled.iter().find(|action| action.toolchain.is_some()) {
+            for action in &compiled {
+                for (index, spelling) in action.spellings.iter().enumerate() {
+                    if spelling.first().is_some_and(|word| word.starts_with('+')) {
+                        let name = action.name.as_str().to_string();
+                        return Err(GrammarRefusal::PlusBesideToolchain {
+                            place: if index == 0 {
+                                Place::ActionUsage(name)
+                            } else {
+                                Place::ActionAliases(name)
+                            },
+                            spelling: spelling.join(" "),
+                            other: Box::new(Place::ActionUsage(selector.name.as_str().to_string())),
+                        });
+                    }
+                }
+            }
         }
         Ok(Self {
             globals: OptionTable::of(global_options, |_| true),
@@ -185,33 +203,63 @@ impl ActionGrammar {
         if !action.options.is_empty() && !usage.options {
             return Err(GrammarRefusal::OptionsNotInUsage { place });
         }
-        if usage.globals {
-            for (option, shell_option) in &action.options {
-                if let Some((flag, global)) = shell_option
+        let overrides = |option: &String| {
+            usage.globals
+                && action
+                    .options
+                    .get(option)
+                    .is_some_and(|shell_option| shell_option.overrides)
+        };
+        for (option, shell_option) in &action.options {
+            let option_place = || Place::ActionOption {
+                action: name.as_str().to_string(),
+                option: option.clone(),
+            };
+            if shell_option.overrides {
+                let Some(global) = global_options
+                    .get(option)
+                    .filter(|global| global.anywhere && usage.globals)
+                else {
+                    return Err(GrammarRefusal::NothingToOverride {
+                        place: option_place(),
+                    });
+                };
+                let mut flags = shell_option.flags.clone();
+                let mut global_flags = global.flags.clone();
+                flags.sort();
+                global_flags.sort();
+                if flags != global_flags
+                    || shell_option.value != global.value
+                    || shell_option.repeated != global.repeated
+                {
+                    return Err(GrammarRefusal::BadOverride {
+                        place: option_place(),
+                        other: Box::new(Place::GlobalOption(option.clone())),
+                    });
+                }
+                continue;
+            }
+            if usage.globals
+                && let Some((flag, global)) = shell_option
                     .flags
                     .iter()
                     .find_map(|flag| anywhere.flags.get(flag).map(|slot| (flag, slot)))
-                {
-                    return Err(GrammarRefusal::FlagTaken {
-                        place: Place::ActionOption {
-                            action: name.as_str().to_string(),
-                            option: option.clone(),
-                        },
-                        flag: flag.clone(),
-                        other: Box::new(Place::GlobalOption(global.field.clone())),
-                    });
-                }
+            {
+                return Err(GrammarRefusal::FlagTaken {
+                    place: option_place(),
+                    flag: flag.clone(),
+                    other: Box::new(Place::GlobalOption(global.field.clone())),
+                });
             }
         }
         let operand_place = |operand: &str| Place::Operand {
             action: name.as_str().to_string(),
             operand: operand.to_string(),
         };
-        if let Some(operand) = action
-            .operands
-            .keys()
-            .find(|operand| !usage.operands.iter().any(|slot| &slot.name == *operand))
-        {
+        if let Some(operand) = action.operands.keys().find(|operand| {
+            usage.toolchain.as_ref() != Some(*operand)
+                && !usage.operands.iter().any(|slot| &slot.name == *operand)
+        }) {
             return Err(GrammarRefusal::OperandNotInUsage {
                 place: operand_place(operand),
             });
@@ -219,7 +267,12 @@ impl ActionGrammar {
 
         let mut fields = Vec::new();
         if usage.globals {
-            fields.extend(global_options.iter().map(option_field));
+            fields.extend(
+                global_options
+                    .iter()
+                    .filter(|(option, _)| !overrides(option))
+                    .map(option_field),
+            );
         }
         fields.extend(action.options.iter().map(option_field));
         let mut operands = Vec::new();
@@ -249,10 +302,33 @@ impl ActionGrammar {
             });
         }
         if let Some(toolchain) = &usage.toolchain {
+            let declared = action.operands.get(toolchain);
+            if declared.is_some_and(|operand| operand.rest) {
+                return Err(GrammarRefusal::BadRest {
+                    place: operand_place(toolchain),
+                });
+            }
+            if let Some(pattern) = declared.and_then(|operand| {
+                let changes = &operand.effects;
+                changes
+                    .like
+                    .iter()
+                    .chain(changes.when.iter().flat_map(|when| &when.like))
+                    .find(|pattern| pattern.starts_with('+'))
+            }) {
+                return Err(GrammarRefusal::ToolchainPattern {
+                    place: operand_place(toolchain),
+                    pattern: pattern.clone(),
+                });
+            }
             fields.push(Field {
                 name: toolchain.clone(),
                 kind: FieldKind::String,
-                source: FieldSource::Toolchain,
+                source: FieldSource::Toolchain(
+                    declared
+                        .map(|operand| operand.effects.clone())
+                        .unwrap_or_default(),
+                ),
             });
         }
         if let Some(field) = fields

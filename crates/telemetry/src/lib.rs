@@ -11,13 +11,14 @@ mod error;
 mod export;
 mod receive;
 mod record;
+mod tool;
 
 pub use collector::Collector;
 pub use config::{Payload, Target, TargetKind, TargetSecret, TelemetryConfig};
 pub use correlation::Correlation;
 pub use error::{Result, TelemetryError};
 pub use record::{
-    ControlOperation, ControlRecord, DecisionCause, DecisionRecord, DeterminingPolicy,
+    ControlOperation, ControlRecord, DecisionCause, DecisionRecord, DeterminingPolicy, McpToolCall,
     McpUnmatched, Signal, Subject,
 };
 

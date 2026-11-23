@@ -3,7 +3,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
-use strands_det_harness::{det_case, sh_quote};
+use strands_det_harness::{det_case, host_output, sh_quote};
 
 fn with_git(text: String, shell: &Path, helpers: &Path, read_only: &Path) -> String {
     let ws = text
@@ -74,7 +74,7 @@ det_case! {
         std::fs::create_dir(&outside).expect("DET_ERROR: create the ungranted directory");
         let ungranted = outside.join("program");
         std::fs::copy(b.built_tool(), &ungranted).expect("DET_ERROR: copy the ungranted program");
-        let host = Command::new(&ungranted).arg("host-control").output()
+        let host = host_output(Command::new(&ungranted).arg("host-control"))
             .expect("DET_ERROR: run the ungranted program outside Box");
         assert!(host.status.success(), "DET_ERROR: the host program must succeed");
         let protected_config = b.workspace().join(".strands-box/box.toml");

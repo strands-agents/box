@@ -1318,14 +1318,19 @@ fn an_otlp_target_receives_the_records_with_the_secret_attached() {
     // Several connections, not one: a box exports its control-plane records and its decisions in
     // separate batches, so serving one would answer whichever raced first and drop the other.
     std::thread::spawn(move || {
-        for stream in listener.incoming().take(8) {
+        'connections: for stream in listener.incoming().take(8) {
             let Ok(mut stream) = stream else { continue };
             let mut reader = BufReader::new(stream.try_clone().expect("clone"));
             let mut head = String::new();
             let mut length = 0usize;
             loop {
                 let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                let read = reader.read_line(&mut line).expect("read HTTP headers");
+                // A connection can close before sending any request bytes.
+                if read == 0 && head.is_empty() {
+                    continue 'connections;
+                }
+                if read == 0 || line == "\r\n" {
                     break;
                 }
                 if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {

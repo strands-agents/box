@@ -77,7 +77,7 @@ authority](decisions.md#the-authored-policy-is-the-only-decision-authority).
 - The reachable paths check runs in the Shell and Monty after the engine. It refuses the box
   directory, the `box.toml` and policy this run loaded, and anything outside the operator's home and
   the workspace. It also refuses writes, deletion, replacement, and enclosing-path changes for
-  configured tool programs and the [installed trusted
+  configured tool programs, the programs of declared secret sources, and the [installed trusted
   binaries](binaries.md#trampoline---strands-box-contain-trampoline). Reads of these files remain
   subject to policy. Policy decides first, so a counting rule still sees the attempt, and the
   refusal is recorded beside policy's verdict.
@@ -118,9 +118,10 @@ The Shell asks once per command line, after it has resolved the program, and the
 operation the command makes, on the resolved path. See [the Shell asks policy at two
 levels](decisions.md#the-shell-checks-policy-at-two-levels).
 
-Each decision changes history. The engine appends the request before evaluating the rules and writes
-the append to disk before returning the verdict. After the operation runs, the caller records how it
-ended. Only these trusted callers write history, and the workload never does. See [only trusted
+Each decision changes history. The engine appends the request before evaluating the rules.
+Default builds batch persistence, so a returned verdict does not mean its event has reached disk.
+After the operation runs, the caller records how it ended. Only these trusted callers write
+history, and the workload never does. See [only trusted
 enforcement points submit history](decisions.md#only-trusted-enforcement-points-submit-history).
 
 ## What a history rule sees
@@ -130,7 +131,7 @@ A history rule, which Dogwood calls a temporal rule, is an ordinary `permit` or 
 context](decisions.md#temporal-rules-ride-the-closed-context). For each action, the history holds
 three kinds of event:
 
-- `::request` for every durably submitted attempt, whether it was allowed or denied.
+- `::request` for every recorded attempt, whether it was allowed or denied.
 - `::response` for an operation that happened, or may have happened.
 - `::error` for an operation that definitely didn't happen.
 
@@ -241,10 +242,11 @@ Dogwood's default, and a longer window refuses to load.
 ## Durable history
 
 Each box keeps one history file, `<box_dir>/private/dogwood.redb`, and a restart reuses it. See
-[history is durable per box](decisions.md#history-is-durable-per-box-and-has-no-rewind). That's what
-stops a restart from resetting a budget. The history follows these rules:
+[history is durable per box](decisions.md#history-is-durable-per-box-and-has-no-rewind). A restart
+recovers the last persisted history; a crash can lose newer events, allowing requests that would otherwise exceed a limit.
+The history follows these rules:
 
-- Opening the engine recovers the history in full, or the run fails. The box never falls back to an
+- Opening the engine recovers the persisted history in full, or the run fails. The box never falls back to an
   empty history. A damaged file refuses the next run and is left as it was found. The run also
   refuses when the box's record says it has run before but the history is missing or empty, and when
   a history exists but the record says the box has never run.
@@ -280,6 +282,55 @@ History is not an audit record and has no tamper evidence. It cannot be rewound 
 The operation and its recorded outcome do not commit together. If the process stops between them,
 the history omits that outcome and a `::response` count is too low.
 
+### Dogwood upgrades
+
+Box pins the Dogwood language and local engine packages to 1.1.2. The adapter marks new history
+with Box-owned compatibility generation `1` under `box.dogwood.history-generation`. The generation
+identifies compatible saved policies and activity, independently of the package versions. Change it
+only when recovery or policy/state identity changes make existing history incompatible. Compatible
+package upgrades retain the generation. The adapter refuses previously used history without a
+supported generation before recovery or policy reconciliation. The workload does not start.
+
+The operator can keep the old box directory and select a new directory for the new build. The
+new directory has no earlier activity, so counts reset and history-based prerequisites must be
+satisfied again. Box does not erase or convert the old directory's history. See
+[start with fresh history](../user/policy.md#start-with-fresh-history-after-a-dogwood-upgrade).
+
+*Figure: the Box policy adapter uses Dogwood 1.1.2 in a new box directory. The old history stays
+with the old directory. Box batches history by default.*
+
+![Before the upgrade, the Box policy adapter uses dogwood-language and dogwood-local-engine 1.0.0. After the upgrade, it uses both packages at 1.1.2 and dogwood-language depends on dogwood-syntax 1.1.2. The new box directory starts with fresh history; the old history remains separate. Cedar and redb versions remain fixed. Box batches history by default.](images/dogwood-upgrade.png)
+
+[Editable figure](images/dogwood-upgrade.drawio)
+
+<a id="experimental-periodic-persistence"></a>
+### Periodic persistence by default
+
+Default Box builds enable the `experimental-idle-flush` Cargo feature, select periodic
+persistence, and start a separate timer for pending history. The engine checks thresholds
+of 1,000 events or one second when an event arrives. A build with `--no-default-features`
+retains per-event persistence. Both modes use the pinned public Dogwood 1.1.2 packages.
+The [operator guide](../user/policy.md#history-persistence-and-process-crashes) gives the build selection.
+
+A process crash before a successful flush can lose recent requests and outcomes.
+After restart, a history rule can therefore see fewer events and admit additional
+requests under a count-based limit. The timer flushes while Box is idle, but its
+one-second interval is a polling cadence, not a maximum persistence delay.
+
+After successful startup, explicit hosted shutdown stops and joins event producers before stopping the timer and
+flushing the remaining history. A recorded timer failure stops the workload, and a final
+flush failure makes the run fail. If native monitoring cannot stop, Box reports the
+shutdown failure and stops the timer without claiming a completed final flush. The
+[policy persistence interface](../../crates/policy/README.md#experimental-idle-history-flushing)
+describes explicit timer shutdown, counters, and errors. The
+[hosted integration](../../crates/box/README.md#experimental-history-timer) describes producer
+shutdown and failure reporting.
+
+![Box's default history timer periodically flushes history. Explicit shutdown stops and joins producers, stops the timer, then performs a final flush.](images/dogwood-idle-history-flush.png)
+
+The timer interval is a polling cadence. A process crash can lose unflushed history.
+Shutdown can wait for an upstream request or callback; the timer interval does not bound this wait.
+
 ## What refuses to load
 
 An invalid policy stops the box. A `forbid` that never matches can appear to protect a resource
@@ -291,12 +342,16 @@ load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-o
 refuses a rule that reads `context.input` under actions of more than one family, or under no action,
 because a field means what the action makes it mean. See [a rule that reads the input names one
 action family](decisions.md#a-rule-that-reads-the-input-names-one-action-family). It also refuses a
-temporal predicate on `mcp:call::error` or a per-tool `::error`, because an MCP call records only
+rule whose action list names actions of more than one action type, such as a `Box::Action` beside an
+MCP tool's action or the actions of two servers, whether or not it reads the input: Cedar refuses a set
+of mixed types, so the rule would stay pending until discovery finishes and then be dropped, and its
+other arms would go unenforced. It also
+refuses a temporal predicate on `mcp:call::error` or a per-tool `::error`, because an MCP call records only
 `::response`.
 
 The `run` verb validates the policy before it writes any box state. A box with no local MCP server
-validates against the complete action schema, and that check accepts and refuses exactly what the
-later load does, so a policy that passes it loads at the next run.
+validates against the complete action schema. Passing this check confirms the policy text;
+opening or recovering saved history can still prevent startup.
 
 A box with a local MCP server can finish the check only after the server reports its tools. Up
 front, `run` checks syntax, macro expansion, provider use, MCP `::error` predicates, and the action
@@ -321,7 +376,8 @@ as ``did you mean `path`?``.
 
 A policy that validates can still fail to run, because opening the history has its own refusals;
 [durable history](#durable-history) lists them. Before a workload starts, Box also refuses
-configured tool programs that overlap with direct writable grants. On macOS and Linux, a command
+configured tool programs, and programs of declared secret sources, that overlap with direct
+writable grants. On macOS and Linux, a command
 with multiple hard links can remain writable by the operator. Box first requires a complete scan
 of every process's declared writable directories. The scan includes subdirectories excluded by
 `deny` and refuses startup if it finds another name for the command.
@@ -380,7 +436,7 @@ has these limits:
 
 - Decisions serialize. Every decision waits for one disk sync and for the one lock, so requests in a
   burst wait for earlier decisions.
-- A temporal macro can lose its history. In Dogwood 1.0.0, a rule that calls a temporal macro such
+- A temporal macro can lose its history. In Dogwood 1.1.2, a rule that calls a temporal macro such
   as `count_within` loses its accumulated state when the text before the call changes, even by a
   comment. A rule written inline keeps its state. Nothing Box ships calls a macro.
 - A verdict is allow or deny. No rule can pause a request for human approval. See [there is no

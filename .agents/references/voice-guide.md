@@ -5,7 +5,7 @@ a consumer. The `docs-writer`, `docs-reviewer`, and `docs-audit` skills apply it
 order.
 
 For a wording-only rewrite in `docs/dev/`, apply the sentence rules in Layers 4 and 5. Keep the
-page's structure, source and test references, and Simplified Technical English register.
+page's structure, source and test references, and plain technical register.
 
 ## Contents
 
@@ -186,8 +186,9 @@ These come from the operator's need for a contract. They apply to every page in 
 3. **Don't explain why.** Document the behavior and the shape. Keep a reason only when it changes
    the operator's action, for example "Install the helpers beside `strands-box`, because the box
    finds them there."
-4. **Document the present.** One `> **Status.**` line at the top is the only sentence about the
-   future that a page may have.
+4. **Document the present.** A page carries no status line and no sentence about the future.
+   When a feature is experimental, the page says so in its own text, next to the key that turns it
+   on.
 5. **Open with the subject.** The first sentence defines the thing the reader runs or configures.
    Don't open with "This guide describes".
 6. **Cut each section that doesn't help the operator act.** Trust boundaries and design history

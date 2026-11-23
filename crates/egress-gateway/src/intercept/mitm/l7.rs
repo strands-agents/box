@@ -191,7 +191,15 @@ async fn run_l7_legs(
     };
 
     // A secret rides only TLS: refuse on the same canonical target the credential match below sees.
-    if !intercepted && state.controls.matches_any(&target.as_destination()) {
+    // The one exception is the reserved loopback name, when it is mapped to loopback, not
+    // re-routed, and every matching route names it exactly: that plaintext leg never leaves the
+    // surrounding OS (docs/design/decisions.md#a-secret-rides-only-tls).
+    let destination = target.as_destination();
+    let stays_on_host_loopback = state.is_mapped_host_loopback(&connect.host, backend)
+        && state
+            .controls
+            .every_match_names_host(&destination, super::HOST_LOOPBACK_NAME);
+    if !intercepted && state.controls.matches_any(&destination) && !stays_on_host_loopback {
         return Ok(refuse(
             "credential would attach on a plaintext request; refused — a secret must ride TLS",
             WorkloadResponse::refusal(403, b"credential not permitted on a plaintext request"),
@@ -268,12 +276,11 @@ async fn run_l7_legs(
         },
         None => None,
     };
-    // A tool call's reply is read into policy history, so ask for it uncompressed; otherwise the
-    // workload could hide its own reply from history by asking for a compressed one.
-    if mcp_target
-        .as_ref()
-        .is_some_and(|(_, target)| target.method() == "tools/call")
-    {
+    // The reply to an MCP frame is read by the policy: a tool call's into history, and a catalog
+    // into the staged schema. Ask for it uncompressed; otherwise the workload could hide its own
+    // reply from history, or fail a catalog's staging and leave a rule unenforced, by asking for a
+    // compressed one.
+    if mcp_target.is_some() {
         req.headers.set("Accept-Encoding", "identity");
     }
 
@@ -412,8 +419,8 @@ async fn run_l7_legs(
     let response = match response {
         Ok(response) => response,
         Err(error) => {
-            request_permit.record_outcome(outcome).map_err(|error| {
-                ProxyError::Io(format!("recording upstream request outcome: {error}"))
+            request_permit.record_outcome(outcome).map_err(|_| {
+                ProxyError::Io("recording upstream request outcome failed".to_string())
             })?;
             return Err(error);
         }
@@ -627,11 +634,21 @@ pub(crate) struct WorkloadResponse {
 }
 
 impl WorkloadResponse {
-    /// A proxy-originated diagnostic, outside the response-release lifecycle.
+    /// A refusal the gateway originates.
     pub(crate) fn refusal(status: u16, body: &[u8]) -> Self {
+        Self::originated(status, crate::PROXY_ORIGIN_VALUE, body)
+    }
+
+    /// A failure the gateway originates, for a request it did not refuse but could not complete.
+    pub(crate) fn failure(status: u16, body: &[u8]) -> Self {
+        Self::originated(status, crate::PROXY_FAILURE_VALUE, body)
+    }
+
+    /// A response the gateway originates, marked `origin`, outside the response-release lifecycle.
+    fn originated(status: u16, origin: &str, body: &[u8]) -> Self {
         Self {
             reason: None,
-            headers: proxy_originated_headers(),
+            headers: proxy_originated_headers(origin),
             body: body.to_vec().into(),
             ..Self::bare(status)
         }
@@ -680,7 +697,7 @@ fn claim_effect(
 /// The response to an effect refusal or a static interceptor failure.
 pub(super) fn interceptor_error(error: &io::Error, mcp_request: Option<&[u8]>) -> WorkloadResponse {
     if error.kind() != io::ErrorKind::PermissionDenied {
-        return WorkloadResponse::refusal(502, b"effect interceptor unavailable");
+        return WorkloadResponse::failure(502, b"effect interceptor unavailable");
     }
     let message = super::diagnostic::denial_message(error);
     if let Some(response) = mcp_request.and_then(|request| mcp_denial_response(request, &message)) {
@@ -695,12 +712,9 @@ pub(super) fn interceptor_error(error: &io::Error, mcp_request: Option<&[u8]>) -
 }
 
 /// The headers every response the gateway originates carries, and no relayed response does.
-fn proxy_originated_headers() -> crate::boundary::HeaderMap {
+fn proxy_originated_headers(origin: &str) -> crate::boundary::HeaderMap {
     let mut headers = crate::boundary::HeaderMap::new();
-    headers.set(
-        crate::PROXY_ORIGIN_HEADER,
-        crate::PROXY_ORIGIN_VALUE.to_string(),
-    );
+    headers.set(crate::PROXY_ORIGIN_HEADER, origin.to_string());
     headers
 }
 
@@ -970,19 +984,24 @@ mod tests {
         );
     }
 
-    /// **A gateway-originated refusal carries the marker.** The client turns the marker into a
-    /// denial, so a refusal this gateway writes must name itself.
+    /// **A gateway-originated response carries the marker.** The client turns the marker into an
+    /// error, so a refusal or a failure this gateway writes must name itself, and say which it is.
     #[test]
-    fn a_gateway_refusal_carries_the_marker() {
-        let response = interceptor_error(
-            &io::Error::new(io::ErrorKind::PermissionDenied, "refused"),
-            None,
-        );
-        assert_eq!(
-            response.headers.get(crate::PROXY_ORIGIN_HEADER),
-            Some(crate::PROXY_ORIGIN_VALUE),
-            "the gateway's own refusal names itself"
-        );
+    fn a_gateway_response_carries_the_marker() {
+        for (error, origin) in [
+            (
+                io::Error::new(io::ErrorKind::PermissionDenied, "refused"),
+                crate::PROXY_ORIGIN_VALUE,
+            ),
+            (io::Error::other("unavailable"), crate::PROXY_FAILURE_VALUE),
+        ] {
+            let response = interceptor_error(&error, None);
+            assert_eq!(
+                response.headers.get(crate::PROXY_ORIGIN_HEADER),
+                Some(origin),
+                "{error}"
+            );
+        }
     }
 
     #[test]

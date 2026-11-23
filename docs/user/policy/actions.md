@@ -8,8 +8,7 @@ Audience: an operator writing a `policy.dw` who needs the exact action name, its
 fields, and which part of the box raises it. [Policy](../policy.md) introduces the rules, and
 [common rules](../policy.md#common-rules) shows each field in use.
 
-> **Status.** The vocabulary can change before 1.0.0. Pin the Box build you install. A rule that
-> names an action the build does not have refuses to load.
+A rule that names an action the build does not have refuses to load.
 
 ## The fixed parts
 
@@ -134,6 +133,9 @@ with `expected ipaddr but saw String`.
 A rule on `path` has caveats for repeated slashes and `%2F`.
 [Forbid one URL path on a host](../policy.md#forbid-one-url-path-on-a-host) lists them.
 
+`host.box.internal` is your machine's loopback, decided as `ip4 = "127.0.0.1"`; see
+[reach a service on your machine](../policy.md#reach-a-service-on-your-machine).
+
 **`websocket:connect`**, once per WebSocket, on its handshake, in place of `http:request`. Its fields
 are those of `http:request` without `body_bytes`, because a handshake has no body. The reply's
 `status` is on `output`, and it is 101 when the WebSocket opened.
@@ -230,7 +232,10 @@ when { context.input.server == "demo" && context.input has tool && context.input
 ```
 
 **A generated per-tool action**, `<server>::Action::"<tool>"`, carries the tool's arguments as
-`context.input.<argument>`, with the types the server's `tools/list` declares. Run the
+`context.input.<argument>`, with the types the server's `tools/list` declares. An argument whose
+name isn't a plain name, such as `zone-id`, keeps it, and a rule reads it as
+`context.input["zone-id"]`. A `temporal` clause can't name such an argument; it reads only
+arguments with plain names. Run the
 `policy generate-schema` verb to see the exact names:
 
 ```sh

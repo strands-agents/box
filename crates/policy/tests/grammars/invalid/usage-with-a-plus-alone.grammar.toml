@@ -1,0 +1,10 @@
+# expect: `<grammar>.shell.send.usage` has "+", which is not a command word, an operand `<name>`, or `--`
+# A tool grammar for gws, with one helper command.
+
+name    = "gws"
+program = "gws"
+format  = 1
+version = 1
+
+[shell.send]
+usage = "gws gmail +"

@@ -540,6 +540,23 @@ fn unconfirmed() {
 /// Hands a remote tool call's reply to its shared [`ToolLeg`].
 struct ToolReplyObserver {
     leg: Arc<Mutex<ToolLeg>>,
+    reader: ReplyReader,
+}
+
+impl ToolReplyObserver {
+    fn new(leg: Arc<Mutex<ToolLeg>>, request_id: Option<&str>) -> Self {
+        Self {
+            leg,
+            reader: ReplyReader::for_request(request_id),
+        }
+    }
+}
+
+/// Reads one remote `tools/call` reply body, plain JSON or Server-Sent Events, as it grows.
+///
+/// The box reads every remote tool reply for its tool-call log record with this reader, so the
+/// record and the per-tool `::response` read a reply the same way.
+pub struct ReplyReader {
     /// The JSON text of the request's JSON-RPC `id`, which the reply must carry.
     request_id: Option<String>,
     /// How many bytes of the reply have been read as Server-Sent Event lines.
@@ -552,16 +569,45 @@ struct ToolReplyObserver {
     reply: Option<serde_json::Value>,
 }
 
-impl ToolReplyObserver {
-    fn new(leg: Arc<Mutex<ToolLeg>>, request_id: Option<&str>) -> Self {
+impl ReplyReader {
+    /// A reader for the reply to the request whose JSON-RPC `id` is `request_id`, as JSON text.
+    #[must_use]
+    pub fn for_request(request_id: Option<&str>) -> Self {
         Self {
-            leg,
             request_id: request_id.map(str::to_string),
             scanned: 0,
             searched: 0,
             data: String::new(),
             reply: None,
         }
+    }
+
+    /// Whether the body so far already holds the reply, reading only what it has not read.
+    pub fn holds_the_reply(&mut self, body: &[u8]) -> bool {
+        // A plain JSON reply is read once, when it ends.
+        if !is_plain_json(body) {
+            self.scan_events(body);
+        }
+        self.reply.is_some()
+    }
+
+    /// The reply in a body that has ended, or `None` when it carries none.
+    pub fn reply_in(&mut self, body: &[u8]) -> Option<serde_json::Value> {
+        if is_plain_json(body) {
+            return std::str::from_utf8(body)
+                .ok()
+                .and_then(|text| matching_reply(text, self.request_id.as_deref()));
+        }
+        self.scan_events(body);
+        if self.reply.is_none() && self.scanned < body.len() {
+            let rest = body[self.scanned..].to_vec();
+            self.event_line(&rest);
+        }
+        if self.reply.is_none() {
+            // A stream may end without the blank line after its last event.
+            self.event_line(b"");
+        }
+        self.reply.take()
     }
 
     /// Read the reply's whole lines that were not read yet, until one event carries the reply.
@@ -603,30 +649,11 @@ fn is_plain_json(body: &[u8]) -> bool {
 
 impl EgressReplyObserver for ToolReplyObserver {
     fn complete(&mut self, reply: &[u8]) -> bool {
-        // A plain JSON reply is read once, when it ends.
-        if !is_plain_json(reply) {
-            self.scan_events(reply);
-        }
-        self.reply.is_some()
+        self.reader.holds_the_reply(reply)
     }
 
     fn finished(mut self: Box<Self>, reply: &[u8]) {
-        let found = if is_plain_json(reply) {
-            std::str::from_utf8(reply)
-                .ok()
-                .and_then(|text| matching_reply(text, self.request_id.as_deref()))
-        } else {
-            self.scan_events(reply);
-            if self.reply.is_none() && self.scanned < reply.len() {
-                let rest = reply[self.scanned..].to_vec();
-                self.event_line(&rest);
-            }
-            if self.reply.is_none() {
-                // A stream may end without the blank line after its last event.
-                self.event_line(b"");
-            }
-            self.reply.take()
-        };
+        let found = self.reader.reply_in(reply);
         ToolLeg::set_reply(
             &self.leg,
             found.map_or(ReplyEnd::Indeterminate, ReplyEnd::Reply),

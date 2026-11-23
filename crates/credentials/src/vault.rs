@@ -21,10 +21,10 @@ use crate::{
 const LOAD_CORRELATION: &str = "credential-store-load";
 
 /// The `cmd://` scheme, refused at open because no request-time capture path is wired.
-const CMD_SCHEME: &str = "cmd";
+pub(crate) const CMD_SCHEME: &str = "cmd";
 
 /// The deferred-mint scheme an operator config could once name.
-const OAUTH2_SCHEME: &str = "oauth2";
+pub(crate) const OAUTH2_SCHEME: &str = "oauth2";
 
 /// One resolved opaque binding: the secret, how it attaches, and the phantom standing in for it.
 pub(crate) struct OpaqueBinding {
@@ -364,14 +364,25 @@ impl Vault {
         // and ambient fallback is allowed: a named-profile-only vault, a `credsd://` vault, or one
         // under `require_scoped_aws_profile` does no resolve at open, so a box that never signs a
         // bare route forces no credentials to exist. The resolve primes the shared provider cache,
-        // and `audit_aws_resolve` emits the one prepare-step record.
+        // `audit_aws_resolve` emits the one prepare-step record, and the vault warns once here for each
+        // bare route.
         if vault.ambient_policy != AmbientFallbackPolicy::Deny
             && let Some(locator) = vault
                 .signed_aws
                 .iter()
                 .find_map(|(_, (loc, _))| is_bare_aws_default_chain(loc).then(|| loc.clone()))
         {
-            vault.audit_aws_resolve(&locator)?;
+            let resolution = vault.audit_aws_resolve(&locator)?;
+            if let Some(warning) = resolution.acquisition.warning() {
+                for (pattern, (route, _)) in &vault.signed_aws {
+                    if is_bare_aws_default_chain(route) {
+                        vault.warn_at_open(&format!(
+                            "aws:// for {} {warning}",
+                            pattern.as_written()
+                        ));
+                    }
+                }
+            }
         }
 
         Ok(Opened::new(vault, phantoms, skipped))
@@ -482,6 +493,17 @@ impl Vault {
         CAPTURED_WARNINGS.with(|warnings| warnings.borrow_mut().push(message.to_string()));
     }
 
+    /// Report, once for this process, a condition that holds for every request this vault serves.
+    fn warn_at_open(&self, message: &str) {
+        let line = format!("strands-box: warning: {message}");
+        if !first_warning(&line) {
+            return;
+        }
+        eprintln!("{line}");
+        #[cfg(test)]
+        CAPTURED_WARNINGS.with(|warnings| warnings.borrow_mut().push(line));
+    }
+
     /// What must be edited on `req` before it goes upstream, or `None` when this vault governs no
     /// credential for its destination.
     pub fn attach_for(&self, req: Outbound<'_>) -> Result<Option<Attachment>> {
@@ -572,10 +594,20 @@ impl Vault {
     }
 }
 
+/// Whether `line` is the first time this process prints it.
+fn first_warning(line: &str) -> bool {
+    static PRINTED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    PRINTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(line.to_string())
+}
+
 #[cfg(test)]
 thread_local! {
-    /// Warnings `Vault::warn` emitted on this thread, so a test can observe a per-request warning
-    /// without capturing stderr. Drained by [`drain_captured_warnings`]. Hermetic: a test injects a
+    /// Warnings the vault emitted on this thread, so a test can observe a warning without capturing
+    /// stderr. Drained by [`drain_captured_warnings`]. Hermetic: a test injects a
     /// fake AWS provider, so `warn` runs on the test thread and never reaches the SDK worker.
     static CAPTURED_WARNINGS: std::cell::RefCell<Vec<String>> =
         const { std::cell::RefCell::new(Vec::new()) };

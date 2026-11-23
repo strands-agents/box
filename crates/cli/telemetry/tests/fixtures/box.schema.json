@@ -1,0 +1,341 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "title": "BoxyTelemetryPing",
+  "description": "One Boxy telemetry event or an array of events. Every event records a persistent installation ID, a generated invocation ID, the invocation's context snapshot (repeated unchanged on every event of the invocation), and event data. Payload strings are fixed enums, a normalized numeric version, generated UUIDs, a profile hash, or built-in pack IDs verified by the client against its bundled catalog.",
+  "oneOf": [
+    {
+      "$ref": "#/definitions/event"
+    },
+    {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/event"
+      }
+    }
+  ],
+  "definitions": {
+    "event": {
+      "description": "One complete event, also used to validate each event independently.",
+      "type": "object",
+      "oneOf": [
+        { "$ref": "#/definitions/run_event_v1" },
+        { "$ref": "#/definitions/polling_event_v1" },
+        { "$ref": "#/definitions/shutdown_event_v1" }
+      ]
+    },
+    "envelope_version": {
+      "type": "integer",
+      "enum": [1]
+    },
+    "run_id": {
+      "description": "A fresh random UUIDv4 generated for this CLI invocation. Reuse it on run, polling, shutdown, and any retries for that invocation. Generate a new ID for each invocation. It is not a persistent user, device, or installation identifier.",
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "installation_id": {
+      "description": "A random UUIDv4 generated once and persisted locally for this installation. Reuse it across CLI invocations. Include the same ID at the root of every run, polling, and shutdown event, including retries.",
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "run_event_v1": {
+      "description": "An invocation's context snapshot and observed launch status. Preserve null for context that could not be resolved.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "event", "installation_id", "run_id", "context", "data"],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/envelope_version"
+        },
+        "event": {
+          "type": "string",
+          "enum": ["run/1"]
+        },
+        "installation_id": {
+          "$ref": "#/definitions/installation_id"
+        },
+        "run_id": {
+          "$ref": "#/definitions/run_id"
+        },
+        "context": {
+          "$ref": "#/definitions/run_context"
+        },
+        "data": {
+          "$ref": "#/definitions/run"
+        }
+      }
+    },
+    "run_context": {
+      "description": "Environment and configuration for this invocation: an immutable snapshot built once per invocation and repeated unchanged on every run, polling and shutdown event, so each event can be sliced by context on its own.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "box_version",
+        "os_family",
+        "os_version",
+        "build_arch",
+        "builtin_packs",
+        "mcp_configured",
+        "has_custom_packs",
+        "profile_policy_present",
+        "profile_hash"
+      ],
+      "properties": {
+        "box_version": {
+          "description": "CLI package version normalized to MAJOR.MINOR.PATCH. Omit prerelease labels and build metadata. Each component is at most four digits.",
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 14,
+          "pattern": "^(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})$"
+        },
+        "os_family": {
+          "type": "string",
+          "enum": ["macos", "linux", "windows", "other"]
+        },
+        "os_version": {
+          "description": "Operating system version reported by the host, such as 14.5. Null means unavailable.",
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "build_arch": {
+          "description": "Architecture targeted by the running Boxy binary.",
+          "type": "string",
+          "enum": ["aarch64", "x86_64", "other"]
+        },
+        "builtin_packs": {
+          "description": "IDs of all packs that Boxy vends and the resolved dependency graph includes. The client must verify bundled provenance and exclude all custom pack names. The service schema leaves the identifier vocabulary open so the bundled catalog can evolve independently, but bounds its shape (lowercase id, at most 32 characters, at most 64 entries) so the field cannot carry free text. Null means unavailable; an empty array means none. Membership does not identify the executable that runs or establish provider traffic.",
+          "type": ["array", "null"],
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+          },
+          "maxItems": 64
+        },
+        "mcp_configured": {
+          "description": "Whether the resolved harness configuration in this invocation's persistent storage declares at least one MCP server. Capture after import and configuration resolution. This does not report Box Core policy permissions or tool usage. Null means the stored configuration is unavailable or unresolved.",
+          "type": ["boolean", "null"]
+        },
+        "has_custom_packs": {
+          "description": "Whether the resolved dependency graph includes a pack outside the bundled catalog. Null means unavailable.",
+          "type": ["boolean", "null"]
+        },
+        "profile_policy_present": {
+          "description": "Whether the selected profile declares at least one policy file in its policies list. Omitted or empty lists mean false. Null means the profile TOML or list is unavailable or malformed. This does not report whether policy contents were customized.",
+          "type": ["boolean", "null"]
+        },
+        "profile_hash": {
+          "description": "SHA-256 digest of the saved profile.toml bytes, before pack and runtime resolution, encoded as lowercase hexadecimal. Null means unavailable.",
+          "type": ["string", "null"],
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "polling_event_v1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "event", "installation_id", "run_id", "context", "data"],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/envelope_version"
+        },
+        "event": {
+          "type": "string",
+          "enum": ["polling/1"]
+        },
+        "installation_id": {
+          "$ref": "#/definitions/installation_id"
+        },
+        "run_id": {
+          "$ref": "#/definitions/run_id"
+        },
+        "context": {
+          "$ref": "#/definitions/run_context"
+        },
+        "data": {
+          "$ref": "#/definitions/polling"
+        }
+      }
+    },
+    "shutdown_event_v1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "event", "installation_id", "run_id", "context", "data"],
+      "properties": {
+        "v": {
+          "$ref": "#/definitions/envelope_version"
+        },
+        "event": {
+          "type": "string",
+          "enum": ["shutdown/1"]
+        },
+        "installation_id": {
+          "$ref": "#/definitions/installation_id"
+        },
+        "run_id": {
+          "$ref": "#/definitions/run_id"
+        },
+        "context": {
+          "$ref": "#/definitions/run_context"
+        },
+        "data": {
+          "$ref": "#/definitions/shutdown"
+        }
+      }
+    },
+    "elapsed_ms": {
+      "description": "Actual elapsed milliseconds, rounded down. Zero is valid for a period shorter than one millisecond.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "count": {
+      "description": "A positive number of decisions during the interval. Counters with a zero count are omitted.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "action": {
+      "description": "A built-in action category. Generated MCP tool actions map to mcp_tool; unclassified actions map to unknown. Never send raw action names.",
+      "type": "string",
+      "enum": [
+        "fs:read",
+        "fs:write",
+        "fs:delete",
+        "fs:move",
+        "fs:other",
+        "net:connect",
+        "http:request",
+        "shell:exec",
+        "shell:spawn",
+        "mcp:call",
+        "mcp_tool",
+        "unknown"
+      ]
+    },
+    "outcome": {
+      "description": "How the decision was resolved: permitted, or the cause of a denial. Every outcome other than permitted is a denial. Permits are not split by cause (an enforcement gate can also permit; those count as permitted). Unclassified denial causes map to unknown. Never send raw reason text.",
+      "type": "string",
+      "enum": ["permitted", "forbidden", "no_match", "policy_pending", "internal_fault", "enforcement", "unknown"]
+    },
+    "decision": {
+      "description": "One nonzero counter: the number of decisions for one action with one outcome during the interval.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "outcome", "count"],
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/action"
+        },
+        "outcome": {
+          "$ref": "#/definitions/outcome"
+        },
+        "count": {
+          "$ref": "#/definitions/count"
+        }
+      }
+    },
+    "run": {
+      "description": "Observed launch status and Boxy preparation failures. A confirmed successful launch reports box_launched as true and failure_reason as null.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["box_launched", "failure_reason", "startup_latency_ms"],
+      "properties": {
+        "box_launched": {
+          "description": "True when launch is confirmed, false when it is known that no launch occurred, and null only when launch status is unknown.",
+          "type": ["boolean", "null"]
+        },
+        "failure_reason": {
+          "description": "A Boxy preparation failure mapped from an error variant. Null means no preparation failure is reported. Core startup errors and later workload failures are not classified here.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "enum": ["profile_missing", "profile_invalid", "agent_not_found", "policy_rejected", "unknown"]
+            }
+          ]
+        },
+        "startup_latency_ms": {
+          "description": "Milliseconds from this invocation's start to the source timestamp of Core's box_started record, rounded down. Null when Core did not report box_started.",
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "failure_reason": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "box_launched": {
+              "enum": [false]
+            },
+            "failure_reason": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "polling": {
+      "description": "Decisions aggregated locally over an interval, as deltas since the previous polling event. The normal schedule is fixed at 60 seconds; the measured interval can differ, including a final partial flush. Delivery is best effort: a missing polling event means its counts are unknown, not zero.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interval_duration_ms", "decisions"],
+      "properties": {
+        "interval_duration_ms": {
+          "$ref": "#/definitions/elapsed_ms"
+        },
+        "decisions": {
+          "description": "Interval deltas, one row per (action, outcome) pair with a nonzero count. Every decision in the interval increments exactly one pair. An empty array means no decisions were observed in the interval. Pair uniqueness requires client and service checks beyond uniqueItems.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/decision"
+          },
+          "maxItems": 84
+        }
+      }
+    },
+    "shutdown": {
+      "description": "A best-effort event on controlled completion. Absence does not establish a crash. Duration covers the Boxy invocation, and exit status does not establish task completion.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invocation_duration_ms", "exit_outcome", "core_outcome"],
+      "properties": {
+        "invocation_duration_ms": {
+          "$ref": "#/definitions/elapsed_ms"
+        },
+        "exit_outcome": {
+          "type": "string",
+          "enum": ["zero", "nonzero"]
+        },
+        "core_outcome": {
+          "description": "This invocation's observed box_stopped outcome. Null means unavailable.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "enum": ["ok", "refused"]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

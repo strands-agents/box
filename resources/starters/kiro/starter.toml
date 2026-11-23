@@ -1,0 +1,6 @@
+# `box profile create kiro` asks for kiro.sign-in. A run never reads this file.
+[starter]
+name = "@box/kiro"
+label = "Kiro CLI"
+packs = ["@box/kiro"]
+ask = ["kiro.sign-in"]

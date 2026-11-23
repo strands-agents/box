@@ -593,3 +593,69 @@ fn a_host_wildcard_admits_the_subdomain_and_refuses_the_apex_until_a_clause_name
         assert_default_denied(&apex_named_too, host);
     }
 }
+
+/// Whether `src` permits the gateway's `net:connect` legs for `host:port`: the host before the
+/// map, then the mapped address.
+fn connects(src: &str, host: &'static str, port: u16, address: &str) -> bool {
+    let interceptor = egress_interceptor(src);
+    let address: SocketAddr = format!("{address}:{port}").parse().unwrap();
+    [
+        EffectAttempt::Resolve { host, port },
+        EffectAttempt::Connect {
+            host,
+            port,
+            address,
+            http_visibility: true,
+        },
+    ]
+    .iter()
+    .all(|attempt| match interceptor.intercept(attempt) {
+        Ok(permit) => {
+            permit.mark_indeterminate();
+            true
+        }
+        Err(_) => false,
+    })
+}
+
+/// A permit on `host.box.internal` and one port, as the docs show it.
+const LOCAL_LLM: &str = r#"
+permit (principal, action == Box::Action::"net:connect", resource)
+when { context.input.host == "host.box.internal" && context.input.port == 4259 };
+"#;
+
+#[test]
+fn permit_is_per_port() {
+    assert!(connects(LOCAL_LLM, "host.box.internal", 4259, "127.0.0.1"));
+    assert!(!connects(LOCAL_LLM, "host.box.internal", 5432, "127.0.0.1"));
+}
+
+#[test]
+fn name_permit_not_literal_loopback() {
+    assert!(!connects(LOCAL_LLM, "127.0.0.1", 4259, "127.0.0.1"));
+    assert!(!connects(LOCAL_LLM, "localhost", 4259, "127.0.0.1"));
+}
+
+/// The address leg sees `ip4 = "127.0.0.1"`, so a loopback forbid also refuses the name, and an
+/// exception on the name opens it again.
+#[test]
+fn ip_forbid_still_applies() {
+    let forbid = r#"forbid (principal, action == Box::Action::"net:connect", resource)
+        when { context.input has ip4 && context.input.ip4 like "127.*" };"#;
+    let excepted = r#"forbid (principal, action == Box::Action::"net:connect", resource)
+        when { context.input has ip4 && context.input.ip4 like "127.*" &&
+               context.input.host != "host.box.internal" };"#;
+    let host = "host.box.internal";
+    assert!(!connects(
+        &format!("{LOCAL_LLM}{forbid}"),
+        host,
+        4259,
+        "127.0.0.1"
+    ));
+    assert!(connects(
+        &format!("{LOCAL_LLM}{excepted}"),
+        host,
+        4259,
+        "127.0.0.1"
+    ));
+}

@@ -368,12 +368,12 @@ fn renderer_only_replaces_the_checked_in_placeholders() {
     );
 }
 
-/// The profile reads seven named sysctls, and no eighth.
+/// The profile reads eight named sysctls, and no ninth.
 ///
 /// Whole names rather than a prefix, because a prefix over `kern.` reaches `kern.procargs2`,
 /// which holds another process's argument vector.
 #[test]
-fn the_profile_reads_exactly_seven_named_sysctls() {
+fn the_profile_reads_exactly_eight_named_sysctls() {
     let (_directory, config) = fixed_config();
     let profile = generate_seatbelt_profile(&config).expect("fixed profile");
     let rules = rules(&profile);
@@ -391,6 +391,7 @@ fn the_profile_reads_exactly_seven_named_sysctls() {
             "hw.machine",
             "hw.ncpu",
             "hw.pagesize_compat",
+            "kern.argmax",
             "kern.hostname",
             "kern.osrelease",
             "kern.ostype",
@@ -484,8 +485,8 @@ fn an_execute_grant_reached_through_a_link_chain_renders_metadata_on_every_node(
     let root = directory.path().canonicalize().expect("canonical tempdir");
     let target = root.join("real-agent");
     std::fs::write(&target, "agent").expect("the real program");
-    // Every link target is spelled canonically. A target reached through a link of its own adds an
-    // unrendered node and moves what this test measures.
+    // Every link target is spelled canonically. A target reached through a linked folder adds that
+    // folder's link as a node of its own and moves what this test measures.
     let first = root.join("hop-1");
     let second = root.join("hop-2");
     let route = root.join("hop-3");
@@ -1805,8 +1806,8 @@ fn the_rendered_profile_grants_exactly_these_operations_and_no_others() {
         "file-write-times",
         "file-read-metadata", // path-ancestors of the read-only root
         "file-read*",         // read-only root subtree
-        // One rule holds all seven names, so this stays one entry. The name set has its own
-        // test, `the_profile_reads_exactly_seven_named_sysctls`.
+        // One rule holds all eight names, so this stays one entry. The name set has its own
+        // test, `the_profile_reads_exactly_eight_named_sysctls`.
         "sysctl-read",
         "network-bind",
         "network-inbound",

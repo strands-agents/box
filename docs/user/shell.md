@@ -29,7 +29,7 @@ command exits, even when the writer keeps the pipe open. A command that does rea
 waits for it until the Shell's timeout, or, with `shell.timeout = false`, until its caller stops
 it.
 
-A command receives at most `[limits.shell] max_stdin` bytes of this input, 64 KiB by default. Past
+A command receives at most `[limits.shell] max_stdin` bytes of this input, 1 MiB by default. Past
 that, the box discards the rest, so the limit never blocks the writer. Forwarding ends when the
 command exits, so a writer that is still writing then can get a broken pipe. A command that does not
 read its input is not affected. A command that reads past the limit gets no end of input: it waits
@@ -92,7 +92,10 @@ The Shell implements these, each in place of a program of the same name on the `
   `xargs`, and others.
 - Text: `cat`, `grep`, `sed`, `head`, `tail`, `sort`, `uniq`, `cut`, `tr`, `wc`, `tee`.
 - Files: `ls`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `ln`, `chmod`, `touch`, `mktemp`, `readlink`.
-- Data and network: `jq`, `curl`.
+- Data and network: `jq`, `base64`, `curl`.
+- System: `uname`, which prints the host's values, except that `-p` and `-i` print `unknown`;
+  `whoami`, which prints `$USER`; and `id`, which prints `$USER` with the Shell's own IDs. A program
+  path such as `/usr/bin/uname -p` runs the host program instead, as a `shell:spawn`.
 - Interpreters: `sh` and `lash`, which run a script in the Shell; `lua`; and `python` and
   `python3`, which run in Monty, Box's Python interpreter. With
   [`monty = false`](./config.md#monty), `python` and `python3` are external programs instead.
@@ -227,7 +230,7 @@ a `shell:spawn` permit, the program runs under the first of these that covers it
 3. Neither: the program is refused with status `126`.
 
 `limits.shell.max_input` bounds submitted command text, and `limits.shell.max_output` bounds
-output buffers and script files loaded with `source`. Set either size to `0` to disable that Shell
+output buffers, script files loaded with `source`, and each `curl` response body. Set either size to `0` to disable that Shell
 limit. The [limits reference](config.md#limits)
 gives their defaults, byte units, and the separate limits on transport and positional script invocation.
 
@@ -265,7 +268,8 @@ and its fixed arguments match the leading arguments of the command. When several
 the one with the longest `command` is used. When a table names the file and none matches the
 arguments, the program is refused.
 
-Configured tool programs remain protected from writes and replacement for the run.
+Configured tool programs and the programs of declared secret sources remain protected from writes
+and replacement for the run.
 Box checks direct writable grants before startup and refuses changes through the Shell after policy permits them.
 [Configured command integrity](config.md#configured-command-integrity) lists the startup constraints and the procedure for operator updates.
 
@@ -352,7 +356,14 @@ action permit when a tool grammar binds the file, and `program` is still the nam
 
 `curl` sends each request through the egress gateway, which decides `net:connect` and
 `http:request` ([how Box controls outbound traffic](../design/egress.md)). A request the gateway
-refuses makes `curl` exit non-zero.
+refuses makes `curl` exit `1` and print the reason, even with `-s`. A request the gateway doesn't
+refuse but can't complete makes `curl` exit `6` and print `curl: (6)` and the reason, unless `-s`
+hides errors.
+
+A response body is at most [`limits.shell.max_output`](config.md#limits) bytes, 1 MiB by default.
+Past it, `curl` exits with status `6`, writes none of the body, and prints
+`curl: (6) response body too large` unless `-s` hides errors. The request was already sent, so
+its effect at the server stays.
 
 ## Exit statuses
 
@@ -368,9 +379,10 @@ refuses makes `curl` exit non-zero.
 | `126` | Policy refused the directory the alias was run from, it isn't a directory, or it is outside the operator's home, the agent's home, and the workspace. Nothing ran. | `strands-box: cannot start in <directory>: <error>` |
 | `126` | Policy refused the command. | `strands-shell: effect denied: policy denied this operation on '<program>'`, then `[policy: <id>]` or `[default-deny]`. A tool grammar action reads the same way. |
 | `126` | A tool grammar binds the program file, and Box refused the spawn before any rule decided it. | `strands-shell: effect denied: policy denied this operation on '<program>' [tool-grammar]: <reason>. No policy can permit it.` |
-| `126` | Policy permitted a program, and nothing in [Configuration](#configuration) covers it. | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments`` |
+| `126` | Policy permitted a program that a `[tool.<name>]` table names, and its arguments match no table's fixed arguments. | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments`` |
+| `126` | Policy permitted a program that no `[tool.<name>]` table names, and no `exec` entry covers it, for example a program the agent installed during the run. | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments. The `[tool.<name>]` tables are fixed when the box starts, so a program created during the run runs only under an `[agent.filesystem] exec` entry`` |
 | `126` | The launch directory differs from the directory policy checked. Run the command again. | `strands-shell: <program>: the tool working directory does not match the policy-approved directory` |
-| `127` | The program is not in the Shell, and not on the `PATH`. | `strands-shell: <program>: command not found` |
+| `127` | The program is not in the Shell, and not on the `PATH`. A `PATH` set inside the box does not change where the box looks. | `strands-shell: <program>: command not found`. For a bare name, then ``strands-shell: <program>: no tool in this box has this name, and no file of this name is on the PATH that `box run` started with. A PATH set inside the box does not change where the box looks`` |
 | Any other | The command's own status. A refused file operation fails the command that made it, for example `cat` with `1`. | `policy denied this operation on '<path>'`, then `[policy: <id>]` or `[default-deny]` |
 | Any other | The path changed between the check and the operation, for example a directory was swapped for a symlink. The Shell refuses rather than act on a file policy didn't judge. Run the command again. | `strands-shell: <command>: filesystem identity changed during effect admission` |
 | Any other | The operation reaches a configured tool command or its ancestor. Select another path. | `<path>: is a configured tool command or its ancestor, which this run does not allow to change` |

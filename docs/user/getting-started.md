@@ -1,6 +1,6 @@
-# Getting started with Box
+# Run an agent with box.toml
 
-Box runs an agent on Linux or macOS under a policy.
+Box Core runs an agent on Linux or macOS under a policy.
 The agent can reach only the files, programs, and network destinations you allow. You describe a box in two files:
 `box.toml` says what to run and what it can reach, and `policy.dw` decides each request it makes.
 
@@ -9,6 +9,9 @@ in a box on macOS. You'll give it one tool, a shell, so your policy decides ever
 file its shell reads or writes, and you'll watch the box refuse a write, then change the policy to
 allow it. The finished files are in
 [`examples/strands-cli`](../../examples/strands-cli/).
+
+To run a coding agent such as Claude Code with a profile instead, install the Box CLI and follow
+[Get started with Box](../cli/getting-started.md).
 
 ## Set up with your coding agent
 
@@ -43,10 +46,12 @@ Rules:
 
 ## Before you start
 
-Box supports macOS on Apple silicon and Linux ARM64 (64-bit Arm). Linux x86-64 is experimental.
-On Linux, use Amazon Linux 2023 for your CPU architecture with GNU C library (glibc) 2.34 or newer and the GCC runtime library (`libgcc_s.so.1`).
+Box supports macOS on Apple silicon, Linux ARM64 (64-bit Arm), and Linux x86-64.
+Linux x86-64 builds require no environment opt-in.
+Check the [macOS requirements](./macos-requirements.md) for the release package, workload dependencies, and startup checks.
+Linux release executables are built on Amazon Linux 2023. Check the [Linux requirements](./linux-requirements.md) for required libraries, permissions to create the sandbox, and tested configurations.
 [Step 1](#step-1-download-box) installs Box on either platform.
-The Strands CLI walkthrough in steps 2–8 uses macOS. For that walkthrough, you need:
+The Strands CLI walkthrough in steps 2 to 8 uses macOS. For that walkthrough, you need:
 
 - A Mac with Apple silicon and macOS 15 or later.
 - Node.js 22.21 or later from Homebrew: `brew install node`.
@@ -83,6 +88,7 @@ Use a fresh destination to keep a previous installation if the final extraction 
 The signed macOS package contains `Box.app`, with a `box` launcher and helper links into that bundle.
 Moving only an executable out of the bundle loses its provisioning profile.
 The package is also notarized, so macOS runs a copy that you download in a browser.
+Check the [macOS requirements](./macos-requirements.md) before running a workload; a successful `box --version` does not test sandbox startup.
 
 ### Linux
 
@@ -90,20 +96,13 @@ Select a release that includes the archive for your CPU: `box-<tag>-linux-arm64.
 The release must also include its checksum in `SHA256SUMS.txt`. Set `BOX_VERSION` to that release tag when running the downloader.
 A release can omit Linux or x86-64 assets. If the x86-64 archive or its checksum is missing, the download stops without substituting an ARM64 archive.
 
-To run Box on x86-64, set its experimental startup opt-in in the same terminal:
+Box has no runtime environment opt-in for ARM64 or x86-64.
 
-```sh
-export EXPERIMENTAL_X86_SUPPORT=TRUE
-```
+After installation, run the [native Linux example](./linux-requirements.md#run-a-native-linux-example) to check sandbox startup and file access without model credentials.
+For a cloud workload, continue with the [Amazon EKS coding example](tutorials/eks.md) or the [AgentCore Runtime shipment example](tutorials/agentcore-runtime.md).
+Steps 2 to 8 below follow the macOS Strands CLI example.
 
-Box requires the exact value `TRUE` for `run` and `policy generate-schema`, including
-their Rust library entry points. Help and version output do not require the flag.
-ARM64 does not require the flag. It does not change the sandbox permissions.
-
-After installation, continue with the [Amazon EKS coding example](tutorials/eks.md) or the [AgentCore Runtime shipment example](tutorials/agentcore-runtime.md).
-Steps 2–8 below follow the macOS Strands CLI example.
-
-Check [Linux setup requirements](cloud-deployments.md#shared-requirements) for the permissions Box needs at startup.
+Check the [Linux requirements](./linux-requirements.md) before running a workload; a successful `box --version` does not test sandbox startup.
 Use the [platform comparison](../design/platform-differences.md) when adapting a macOS configuration.
 
 <a id="build-from-source"></a>
@@ -119,8 +118,6 @@ mkdir box-core
 cp box-src/target/release/strands-box box-core/box
 cp box-src/target/release/strands-box-sock-alias box-src/target/release/strands-box-contain-trampoline box-core/
 ```
-
-The x86-64 startup opt-in above also applies to builds from source.
 
 </details>
 
@@ -373,7 +370,7 @@ Example output:
 
 ```text
 deny    net:connect   telemetry.strandsagents.com
-deny    shell:spawn   /usr/bin/uname -s
+permit  shell:exec    uname -s
 permit  shell:exec    pwd
 permit  net:connect   bedrock-runtime.us-west-2.amazonaws.com
 permit  http:request  bedrock-runtime.us-west-2.amazonaws.com
@@ -390,11 +387,11 @@ deny    fs:write      ~/box-tutorial/my-project/README.md
 Notice that each model call results in a `net:connect` and an `http:request`, and each command
 results in a `shell:exec`, plus an `fs:` decision for every file it touches.
 
-The box's shell has `cat`, `printf`, `ls`, and about thirty other commands built in. Running any
-other program is a `shell:spawn`, and this policy allows none, so the box refused the `uname` that
-the CLI runs when it starts. The box also refused the CLI's own version ping, because the policy
-names no host but Bedrock. Nothing you typed asked for either one, which is the point: the log holds
-what the agent did on its own as well as what you asked for.
+The box's shell has `cat`, `printf`, `ls`, `uname`, and about thirty other commands built in, so
+the `uname` that the CLI runs when it starts is a `shell:exec`. Running any other program is a
+`shell:spawn`, and this policy allows none. The box refused the CLI's own version ping, because the
+policy names no host but Bedrock. Nothing you typed asked for the `uname` or the ping, which is the
+point: the log holds what the agent did on its own as well as what you asked for.
 
 ## Step 8. Allow the write
 

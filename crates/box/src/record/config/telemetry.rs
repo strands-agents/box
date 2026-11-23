@@ -3,8 +3,9 @@
 //! A declared target REPLACES the box's default destination, so this module owns both halves — what
 //! an operator may write, and the collector request a run builds from what was stored.
 //!
-//! An absent `include` means every signal, so a target receives the harness's own spans, logs and
-//! metrics without naming one. The five words below are how an operator NARROWS that.
+//! An absent `include` means every signal except `mcp_tool_calls`, so a target receives the harness's own
+//! spans, logs and metrics without naming one, and a tool call's values only when it names the word.
+//! The six words below are how an operator narrows or extends that.
 //!
 //! The `telemetry` crate's own items are imported by name rather than qualified, because this module
 //! shares its spelling and `telemetry::Signal` would read as `self::Signal`.
@@ -21,6 +22,7 @@ use crate::error::{BoxError, ConfigError};
 // The `[[egress]]` vocabulary owns these: a telemetry target's secret is a credential,
 // and it follows the same header convention.
 use super::egress::Placement;
+use super::secret_source::{DeclaredSources, vault_credential_refusal};
 use super::{BASIC_AUTH_PLACEMENT, BEARER_PREFIX, DEFAULT_HEADER, ENV_SCHEME, HEADER_PLACEMENT};
 
 /// Refuse a file destination the workload could truncate.
@@ -83,8 +85,8 @@ fn expanded_home_path(destination: &str, operator_home: Option<&Path>) -> Option
 /// The spelling an operator may use beside the credential vocabulary's own.
 const TELEMETRY_ALIAS_SCHEME: &str = "secret://";
 
-/// The schemes whose credential signs the request instead of sitting in one header. With `env://`
-/// and its alias, these are every scheme a telemetry credential may name.
+/// The schemes whose credential signs the request instead of sitting in one header. With `env://`,
+/// its alias, and each declared scheme, these are every scheme a telemetry credential may name.
 const SIGNING_SCHEMES: [&str; 2] = [AWS_REFERENCE, CREDSD_REFERENCE];
 
 /// The scheme of a credential signed from an AWS profile.
@@ -113,6 +115,8 @@ pub(crate) enum SignalGroup {
     Logs,
     /// The agent's own metrics.
     Metrics,
+    /// Each MCP tool call's own arguments, and how it ended.
+    McpToolCalls,
 }
 
 impl SignalGroup {
@@ -124,17 +128,19 @@ impl SignalGroup {
             Self::Trace => vec![Signal::AgentTrace, Signal::ControlPlane],
             Self::Logs => vec![Signal::AgentLogs, Signal::McpUnmatched],
             Self::Metrics => vec![Signal::AgentMetrics],
+            Self::McpToolCalls => vec![Signal::McpToolCalls],
         }
     }
 
     /// Every word an operator may write, for a refusal that lists them.
-    fn every() -> [Self; 5] {
+    fn every() -> [Self; 6] {
         [
             Self::Deny,
             Self::Permit,
             Self::Trace,
             Self::Logs,
             Self::Metrics,
+            Self::McpToolCalls,
         ]
     }
 
@@ -146,6 +152,7 @@ impl SignalGroup {
             Self::Trace => "trace",
             Self::Logs => "logs",
             Self::Metrics => "metrics",
+            Self::McpToolCalls => "mcp_tool_calls",
         }
     }
 }
@@ -244,12 +251,50 @@ pub(crate) struct TelemetryEntry {
     pub(crate) region: Option<String>,
 }
 
+impl TelemetryEntry {
+    /// A `file` target at `destination` naming `include`, with every other key absent.
+    #[cfg(test)]
+    pub(crate) fn file(destination: &str, include: Option<Vec<SignalGroup>>) -> Self {
+        Self {
+            kind: TelemetryKind::File,
+            destination: destination.to_string(),
+            include,
+            secret: None,
+            accepts: None,
+            headers: None,
+            log_group: None,
+            log_stream: None,
+            project: None,
+            region: None,
+        }
+    }
+
+    /// Where this target sends records, as a disclosure names it: its destination, or its kind
+    /// when the kind supplies the address.
+    pub(crate) fn shown_destination(&self) -> String {
+        let destination = self.destination.trim();
+        if destination.is_empty() {
+            format!("the {} endpoint", self.kind.spelling())
+        } else {
+            destination.to_string()
+        }
+    }
+
+    /// Whether this target names `mcp_tool_calls`, the only way it receives a tool call's values.
+    pub(crate) fn takes_tool_calls(&self) -> bool {
+        self.include
+            .iter()
+            .flatten()
+            .any(|group| *group == SignalGroup::McpToolCalls)
+    }
+}
+
 /// Which secret a telemetry target attaches, and under which header.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TelemetrySecret {
-    /// The secret to attach, as a URI: `env://NAME`, `secret://NAME`, `aws://PROFILE`, or
-    /// `credsd://ENVIRONMENT`.
+    /// The secret to attach, as a URI: `env://NAME`, `secret://NAME`, `aws://PROFILE`,
+    /// `credsd://ENVIRONMENT`, or a reference in a declared scheme.
     #[serde(rename = "ref")]
     pub(crate) reference: String,
 
@@ -344,30 +389,38 @@ fn presented(placement: &Placement, phantom: &str) -> Option<(String, String)> {
     }
 }
 
-/// A telemetry secret reference, as the credential vocabulary spells it.
-fn telemetry_secret_uri(reference: &str) -> Result<String, String> {
+/// A telemetry secret reference, as the credential vocabulary spells it, in a configuration that
+/// declares `sources`.
+fn telemetry_secret_uri(reference: &str, sources: &DeclaredSources) -> Result<String, String> {
     let reference = reference.trim();
-    if let Some(name) = reference.strip_prefix(TELEMETRY_ALIAS_SCHEME) {
+    let uri = if let Some(name) = reference.strip_prefix(TELEMETRY_ALIAS_SCHEME) {
         if name.is_empty() {
             return Err(format!(
                 "the {TELEMETRY_ALIAS_SCHEME} reference names no variable"
             ));
         }
-        return Ok(format!("{ENV_SCHEME}{name}"));
-    }
-    if reference.starts_with(ENV_SCHEME)
+        format!("{ENV_SCHEME}{name}")
+    } else if reference.starts_with(ENV_SCHEME)
         || SIGNING_SCHEMES
             .iter()
             .any(|scheme| reference.starts_with(scheme))
+        || sources.source_of(reference).is_some()
     {
-        return Ok(reference.to_string());
+        reference.to_string()
+    } else {
+        return Err(format!(
+            "`secret.ref` names no scheme this box reads; write `{ENV_SCHEME}NAME`, \
+             `{TELEMETRY_ALIAS_SCHEME}NAME`, `aws://profile`, `credsd://environment`, or a \
+             reference in a scheme that a `[secret-source.<scheme>]` table declares, never the \
+             value itself. The value is deliberately not echoed here, in case it is one"
+        ));
+    };
+    if let Some(name) = uri.strip_prefix(ENV_SCHEME)
+        && let Some(scheme) = sources.credential_owner(name)
+    {
+        return Err(vault_credential_refusal(name, scheme));
     }
-    Err(format!(
-        "`secret.ref` names no scheme this box reads; write `{ENV_SCHEME}NAME`, \
-         `{TELEMETRY_ALIAS_SCHEME}NAME`, `aws://profile` or \
-         `credsd://environment`, never the value itself. The value is deliberately not echoed \
-         here, in case it is one"
-    ))
+    Ok(uri)
 }
 
 /// The refusal a declared target carries, naming the target the operator keyed it under.
@@ -722,15 +775,18 @@ fn credential_destination(destination: &str) -> Result<credentials::DestinationP
 /// One target's vault, and the header that presents its phantom when the credential has one.
 type ResolvedCredential = (Arc<credentials::Vault>, Option<(String, String)>);
 
-/// The vault holding one target's credential, apart from the egress gateway's so no workload
-/// request can carry it, and the header presenting its phantom.
+/// The vault holding one target's credential, which it reads through `backend` in a configuration
+/// that declares `sources` and keeps apart from the egress gateway's so no workload request can
+/// carry it, and the header presenting its phantom.
 fn resolved_secret(
     label: &str,
     destination: &str,
     secret: &TelemetrySecret,
+    sources: &DeclaredSources,
+    backend: &credentials::Backend,
 ) -> Result<ResolvedCredential, BoxError> {
     let refused = |reason: String| -> BoxError { refuse(label, reason).into() };
-    let uri = telemetry_secret_uri(&secret.reference).map_err(refused)?;
+    let uri = telemetry_secret_uri(&secret.reference, sources).map_err(refused)?;
     let locator = credentials::Locator::parse_uri(&uri).map_err(|source| ConfigError::Locator {
         locator: "<telemetry secret>".to_string(),
         source,
@@ -745,12 +801,9 @@ fn resolved_secret(
         None => credentials::RouteSpec::signed_aws(pattern, locator),
     };
     let opened = credentials::Vault::open(
-        credentials::VaultConfig::new(
-            credentials::Backend::local(),
-            format!("strands-box-telemetry-{label}"),
-        )
-        .route(route)
-        .require_every_route(),
+        credentials::VaultConfig::new(backend.clone(), format!("strands-box-telemetry-{label}"))
+            .route(route)
+            .require_every_route(),
     )
     .map_err(|source| ConfigError::Locator {
         locator: "<telemetry secret>".to_string(),
@@ -770,11 +823,14 @@ fn resolved_secret(
     Ok((Arc::new(opened.into_vault()), presented))
 }
 
-/// The stored telemetry entries as one collector request.
+/// The stored telemetry entries as one collector request, with each secret read through `backend`
+/// in a configuration that declares `sources`.
 pub(crate) fn config_for(
     box_name: &str,
     entries: &BTreeMap<String, TelemetryEntry>,
     layout: &crate::record::layout::BoxRoot,
+    sources: &DeclaredSources,
+    backend: &credentials::Backend,
 ) -> Result<TelemetryConfig, BoxError> {
     let mut request = TelemetryConfig::for_box(box_name);
     if entries.is_empty() {
@@ -788,7 +844,8 @@ pub(crate) fn config_for(
         let mut target = target_for(entry, layout.operator_home(), layout.root(), None)
             .map_err(|reason| refuse(name, reason))?;
         if let Some(secret) = &entry.secret {
-            let (vault, presented) = resolved_secret(name, entry.destination.trim(), secret)?;
+            let (vault, presented) =
+                resolved_secret(name, entry.destination.trim(), secret, sources, backend)?;
             target = target.with_vault(vault);
             if let Some((header, value)) = presented {
                 target = target.with_header(header, value);
@@ -831,7 +888,14 @@ pub(crate) fn preflight_aws(targets: &BTreeMap<String, TelemetryEntry>) -> Resul
         };
         let refused = |reason: String| -> BoxError { refuse(name, reason).into() };
         let destination = entry.destination.trim();
-        let (vault, _) = resolved_secret(name, destination, secret)?;
+        // An `aws://` reference is in no declared scheme, and its vault signs on each request.
+        let (vault, _) = resolved_secret(
+            name,
+            destination,
+            secret,
+            &DeclaredSources::none(),
+            &credentials::Backend::local(),
+        )?;
         let url = url::Url::parse(&dialed(destination))
             .map_err(|_| refused("the destination is not a URL".to_string()))?;
         let port = url
@@ -876,6 +940,7 @@ pub(crate) fn needs_export_record(targets: &BTreeMap<String, TelemetryEntry>) ->
 pub(crate) fn checked(
     entries: &BTreeMap<String, TelemetryEntry>,
     box_directory: &Path,
+    sources: &DeclaredSources,
 ) -> Result<BTreeMap<String, TelemetryEntry>, ConfigError> {
     let home = crate::record::layout::operator_home_directory().ok();
 
@@ -928,7 +993,7 @@ pub(crate) fn checked(
             }
             let placement = match &entry.secret {
                 Some(secret) => {
-                    telemetry_secret_uri(&secret.reference)
+                    telemetry_secret_uri(&secret.reference, sources)
                         .map_err(|reason| refuse(name, reason))?;
                     let placement = placement_of(secret).map_err(|reason| refuse(name, reason))?;
                     placement
@@ -944,7 +1009,6 @@ pub(crate) fn checked(
                 refuse_a_credential_header(headers, placement.as_ref())
                     .map_err(|reason| refuse(name, reason))?;
             }
-
             // **Every remaining rule belongs to the collector, so ask it rather than restate it.**
             // Two copies disagreed on `HTTPS://`, so `configure` refused what `run` accepted. The
             let probe = target_for(
@@ -967,9 +1031,18 @@ pub(crate) fn checked(
     Ok(accepted)
 }
 
+/// Whether an authored `[telemetry]` table names `mcp_tool_calls`, which an older build cannot honour.
+///
+/// Called before the targets are checked, so it reads the tables as authored; a table `checked`
+/// refuses fails the whole file there.
+pub(crate) fn names_tool_calls(telemetry: &BTreeMap<String, TelemetryEntry>) -> bool {
+    telemetry.values().any(TelemetryEntry::takes_tool_calls)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::config::secret_source::tests::declared;
 
     /// **A destination inside the box directory but outside `private/` is refused**, because a
     /// process a spec grants reach there could truncate the record of its own denials.
@@ -1061,25 +1134,231 @@ mod tests {
     /// refused without being echoed, in case it is one.
     #[test]
     fn a_secret_reference_is_normalized_and_a_literal_is_refused() {
+        let none = DeclaredSources::none();
         assert_eq!(
-            telemetry_secret_uri("secret://HONEYCOMB_KEY").expect("the alias is accepted"),
+            telemetry_secret_uri("secret://HONEYCOMB_KEY", &none).expect("the alias is accepted"),
             format!("{ENV_SCHEME}HONEYCOMB_KEY")
         );
         assert_eq!(
-            telemetry_secret_uri("env://HONEYCOMB_KEY").expect("the canonical form is accepted"),
+            telemetry_secret_uri("env://HONEYCOMB_KEY", &none)
+                .expect("the canonical form is accepted"),
             "env://HONEYCOMB_KEY"
         );
         assert!(
-            telemetry_secret_uri("secret://").is_err(),
+            telemetry_secret_uri("secret://", &none).is_err(),
             "an empty name names no variable"
         );
 
-        let refusal = telemetry_secret_uri("hcaik_live_abcdef")
+        let refusal = telemetry_secret_uri("hcaik_live_abcdef", &none)
             .expect_err("a literal value is not a reference");
         assert!(
             !refusal.contains("hcaik_live_abcdef"),
             "the refusal must not echo the value, in case it is a secret: {refusal}"
         );
+
+        // A reference in a declared scheme is kept as written, with its `#FIELD`.
+        let declared = declared();
+        assert_eq!(
+            telemetry_secret_uri("aws-secretsmanager://box/telemetry#OTLP_KEY", &declared)
+                .expect("the scheme is declared"),
+            "aws-secretsmanager://box/telemetry#OTLP_KEY"
+        );
+        // The same reference with no declaration is refused, and no part of it is echoed.
+        for sources in [&none, &declared] {
+            let refusal = telemetry_secret_uri("vault://kv/box/telemetry", sources)
+                .expect_err("no table declares the scheme");
+            assert_eq!(
+                refusal,
+                "`secret.ref` names no scheme this box reads; write `env://NAME`, \
+                 `secret://NAME`, `aws://profile`, `credsd://environment`, or a reference in a \
+                 scheme that a `[secret-source.<scheme>]` table declares, never the value \
+                 itself. The value is deliberately not echoed here, in case it is one"
+            );
+        }
+        assert!(
+            telemetry_secret_uri("aws-secretsmanager://box/telemetry#OTLP_KEY", &none).is_err(),
+            "a declared scheme is read only in a configuration that declares it"
+        );
+        // The scheme is the one that `credentials` routes by, after the trim. A declared scheme
+        // with nothing after it is no reference, so it is refused here, and no part is echoed.
+        assert_eq!(
+            telemetry_secret_uri(" op://Personal/Vendor/key ", &declared)
+                .expect("the scheme is declared"),
+            "op://Personal/Vendor/key"
+        );
+        let undeclared = telemetry_secret_uri("vault://kv/box/telemetry", &declared)
+            .expect_err("no table declares the scheme");
+        for reference in ["op://", "OP://Personal/Vendor/key", "op ://key"] {
+            assert_eq!(
+                telemetry_secret_uri(reference, &declared)
+                    .expect_err("credentials routes this text to no declared source"),
+                undeclared,
+                "for {reference:?}"
+            );
+        }
+    }
+
+    /// **A telemetry target cannot send out the credential of a declared source's vault**, under
+    /// either spelling of the reference, by an exact entry or by a prefix entry.
+    #[test]
+    fn a_reference_to_the_credential_of_a_declared_source_is_refused() {
+        let declared = declared();
+        for (reference, name) in [
+            ("env://OP_SERVICE_ACCOUNT_TOKEN", "OP_SERVICE_ACCOUNT_TOKEN"),
+            (
+                "secret://OP_SERVICE_ACCOUNT_TOKEN",
+                "OP_SERVICE_ACCOUNT_TOKEN",
+            ),
+            ("secret://OP_SESSION_abc", "OP_SESSION_abc"),
+        ] {
+            assert_eq!(
+                telemetry_secret_uri(reference, &declared).expect_err("the variable is refused"),
+                format!(
+                    "the variable {name} is a credential of the secret source `op` (its \
+                     `pass-secret-env` names it), so no env:// or secret:// reference can read it"
+                )
+            );
+            telemetry_secret_uri(reference, &DeclaredSources::none())
+                .expect("no declaration names the variable");
+        }
+        telemetry_secret_uri("env://OP_ACCOUNT", &declared)
+            .expect("a `pass-env` name is a plain setting");
+
+        let entry = TelemetryEntry {
+            kind: TelemetryKind::Otlp,
+            destination: "http://localhost:4318".to_string(),
+            include: None,
+            secret: Some(TelemetrySecret {
+                reference: "env://OP_SERVICE_ACCOUNT_TOKEN".to_string(),
+                header: None,
+                prefix: None,
+                placement: None,
+            }),
+            accepts: None,
+            headers: None,
+            log_group: None,
+            log_stream: None,
+            project: None,
+            region: None,
+        };
+        let refusal = checked(
+            &BTreeMap::from([("otlp".to_string(), entry)]),
+            Path::new("/var/lib/boxes/codex"),
+            &declared,
+        )
+        .expect_err("the target is refused when the configuration loads");
+        assert_eq!(
+            refusal.to_string(),
+            "invalid `[telemetry.otlp]` target: the variable OP_SERVICE_ACCOUNT_TOKEN is a \
+             credential of the secret source `op` (its `pass-secret-env` names it), so no env:// or secret:// \
+             reference can read it"
+        );
+    }
+
+    /// **A telemetry target takes a reference in a declared scheme and no placeholder variable**:
+    /// Box attaches that secret itself, so the target has no `secret.env` key.
+    #[test]
+    fn a_target_takes_a_declared_scheme_and_no_placeholder_variable() {
+        let target = |extra: &str| {
+            toml::from_str::<TelemetryEntry>(&format!(
+                "kind = \"otlp\"\ndestination = \"http://localhost:4318\"\n\
+                 secret.ref = \"aws-secretsmanager://box/telemetry#OTLP_KEY\"\n\
+                 secret.header = \"x-api-key\"\n{extra}"
+            ))
+        };
+        let entry = target("").expect("the target parses");
+        checked(
+            &BTreeMap::from([("otlp".to_string(), entry.clone())]),
+            Path::new("/var/lib/boxes/codex"),
+            &declared(),
+        )
+        .expect("the scheme is declared");
+        let refusal = checked(
+            &BTreeMap::from([("otlp".to_string(), entry)]),
+            Path::new("/var/lib/boxes/codex"),
+            &DeclaredSources::none(),
+        )
+        .expect_err("the scheme is not declared");
+        assert!(
+            refusal
+                .to_string()
+                .starts_with("invalid `[telemetry.otlp]` target: `secret.ref` names no scheme"),
+            "{refusal}"
+        );
+
+        let error = target("secret.env = \"OTLP_KEY\"\n").expect_err("the key is unknown");
+        assert!(
+            error.message().starts_with(
+                "unknown field `env`, expected one of `ref`, `header`, `prefix`, `placement`"
+            ),
+            "{error}"
+        );
+    }
+
+    /// **A vendor kind takes a reference in a declared scheme**, and Box stores the target with the
+    /// placement of that vendor. A CloudWatch kind is signed, so it refuses the reference.
+    #[test]
+    fn a_vendor_kind_takes_a_declared_scheme() {
+        let stored = checked(
+            &parsed(
+                "[telemetry.langsmith]\nkind = \"langsmith\"\n\
+                 secret.ref = \"aws-secretsmanager://box/telemetry#LANGSMITH_API_KEY\"\n\
+                 [telemetry.langfuse]\nkind = \"langfuse\"\n\
+                 secret.ref = \"aws-secretsmanager://box/telemetry#LANGFUSE_AUTH\"\n",
+            ),
+            Path::new("/var/lib/boxes/codex"),
+            &declared(),
+        )
+        .expect("the scheme is declared");
+        assert_eq!(
+            stored["langsmith"].secret,
+            Some(TelemetrySecret {
+                reference: "aws-secretsmanager://box/telemetry#LANGSMITH_API_KEY".to_string(),
+                header: Some(LANGSMITH_KEY_HEADER.to_string()),
+                prefix: None,
+                placement: None,
+            })
+        );
+        assert_eq!(
+            stored["langfuse"].secret,
+            Some(TelemetrySecret {
+                reference: "aws-secretsmanager://box/telemetry#LANGFUSE_AUTH".to_string(),
+                header: None,
+                prefix: None,
+                placement: Some(BASIC_AUTH_PLACEMENT.to_string()),
+            })
+        );
+
+        let refusal = checked(
+            &parsed(
+                "[telemetry.logs]\nkind = \"cloudwatch_logs\"\nregion = \"us-west-2\"\n\
+                 log_group = \"group\"\nlog_stream = \"stream\"\n\
+                 secret.ref = \"aws-secretsmanager://box/telemetry#KEY\"\n",
+            ),
+            Path::new("/var/lib/boxes/codex"),
+            &declared(),
+        )
+        .expect_err("a CloudWatch target is signed")
+        .to_string();
+        assert!(refusal.contains("is signed with SigV4"), "{refusal}");
+    }
+
+    /// **No secret source can take a scheme that a telemetry target reads without one**: the
+    /// credentials crate reserves each of them, and this file owns the `secret://` alias.
+    #[test]
+    fn no_secret_source_can_claim_a_scheme_that_a_target_reads_itself() {
+        for prefix in [TELEMETRY_ALIAS_SCHEME, ENV_SCHEME]
+            .into_iter()
+            .chain(SIGNING_SCHEMES)
+        {
+            let scheme = prefix
+                .strip_suffix("://")
+                .expect("each constant is a scheme prefix");
+            assert!(
+                credentials::SecretSourceCommand::check_scheme(scheme).is_err(),
+                "{scheme} is reserved"
+            );
+        }
     }
 
     /// A file destination must be absolute or `~/`-relative, judged on the AUTHORED spelling.
@@ -1098,20 +1377,26 @@ mod tests {
             region: None,
         };
         let entries = BTreeMap::from([("decisions".to_string(), entry)]);
-        let refusal = checked(&entries, Path::new("/var/lib/boxes/codex"))
-            .expect_err("a relative file destination must be refused");
+        let refusal = checked(
+            &entries,
+            Path::new("/var/lib/boxes/codex"),
+            &DeclaredSources::none(),
+        )
+        .expect_err("a relative file destination must be refused");
         assert!(refusal.to_string().contains("absolute"), "{refusal}");
         // The refusal names the target the operator keyed it under, not a position in an array.
         assert!(refusal.to_string().contains("decisions"), "{refusal}");
     }
 
-    /// **`trace` names both the agent's spans and the control plane**, so neither is selectable on
-    /// its own, and the five words together name every signal the box files.
+    /// `trace` names both the agent's spans and the control plane, so neither is selectable on
+    /// its own, and the six words together name every signal the box files.
     ///
-    /// `logs` and `metrics` are separate words rather than part of `trace`, because a harness log is
-    /// not a span and an operator narrowing to spans must not silently also take metrics.
+    /// `logs` and `metrics` are separate words rather than part of `trace`, because a harness log
+    /// is not a span and an operator narrowing to spans must not silently also take metrics.
+    /// `mcp_tool_calls` is its own word, and the only way a target receives tool-call records, because
+    /// their values are in clear text.
     #[test]
-    fn the_five_words_expand_through_the_production_path() {
+    fn the_six_words_expand_through_the_production_path() {
         assert_eq!(
             signals_for(&[SignalGroup::Deny]),
             vec![Signal::PolicyDenied]
@@ -1132,20 +1417,64 @@ mod tests {
             signals_for(&[SignalGroup::Metrics]),
             vec![Signal::AgentMetrics]
         );
+        assert_eq!(
+            signals_for(&[SignalGroup::McpToolCalls]),
+            vec![Signal::McpToolCalls]
+        );
 
         // Every signal is reachable through an include word.
         let every = signals_for(&SignalGroup::every());
         assert_eq!(every.len(), Signal::every().len(), "{every:?}");
     }
 
+    /// A target whose `include` names `mcp_tool_calls` receives the signal, and one whose `include`
+    /// leaves it out does not.
+    #[test]
+    fn an_include_list_selects_or_leaves_out_tool_calls() {
+        let entry =
+            |include: Option<Vec<SignalGroup>>| TelemetryEntry::file("/tmp/records.jsonl", include);
+        let naming = target_for(
+            &entry(Some(vec![SignalGroup::McpToolCalls])),
+            None,
+            Path::new("/var/lib/boxes/codex"),
+            None,
+        )
+        .expect("the entry is well formed");
+        assert_eq!(naming.signals(), &[Signal::McpToolCalls]);
+        let other = target_for(
+            &entry(Some(vec![SignalGroup::Deny])),
+            None,
+            Path::new("/var/lib/boxes/codex"),
+            None,
+        )
+        .expect("the entry is well formed");
+        assert!(!other.signals().contains(&Signal::McpToolCalls));
+    }
+
+    /// A record that stores a target naming `mcp_tool_calls` carries `TOOL_CALLS_RECORD_VERSION`, so
+    /// an older build refuses the box rather than resuming it with values silently dropped.
+    #[test]
+    fn names_tool_calls_finds_only_a_target_naming_the_word() {
+        let telemetry = BTreeMap::from([(
+            "decisions".to_string(),
+            TelemetryEntry::file("/tmp/records.jsonl", Some(vec![SignalGroup::McpToolCalls])),
+        )]);
+        assert!(names_tool_calls(&telemetry));
+        let other = BTreeMap::from([(
+            "decisions".to_string(),
+            TelemetryEntry::file("/tmp/records.jsonl", Some(vec![SignalGroup::Deny])),
+        )]);
+        assert!(!names_tool_calls(&other));
+    }
+
     /// **An absent `include` takes every signal**, so an operator who names nothing still receives
-    /// the harness's own logs and metrics.
+    /// the harness's own logs and metrics, and never a tool call, whose values are in clear text.
     ///
     /// Read through `target_for`, which is the one path a run takes, rather than through
     /// `Signal::default_signals` — the box could otherwise call `receiving` with a narrower set and
     /// this assertion would still pass.
     #[test]
-    fn an_absent_include_takes_every_signal() {
+    fn an_absent_include_takes_every_signal_but_tool_calls() {
         let entry = TelemetryEntry {
             kind: TelemetryKind::File,
             destination: "/tmp/records.jsonl".to_string(),
@@ -1162,9 +1491,13 @@ mod tests {
             .expect("the entry is well formed");
         assert_eq!(
             target.signals().len(),
-            Signal::every().len(),
-            "an absent include must reach every signal: {:?}",
+            Signal::every().len() - 1,
+            "an absent include must reach every signal but mcp_tool_calls: {:?}",
             target.signals()
+        );
+        assert!(
+            !target.signals().contains(&Signal::McpToolCalls),
+            "a tool call reaches only a target that names mcp_tool_calls"
         );
         for expected in [
             Signal::AgentLogs,
@@ -1183,7 +1516,7 @@ mod tests {
     /// **An empty `include` and a repeated word are both refused in the operator's own vocabulary**,
     /// because the collector's own messages name the record spellings instead.
     #[test]
-    fn an_empty_or_repeated_include_is_refused_naming_the_five_words() {
+    fn an_empty_or_repeated_include_is_refused_naming_the_six_words() {
         let entry = |include: Vec<SignalGroup>| TelemetryEntry {
             kind: TelemetryKind::File,
             destination: "/tmp/records.jsonl".to_string(),
@@ -1200,11 +1533,19 @@ mod tests {
         let empty = checked(
             &BTreeMap::from([("decisions".to_string(), entry(vec![]))]),
             Path::new("/var/lib/boxes/codex"),
+            &DeclaredSources::none(),
         )
         .expect_err("an empty include names no signal")
         .to_string();
         assert!(empty.contains("no signal"), "{empty}");
-        for word in ["deny", "permit", "trace", "logs", "metrics"] {
+        for word in [
+            "deny",
+            "permit",
+            "trace",
+            "logs",
+            "metrics",
+            "mcp_tool_calls",
+        ] {
             assert!(
                 empty.contains(word),
                 "the refusal must list {word}, which an operator may write: {empty}"
@@ -1217,6 +1558,7 @@ mod tests {
                 entry(vec![SignalGroup::Deny, SignalGroup::Deny]),
             )]),
             Path::new("/var/lib/boxes/codex"),
+            &DeclaredSources::none(),
         )
         .expect_err("a repeated word is refused rather than deduplicated in silence")
         .to_string();
@@ -1267,7 +1609,12 @@ accepts = ["traces"]
 secret.ref = "credsd://default"
 "#,
         );
-        let checked = checked(&entries, Path::new("/var/lib/boxes/codex")).expect("accepted");
+        let checked = checked(
+            &entries,
+            Path::new("/var/lib/boxes/codex"),
+            &DeclaredSources::none(),
+        )
+        .expect("accepted");
         assert_eq!(checked.len(), 4);
         assert_eq!(
             checked["langfuse"].accepts.as_deref(),
@@ -1324,7 +1671,12 @@ region = "us-west-2"
 secret.ref = "aws://runtime"
 "#,
         );
-        let stored = checked(&entries, Path::new("/var/lib/boxes/codex")).expect("accepted");
+        let stored = checked(
+            &entries,
+            Path::new("/var/lib/boxes/codex"),
+            &DeclaredSources::none(),
+        )
+        .expect("accepted");
         let header = |label: &str, name: &str| {
             stored[label]
                 .headers
@@ -1387,7 +1739,12 @@ secret.ref = "aws://runtime"
 
         // The stored form is itself accepted unchanged, so `run` reads what `checked` wrote.
         assert_eq!(
-            checked(&stored, Path::new("/var/lib/boxes/codex")).expect("accepted"),
+            checked(
+                &stored,
+                Path::new("/var/lib/boxes/codex"),
+                &DeclaredSources::none()
+            )
+            .expect("accepted"),
             stored
         );
     }
@@ -1458,9 +1815,13 @@ secret.ref = "aws://runtime"
 
     /// One entry's refusal, as the operator reads it.
     fn refusal(text: &str) -> String {
-        checked(&parsed(text), Path::new("/var/lib/boxes/codex"))
-            .expect_err("refused")
-            .to_string()
+        checked(
+            &parsed(text),
+            Path::new("/var/lib/boxes/codex"),
+            &DeclaredSources::none(),
+        )
+        .expect_err("refused")
+        .to_string()
     }
 
     /// **A signed credential takes no header, and Basic auth takes no prefix**, because neither
@@ -1607,6 +1968,8 @@ secret.ref = "aws://runtime"
             "langfuse",
             "https://cloud.langfuse.com/api/public/otel",
             &secret(Some(BASIC_AUTH_PLACEMENT), None),
+            &DeclaredSources::none(),
+            &credentials::Backend::local(),
         )
         .expect("resolves");
         let (header, value) = presented.expect("a Basic phantom");
@@ -1625,6 +1988,8 @@ secret.ref = "aws://runtime"
             "langsmith",
             "https://api.smith.langchain.com/otel",
             &secret(None, Some("x-api-key")),
+            &DeclaredSources::none(),
+            &credentials::Backend::local(),
         )
         .expect("resolves");
         let (header, value) = presented.expect("a header phantom");
@@ -1634,9 +1999,14 @@ secret.ref = "aws://runtime"
             "no prefix on a named header: {value}"
         );
 
-        let (_, presented) =
-            resolved_secret("bearer", "https://vendor.example", &secret(None, None))
-                .expect("resolves");
+        let (_, presented) = resolved_secret(
+            "bearer",
+            "https://vendor.example",
+            &secret(None, None),
+            &DeclaredSources::none(),
+            &credentials::Backend::local(),
+        )
+        .expect("resolves");
         let (header, value) = presented.expect("a bearer phantom");
         assert_eq!(header, DEFAULT_HEADER);
         assert!(value.starts_with("Bearer strands_box_"), "{value}");
@@ -1650,6 +2020,8 @@ secret.ref = "aws://runtime"
                 prefix: None,
                 placement: None,
             },
+            &DeclaredSources::none(),
+            &credentials::Backend::local(),
         )
         .expect("a signed route resolves per request, not at open");
         assert!(
@@ -1666,9 +2038,63 @@ secret.ref = "aws://runtime"
     #[test]
     fn no_declaration_can_name_a_kind_without_a_target() {
         assert!(
-            checked(&BTreeMap::new(), Path::new("/var/lib/boxes/codex"))
-                .expect("no targets is not an error")
-                .is_empty()
+            checked(
+                &BTreeMap::new(),
+                Path::new("/var/lib/boxes/codex"),
+                &DeclaredSources::none()
+            )
+            .expect("no targets is not an error")
+            .is_empty()
         );
+    }
+
+    /// **A target's secret in a declared scheme is read through the given backend**, so a target
+    /// and a route with one secret share one run of the program.
+    #[test]
+    fn a_target_secret_in_a_declared_scheme_is_read_through_the_given_backend() {
+        use crate::run::secret_sources::tests::{PRINTER, StandIn, printer_sources};
+        let program = StandIn::new(PRINTER);
+        let secrets = printer_sources(&program);
+        let secret = |reference: &str| TelemetrySecret {
+            reference: reference.to_string(),
+            header: Some("x-api-key".to_string()),
+            prefix: None,
+            placement: None,
+        };
+        let (_, presented) = resolved_secret(
+            "otlp",
+            "https://vendor.example",
+            &secret("aws-secretsmanager://object#A"),
+            &declared(),
+            secrets.backend(),
+        )
+        .expect("the program supplies the secret");
+        // The target presents a phantom, and its vault holds the secret.
+        let (header, value) = presented.expect("a header phantom");
+        assert_eq!(header, "x-api-key");
+        assert!(value.starts_with("strands_box_"), "{value}");
+        assert_eq!(program.runs(), 1);
+        // A second read of that secret, as a route makes it, starts no program.
+        secrets
+            .backend()
+            .resolve(
+                &credentials::Locator::parse_uri("aws-secretsmanager://object#B")
+                    .expect("the reference parses"),
+            )
+            .expect("the backend holds the secret");
+        assert_eq!(program.runs(), 1);
+        // A scheme that no table declares stays refused, and starts no program.
+        let error = match resolved_secret(
+            "otlp",
+            "https://vendor.example",
+            &secret("vault://kv/key"),
+            &declared(),
+            secrets.backend(),
+        ) {
+            Ok(_) => panic!("the scheme is not declared"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("names no scheme this box reads"), "{error}");
+        assert_eq!(program.runs(), 1);
     }
 }

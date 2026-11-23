@@ -13,7 +13,7 @@ against the code and its tests. That's the `docs-audit` skill.
 For a rewrite, obtain the original commit and path or saved text and the requested scope.
 Compare meaning as well as style. A wording-only review covers changed prose and preservation;
 report pre-existing issues separately. For `docs/dev/`, apply the sentence rules in Layers 4 and 5
-and preserve its structure, source and test references, and Simplified Technical English register.
+and preserve its structure, source and test references, and plain technical register.
 The user/design placement and citation rules do not apply to that developer-doc wording review.
 
 Readability and altitude come first. A page can pass every mechanical rule and still be a page

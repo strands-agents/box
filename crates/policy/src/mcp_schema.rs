@@ -160,6 +160,7 @@ fn generate_from_tools(server: &str, tools_list: &str) -> Result<String, McpSche
     let tools_with_output = tools_declaring_output(tools_list);
     let compatible_tools_list = make_unsupported_schema_references_opaque(tools_list);
     let tools_list = lower_arg_types(&compatible_tools_list);
+    let (tools_list, argument_names) = identify_arguments(&tools_list);
     let description = ServerDescription::from_json_str(&tools_list).map_err(|source| {
         McpSchemaError::Description {
             server: server.to_string(),
@@ -273,8 +274,12 @@ fn generate_from_tools(server: &str, tools_list: &str) -> Result<String, McpSche
                 reason,
             }
         })?;
-        use_box_entities(&mut definition_value, &server_namespace);
-        declare_reply_output(&mut definition_value, &tools_with_output);
+        finish_namespace(
+            &mut definition_value,
+            &server_namespace,
+            &tools_with_output,
+            &argument_names,
+        );
         *definition = serde_json::from_value(definition_value).map_err(|_| {
             McpSchemaError::GeneratedShape {
                 server: server.to_string(),
@@ -671,6 +676,256 @@ fn lower_type(ty: &serde_json::Value) -> Option<serde_json::Value> {
             })
         }
         _ => None,
+    }
+}
+
+/// The JSON Schema keywords below a schema whose values are schemas the generator reads, besides
+/// the `properties` and `$defs` maps.
+const SCHEMA_KEYWORDS: [&str; 6] = [
+    "additionalProperties",
+    "anyOf",
+    "items",
+    "json",
+    "oneOf",
+    "prefixItems",
+];
+
+/// The record fields that the generator and [`declare_reply_output`] add, which no argument
+/// identifier may take.
+const GENERATED_FIELDS: [&str; 4] = ["input", "output", "reply", "structured"];
+
+/// `tools_list` with each input argument name that is not a Cedar identifier renamed to one, and
+/// the exact name of each renamed identifier. `tools_list` is unchanged when it does not parse.
+fn identify_arguments(tools_list: &str) -> (String, BTreeMap<String, String>) {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(tools_list) else {
+        return (tools_list.to_string(), BTreeMap::new());
+    };
+    let mut names = ArgumentNames::for_response(&value);
+    names.rename_tools(&mut value);
+    if names.exact.is_empty() {
+        return (tools_list.to_string(), BTreeMap::new());
+    }
+    (value.to_string(), names.exact)
+}
+
+/// Each property name in a schema value, at every depth.
+fn collect_property_names(value: &serde_json::Value, names: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(properties) = object
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+            {
+                names.extend(properties.keys().cloned());
+            }
+            for child in object.values() {
+                collect_property_names(child, names);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                collect_property_names(child, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The input argument renames of one server's tools.
+#[derive(Default)]
+struct ArgumentNames {
+    /// Every property name the server declares, renamed or not.
+    taken: BTreeSet<String>,
+    /// The identifier given to each renamed exact name.
+    identifiers: BTreeMap<String, String>,
+    /// The exact name of each identifier given.
+    exact: BTreeMap<String, String>,
+    /// The next suffix to try for each base identifier.
+    next_suffix: BTreeMap<String, u32>,
+}
+
+impl ArgumentNames {
+    /// The renames for one tools/list response, with every name it declares already taken.
+    fn for_response(response: &serde_json::Value) -> Self {
+        let mut names = Self::default();
+        names
+            .taken
+            .extend(GENERATED_FIELDS.iter().map(|field| field.to_string()));
+        collect_property_names(response, &mut names.taken);
+        names
+    }
+
+    /// Rename the arguments of each tool in a tools/list response, in the three shapes the
+    /// generator reads: a `result` with `tools` and shared `$defs`, an array of tools, or one tool.
+    fn rename_tools(&mut self, response: &mut serde_json::Value) {
+        let tools = match response {
+            serde_json::Value::Object(object) => match object.get_mut("result") {
+                Some(serde_json::Value::Object(result)) => {
+                    if let Some(serde_json::Value::Object(definitions)) = result.get_mut("$defs") {
+                        for schema in definitions.values_mut() {
+                            self.rename_in(schema);
+                        }
+                    }
+                    match result.get_mut("tools") {
+                        Some(serde_json::Value::Array(tools)) => tools.iter_mut().collect(),
+                        _ => Vec::new(),
+                    }
+                }
+                Some(_) => Vec::new(),
+                None => vec![response],
+            },
+            serde_json::Value::Array(tools) => tools.iter_mut().collect(),
+            _ => Vec::new(),
+        };
+        for tool in tools {
+            let Some(tool) = tool.as_object_mut() else {
+                continue;
+            };
+            let input = if tool.contains_key("parameters") {
+                "parameters"
+            } else {
+                "inputSchema"
+            };
+            if let Some(schema) = tool.get_mut(input) {
+                self.rename_in(schema);
+            }
+            if let Some(serde_json::Value::Object(definitions)) = tool.get_mut("$defs") {
+                for definition in definitions.values_mut() {
+                    self.rename_in(definition);
+                }
+            }
+        }
+    }
+
+    /// Rename the arguments in one input schema value and the schemas below it.
+    fn rename_in(&mut self, value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(serde_json::Value::Object(properties)) = object.get_mut("properties") {
+                    let renames = self.rename_properties(properties);
+                    if let Some(serde_json::Value::Array(required)) = object.get_mut("required") {
+                        for name in required.iter_mut() {
+                            if let Some(identifier) =
+                                name.as_str().and_then(|name| renames.get(name))
+                            {
+                                *name = serde_json::Value::String(identifier.clone());
+                            }
+                        }
+                    }
+                }
+                for (key, child) in object.iter_mut() {
+                    match key.as_str() {
+                        "properties" | "$defs" => {
+                            if let serde_json::Value::Object(schemas) = child {
+                                for schema in schemas.values_mut() {
+                                    self.rename_in(schema);
+                                }
+                            }
+                        }
+                        _ if SCHEMA_KEYWORDS.contains(&key.as_str()) => self.rename_in(child),
+                        _ => {}
+                    }
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    self.rename_in(child);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Rename the keys of one `properties` object, and return each rename it made.
+    fn rename_properties(
+        &mut self,
+        properties: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> BTreeMap<String, String> {
+        let renamed = properties
+            .keys()
+            .filter(|name| cedar_identifier(name) != **name)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut renames = BTreeMap::new();
+        for name in renamed {
+            let identifier = self.identifier_for(&name);
+            if let Some(schema) = properties.remove(&name) {
+                properties.insert(identifier.clone(), schema);
+            }
+            renames.insert(name, identifier);
+        }
+        renames
+    }
+
+    /// The identifier for one exact name, unique among the server's property names.
+    fn identifier_for(&mut self, name: &str) -> String {
+        if let Some(identifier) = self.identifiers.get(name) {
+            return identifier.clone();
+        }
+        let base = cedar_identifier(name);
+        let next = self.next_suffix.entry(base.clone()).or_insert(1);
+        let identifier = loop {
+            let candidate = if *next == 1 {
+                base.clone()
+            } else {
+                format!("{base}_{next}")
+            };
+            *next += 1;
+            if !self.taken.contains(&candidate) && !self.exact.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        self.identifiers
+            .insert(name.to_string(), identifier.clone());
+        self.exact.insert(identifier.clone(), name.to_string());
+        identifier
+    }
+}
+
+/// Give a generated namespace its exact argument names, Box's entities, and Box's reply output.
+fn finish_namespace(
+    value: &mut serde_json::Value,
+    namespace: &str,
+    tools_with_output: &BTreeSet<String>,
+    argument_names: &BTreeMap<String, String>,
+) {
+    // Restore first: Box's own fields do not exist yet, so the restore cannot rename one.
+    restore_argument_names(value, argument_names);
+    use_box_entities(value, namespace);
+    declare_reply_output(value, tools_with_output);
+}
+
+/// Give each record attribute that [`identify_arguments`] renamed its exact argument name again.
+fn restore_argument_names(value: &mut serde_json::Value, exact: &BTreeMap<String, String>) {
+    if exact.is_empty() {
+        return;
+    }
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(serde_json::Value::Object(attributes)) = object.get_mut("attributes") {
+                let renamed = attributes
+                    .keys()
+                    .filter(|name| exact.contains_key(*name))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for identifier in renamed {
+                    if let (Some(attribute), Some(name)) =
+                        (attributes.remove(&identifier), exact.get(&identifier))
+                    {
+                        attributes.insert(name.clone(), attribute);
+                    }
+                }
+            }
+            for child in object.values_mut() {
+                restore_argument_names(child, exact);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                restore_argument_names(child, exact);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1258,6 +1513,452 @@ mod tests {
             .find(|action| action.type_name().to_string() == "issues_mcp::Action")
             .expect("the namespaced tool action exists");
         assert_eq!(action.id().unescaped(), tool);
+    }
+
+    fn validates(schema: &Schema, action: &str, condition: &str) -> bool {
+        let policy: PolicySet = format!(
+            r#"permit (
+                principal == Box::Agent::"self",
+                action == {action},
+                resource == Box::Resource::"unused"
+            ) when {{ {condition} }};"#
+        )
+        .parse()
+        .expect("valid policy");
+        Validator::new(schema.clone())
+            .validate(&policy, ValidationMode::Strict)
+            .validation_passed()
+    }
+
+    /// The attribute names of one generated record type.
+    fn attributes(generated: &str, namespace: &str, record: &str) -> Vec<String> {
+        let (fragment, _) =
+            SchemaFragment::from_cedarschema_str(generated).expect("the fragment parses");
+        let json = fragment.to_json_value().expect("the fragment converts");
+        json.pointer(&format!("/{namespace}/commonTypes/{record}/attributes"))
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| panic!("{record} is a record\n{generated}"))
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn an_argument_name_that_is_not_a_cedar_identifier_keeps_its_exact_name() {
+        let tools = serde_json::json!({
+            "result": {
+                "tools": [
+                    {
+                        "name": "get_zone",
+                        "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}
+                    },
+                    {
+                        "name": "list_records",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "zone-id": {"type": "string"},
+                                "a b": {"type": "string"},
+                                "$filter": {"type": "string"},
+                                "1st": {"type": "integer"},
+                                "if": {"type": "boolean"},
+                                "__cedar": {"type": "string"},
+                                "x__cedar": {"type": "string"},
+                                "filter": {
+                                    "type": "object",
+                                    "properties": {"x-api-key": {"type": "string"}},
+                                    "required": ["x-api-key"]
+                                },
+                                "shared": {"$ref": "#/$defs/Shared"}
+                            },
+                            "required": ["zone-id"]
+                        }
+                    }
+                ],
+                "$defs": {
+                    "Shared": {"type": "object", "properties": {"a.b": {"type": "string"}}}
+                }
+            }
+        });
+        let generated =
+            generate_mcp_schema("cf", &tools.to_string()).expect("the schema generates");
+        let (schema, warnings) =
+            Schema::from_cedarschema_str(&format!("{SCHEMA_SRC}\n{generated}"))
+                .expect("the schema composes");
+        assert_eq!(warnings.count(), 0);
+
+        let records = r#"cf::Action::"list_records""#;
+        for condition in [
+            r#"context.input["zone-id"] == "abc""#,
+            r#"context.input has "a b" && context.input["a b"] == "abc""#,
+            r#"context.input has "$filter" && context.input["$filter"] == "abc""#,
+            r#"context.input has "1st" && context.input["1st"] > 1"#,
+            r#"context.input has "if" && context.input["if"]"#,
+            r#"context.input has "__cedar" && context.input["__cedar"] == "abc""#,
+            r#"context.input has "x__cedar" && context.input["x__cedar"] == "abc""#,
+            r#"context.input has filter && context.input.filter["x-api-key"] == "abc""#,
+            r#"context.input has shared && context.input.shared has "a.b"
+                && context.input.shared["a.b"] == "abc""#,
+        ] {
+            assert!(
+                validates(&schema, records, condition),
+                "{condition}\n{generated}"
+            );
+        }
+        assert_eq!(
+            attributes(&generated, "cf", "list_recordsInput"),
+            [
+                "$filter", "1st", "__cedar", "a b", "filter", "if", "shared", "x__cedar", "zone-id"
+            ]
+        );
+        assert_eq!(
+            attributes(&generated, "cf", "list_records_Input_filter"),
+            ["x-api-key"]
+        );
+        assert_eq!(attributes(&generated, "cf", "Shared"), ["a.b"]);
+        assert_eq!(attributes(&generated, "cf", "get_zoneInput"), ["q"]);
+    }
+
+    #[test]
+    fn an_argument_name_below_each_schema_keyword_keeps_its_exact_name() {
+        let tools = serde_json::json!({"result": {"tools": [{
+            "name": "send",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "headers": {
+                        "type": "array",
+                        "items": {"type": "object", "properties": {"x-name": {"type": "string"}}}
+                    },
+                    "target": {
+                        "anyOf": [
+                            {"type": "object", "properties": {"zone-id": {"type": "string"}}},
+                            {"type": "string"}
+                        ]
+                    },
+                    "pair": {
+                        "type": "array",
+                        "prefixItems": [
+                            {"type": "object", "properties": {"first-key": {"type": "string"}}}
+                        ],
+                        "items": false
+                    },
+                    "labels": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": {"label-value": {"type": "string"}}
+                        }
+                    },
+                    "x__cedar": {"type": "object", "properties": {"q": {"type": "string"}}}
+                }
+            }
+        }]}});
+        let generated =
+            generate_mcp_schema("cf", &tools.to_string()).expect("the schema generates");
+        for name in ["x-name", "zone-id", "first-key", "label-value"] {
+            assert!(
+                generated.contains(&format!("\"{name}\"?: String")),
+                "{name}\n{generated}"
+            );
+        }
+        assert!(
+            generated.contains("type send_Input_x__cedar = {"),
+            "an identifier that already parses keeps the type name it had before\n{generated}"
+        );
+    }
+
+    #[test]
+    fn restoring_argument_names_never_renames_a_field_box_adds() {
+        // An identifier map that names Box's own fields, as it would if Box added a field whose
+        // name an argument identifier can take (for example `reply_text` beside `reply-text`).
+        let exact = BTreeMap::from([
+            ("zone_id".to_string(), "zone-id".to_string()),
+            ("reply".to_string(), "re-ply".to_string()),
+            ("structured".to_string(), "struc-tured".to_string()),
+        ]);
+        let mut namespace = serde_json::json!({
+            "commonTypes": {
+                "lookupInput": {
+                    "type": "Record",
+                    "attributes": {"zone_id": {"type": "String", "required": false}}
+                },
+                "lookupOutput": {
+                    "type": "Record",
+                    "attributes": {"q": {"type": "String", "required": false}}
+                }
+            },
+            "entityTypes": {},
+            "actions": {"lookup": {"appliesTo": {
+                "principalTypes": ["Agent"],
+                "resourceTypes": ["Resource"],
+                "context": {"type": "Record", "attributes": {
+                    "input": {"type": "EntityOrCommon", "name": "lookupInput"},
+                    "output": {"type": "EntityOrCommon", "name": "lookupOutput"}
+                }}
+            }}}
+        });
+
+        finish_namespace(
+            &mut namespace,
+            "cf",
+            &BTreeSet::from(["lookup".to_string()]),
+            &exact,
+        );
+
+        let output = namespace
+            .pointer("/actions/lookup/appliesTo/context/attributes/output/attributes")
+            .and_then(serde_json::Value::as_object)
+            .expect("Box declares the reply output");
+        assert_eq!(
+            output.keys().collect::<Vec<_>>(),
+            ["reply", "structured"],
+            "{namespace:#}"
+        );
+        assert!(
+            namespace
+                .pointer("/commonTypes/lookupInput/attributes/zone-id")
+                .is_some(),
+            "the argument keeps its exact name\n{namespace:#}"
+        );
+    }
+
+    #[test]
+    fn no_argument_identifier_can_take_a_name_box_or_the_generator_adds() {
+        let names = ArgumentNames::for_response(&serde_json::json!({"result": {"tools": []}}));
+        for field in ["input", "output", "reply", "structured"] {
+            assert!(names.taken.contains(field), "{field} is reserved");
+        }
+    }
+
+    #[test]
+    fn an_argument_spelled_like_a_generated_field_keeps_every_field() {
+        let tools = serde_json::json!({"result": {"tools": [{
+            "name": "lookup",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "in-put": {"type": "string"},
+                    "out-put": {"type": "string"},
+                    "re-ply": {"type": "string"},
+                    "struc-tured": {"type": "string"},
+                    "type-Choice0": {"type": "string"},
+                    "proj-0": {"type": "string"},
+                    "either": {"type": ["string", "integer"]}
+                }
+            },
+            "outputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}
+        }]}});
+        let generated =
+            generate_mcp_schema("cf", &tools.to_string()).expect("the schema generates");
+        let (schema, warnings) =
+            Schema::from_cedarschema_str(&format!("{SCHEMA_SRC}\n{generated}"))
+                .expect("the schema composes");
+        assert_eq!(warnings.count(), 0);
+        assert_eq!(
+            attributes(&generated, "cf", "lookupInput"),
+            [
+                "either",
+                "in-put",
+                "out-put",
+                "proj-0",
+                "re-ply",
+                "struc-tured",
+                "type-Choice0"
+            ]
+        );
+        let lookup = r#"cf::Action::"lookup""#;
+        for condition in [
+            r#"context.input has "in-put" && context.input["in-put"] == "x""#,
+            r#"context.input has either && context.input.either has typeChoice0
+                && context.input.either.typeChoice0 == "x""#,
+            r#"context has output && context.output.reply == "result"
+                && context.output has structured && context.output.structured has q"#,
+        ] {
+            assert!(
+                validates(&schema, lookup, condition),
+                "{condition}\n{generated}"
+            );
+        }
+    }
+
+    #[test]
+    fn many_names_on_one_base_each_keep_their_exact_name() {
+        let names = (0x4e00_u32..0x4e00 + 2_000)
+            .filter_map(char::from_u32)
+            .map(String::from)
+            .collect::<Vec<_>>();
+        let properties = names
+            .iter()
+            .map(|name| (name.clone(), serde_json::json!({"type": "string"})))
+            .collect::<serde_json::Map<_, _>>();
+        let tools = serde_json::json!({"result": {"tools": [{
+            "name": "wide",
+            "inputSchema": {"type": "object", "properties": properties}
+        }]}});
+        let generated =
+            generate_mcp_schema("cf", &tools.to_string()).expect("the schema generates");
+        let mut expected = names;
+        expected.sort();
+        assert_eq!(attributes(&generated, "cf", "wideInput"), expected);
+    }
+
+    #[test]
+    fn a_properties_object_outside_an_input_schema_is_not_an_argument_list() {
+        let tools = serde_json::json!({"result": {
+            "tools": [{
+                "name": "lookup",
+                "_meta": {"properties": {"zone-id": true, "zone_id": true}},
+                "annotations": {"properties": {"zone-id": 1, "zone_id": 2}},
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "zone-id": {
+                            "type": "string",
+                            "default": {"properties": {"a-b": 1, "a_b": 2}},
+                            "x-vendor": {"properties": {"c-d": 1, "c_d": 2}}
+                        },
+                        "tool-local": {"$ref": "#/$defs/ToolLocal"},
+                        "input-local": {"$ref": "#/$defs/InputLocal"}
+                    },
+                    "$defs": {
+                        "InputLocal": {"type": "object", "properties": {"i-j": {"type": "string"}}}
+                    }
+                },
+                "$defs": {
+                    "ToolLocal": {"type": "object", "properties": {"g-h": {"type": "string"}}}
+                },
+                "outputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}
+            }],
+            "_meta": {"properties": {"e-f": 1, "e_f": 2}}
+        }});
+        let generated =
+            generate_mcp_schema("cf", &tools.to_string()).expect("the schema generates");
+        assert_eq!(
+            attributes(&generated, "cf", "lookupInput"),
+            ["input-local", "tool-local", "zone-id"]
+        );
+        assert_eq!(attributes(&generated, "cf", "lookupOutput"), ["q"]);
+        let (schema, warnings) =
+            Schema::from_cedarschema_str(&format!("{SCHEMA_SRC}\n{generated}"))
+                .expect("the schema composes");
+        assert_eq!(warnings.count(), 0);
+        for condition in [
+            r#"context.input has "tool-local" && context.input["tool-local"] has "g-h"
+                && context.input["tool-local"]["g-h"] == "x""#,
+            r#"context.input has "input-local" && context.input["input-local"] has "i-j"
+                && context.input["input-local"]["i-j"] == "x""#,
+        ] {
+            assert!(
+                validates(&schema, r#"cf::Action::"lookup""#, condition),
+                "{condition}\n{generated}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_arguments_of_one_object_that_normalize_to_one_identifier_keep_their_exact_names() {
+        for (properties, record, names) in [
+            (
+                serde_json::json!({"zone-id": {"type": "string"}, "zone_id": {"type": "string"}}),
+                "list_recordsInput",
+                vec!["zone-id", "zone_id"],
+            ),
+            (
+                serde_json::json!({"zone-id": {"type": "string"}, "zone.id": {"type": "string"}}),
+                "list_recordsInput",
+                vec!["zone-id", "zone.id"],
+            ),
+            (
+                serde_json::json!({"名前": {"type": "string"}, "住所": {"type": "string"}}),
+                "list_recordsInput",
+                vec!["住所", "名前"],
+            ),
+            (
+                serde_json::json!({"filter": {"type": "object", "properties": {
+                    "zone-id": {"type": "string"}, "zone_id": {"type": "string"}
+                }, "required": ["zone-id", "zone_id"]}}),
+                "list_records_Input_filter",
+                vec!["zone-id", "zone_id"],
+            ),
+        ] {
+            let tools = serde_json::json!({"result": {"tools": [
+                {
+                    "name": "get_zone",
+                    "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}
+                },
+                {
+                    "name": "list_records",
+                    "inputSchema": {"type": "object", "properties": properties}
+                }
+            ]}});
+            let generated = generate_mcp_schema("cf", &tools.to_string())
+                .unwrap_or_else(|error| panic!("{names:?}: {error}"));
+            let (schema, warnings) =
+                Schema::from_cedarschema_str(&format!("{SCHEMA_SRC}\n{generated}"))
+                    .expect("the schema composes");
+            assert_eq!(warnings.count(), 0);
+            assert_eq!(attributes(&generated, "cf", record), names, "{generated}");
+            assert_eq!(attributes(&generated, "cf", "get_zoneInput"), ["q"]);
+            if record == "list_recordsInput" {
+                for name in &names {
+                    assert!(
+                        validates(
+                            &schema,
+                            r#"cf::Action::"list_records""#,
+                            &format!(
+                                r#"context.input has "{name}" && context.input["{name}"] == "x""#
+                            )
+                        ),
+                        "{name}\n{generated}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn one_identifier_in_two_tools_keeps_each_exact_name() {
+        let tools = serde_json::json!({"result": {"tools": [
+            {
+                "name": "hyphen",
+                "inputSchema": {"type": "object", "properties": {"zone-id": {"type": "string"}}}
+            },
+            {
+                "name": "underscore",
+                "inputSchema": {"type": "object", "properties": {
+                    "zone_id": {"type": "string"},
+                    "zone_id_2": {"type": "string"}
+                }}
+            },
+            {
+                "name": "dot",
+                "inputSchema": {"type": "object", "properties": {"zone.id": {"type": "string"}}}
+            }
+        ]}});
+        let generated =
+            generate_mcp_schema("cf", &tools.to_string()).expect("the schema generates");
+        let (schema, warnings) =
+            Schema::from_cedarschema_str(&format!("{SCHEMA_SRC}\n{generated}"))
+                .expect("the schema composes");
+        assert_eq!(warnings.count(), 0);
+
+        let hyphen = r#"cf::Action::"hyphen""#;
+        let underscore = r#"cf::Action::"underscore""#;
+        let dot = r#"cf::Action::"dot""#;
+        assert!(validates(&schema, hyphen, r#"context.input has "zone-id""#));
+        assert!(validates(
+            &schema,
+            underscore,
+            "context.input has zone_id_2"
+        ));
+        assert!(validates(&schema, dot, r#"context.input has "zone.id""#));
+        assert_eq!(attributes(&generated, "cf", "hyphenInput"), ["zone-id"]);
+        assert_eq!(
+            attributes(&generated, "cf", "underscoreInput"),
+            ["zone_id", "zone_id_2"]
+        );
+        assert_eq!(attributes(&generated, "cf", "dotInput"), ["zone.id"]);
     }
 
     #[test]

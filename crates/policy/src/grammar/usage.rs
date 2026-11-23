@@ -1,6 +1,6 @@
 //! One `usage` line, read into the shape that the command lines of its action take.
 
-use super::model::{command_word, is_identifier};
+use super::model::{all_uppercase, command_word, is_identifier, spelled_like_a_command_word};
 
 /// What one `usage` line says about the command lines of its action.
 #[derive(Debug, Default)]
@@ -47,6 +47,10 @@ pub(crate) enum UsageFault {
     CommandWordOutOfPlace(String),
     #[error("has {0:?}, which is not a command word, an operand `<name>`, or `--`")]
     UnknownWord(String),
+    #[error("{}", uppercase_word(.0))]
+    UppercaseWord(String),
+    #[error("has `[{written}]`; write `[{lowercase}]`")]
+    UppercaseOptions { written: String, lowercase: String },
     #[error("has option {0:?}; declare it in `options`, and write `[options]` in the usage")]
     InlineOption(String),
     #[error("puts `[global options]` after the command words")]
@@ -137,6 +141,16 @@ fn tokenize(usage: &str) -> Result<Vec<Node>, UsageFault> {
     }
 }
 
+fn uppercase_word(word: &str) -> String {
+    let lowercase = word.to_ascii_lowercase();
+    let advice = if is_identifier(&lowercase) {
+        format!("write an operand as `<{lowercase}>`")
+    } else {
+        "write an operand as `<name>`".to_string()
+    };
+    format!("has {word:?}, which has no lowercase letter, so it is not a command word; {advice}")
+}
+
 fn placeholder(word: &str) -> Option<(&str, bool)> {
     let (inner, variadic) = match word.strip_suffix("...") {
         Some(inner) => (inner, true),
@@ -182,6 +196,9 @@ impl Walker {
             });
             return Ok(());
         }
+        if spelled_like_a_command_word(word) && all_uppercase(word) {
+            return Err(UsageFault::UppercaseWord(word.to_string()));
+        }
         if command_word(word) {
             if optional || self.phase == Phase::After {
                 return Err(UsageFault::CommandWordOutOfPlace(word.to_string()));
@@ -204,6 +221,14 @@ impl Walker {
                 Node::Group(_) => None,
             })
             .collect();
+        let written = words.join(" ");
+        let lowercase = written.to_ascii_lowercase();
+        if group.len() == words.len()
+            && written != lowercase
+            && (lowercase == "options" || lowercase == "global options")
+        {
+            return Err(UsageFault::UppercaseOptions { written, lowercase });
+        }
         match (words.as_slice(), group.len()) {
             (["global", "options"], 2) => {
                 if self.phase != Phase::Before {

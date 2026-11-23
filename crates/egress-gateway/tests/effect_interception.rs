@@ -16,7 +16,7 @@ use credentials::{
 use egress_gateway::{
     AuditDecision, CapabilitySet, CredentialCapability, EffectAttempt, EffectInterceptor,
     EffectOutcome, EffectPermit, EgressDecision, Emitter, McpFrame, MitmConfig, MitmInterceptor,
-    StubEmitter,
+    PROXY_ORIGIN_HEADER, StubEmitter,
 };
 
 use harness::{TlsUpstream, WorkloadClient};
@@ -303,6 +303,17 @@ fn wait_for_event_count(events: &Arc<Mutex<Vec<Event>>>, expected: usize) -> Vec
     }
 }
 
+/// Assert that `response` is the gateway's own failure, and that it names `reason`.
+fn assert_gateway_failure(response: &str, reason: &str) {
+    assert!(response.starts_with("HTTP/1.1 502 "), "{response}");
+    assert_eq!(
+        harness::header_value(response, PROXY_ORIGIN_HEADER),
+        Some("failed"),
+        "{response}"
+    );
+    assert!(response.contains(reason), "{response}");
+}
+
 #[test]
 fn lifecycle_orders_real_effects_and_keeps_attempts_secret_free() {
     const SECRET: &str = "sk_live_lifecycle_secret";
@@ -587,6 +598,59 @@ fn request_outcome_sink_failure_terminates_an_open_response() {
     );
 }
 
+/// A request outcome that fails to record on an empty reply answers a failure that keeps the
+/// interceptor's own error from the workload.
+#[test]
+fn request_outcome_sink_failure_on_an_empty_reply_hides_the_interceptor_error() {
+    let host = "empty-reply-outcome-failure.test";
+    let upstream =
+        TlsUpstream::start_with_response(host, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+    let handle = MitmInterceptor::start(
+        config_for(host, &upstream),
+        no_injection(),
+        Arc::new(RecordingInterceptor::failing_recording(
+            Arc::default(),
+            EffectKind::HttpRequest,
+        )),
+    )
+    .unwrap();
+
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+    client.send_request("GET", "/", &[], b"");
+    let response = client.read_response();
+    assert_gateway_failure(&response, "recording upstream request outcome failed");
+    assert!(!response.contains("test outcome sink failed"), "{response}");
+}
+
+/// A request in the tunnel that the gateway can't parse is the workload's own fault: it gets the
+/// gateway's own 400, which says why, and reaches no upstream.
+#[test]
+fn a_malformed_request_in_the_tunnel_gets_a_400() {
+    let host = "malformed.test";
+    let upstream = TlsUpstream::start(host);
+    let handle = MitmInterceptor::start(
+        config_for(host, &upstream),
+        no_injection(),
+        Arc::new(RecordingInterceptor::allowing(Arc::default())),
+    )
+    .unwrap();
+
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+    client.send_request("GET", "/", &[("Connection", "not a token")], b"");
+    let response = client.read_response();
+    assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
+    assert_eq!(
+        harness::header_value(&response, PROXY_ORIGIN_HEADER),
+        Some("refused"),
+        "{response}"
+    );
+    assert!(
+        response.contains("malformed Connection header"),
+        "{response}"
+    );
+    assert_eq!(upstream.request_count(), 0, "nothing reaches the upstream");
+}
+
 /// An upstream that closes without a reply: the request outcome records the delivered bytes with
 /// no status, exactly once, and no release follows.
 #[test]
@@ -604,7 +668,7 @@ fn a_request_with_no_reply_records_its_delivery_without_a_status() {
 
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
     client.send_request("POST", "/no-reply", &[], b"effect");
-    assert_eq!(client.read_response(), "", "no reply reaches the workload");
+    assert_gateway_failure(&client.read_response(), "upstream exchange");
 
     let events = wait_for_event_count(&shared, 5);
     assert_eq!(
@@ -1451,7 +1515,7 @@ fn an_upstream_that_never_replies_is_bounded_by_the_read_deadline() {
     let started = Instant::now();
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
     client.send_request("POST", "/silent", &[], b"effect");
-    assert_eq!(client.read_response(), "", "no reply reaches the workload");
+    assert_gateway_failure(&client.read_response(), "upstream deadline passed");
     assert!(
         started.elapsed() < Duration::from_secs(10),
         "the deadline bounds the wait: {:?}",
@@ -1501,11 +1565,7 @@ fn an_upstream_that_drips_its_reply_is_bounded_by_the_read_deadline() {
     let started = Instant::now();
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
     client.send_request("GET", "/drip", &[], b"");
-    assert_eq!(
-        client.read_response(),
-        "",
-        "a dripped reply is not released"
-    );
+    assert_gateway_failure(&client.read_response(), "upstream deadline passed");
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "the deadline bounds the exchange as a whole: {:?}",
@@ -1546,11 +1606,7 @@ fn an_upstream_that_never_drains_the_request_is_bounded_by_the_write_deadline() 
     let body = vec![b'x'; 12 << 20];
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
     client.send_request("POST", "/deaf", &[], &body);
-    assert_eq!(
-        client.read_response(),
-        "",
-        "an undelivered request gets no reply"
-    );
+    assert_gateway_failure(&client.read_response(), "upstream deadline passed");
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "the deadline bounds the write: {:?}",
@@ -1601,11 +1657,7 @@ fn an_upstream_that_sips_the_request_is_bounded_by_the_write_deadline() {
     let body = vec![b'x'; 12 << 20];
     let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
     client.send_request("POST", "/sip", &[], &body);
-    assert_eq!(
-        client.read_response(),
-        "",
-        "an undelivered request gets no reply"
-    );
+    assert_gateway_failure(&client.read_response(), "upstream deadline passed");
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "the deadline bounds the writes as a whole: {:?}",
@@ -1686,7 +1738,7 @@ fn an_upstream_that_sips_a_plain_request_is_bounded_by_the_write_deadline() {
     proxy.write_all(&body).unwrap();
     let mut reply = Vec::new();
     let _ = proxy.read_to_end(&mut reply);
-    assert!(reply.is_empty(), "an undelivered request gets no reply");
+    assert_gateway_failure(&String::from_utf8_lossy(&reply), "upstream deadline passed");
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "the deadline bounds the writes as a whole: {:?}",
@@ -2081,6 +2133,16 @@ fn observe_one_canned_reply(
     response: &'static [u8],
     max_body_bytes: usize,
 ) -> (Vec<Observed>, harness::SeenRequest) {
+    observe_one_canned_reply_to(host, TOOL_CALL, response, max_body_bytes)
+}
+
+/// As `observe_one_canned_reply`, for a request carrying `body`.
+fn observe_one_canned_reply_to(
+    host: &str,
+    body: &'static str,
+    response: &'static [u8],
+    max_body_bytes: usize,
+) -> (Vec<Observed>, harness::SeenRequest) {
     let upstream = TlsUpstream::start_with_response(host, response);
     let observed = Arc::new(Mutex::new(Vec::new()));
     let handle = MitmInterceptor::start(
@@ -2105,7 +2167,7 @@ fn observe_one_canned_reply(
             ("Content-Type", "application/json"),
             ("Accept-Encoding", "gzip"),
         ],
-        TOOL_CALL.as_bytes(),
+        body.as_bytes(),
     );
     // Read until the gateway stops sending; a refused or cut-off reply ends with a read error.
     let mut received = Vec::new();
@@ -2128,6 +2190,21 @@ fn a_tool_call_asks_the_server_for_an_uncompressed_reply() {
         "a compressed reply would go unread, so the workload cannot ask for one"
     );
     assert_eq!(observed.len(), 1);
+}
+
+/// A catalog is staged into the policy, and a compressed one fails that staging, so a workload
+/// that asks for one could leave a rule that waits for the catalog unenforced.
+#[test]
+fn a_tools_list_asks_the_server_for_an_uncompressed_reply() {
+    const TOOLS_LIST: &str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    const REPLY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}";
+    let (_, seen) =
+        observe_one_canned_reply_to("list-identity.test", TOOLS_LIST, REPLY, 1024 * 1024);
+    assert_eq!(
+        seen.header("accept-encoding").as_deref(),
+        Some("identity"),
+        "a compressed catalog fails staging, so the workload cannot ask for one"
+    );
 }
 
 /// A server that compresses anyway hands the observer bytes no JSON parser reads, so the policy

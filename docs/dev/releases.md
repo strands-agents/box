@@ -4,37 +4,46 @@ Use the `Release Box` workflow in `.github/workflows/deploy-box-artifact.yml`.
 Select upstream `main` and pin the product source with the `sha` input.
 The source must belong to `main` history for publication.
 
+One run publishes one tag with both products: Box Core and the `box` CLI.
+`Release Box` builds and signs Box Core itself.
+It calls the reusable `CLI release` workflow (`.github/workflows/cli-release.yml`) to build, sign, verify, and bundle the CLI.
+Box Core's tests (`rust-test-lint.yml`) and the CLI's tests (`cli-test.yml`) both gate the release.
+The workflow stamps the selected version into the crates of both products before it builds them.
+The [CLI macOS release guide](macos-release-cli.md) describes the CLI's package, signing, and checks.
+
 ## Choose a version
 
-Both channels publish macOS Apple silicon. Set the workflow input `publish_linux=true` to include the Amazon Linux 2023 ARM64 archive.
-The default, `publish_linux=false`, keeps stable releases macOS-only. Linux preview versions require `publish_linux=true`.
-To add the x86-64 archive after target qualification, also set `publish_linux_x86=true`. This input defaults to `false` and requires `publish_linux=true`.
-Linux x86-64 remains experimental. Its separate runtime opt-in is described below.
+Every release, stable or prerelease, publishes macOS Apple silicon and the Amazon Linux 2023 ARM64 archives of both products.
+The workflow also publishes the Linux x86-64 archives of both products by default. Set `publish_linux_x86=false` to omit them.
 
 | Version input | GitHub release | Latest stable release |
 |---|---|---|
-| `0.1.1` | Stable | Replaced by this release |
-| `0.1.1-linux-preview.1` | Prerelease | Unchanged |
+| `0.3.0` | Stable | Replaced by this release |
+| `0.3.0-preview.1` | Prerelease | Unchanged |
+| `0.3.0-linux-preview.1` | Prerelease | Unchanged |
 
 These are examples, not reserved versions. Do not include the leading `v` in the input.
 The workflow adds it to the tag and archive names.
 The version must make one major, minor, or patch increment from the latest stable tag.
-The tag must not already exist. Preview tags do not change the stable version baseline.
-A Linux preview also includes the macOS archive. There is no separate macOS preview channel.
+The tag must not already exist. Prerelease tags do not change the stable version baseline.
+`N` in `-preview.N` and `-linux-preview.N` is greater than zero.
+A prerelease publishes the same asset set as a stable release and is never marked latest.
+The installer picks a prerelease only when `BOX_VERSION` names it exactly.
+The first release that includes the CLI is `v0.3.0-preview.1`.
 
 ## Rehearse
 
 Run the workflow with the selected `version` and `sha`, and these inputs:
 
 - `dry_run=true`
-- `publish_linux=true` for an ARM64 Linux release, or `false` for a macOS-only stable release
-- `publish_linux_x86=true` to include the qualified x86-64 package, or `false` to omit it
+- `publish_linux_x86=true` (the default) to include the qualified x86-64 package, or `false` to omit it
 - `sign_macos=true`
 - `premerge_signing_test=false`
 - `skip_tests=false`
 
-Inspect the build, package checks, workspace tests, signing, signed-package tests, and archive inspection.
-The [macOS release guide](macos-release.md) describes the signing prerequisites and evidence.
+Inspect the build, package checks, workspace tests, signing, signed-package tests, and archive inspection for both products.
+The [macOS release guide](macos-release.md) describes the signing prerequisites and Box Core's evidence.
+The [CLI macOS release guide](macos-release-cli.md) describes the CLI's evidence.
 A dry run with `sign_macos=false` omits signing and signed-package verification.
 It does not rehearse all publication prerequisites.
 
@@ -49,35 +58,50 @@ from the repository root on a Linux host with Python 3 and `readelf` installed:
 python3 scripts/check-linux-package.py stage/box-core --target x86_64-unknown-linux-gnu
 ```
 
-Omit `--target` to check ARM64. These checks do not run workloads or qualify an installed x86-64 release.
-Box workloads on Linux x86-64 still require the `EXPERIMENTAL_X86_SUPPORT=TRUE` environment setting.
+Omit `--target` to check ARM64. This command checks binary metadata only.
+
+Before the x86-64 package check, the workflow removes the retired `EXPERIMENTAL_LINUX_SUPPORT` and `EXPERIMENTAL_X86_SUPPORT` variables from the environment.
+It requires the staged executable to reject a missing configuration, which catches a selected source that still requires an opt-in.
+This startup check does not run a workload.
+
+Each Linux build then runs `scripts/smoke-linux-package.py` against its packaged archive on a runner
+with the matching CPU architecture. The checks run as a non-root user in the Amazon Linux 2023
+container. They start a contained workload and verify file-access and process restrictions without
+an experimental opt-in. A failed check stops the build and prevents publication. These checks do not
+replace target qualification or verification of the published download.
 
 ## Publish
 
 Complete security acceptance and target qualification before approving publication.
-Run the same version, source, `publish_linux`, and `publish_linux_x86` selections from upstream `main` with `dry_run=false` and `skip_tests=false`.
+Run the same version, source, and `publish_linux_x86` selection from upstream `main` with `dry_run=false` and `skip_tests=false`.
 Real releases require macOS signing and signed-package verification, including releases that introduce Linux support.
-Approve the protected signing environment when requested, then approve `release-gate` after the checks pass.
+Box Core's signing job and the CLI's signing job both run in the protected `macos-signing` environment, which only `main` can use.
+Approve the signing environment when requested, then approve `release-gate` after the checks pass.
 The workflow creates the tag and publishes the verified bundle from that run.
 A new run rebuilds the package. Keep the hashes from the publication run.
 
-With `publish_linux=true` and `publish_linux_x86=false`, both channels publish these files, with the selected tag in place of `<tag>`:
+By default, every release publishes these files, with the selected tag in place of `<tag>`:
 
-- `box-<tag>-aarch64-apple-darwin.tar.gz`
-- `box-<tag>-linux-arm64.tar.gz`
-- `SHA256SUMS.txt`
+| Product | Archive |
+|---|---|
+| Box Core, macOS (`Box.app`) | `box-<tag>-aarch64-apple-darwin.tar.gz` |
+| Box Core, Linux ARM64 | `box-<tag>-linux-arm64.tar.gz` |
+| Box Core, Linux x86-64 | `box-<tag>-linux-x86_64.tar.gz` |
+| CLI, macOS | `box-cli-<tag>-aarch64-apple-darwin.tar.gz` |
+| CLI, Linux ARM64 | `box-cli-<tag>-aarch64-unknown-linux-gnu.tar.gz` |
+| CLI, Linux x86-64 | `box-cli-<tag>-x86_64-unknown-linux-gnu.tar.gz` |
 
-Setting `publish_linux_x86=true` adds `box-<tag>-linux-x86_64.tar.gz` and its checksum entry.
-With the default `false`, the x86-64 package remains a workflow artifact.
+One `SHA256SUMS.txt` lists every published archive.
+`download.sh` reads only Box Core's archives, and `install.sh` reads only the CLI's.
 
-The Linux release archives use `linux-arm64` and `linux-x86_64` in their names.
-Compilation and intermediate workflow artifacts retain the Rust targets `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu`, respectively.
+Setting `publish_linux_x86=false` omits both x86-64 archives and their checksum entries.
+The x86-64 packages then remain workflow artifacts.
+The x86-64 build and package checks run for either setting. A failure blocks publication of every selected archive.
+
+Box Core's Linux release archives use `linux-arm64` and `linux-x86_64` in their names.
+The CLI's archives, compilation, and intermediate workflow artifacts retain the Rust targets `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu`.
 `SHA256SUMS.txt` contains a checksum for each published archive.
-Build jobs display `Linux ARM64`, `Linux x86_64`, or `macOS ARM64`.
-
-For a macOS-only stable release, the bundle omits both Linux archives and their checksum entries.
-Its release notes omit Linux installation instructions. Linux builds and checks still run.
-This choice omits Linux from the new release. It does not remove archives from older releases.
+Box Core's build jobs display `Linux ARM64`, `Linux x86_64`, or `macOS ARM64`.
 
 The final workflow check verifies asset names and prerelease metadata.
 It does not download and execute the published Linux packages.
@@ -108,9 +132,8 @@ If the release omits your Linux architecture, select a tag that includes its arc
 The downloader does not fall back to an older release or a prerelease automatically.
 For ARM64, manual checksum verification and extraction from the release notes remain an alternative.
 Keep `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` together.
-On x86-64, set `EXPERIMENTAL_X86_SUPPORT=TRUE` in the environment before running workloads.
 Verify the reported version, an allowed operation, and a denied operation on each published Linux architecture using the approved test configuration.
 Record the release URL, source commit, archive hash, host baseline, commands, and results.
 
-Linux ARM64 startup requires no environment opt-in.
+Linux ARM64 and x86-64 startup require no environment opt-in.
 A stable version does not establish security acceptance.

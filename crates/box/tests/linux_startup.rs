@@ -1,6 +1,11 @@
-//! Linux x86 commands require explicit operator consent before startup.
+//! Linux commands start without the retired platform opt-ins.
 
 #![cfg(target_os = "linux")]
+
+#[path = "support/bounded_output.rs"]
+mod bounded_output;
+#[path = "support/fixture.rs"]
+mod fixture;
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStringExt;
@@ -8,7 +13,6 @@ use std::process::{Command, Output};
 
 const LEGACY_OPT_IN: &str = "EXPERIMENTAL_LINUX_SUPPORT";
 const X86_OPT_IN: &str = "EXPERIMENTAL_X86_SUPPORT";
-const X86_REFUSAL: &str = "strands-box: refusing to run: x86 support on Linux is experimental. Set EXPERIMENTAL_X86_SUPPORT=TRUE to enable it.\n";
 
 fn command(legacy: Option<&OsStr>, x86: Option<&OsStr>, args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_strands-box"));
@@ -46,7 +50,7 @@ fn linux_run_validates_configuration_regardless_of_legacy_opt_in() {
     for value in values() {
         let output = command(
             value.as_deref(),
-            Some(OsStr::new("TRUE")),
+            None,
             &[
                 "run",
                 "--config",
@@ -69,7 +73,7 @@ fn linux_schema_validates_configuration_regardless_of_legacy_opt_in() {
     for value in values() {
         let output = command(
             value.as_deref(),
-            Some(OsStr::new("TRUE")),
+            None,
             &[
                 "policy",
                 "generate-schema",
@@ -89,15 +93,13 @@ fn linux_schema_validates_configuration_regardless_of_legacy_opt_in() {
 }
 
 #[test]
-fn linux_commands_require_exact_x86_opt_in_only_on_x86() {
+fn linux_commands_validate_configuration_regardless_of_x86_opt_in() {
     let directory = tempfile::tempdir().expect("create configuration parent");
     let config = directory.path().join("missing-platform-config.toml");
     let destination = directory.path().join("schema");
     let config_text = config.to_str().expect("UTF-8 temporary path");
     let destination_text = destination.to_str().expect("UTF-8 temporary path");
     for value in values() {
-        let admitted =
-            !cfg!(target_arch = "x86_64") || value.as_deref() == Some(OsStr::new("TRUE"));
         for args in [
             vec!["run", "--config", config_text],
             vec![
@@ -109,19 +111,38 @@ fn linux_commands_require_exact_x86_opt_in_only_on_x86() {
                 destination_text,
             ],
         ] {
-            let output = command(Some(OsStr::new("TRUE")), value.as_deref(), &args);
+            let output = command(None, value.as_deref(), &args);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(!output.status.success(), "{stderr}");
-            if admitted {
-                assert!(stderr.contains("missing-platform-config.toml"), "{stderr}");
-                assert!(!stderr.contains(X86_OPT_IN), "{stderr}");
-            } else {
-                assert_eq!(stderr, X86_REFUSAL, "value: {value:?}");
-                assert!(!stderr.contains("missing-platform-config.toml"), "{stderr}");
-            }
+            assert!(stderr.contains("missing-platform-config.toml"), "{stderr}");
+            assert!(!stderr.contains(X86_OPT_IN), "{stderr}");
             assert!(!destination.exists());
         }
     }
+}
+
+#[test]
+fn linux_workload_runs_without_startup_opt_ins() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let configured = fixture::Request::with_policy(
+        "linux-default-startup",
+        "permit(principal, action, resource);",
+    )
+    .expect();
+    let mut command = configured.command_for("/bin/bash");
+    command
+        .env_remove(LEGACY_OPT_IN)
+        .env_remove(X86_OPT_IN)
+        .args(["-c", "printf 'linux-startup-ok\n'"]);
+    let output = bounded_output::bounded_output(command);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"linux-startup-ok\n");
 }
 
 #[test]
@@ -172,7 +193,7 @@ fn x86_native_policy_is_refused_before_state_or_schema_creation() {
                 schema_text,
             ],
         ] {
-            let output = command(None, Some(OsStr::new("TRUE")), &args);
+            let output = command(None, None, &args);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(
                 !output.status.success(),
@@ -196,7 +217,7 @@ fn x86_native_policy_is_refused_before_state_or_schema_creation() {
     .expect("write the disabled native policy control");
     let output = command(
         None,
-        Some(OsStr::new("TRUE")),
+        None,
         &[
             "policy",
             "generate-schema",

@@ -33,18 +33,18 @@ containment regression and is a missing binary.
 
 In CI this is `.github/workflows/containment-deterministic.yml`, called from
 `ci.yml` so it reports under the single `CI Gate` status. It runs on
-`ubuntu-24.04-arm`, `ubuntu-24.04` (x86-64), and `macos-latest` on the plain `pull_request` trigger: the
+`ubuntu-24.04-arm` and `ubuntu-24.04` (x86-64) on the plain `pull_request` trigger: the
 suite needs no secrets, so a fork PR runs it with a read-only token and no
-approval gate is required for safety.
+approval gate is required for safety. The macOS run is the job
+`Rust / Containment (macos-latest)` of `rust-test-lint.yml`.
 
 ### All three runners block
 
-The Ubuntu ARM64, Ubuntu x86-64, and macOS jobs each affect `CI Gate`.
+The Ubuntu ARM64 and Ubuntu x86-64 jobs, and the macOS steps, each affect `CI Gate`.
 The repository requires that status before merging.
 Both Linux jobs enable unprivileged user namespaces before the suite starts.
-The x86-64 job sets `EXPERIMENTAL_X86_SUPPORT=TRUE` for all Box processes.
-Set the same environment variable when running the suite locally on x86-64.
-This opt-in does not change the default startup behavior or qualify a release package.
+Neither Linux architecture requires an environment opt-in.
+These tests do not qualify a release package.
 
 Each job writes the per-case table to its summary and uploads the verdict and logs.
 A recorded platform exclusion remains a skip, not evidence that its assertions ran.
@@ -125,7 +125,11 @@ Use `src/scenarios.rs` for setup and expected results that several execution rou
 Keep commands, interpreter checks, and route-specific refusal checks in each case.
 `MoveReplacement` shows this pattern for Shell and Monty.
 
-`src/process.rs` owns concurrent workload execution and child cleanup.
+`src/process.rs` owns host control output, concurrent workload execution, and child cleanup.
+Use `host_output(&mut Command)` to start a copied executable directly on the host.
+It retries only executable-busy startup errors every 10 milliseconds for up to two seconds.
+The caller receives the original process output or error and retains its status, output, and policy checks.
+
 Cleanup first requests normal shutdown, so Box can stop its workload groups.
 After five seconds it force-stops the direct child. A timeout remains a failed result even if shutdown exits successfully.
 Its tests in `src/process/tests.rs` check helper behavior with local subprocesses.

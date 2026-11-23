@@ -1,4 +1,4 @@
-# Policy
+# Policy language
 
 A policy is the `policy.dw` file of `permit` and `forbid` rules that decides each request the
 workload makes through the box's trusted process (the part of Box that runs outside the box and
@@ -9,9 +9,6 @@ through the box's trusted process.
 Audience: an operator who wants to write or change a policy. [Write a policy and read what it
 decided](tutorials/first-policy.md) walks through a first one, and [the action
 vocabulary](policy/actions.md) lists every field a rule can read.
-
-> **Status.** The action vocabulary and the context fields can change before 1.0.0. Pin the Box
-> build you install (`./box-core/box --version`).
 
 ## When the box asks policy
 
@@ -178,7 +175,8 @@ strands-shell: tee: policy denied this operation on '~/project/notes.md' [policy
 - The `when` clause limits the `forbid` to content writes. A `mkdir` is `fs:write` with operation
   `create_dir`, so the budget leaves it alone. A rename is `fs:move`, and a delete is `fs:delete`;
   each needs its own rule.
-- The count persists across a restart of the box and across an edit to another rule.
+- The persisted count survives a restart of the box and an edit to another rule. A process
+  crash can lose recent events; see [history persistence](#history-persistence-and-process-crashes).
 
 For an exact count of attempts, including refused ones, replace the predicate inside
 `formerly within 1h ( … )` with:
@@ -428,6 +426,101 @@ policy denied this operation on 'example.com:443' [default-deny]: No permit poli
 A `[egress.<name>]` table with no matching permit leaves the host unreachable. A permit with no
 binding sends the request with a placeholder in place of the secret, which the provider rejects.
 
+### Reach a service on your machine
+
+The agent reaches `http://host.box.internal:4259`, a service on your machine's loopback, and no other
+port there ([a service on your machine](egress.md#a-service-on-your-machine)):
+
+```text
+@id("local_llm_connect")
+permit (principal, action == Box::Action::"net:connect", resource)
+when { context.input.host == "host.box.internal" && context.input.port == 4259 };
+
+@id("local_llm_request")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "host.box.internal" && context.input.port == 4259 };
+```
+
+The gateway decides `net:connect` on the name, then on the address it dials, `ip4 = "127.0.0.1"`.
+So a forbid on loopback addresses also refuses the name. To keep it, exclude the name:
+
+```text
+@id("no_loopback")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when {
+  context.input has ip4 && context.input.ip4 like "127.*" &&
+  context.input.host != "host.box.internal"
+};
+```
+
+A permit on the name doesn't admit `127.0.0.1:4259`, and a wildcard host permit includes the name.
+
+## History persistence and process crashes
+
+Box batches policy-history writes by default. Accepted events affect decisions during
+the run before those events necessarily reach disk. The engine checks persistence
+thresholds of 1,000 events or one second when an event arrives. A separate one-second
+timer also persists pending history while Box is idle. This interval is a polling
+target, not a maximum persistence delay.
+
+If the box's trusted process crashes or is killed before a completed flush, recent
+requests and outcomes can be lost. After restart, a count-based limit can admit
+additional requests because those events no longer count. A normal shutdown stops
+and joins event producers before the final history flush. A recorded timer failure
+stops the workload, and a final-flush failure makes the run fail. Shutdown has no
+fixed completion deadline; an [active upstream exchange](egress.md#errors-and-exit-codes) can delay it.
+
+To use per-event persistence, build Box and its helpers from the repository root with
+the default `experimental-idle-flush` Cargo feature disabled:
+
+```sh
+cargo build --release --locked -p strands-box -p strands-box-containment --no-default-features
+```
+
+The resulting build waits for persistence when submitting each event. An operation can
+still finish before its outcome is recorded. To retain the native filesystem policy build
+feature, also pass `--features native-filesystem-policy`;
+[its runtime selection](native-filesystem-policy.md) remains separate.
+`--all-features` or `--features experimental-idle-flush` enables batching again.
+This selection happens when Box is built; there is no `box.toml` setting for it.
+See [getting started](getting-started.md#step-1-download-box) for the source checkout and helper installation.
+
+## Start with fresh history after a Dogwood upgrade
+
+This upgrade to Dogwood 1.1.2 requires a new box directory. If the configured directory contains
+unsupported history, Box refuses to start the workload. The error directs you to start with a new
+box directory; Box does not erase or convert the old history. Later restarts reuse the new history.
+
+A new directory starts with no recorded activity. Counts and usage budgets start over. An earlier
+read no longer satisfies a rule that requires that read before a write. If those resets are not
+acceptable, keep using the existing build and box directory.
+
+To use the new build with fresh history:
+
+1. Stop the old Box run.
+2. Copy its configuration beside the original as `box-1.1.2.toml`. Keep the original configuration
+   and the complete old box directory intact.
+3. In the copy, set `box_dir` to a new absolute path outside the workload workspace. Its parent
+   directory must exist. Keep the policy, tool grammar, credential references, and workload settings.
+4. Check each `[telemetry.<label>]` table in the copy. For a target with `kind = "file"` whose
+   `destination` points inside the old box directory, change `destination` to an absolute path under
+   the new directory's `private/` directory. Keep the target's other settings. Otherwise, the new
+   build continues to write telemetry records to the old directory.
+5. Run the new Box executable with the copied configuration:
+
+   ```sh
+   ./box-core/box run --config /absolute/path/to/box-1.1.2.toml
+   ```
+
+Replace the configuration path with your copy's absolute path. `run` creates the new box state
+and starts the configured workload. Keeping the configuration beside the original preserves
+relative policy paths. Credential references must still resolve in the operator environment.
+If `[agent] workspace` is absent, run from the same working directory as before.
+
+Do not copy generated box state or `private/dogwood.redb` into the new directory. Retaining the
+old directory keeps its history available to the old build. Activity in the new directory does
+not appear in the old one; there is no conversion between them.
+
 ## Troubleshooting load failures
 
 The box validates `policy.dw` before it starts. It refuses to start on a policy it cannot read, or
@@ -645,7 +738,7 @@ destination that reaches the box as an IPv6 encoding of an IPv4 address carries 
 `ip4` as well. So one `ip4 like "169.254.*"` covers the dotted quad and every encoding in the table
 below, and you need no clause per encoding.
 
-**`ip6` matches the wire form** — the address the gateway actually dials. A destination that arrives
+**`ip6` matches the wire form**: the address the gateway dials. A destination that arrives
 wrapped carries both fields, so `ip6 like "64:ff9b::*"` refuses every address routed through the
 well-known NAT64 translator, whatever IPv4 address each one carries. Use `ip6` when the route is
 what you care about and `ip4` when the endpoint is.
@@ -714,7 +807,7 @@ refuse to load:
 
 What this does not catch is a wildcard pattern whose pieces are all plausible but whose prefix no
 address takes, such as `ip6 like "::ffff:a9fe:*"`. A mapped address is written with a dotted quad, so
-that pattern misses the mapped addresses it looks aimed at — but `::ffff:a9fe:a9fe:0` is a real
+that pattern misses the mapped addresses it looks aimed at. But `::ffff:a9fe:a9fe:0` is a real
 address it does match, so the load cannot prove it inert. Check an `ip6` pattern against the table
 above.
 
@@ -792,6 +885,32 @@ when { context.input.path like "*/secrets.env" };
 Actions are in the same family when their names start the same way before the `:`. So
 `fs:read`, `fs:write`, and `fs:delete` can share one rule, and `net:connect` and `http:request`
 can't. Each MCP tool action is a family of its own.
+
+### A rule that lists a built-in action beside an MCP tool's action
+
+An action list can't name a built-in action, such as `fs:read`, beside an MCP tool's action, or
+the actions of two servers. Box can't check the list until the server reports its tools, and it
+never checks a list of mixed kinds at all. So the rule would never take effect, and the built-in
+action would go unenforced. This rule refuses to load:
+
+```text
+@id("both_doors")
+forbid (principal, action in [Box::Action::"fs:read", filesrv::Action::"read_file"], resource);
+```
+
+```text
+policy lists actions of more than one namespace: rule @id("both_doors") lists [Box::Action::"fs:read"] beside [filesrv::Action::"read_file"], and an action list of more than one namespace never takes effect; write one rule for each namespace
+```
+
+To fix it, write one rule for each:
+
+```text
+@id("both_doors_file")
+forbid (principal, action == Box::Action::"fs:read", resource);
+
+@id("both_doors_tool")
+forbid (principal, action == filesrv::Action::"read_file", resource);
+```
 
 A rule that checks `context.input` and names no action gets the same error. Name the action the
 rule is for in its scope, as `action == Box::Action::"fs:read"`. A test such as
@@ -891,6 +1010,9 @@ record says it has not run but the history holds events:
 strands-box: error: policy staging failed: the box record is committed, but the history /Users/dev/.box/<name>/private/dogwood.redb is absent. Wipe the box directory to start again.
 ```
 
+A first run that stops after Box stores the record and before it opens the history leaves the box
+in this state too.
+
 The text varies: the record `is committed` or `is not committed`, and the history `is absent`,
 `is empty`, or `holds <n> bytes`. The run also refuses when the engine cannot read the history
 file, with `policy staging failed: ` and the engine's own reason, and the file is left as found.
@@ -909,10 +1031,19 @@ If the clock moves back more than five minutes during a run, the box denies each
 is within five minutes of the newest history timestamp. If an action finished while the clock was
 that far back, the box keeps its record and prints
 `policy: warn: an earlier outcome is not recorded yet: ...; denying` for each request until the
-record is saved. Once the clock is within five minutes again, the box saves it at the next request,
-or when the run shuts down, and then requests are decided normally. If the run ends while the clock
+record is saved. Once the clock is within five minutes again, the box retries it when another
+request or completed outcome arrives, or when the run shuts down. Requests are decided normally
+after the record is saved. If the run ends while the clock
 is still more than five minutes behind, or the process is killed, that action doesn't count toward
 any limit after a restart. A time-zone change does not move this clock.
+
+In the default build, the background history timer also retries the kept record after
+the clock recovers. With batching disabled, retry occurs on a later request, another completed
+outcome, or shutdown. The timer does not stop the run for this clock delay. Each timer call still
+persists events the engine already accepted while it waits to record the completed action.
+Storage failures still stop the run. Shutdown reports an error if a completed action remains
+unrecorded after its final attempt.
+
 Correct the system clock, or remove the box directory to start again, as
 [getting started](getting-started.md#clean-up) describes.
 

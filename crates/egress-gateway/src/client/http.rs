@@ -341,9 +341,9 @@ impl ResponseReader {
 
     fn record_request_outcome(&mut self) -> io::Result<()> {
         if let Some((permit, outcome)) = self.request.take() {
-            permit.record_outcome(outcome).map_err(|error| {
-                io::Error::other(format!("recording upstream request outcome: {error}"))
-            })?;
+            permit
+                .record_outcome(outcome)
+                .map_err(|_| io::Error::other("recording upstream request outcome failed"))?;
         }
         Ok(())
     }

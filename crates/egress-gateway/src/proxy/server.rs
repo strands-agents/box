@@ -130,7 +130,7 @@ async fn first_request(
             Ok(opened) => opened,
             Err(refusal) => return Ok(*refusal),
         };
-    l7::forward_plain(
+    let forwarded = l7::forward_plain(
         upstream,
         backend.as_ref(),
         &connect,
@@ -141,7 +141,26 @@ async fn first_request(
         correlation,
         completion,
     )
-    .await
+    .await;
+    Ok(answered(&connect, backend.as_ref(), forwarded))
+}
+
+/// The forwarded response, or a failure that says why, with the reason and any backend on stderr.
+fn answered(
+    connect: &ConnectRequest,
+    backend: Option<&BackendDial>,
+    forwarded: Result<WorkloadResponse>,
+) -> WorkloadResponse {
+    forwarded.unwrap_or_else(|error| {
+        let via = backend
+            .map(|dial| format!(" (backend {}:{})", dial.host, dial.port))
+            .unwrap_or_default();
+        eprintln!(
+            "strands-box: warning: egress request to {}:{}{via} failed: {error}",
+            connect.host, connect.port
+        );
+        WorkloadResponse::failure(error.http_status(), error.to_string().as_bytes())
+    })
 }
 
 /// The token check, then the connect decisions and the pinned upstream socket. The optional
@@ -193,8 +212,13 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
         let handshake = websocket::classify(&request);
         let upgrade = hyper::upgrade::on(&mut request);
         let max_body = state.config.response_limits.max_body_bytes;
-        let parsed = http1::read_request(&head, request.into_body(), max_body).await?;
-        let mut response = l7::forward_tls(
+        let parsed = match http1::read_request(&head, request.into_body(), max_body).await {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return Ok(WorkloadResponse::refusal(400, error.to_string().as_bytes()));
+            }
+        };
+        let forwarded = l7::forward_tls(
             parsed,
             upstream,
             backend.as_ref(),
@@ -204,7 +228,8 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
             completion,
             handshake,
         )
-        .await?;
+        .await;
+        let mut response = answered(&connect, backend.as_ref(), forwarded);
         if let Some(relay) = response.relay.take() {
             pending.set(Some((upgrade, relay)));
         }

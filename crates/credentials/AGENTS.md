@@ -3,8 +3,9 @@
 Applies to `crates/credentials/**`. Follow the
 [repository guidance](../../AGENTS.md) first.
 
-**Interface-frozen.** The frozen surface is the `pub use` façade, the URI vocabulary (`env://`,
-`aws://`, `file://`, `op://`), and the mint/inject split. Changing one, or a foundational premise,
+**Interface-frozen.** The frozen surface is the `pub use` façade, the URI vocabulary, the reserved
+scheme list, and the mint/inject split. The URI vocabulary is `env://`, `aws://`, `file://`,
+`op://`, and `SCHEME://NAME[#FIELD]` for a declared scheme. Changing one, or a foundational premise,
 needs the user's approval before code. A defect fix behind the current shape does not.
 
 ## Responsibility
@@ -16,11 +17,14 @@ the scrub of an echoed secret. `strands-box-egress-gateway` applies the edits to
 
 ## Public Contract
 
-- Keep implementation modules private. `src/lib.rs` re-exports the supported surface: 20 public
-  names — including `PhantomCheck` and the opaque `ResponseRedactor` — plus eleven
-  `pub(crate) use` re-exports (`Emitter`, `RequestId`, `audit_resolve`,
-  `CredentialDiagnostic`, `redact_credential_ref`, `AwsSessionCredentials`, `PhantomToken`,
-  `Secret`, `DEFAULT_PHANTOM_PREFIX`, `check_phantom_prefix`, `sign_request`).
+- Keep implementation modules private. `src/lib.rs` re-exports the supported surface: 21 public
+  names and eleven `pub(crate) use` re-exports. The public names include `PhantomCheck`, the opaque
+  `ResponseRedactor`, and `SecretSourceCommand`, the one name of a declared secret source. Keep the
+  reserved scheme list and the `{ref}` text inside the crate, because no other crate reads them.
+  `SecretSourceCommand::check_scheme` is the one check of a scheme. The crate-internal ones are
+  `Emitter`, `RequestId`, `audit_resolve`, `CredentialDiagnostic`, `redact_credential_ref`,
+  `AwsSessionCredentials`, `PhantomToken`, `Secret`, `DEFAULT_PHANTOM_PREFIX`,
+  `check_phantom_prefix`, and `sign_request`.
   Count the lists separately; a move either way needs approval.
 - Do not re-export our `Emitter`; `egress-gateway` exports its own.
 - Keep `#![warn(missing_docs, unreachable_pub)]` on, and treat its output as findings.
@@ -35,6 +39,20 @@ the scrub of an echoed secret. `strands-box-egress-gateway` applies the edits to
 - Add no destination, tenant, or request-id parameter to `Backend::resolve`; ingress has none, so
   the seam fabricates them.
 - Keep backend selection a named `Backend` profile over a private enum. Return no trait object.
+- Keep `Backend::declared` the one way a caller names a program, and keep its item a declaration
+  with the opened program file that the caller checked. A declared source with no checked file
+  cannot exist, so no caller can skip the check. Keep `SecretSourceCommand`'s
+  fields sealed behind `new`, `output`, `pass_env`, and `pass_secret_env`. Export no output enum;
+  `output` takes the `box.toml` word. `passes_as_secret` is the one read of a declaration: it
+  answers for one variable name, so the box refuses a reference to the credential of a vault with
+  the prefix rule of this crate. Return no pass list from an accessor.
+- Keep `Backend` `Clone` over one shared profile, so each clone of a declared backend shares each
+  fetched secret. Give the held secrets no accessor: they leave through `Backend::resolve` alone,
+  and their key is a reference name, never a destination or a tenant.
+- Keep `Backend::close_declared` final: it wipes each held secret, and a closed source refuses
+  each later fetch. A source that fetched again after the close would start a host program while
+  a workload runs. `a_closed_backend_holds_no_secret_and_reads_no_declared_scheme` pins it.
+- Keep `Backend::local()` at `env`, `file`, and the built-in `op`.
 - Declare no `pub trait`, and keep `SecretSource` and `Emitter` `pub(crate)`, so no caller supplies
   an unreviewed backend.
 - Keep `RouteSpec`'s fields sealed behind `opaque()`, `signed_aws()`, `box_owned()`, `strip_phantom()`,
@@ -69,6 +87,11 @@ the scrub of an echoed secret. `strands-box-egress-gateway` applies the edits to
 - Redact credential references at the constructor, in `CredentialDiagnostic::new` and
   `CredentialAcquire::new`, never at the logging site.
 - Serve one tenant per vault, and never consult the tenant while matching.
+- Run a declared program with no shell, by its absolute path, with a composed environment and no
+  stdin. Bound its time and its stdout. Refuse a reference whose text after `://` starts with `-`
+  before any program starts.
+- Print no stdout of a declared program, and no `serde_json` error, in any failure; the error
+  quotes the value it read. Print stderr only through `excerpt`.
 - Refuse two matches on the opaque path with `CredentialError::Ambiguous`.
 - Treat an absent secret as the one soft failure, listed in `Opened::skipped()`.
   `require_every_route` makes it hard; every other failure aborts `open`.
@@ -89,6 +112,10 @@ the scrub of an echoed secret. `strands-box-egress-gateway` applies the edits to
 - Resolve signed AWS routes per request; session credentials expire.
 - Strip every inbound signing artifact before signing. `STRIP_SIGNING_HEADERS` must cover the
   payload-hash and query-signature artifacts.
+- Sign no header in `UNSIGNED_HEADERS`, which is the list of headers that botocore does not sign.
+  A proxy or a trace service between the box and AWS can change one of these headers, and AWS then
+  refuses the signature. The signer removes none of these headers from the request. It only keeps
+  them out of the canonical request.
 - Emit exactly one acquisition record per resolve, success or failure, including the per-request
   signing resolve. The discarding sink drops the record, never the build.
 - Keep phantom tokens distinct from real material: non-secret, unguessable at 256 CSPRNG bits. A
@@ -99,9 +126,11 @@ the scrub of an echoed secret. `strands-box-egress-gateway` applies the edits to
 
 ## Internal Ownership
 
-`model/` owns destination, route, locator, injection, and AWS values. `config.rs` owns
+`model/` owns destination, route, locator, injection, and AWS values, and the declaration of a
+secret source with the reserved scheme list. `config.rs` owns
 `VaultConfig`. `backend.rs` owns the sealed profile and the locator-to-plaintext primitive.
-`sources/` owns the adapters, all `pub(crate)`. `vault.rs` owns `open`, the binding tables, and
+`sources/` owns the adapters, all `pub(crate)`; `sources/command.rs` owns the declared source: the
+runner, the output and field steps, and the held secrets. `vault.rs` owns `open`, the binding tables, and
 lookup. `legs.rs` owns `swap_phantom` and `sign_aws`; keep them here. `attach.rs` owns the borrowed
 views, and `redaction.rs` owns incremental response matching. `opened.rs` owns the startup obligations.
 `audit.rs` and `diagnostic.rs` own secret-free
@@ -244,7 +273,14 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   broken chain fails at `box run` rather than on the first request. Only when a bare route exists and
   `ambient_policy != Deny`; a named-profile-only or `credsd://` vault does no resolve at open, so a
   box that never signs a bare route forces no credentials to exist. The resolve primes the shared
-  cache and emits the one prepare-step audit record.
+  cache and emits the one prepare-step audit record. It is also where the vault prints the one
+  ambient-identity warning (`warn_at_open`), one line for each bare route, naming its destination. `sign_aws` warns no more: each sign keeps its audit
+  record, and a repeated warning told the operator nothing new.
+  `sign_aws_warns_on_bare_and_not_on_scoped` and `many_bare_signs_leave_one_ambient_warning` pin
+  one warning at open and none per sign; `each_bare_route_names_its_host_at_open` pins one line per
+  bare route. A destination warns once for the process (`first_warning`), because a box opens more
+  than one vault for one destination: a telemetry target's `preflight_aws` opens a second.
+  `a_destination_warns_once_across_vaults` pins it, and each warning test uses its own destination.
 - Build the per-request resolve from the vault's retained `ambient_policy` via
   `AwsSource::with_provider(self.aws_provider(), …)`, never `AwsSource::new()`, or
   `require_scoped_aws_profile` is unreachable.
@@ -271,12 +307,90 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   catalogue. A bare `aws://` default chain reads those `AWS_*` names on purpose, through the SDK.
 - Do not merge `DENYLIST` with `reserved_workload_environment` (`box/src/define/config.rs`), which
   governs what a credential may claim in the workload environment and refuses at `create`.
-- `op://` has no soft tier; `op read` cannot signal absence, so every failure is hard.
+- `op://` has no soft tier; `op read` cannot signal absence, so every failure is hard. A declared
+  source has none for the same reason.
 - Read `file://` before sandbox activation, or every such route skips instead of erroring. The
   loader owns that ordering.
 - Keep a signed route's `credential_ref` the sentinel `"aws-signed://route"`; no source claims that
   scheme, and a meaningful one couples an unrelated refusal to every signed route.
 - Strip the parameter before a `QueryParam` attach; `set_query_param` appends.
+
+### The declared source (`sources/command.rs`)
+
+- Read each pipe into one buffer that never grows. A `Vec` that grows frees each smaller buffer
+  un-wiped, and each one holds a prefix of the secret. The secret is then copied once into an
+  exact-size `Zeroizing<String>`, and the buffer is wiped as it drops.
+- Read both pipes on threads. Wait for stdout only until the deadline: a descendant that keeps it
+  open after the program exits would otherwise hang startup, and
+  `a_program_that_leaves_its_stdout_open_fails_at_the_deadline` pins it. Wait for stderr only after
+  a failure, and for one second at most, because it only explains the failure. Read stderr to its
+  end, because a full pipe blocks a noisy program. Keep its last 8 KiB, because the cause is at
+  the end.
+- Give `HOME` and `PATH` their values outside the pass lists, and skip both names in a pass list.
+  A `PA*` entry then cannot replace the fixed `PATH`. Refuse the exact entries `PATH` and `HOME`,
+  and an entry with a `*` before its end. Without the refusal, each one has no effect and the
+  operator gets no message: `AWS_*_KEY` matches nothing. Mark `HOME` as a credential when a prefix entry of
+  `pass_secret_env` matches it, so its value is hidden in a failure.
+- Start the program in `/`. The trusted process can start in a workspace that a workload writes,
+  and a program can read configuration from its working directory.
+- Compare the declared path with the checked program file before the spawn and after the exit, by
+  device and inode. macOS has no call that starts a program from an open file, so the path is what
+  the runner starts. The comparison after the exit refuses the output of a program that was
+  replaced between the first comparison and the spawn. Keep the file open, so its inode names one
+  file for the run. `a_program_path_that_names_another_file_after_the_check_does_not_start` and
+  `a_program_path_that_changes_while_the_program_runs_gives_no_secret` pin both sides.
+- Residual: a program that is replaced after the first comparison still starts once, with the
+  passed credentials. Its output is not read, and the fetch fails.
+- Residual: the comparison is by device and inode. A write into the checked file itself keeps
+  both, so the runner starts the changed content. The caller keeps the file away from each writer
+  that it does not trust.
+- Hold the lock for the whole fetch, so two callers that ask for one secret run the program once.
+  Keep no failed run, and no run whose output `decode` refuses. A run that `decode` accepts is
+  kept, also when `select` or `Secret::new` then refuses the value.
+- Hold the secret before the `#FIELD` step. A JSON secret can span lines, so only the value that
+  leaves the source passes `Secret::new`.
+- Hide each hidden value in `excerpt` by position, in the captured bytes. A replacement of one
+  value after another leaves the rest of a value that holds or meets another one. When a capture
+  lost its first bytes, hide only its start that ends a hidden value. A cut of a fixed length can
+  cut a whole value and leave its end in the message. Compare bytes, not text: `to_str` drops a
+  credential that is not UTF-8 from the hidden values.
+- Refuse a command with no `{ref}` in its arguments. A wrong token such as `{REF}` otherwise gives
+  each reference the same secret.
+- Name no `#FIELD` text in a failure. A field name is part of the reference, and a reference body
+  is redacted.
+- Refuse a JSON object that has no `#FIELD` with each `output`. A check for `json` alone lets a
+  program that prints an object as text give one destination each key. The built-in `op://`
+  source has no such check and returns the object whole, so a declared `op` differs from it.
+- Build the reserved scheme list from the constant of each owner and from the two route markers,
+  so that a scheme has one owner. Keep a literal only for `secret`, which the box crate owns. No
+  code collects the constants, so add each new scheme constant and each new route marker to the
+  list and to `each_scheme_constant_and_each_route_marker_of_the_crate_is_reserved`. Keep `op`
+  out of the list, because a declaration can claim it.
+- The JSON field step and its wipe helpers follow `json_field` and `is_json_object` in pull
+  request #448. Only `wipe_value` has a test; no test can observe a wipe of a value that drops.
+- The environment test runs its stand-in through `/bin/sh`, which adds `PWD`, `OLDPWD`, `SHLVL`,
+  and `_` itself. The test removes those four names and compares the rest as one list.
+- Name the key and the entry in a pass-list refusal, because an operator reads it at load. Show
+  only the text before `=` of an entry that holds one: the rest can be a value.
+- Residual: the runner stops the program alone. A descendant can outlive a timeout, because the
+  crate has no process-group kill.
+- Residual: `excerpt` hides the reference name as one whole text. A program that prints one part
+  of the name, such as `op` with an item name, still shows that part. A hide of each `/` segment
+  would also hide a common word such as `token`.
+- Residual: a failing program can print a secret on stderr that the runner does not know. The
+  runner hides the reference name and each passed `pass_secret_env` value only.
+- Residual: `serde_json` frees its own buffers un-wiped. An escaped string, a parse that
+  fails part way, and a repeated key can each leave a part of the secret in freed memory.
+- Residual: `is_json_object` reads a secret that `serde_json` cannot parse as plain text. An object
+  nested more than 128 levels deep is such a secret, so it leaves without `#FIELD`.
+- Residual: the held secret of a JSON object holds each field, also a field that no reference
+  names. It stays until the caller closes the declared sources, or until the last clone of the
+  backend drops, and a vault keeps its backend for the run.
+- Wipe each value of the environment snapshot: a value that does not pass in `compose`, and a
+  passed value when its `ChildVariable` drops. A value that does not pass can be a credential of
+  another source. No test can observe these wipes.
+- Residual: `std::process::Command` copies each passed variable, and the source cannot wipe those
+  copies. The process environment already holds each of them for the whole run.
 
 ### Open residuals
 

@@ -28,10 +28,12 @@ def probe(name):
         print(label, "OK", "rc=0 errno=0")
     else:
         print(label, "ERR", errno, "rc", rc)
-for n in ["kern.hostname", "kern.osrelease", "kern.ostype", "hw.ncpu", "hw.machine"]:
+for n in ["kern.hostname", "kern.osrelease", "kern.ostype", "hw.ncpu", "hw.machine", "kern.argmax"]:
     probe(n)
-for n in ["kern.boottime", "kern.argmax", "hw.memsize", "kern.procname"]:
+for n in ["kern.boottime", "kern.maxproc", "hw.memsize", "kern.procname"]:
     probe(n)
+# The call the report makes: libc asks by the numeric MIB, not by name.
+t("sysconf_arg_max", lambda: os.sysconf("SC_ARG_MAX") > 0)
 "#,
         );
         // Granted names answer.
@@ -39,9 +41,12 @@ for n in ["kern.boottime", "kern.argmax", "hw.memsize", "kern.procname"]:
         r.assert_ok("sysctl_kern_osrelease", "rc=0 errno=0");
         r.assert_ok("sysctl_hw_ncpu", "rc=0 errno=0");
         r.assert_ok("sysctl_hw_machine", "rc=0 errno=0");
+        r.assert_ok("sysctl_kern_argmax", "rc=0 errno=0");
+        r.assert_ok("sysconf_arg_max", "True");
         // Names the profile does not carry stay refused, so a new operation gets no access.
         r.assert_errno("sysctl_kern_boottime", 1);
-        r.assert_errno("sysctl_kern_argmax", 1);
+        r.assert_errno("sysctl_kern_maxproc", 1);
         r.assert_errno("sysctl_hw_memsize", 1);
+        r.assert_errno("sysctl_kern_procname", 1);
     }
 }

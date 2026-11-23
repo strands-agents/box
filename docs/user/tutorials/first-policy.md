@@ -9,10 +9,6 @@ Audience: an operator who has run [getting started](../getting-started.md) and w
 policy by hand. [Policy](../policy.md) names each part of a rule and the eleven actions, and
 [the action vocabulary](../policy/actions.md) lists every field a rule can read.
 
-> **Status.** The action vocabulary and the context fields can change before 1.0.0. Pin the Box
-> build you install (`./box-core/box --version`), and read [troubleshooting load
-> failures](../policy.md#troubleshooting-load-failures) after an upgrade.
-
 ## Before you start
 
 - The box from [getting started](../getting-started.md): `my-box/box.toml` and `my-box/policy.dw`

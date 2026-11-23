@@ -49,6 +49,29 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def build_features(path, source_sha, archive):
+    metadata = json.loads(path.read_text())
+    require(isinstance(metadata, dict)
+            and set(metadata) == {"source_sha", "features", "input_sha256"},
+            "Invalid build metadata fields")
+    require(isinstance(metadata["source_sha"], str)
+            and re.fullmatch(r"[0-9a-f]{40}", metadata["source_sha"]),
+            "Invalid build metadata source SHA")
+    require(metadata["source_sha"] == source_sha, "Build metadata source SHA mismatch")
+    require(isinstance(metadata["input_sha256"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", metadata["input_sha256"]),
+            "Invalid build metadata input SHA-256")
+    features = metadata["features"]
+    require(isinstance(features, list)
+            and all(isinstance(feature, str) and feature for feature in features),
+            "Invalid build metadata features")
+    require(len(features) == len(set(features)), "Duplicate build metadata features")
+    require("native-filesystem-policy" in features,
+            "Build metadata missing native-filesystem-policy")
+    require(metadata["input_sha256"] == digest(archive), "Build metadata input SHA-256 mismatch")
+    return sorted(features)
+
+
 def unpack_build(archive, destination):
     destination.mkdir()
     with tarfile.open(archive) as source:
@@ -95,7 +118,7 @@ def unpack_signed(archive, destination, root):
 
 
 def prepare_bundle(binaries, destination, version):
-    require(re.fullmatch(r"\d+\.\d+\.\d+(?:-linux-preview\.[1-9]\d*)?", version),
+    require(re.fullmatch(r"\d+\.\d+\.\d+(?:-(?:linux-)?preview\.[1-9]\d*)?", version),
             "Invalid release version")
     app = destination / "Box.app"
     executables = app / "Contents/MacOS"
@@ -380,6 +403,7 @@ class Signer:
 
 
 def release(args):
+    features = build_features(args.build_metadata, args.source_sha, args.input)
     work = args.work.resolve()
     work.mkdir()
     signer = Signer()
@@ -424,7 +448,7 @@ def release(args):
     subprocess.run(["gtar", "-czf", str(args.output.resolve()), "-C", str(stage), "."], check=True)
     save(work / "receipt.json", {
         "source_sha": args.source_sha, "version": args.version,
-        "features": ["native-filesystem-policy"],
+        "features": features,
         "input_sha256": digest(args.input), "output_sha256": digest(args.output),
         "notarized": True, "notarization_id": submission,
     })
@@ -438,6 +462,8 @@ if __name__ == "__main__":
         sign.add_argument("--" + name, required=True, type=Path)
     sign.add_argument("--version", required=True)
     sign.add_argument("--source-sha", required=True)
+    sign.add_argument("--build-metadata", required=True, type=Path,
+                      help="JSON sidecar recording the source SHA, features, and unsigned archive hash")
     notary = sign.add_mutually_exclusive_group(required=True)
     notary.add_argument("--notary-secret",
                         help="ARN of a Secrets Manager secret that holds an App Store Connect API key, "

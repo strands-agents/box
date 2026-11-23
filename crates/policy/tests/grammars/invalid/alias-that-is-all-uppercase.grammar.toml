@@ -1,0 +1,11 @@
+# expect: `<grammar>.shell.cat.aliases`: "CAT" must be command words (an optional `+`, then ASCII letters, digits, `-`, and `_`, not first a `-` or a `_`, and not all uppercase)
+# A tool grammar with an alias that has no lowercase letter.
+
+name    = "tool"
+program = "tool"
+format  = 1
+version = 1
+
+[shell.cat]
+usage   = "tool cat <file>"
+aliases = ["CAT"]

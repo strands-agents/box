@@ -17,15 +17,6 @@ const SYMLINK_LOOP: &str = "too many levels of symbolic links";
 /// The inode number of the root directory.
 const ROOT_INO: vfs::Ino = 1;
 
-/// `path` made absolute against `cwd`, with `.` and `..` folded.
-pub(super) fn absolute(cwd: &std::path::Path, path: &str) -> String {
-    if path.starts_with('/') {
-        vfs::normalize(path)
-    } else {
-        vfs::normalize(&format!("{}/{}", cwd.display(), path))
-    }
-}
-
 /// `abs` with every symlink followed, a missing tail kept, and a dangling symlink replaced by the
 /// path it names.
 pub(super) fn target(vfs: &Vfs, mounts: &Mounts, abs: &str) -> String {

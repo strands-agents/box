@@ -16,9 +16,9 @@ A box with no `[telemetry]` table writes one file inside its own box directory:
 <box_dir>/private/telemetry/records.jsonl
 ```
 
-That target receives every record: each effective denial, each effective permit, the box's own
-control-plane records and MCP routing diagnostics, and the workload's relayed spans, log records, and
-metrics. The workload cannot reach the file.
+That target receives every record except tool calls: each effective denial, each effective permit,
+the box's own control-plane records and MCP routing diagnostics, and the workload's relayed spans,
+log records, and metrics. The workload cannot reach the file.
 
 The file grows for as long as the box is used. Rotate or remove it as the operator's own task.
 
@@ -36,7 +36,7 @@ own writes no record to `private/telemetry/records.jsonl`.
 [telemetry.decisions]                  # every decision this box takes, recorded
 kind        = "file"
 destination = "~/boxes/codex/records.jsonl"
-include     = ["deny", "permit", "trace", "logs"]
+include     = ["deny", "permit", "trace", "logs", "metrics"]
 ```
 
 A `file` table takes three keys. An unknown key is refused.
@@ -45,7 +45,7 @@ A `file` table takes three keys. An unknown key is refused.
 |---|---|---|---|
 | `kind` | string | none, required | `file`. [Endpoints](#endpoints) lists the other kinds. |
 | `destination` | string | none, required | The file the records go to, as stated below. |
-| `include` | array of strings | every record | Which records reach this target: `deny`, `permit`, `trace`, `logs`, or `metrics`. |
+| `include` | array of strings | every record except tool calls | Which records reach this target: `deny`, `permit`, `trace`, `logs`, `metrics`, or `mcp_tool_calls`. |
 
 ## `kind = "file"`
 
@@ -70,8 +70,8 @@ Declare one target per file. Two boxes that append to one file can tear a line.
 
 ## `include`
 
-Omit `include` and the target receives every record. Write `include` and the target receives only the
-records the words in the list name:
+Omit `include` and the target receives every record except tool calls. Write `include` and the
+target receives only the records the words in the list name:
 
 | Word | The target then receives |
 |---|---|
@@ -80,6 +80,10 @@ records the words in the list name:
 | `trace` | The workload's own spans, and this box's control-plane records. |
 | `logs` | Box's unmatched MCP routing diagnostics and the workload's log records. |
 | `metrics` | The workload's metrics. |
+| `mcp_tool_calls` | Each MCP tool call's arguments and output in clear text, and how it ended. A target receives these only when it names `mcp_tool_calls`. |
+
+A tool-call record is a log record, so Box refuses `mcp_tool_calls` at startup on a target that
+accepts no logs, such as a `langfuse`, `langsmith`, or `cloudwatch_traces` target.
 
 So `include = ["deny"]` writes a file of refusals, and leaves out the permits, control-plane records,
 and MCP routing diagnostics.
@@ -132,9 +136,11 @@ that the workload's log records and metrics reach every target.
 ### The credential
 
 `secret.ref` names where the box reads the key: `env://NAME` or `secret://NAME` for a variable in the
-environment of `strands-box run`, or `aws://PROFILE` or `credsd://ENVIRONMENT` for a SigV4 signature.
-The box holds the key in a vault of its own for each target, and attaches it on each request. A
-literal key is refused, and so is a `file://` or `op://` reference.
+environment of `strands-box run`, `aws://PROFILE` or `credsd://ENVIRONMENT` for a SigV4 signature, or
+a reference in a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table
+declares. The box holds the key in a vault of its own for each target, and attaches it on each
+request. A literal key is refused, and so is a `file://` reference. An `op://` reference is refused
+unless a table declares `op`.
 
 A credential needs an `https://` destination, unless the destination is loopback.
 
@@ -246,6 +252,68 @@ The diagnostic carries no policy verdict, action, or rule. Box writes it before 
 alias, so it does not say whether ordinary execution starts or succeeds. It produces no span.
 Targets receive it when `include` is omitted or contains `logs`.
 
+### A tool call
+
+Each MCP tool call produces up to two log records in the `strands-box.mcp` scope, over a stdio or
+an http server alike:
+
+| Event name | Written when | Keys |
+|---|---|---|
+| `strands.box.mcp.tool.call` | the call is decided, whether it is allowed or refused | `strands.box.mcp.tool.server`, `.name`, and `.arguments` |
+| `strands.box.mcp.tool.completion` | the call ends | `strands.box.mcp.tool.server`, `.name`, `.reply`, and `.output` when the reply carried `structuredContent` |
+
+`strands.box.mcp.tool.reply` holds one of `result`, `tool_error`, `protocol_error`, `cancelled`, or
+`indeterminate`, as [`output.reply`](policy/actions.md) defines them. A refused call has no
+completion. Both records carry `jsonrpc.request.id`, which joins them to each other and to the
+call's decision.
+
+`.arguments` and `.output` are maps of the call's fields, flattened into the paths a rule writes
+after `context.input.` or `output.structured.`: an object's member is `parent.member`, and an
+array's element is `parent.N`. So `{"profile": {"email": "a@b"}}` becomes the field `profile.email`.
+
+**Tool-call values are in clear text, so a target receives them only when it names
+`mcp_tool_calls`.** A target with no `include`, and the box's own default file, receives none. An
+argument or an output can hold anything a tool takes or returns, including a password, a token, or a
+customer's data, and Box can't tell which field does. So name `mcp_tool_calls` only on a target
+whose readers may see all of it, such as a file on your own machine, and not on a vendor's endpoint
+you wouldn't trust with those values:
+
+```toml
+[telemetry.local]
+kind        = "file"
+destination = "~/boxes/helpdesk/records.jsonl"
+include     = ["deny", "permit", "trace", "logs", "metrics", "mcp_tool_calls"]
+```
+
+A declared target replaces the default file, and a written `include` names everything the target
+receives, so list the other signals you still want beside `mcp_tool_calls`. At startup, Box prints
+one line on stderr for each target that receives tool calls, naming where they go.
+
+A tool-call record is a log record, so a target that accepts no logs can't name `mcp_tool_calls`:
+Box refuses it with a message that says `tool-call records are logs and it accepts no logs`. That
+covers `langfuse`, `langsmith`, `cloudwatch_traces`, and an `otlp` target whose `accepts` leaves out
+`logs`.
+
+Keys arrive as the tool wrote them. When two keys flatten to one path, such as `"a.b"` and
+`{"a": {"b": …}}`, the first is kept and the second is counted as left out. At most 64 fields are reported
+per record, each value at most 4 KiB; when a call has more, the record also carries
+`strands.box.mcp.tool.arguments_omitted` or `strands.box.mcp.tool.output_omitted` with the count
+left out.
+
+A value keeps its JSON type: a string, `true` or `false`, or a number, so `true` and `"true"` stay
+apart. An integer too large for 64 bits arrives as its digits in a string, and a JSON `null` arrives
+as an empty array, which no flattened value can otherwise be.
+
+A call refused before it reaches the server, by the coarse `mcp:call` check or because the tool
+isn't listed, is recorded too, because it shows what the agent tried.
+
+A tool-call record produces no span.
+
+**Over http, a target that takes tool calls makes Box read every tool reply.** Reading a reply
+copies it through the gateway's budget, which every reply being read at once shares (64 MiB). The
+policy already reads the reply of every tool in the server's tool list once Box has read that list,
+so the extra copies are for replies the policy doesn't read.
+
 ### A control-plane record
 
 A control-plane record states one change to the authority this box holds. The scope is
@@ -253,11 +321,20 @@ A control-plane record states one change to the authority this box holds. The sc
 
 | Key | Value |
 |---|---|
-| `strands.box.control.operation` | `policy_installed`, `policy_refused`, `schema_installed`, `discovery_complete`, `box_started`, or `box_stopped` |
+| `strands.box.control.operation` | `policy_installed`, `policy_refused`, `schema_installed`, `discovery_complete`, `box_started`, `box_stopped`, or `secret_fetched` |
 | `strands.box.control.outcome` | `ok`, or `refused` |
 | `strands.box.control.subject` | what the operation was about |
 | `strands.box.control.reason` | why a refusal happened |
 | `strands.box.control.detail` | further text the operation carries |
+
+A `secret_fetched` record states one read of a secret through a
+[declared secret source](config.md#secret-sourcescheme), when the box starts. The subject is the
+entry that names the secret, such as `[egress.github] secret.ref`. The detail names the source, its
+program, and the reference with its name removed: ``source `op`, program /opt/homebrew/bin/op,
+reference op://[REDACTED]``. The outcome is `refused` when the program returned no secret. The
+reason then says only that, because the program's own words go to stderr alone. Box reads the
+secret of a telemetry target before it opens its records, so a read that fails there is on stderr
+and in no record.
 
 ## Reading a records file
 
@@ -333,9 +410,10 @@ message does: Box prefixes every line it prints with `strands-box:`.
 | `` `<key>` does not apply to a `<kind>` target `` | A key belongs to another kind. |
 | ``a `cloudwatch_logs` target needs `log_group` and `log_stream` `` | A CloudWatch Logs target names no group or stream. |
 | ``needs `region`, an AWS region such as `us-west-2` `` | A CloudWatch target names no region, or an invalid one. |
-| `` `secret.ref` names no scheme this box reads `` | The reference is a literal value, or a scheme other than `env://`, `secret://`, `aws://`, or `credsd://`. |
+| `` `secret.ref` names no scheme this box reads `` | The reference is a literal value, or its scheme is not `env://`, `secret://`, `aws://`, `credsd://`, or a [declared scheme](config.md#secret-sourcescheme). A declared scheme with nothing after `://` is refused in the same way. |
 | `its destination is neither https nor loopback` | A credential would cross the network in the clear. |
 | `` the `aws://` credential cannot sign `` | The profile is missing, or holds no static keys. The run stops before the workload starts. |
+| `` `[telemetry.<name>] secret.ref` names a secret that the secret source `<scheme>` (<program>) did not return `` | The program of a declared secret source returned no secret for this target. The line before it on stderr holds the reason. No record holds this failure, because Box reads the secret before it opens its records. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |
 
 Each message names the table it came from.
 

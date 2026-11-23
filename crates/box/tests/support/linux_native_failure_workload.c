@@ -1,5 +1,6 @@
 /* A static ARM64 workload. Each operation calls Linux directly, without Shell. */
 #include <asm/unistd.h>
+#include <errno.h>
 #include <fcntl.h>
 
 static long invoke(long n, long a, long b, long c, long d, long e) {
@@ -23,11 +24,94 @@ static void gate(void) {
         __builtin_unreachable();
     }
 }
+static void finish(long code) {
+    invoke(__NR_exit, code, 0, 0, 0, 0);
+    __builtin_unreachable();
+}
+static long transfer(int fd, char *bytes, long count, int writing) {
+    long done = 0;
+    while (done < count) {
+        long result = invoke(writing ? __NR_write : __NR_read, fd,
+                             (long)(bytes + done), count - done, 0, 0);
+        if (result == -EINTR) continue;
+        if (result <= 0) return result;
+        done += result;
+    }
+    return done;
+}
+static void report(const char *label, long count) {
+    char line[64], digits[24];
+    int length = 0, used = 0;
+    while (*label) line[length++] = *label++;
+    do { digits[used++] = '0' + count % 10; count /= 10; } while (count);
+    while (used) line[length++] = digits[--used];
+    line[length++] = '\n';
+    transfer(1, line, length, 1);
+}
+static void parallel_reads(const char *path, int denied) {
+    enum { count = 384 };
+    int ready[2], release[2];
+    if (invoke(__NR_pipe2, (long)ready, O_CLOEXEC, 0, 0, 0) < 0 ||
+        invoke(__NR_pipe2, (long)release, O_CLOEXEC, 0, 0, 0) < 0) finish(100);
+    long children[count];
+    int spawned = 0;
+    for (; spawned < count; spawned++) {
+        long child = invoke(__NR_clone, 17, 0, 0, 0, 0);
+        if (child < 0) break;
+        if (child == 0) {
+            invoke(__NR_close, ready[0], 0, 0, 0, 0);
+            invoke(__NR_close, release[1], 0, 0, 0, 0);
+            char bytes[16];
+            bytes[0] = 'R';
+            if (transfer(ready[1], bytes, 1, 1) != 1) finish(101);
+            invoke(__NR_close, ready[1], 0, 0, 0, 0);
+            if (transfer(release[0], bytes, 1, 0) != 1) finish(101);
+            invoke(__NR_close, release[0], 0, 0, 0, 0);
+            long fd = invoke(__NR_openat, AT_FDCWD, (long)path, O_RDONLY | O_CLOEXEC, 0, 0);
+            if (denied) {
+                if (fd >= 0) invoke(__NR_close, fd, 0, 0, 0, 0);
+                finish(fd == -EACCES ? 0 : 102);
+            }
+            if (fd < 0) finish(103);
+            long size = invoke(__NR_read, fd, (long)bytes, sizeof(bytes), 0, 0);
+            invoke(__NR_close, fd, 0, 0, 0, 0);
+            const char expected[] = "original\n";
+            if (size != (long)(sizeof(expected) - 1)) finish(104);
+            for (unsigned n = 0; n < sizeof(expected) - 1; n++) {
+                if (bytes[n] != expected[n]) finish(105);
+            }
+            finish(0);
+        }
+        children[spawned] = child;
+    }
+    invoke(__NR_close, ready[1], 0, 0, 0, 0);
+    invoke(__NR_close, release[0], 0, 0, 0, 0);
+    char bytes[count];
+    int failed = transfer(ready[0], bytes, spawned, 0) != spawned;
+    /* No child opens the file until all spawned children have reached this barrier. */
+    report("READY ", spawned);
+    if (!failed && transfer(release[1], bytes, spawned, 1) != spawned) failed++;
+    invoke(__NR_close, ready[0], 0, 0, 0, 0);
+    invoke(__NR_close, release[1], 0, 0, 0, 0);
+    int reaped = 0;
+    for (int n = 0; n < spawned; n++) {
+        int status = 0;
+        long result;
+        do { result = invoke(__NR_wait4, children[n], (long)&status, 0, 0, 0); }
+        while (result == -EINTR);
+        if (result == children[n]) reaped++;
+        if (result != children[n] || status != 0) failed++;
+    }
+    report("COMPLETED ", reaped);
+    report("FAILED ", failed);
+    finish(failed || spawned != count || reaped != count ? 106 : 0);
+}
 void native_main(long *stack) {
     char **argv = (char **)(stack + 1);
     if (*stack != 3) { invoke(__NR_exit, 90, 0, 0, 0, 0); __builtin_unreachable(); }
     message("READY\n", 6);
     gate();
+    if (argv[1][0] == 'p') parallel_reads(argv[2], argv[1][9] == 'd');
     if (argv[1][0] == 'r' || argv[1][0] == 'l') {
         int directory = argv[1][0] == 'l';
         long fd = invoke(__NR_openat, AT_FDCWD, (long)argv[2],
