@@ -203,6 +203,11 @@ The permit set includes `copy_file_range` and `sendfile`, which Node uses to cop
 Both calls move data from a file that the workload already has open, to a file, pipe, or connected socket that it already has open.
 So they reach only what the filesystem grants and the network restrictions already allow.
 
+The permit set includes `setresuid` and `setresgid` when each of their three ids is `0` or `-1`.
+The user namespace maps one user and one group, both `0`, so these calls leave every id as it is.
+glibc's `posix_spawn` makes them to reset a child's ids, as GNU make does for each recipe.
+A call that names any other id is refused, and `setuid` and `setgid` stay refused.
+
 The `mprotect` and `pkey_mprotect` system calls change memory access permissions.
 Writable-and-executable `mmap` and `mprotect` with `PROT_EXEC` are permitted on Linux, so a JIT runtime runs the code it compiles.
 The permit set omits `pkey_mprotect`, so the filter refuses it.
