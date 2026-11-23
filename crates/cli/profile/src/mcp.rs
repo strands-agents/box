@@ -17,7 +17,9 @@ use crate::storage_files::Refusals;
 
 /// The server fields `box` reads, besides the fields a row's `env-var-locations` names. Every other
 /// field passes through: it stays in the agent's own configuration, and it keeps no server out.
-pub(crate) const KNOWN_FIELDS: &[&str] = &["type", "command", "args", "env", "url", "enabled"];
+pub(crate) const KNOWN_FIELDS: &[&str] = &[
+    "type", "command", "args", "env", "url", "enabled", "disabled",
+];
 
 /// The known stdio fields that accept the `references` role.
 pub(crate) const EXPANDED_FIELDS: &[&str] = &["command", "args", "env"];
@@ -1579,6 +1581,11 @@ fn convert(
         Some(Value::Bool(false)) => return Err("is turned off (enabled = false)".into()),
         Some(_) => return Err("`enabled` is not true or false".into()),
     }
+    match fields.get("disabled") {
+        None | Some(Value::Bool(false)) => {}
+        Some(Value::Bool(true)) => return Err("is turned off (disabled = true)".into()),
+        Some(_) => return Err("`disabled` is not true or false".into()),
+    }
     let transport = transport_of(fields)?;
     if let Some(syntax) = syntax
         && let Some(reason) = unread(fields, roles, syntax)
@@ -1774,10 +1781,11 @@ fn keys(
                     {
                         continue;
                     }
+                    // An RFC 7230 token, the rule Box Core checks the secret's header by.
                     if header.is_empty()
                         || !header
-                            .chars()
-                            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
                     {
                         return Err(format!(
                             "its {field} header {header:?} is not a header name"
@@ -4178,6 +4186,7 @@ mod tests {
             ".claude.json",
             r#"{"mcpServers": {
             "off": {"command": "tool", "enabled": false},
+            "resting": {"command": "tool", "disabled": true},
             "sse": {"type": "sse", "url": "https://x.example.com"},
             "launched": {"command": "npx", "args": ["-y", "server"]},
             "shell": {"command": "bash"},
@@ -4214,6 +4223,7 @@ mod tests {
                 ),
             ),
             ("remote-env", "uses env".to_string()),
+            ("resting", "is turned off (disabled = true)".to_string()),
             ("shell", "runs bash, which the box does not start as a server".to_string()),
             ("sse", "uses type sse".to_string()),
         ];
@@ -5497,7 +5507,15 @@ mod tests {
             ("header-references", "${TOKEN}"),
             ("header-variables", "TOKEN"),
         ] {
-            for header in ["X_Client", "X.Trace", "X Key", ""] {
+            for header in [
+                "X Key",
+                "",
+                "X:Key",
+                "X\tKey",
+                "X\u{7f}Key",
+                "X(Key)",
+                "Ключ",
+            ] {
                 let mut host = Host::new();
                 host.set = vec![("TOKEN", "a-key")];
                 let file = host.file(
@@ -5520,6 +5538,57 @@ mod tests {
                 );
                 assert_eq!(mcp, toml::Table::new());
                 assert_eq!(servers.detected_lines(&host.home()), Vec::new());
+            }
+        }
+    }
+
+    #[test]
+    fn a_variable_header_named_by_any_rfc_7230_token_is_declared() {
+        let mut names: Vec<String> = "!#$%&'*+.^_`|~"
+            .chars()
+            .map(|c| format!("X{c}Key"))
+            .collect();
+        names.extend(["CONTEXT7_API_KEY".to_string(), "x-key-2".to_string()]);
+        for (role, value) in [
+            ("header-references", "${TOKEN}"),
+            ("header-variables", "TOKEN"),
+        ] {
+            for header in &names {
+                let mut host = Host::new();
+                host.set = vec![("TOKEN", "a-key")];
+                let file = host.file(
+                    ".agent.json",
+                    &serde_json::json!({"s": {
+                        "remote": {"url": "https://remote.example.com", "headers": {header: value}}
+                    }})
+                    .to_string(),
+                );
+                let mut mcp = toml::Table::new();
+                let servers = host.detect(
+                    &[with_roles(row(&file, &["s"]), &[("headers", role)])],
+                    &mut mcp,
+                );
+                assert_eq!(reasons(&servers), Vec::new(), "{role} {header}");
+                let mut expected = toml::Table::new();
+                expected.insert(
+                    "remote".into(),
+                    toml::Value::Table(toml::Table::from_iter([
+                        ("type".to_string(), toml::Value::from("http")),
+                        (
+                            "destinations".to_string(),
+                            toml::Value::from(vec!["remote.example.com"]),
+                        ),
+                        (
+                            "secret".to_string(),
+                            toml::Value::Table(toml::Table::from_iter([
+                                ("ref".to_string(), toml::Value::from("env://TOKEN")),
+                                ("header".to_string(), toml::Value::from(header.as_str())),
+                                ("prefix".to_string(), toml::Value::from("")),
+                            ])),
+                        ),
+                    ])),
+                );
+                assert_eq!(mcp, expected, "{role} {header}");
             }
         }
     }

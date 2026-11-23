@@ -925,8 +925,8 @@ There is no credential action in the schema. An operator declares a binding in `
 binding says only which secret is attached to a request the policy already permits. Reachability
 stays the policy's decision alone, so a binding never opens a destination, and the two must name the
 same host. A bare `aws://` body parses and names the AWS default credential provider chain, so a
-binding can sign with the host's ambient identity; this is not silent, because the box warns on every
-such request and records a distinct default-chain acquisition. See
+binding can sign with the host's ambient identity; this is not silent, because the box warns once at
+startup and records a distinct default-chain acquisition for each request. See
 [a bare aws:// resolves the default credential chain](#a-bare-aws-resolves-the-default-credential-chain).
 A secret travels over TLS only, except to `host.box.internal`. See [credentials require
 TLS](#a-secret-rides-only-tls).
@@ -2645,7 +2645,7 @@ plaintext; and a workload with write access to `~/.aws` can name a `credential_p
 trusted process runs outside the sandbox, which is remote code execution
 ([how access choices change the risk](limitations.md#how-access-choices-change-the-risk)). This
 residual now covers a named profile as well as the bare form. The bare form also signs with the
-host's ambient identity, so the box warns on every such request; `require_scoped_aws_profile` refuses
+host's ambient identity, so the box warns once at startup; `require_scoped_aws_profile` refuses
 the bare form, but it does not gate a named profile that declares `credential_process`. The one
 mitigation that covers both is keeping `~/.aws` unwritable by the workload.
 

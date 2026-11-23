@@ -434,8 +434,9 @@ credentials, and the signed leg strips whatever it signed with before signing ag
 profile: its static keys, `credential_process`, assume-role, or web identity. It never reads the
 ambient `AWS_*` keys or instance metadata, and a missing profile is refused rather than signing as
 the ambient identity. A bare `aws://` resolves the default chain under the host's ambient identity,
-and the box warns on every signed request. AWS SSO and `aws login` profiles are refused (the `sso` provider is
-compiled out), and the refusal names the missing provider.
+with a warning ([credential sources](../../docs/user/egress.md#credential-sources)). AWS SSO and
+`aws login` profiles are refused (the `sso` provider is compiled out), and the refusal names the
+missing provider.
 
 Because either form reads `credential_process`, which the trusted process runs outside containment,
 an `aws://` route is a remote-code-execution path when the workload can write `~/.aws`; the shipped

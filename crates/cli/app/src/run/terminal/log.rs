@@ -149,20 +149,23 @@ impl Log {
             Some(text) if super::super::banner::clean(text) == text => text.to_owned(),
             _ => format!("{path:?}"),
         };
-        let more = match self.unshown {
-            0 => String::new(),
-            1 => " (1 more message)".to_owned(),
-            count => format!(" ({count} more messages)"),
-        };
-        let saved = match &self.output {
-            Ok(_) => format!("box: full log{more}: {path}\n"),
+        let log = match &self.output {
+            Ok(_) => path,
             Err(error) => format!(
-                "box: could not write log {path}: {}\n",
-                error.to_string().escape_debug(),
+                "could not write {path}: {}",
+                error.to_string().escape_debug()
             ),
         };
-        let reuse = launch.reuse_instruction();
-        format!("\n{preview}{saved}\n{reuse}\n\n")
+        let id = launch.name();
+        format!(
+            "\n{preview}box: run {id} ended\n  startup disclosure \u{b7} {}\n  log      {log}\n  \
+             history  box runs history {id}\n  reuse    {}\n\n",
+            match self.unshown {
+                1 => "1 more message".to_owned(),
+                count => format!("{count} more messages"),
+            },
+            launch.reuse_command(),
+        )
     }
 }
 
@@ -175,7 +178,9 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut log = Log::new(File::open("/dev/null").unwrap(), file.reopen());
         let mut bytes = b"loader: error: first failure\n".to_vec();
-        bytes.extend_from_slice(&b"policy: warn: error while evaluating policy\n".repeat(2000));
+        bytes.extend_from_slice(
+            &b"policy: warning[P0201]: dogwood evaluation failed: x; denying\n".repeat(2000),
+        );
         bytes.extend_from_slice(b"box: error: final failure with \x1b[2J\x00input");
         for part in bytes.chunks(7) {
             log.push(part);
@@ -191,10 +196,16 @@ mod tests {
             ),
         );
 
-        log.push(format!("strands-box: warning: {}", "x".repeat(PREVIEW_BYTES * 2)).as_bytes());
+        log.push(
+            format!(
+                "strands-box: warning[B0501]: {}",
+                "x".repeat(PREVIEW_BYTES * 2)
+            )
+            .as_bytes(),
+        );
         assert!(log.line.len() <= PREVIEW_BYTES + 1);
         log.message("box: policy update failed: invalid edit\n");
-        log.push(b"strands-box: error: still part of the warning\n");
+        log.push(b"strands-box: error[B0105]: still part of the warning\n");
         assert_eq!(
             log.preview(),
             format!("{preview}  box: policy update failed: invalid edit\n")
@@ -218,6 +229,10 @@ mod tests {
             .unwrap();
         assert!(error.starts_with("box: error: éé\\u{0}"));
         assert!(error.len() <= PREVIEW_BYTES);
+    }
+
+    fn log_report(launch: &Launch) -> String {
+        Log::new(File::open("/dev/null").unwrap(), tempfile::tempfile()).report(launch, true)
     }
 
     #[test]
@@ -248,7 +263,17 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600,
         );
-        assert!(console.starts_with("\nbox: full log (1 more message): "));
+        assert!(
+            console.starts_with(&format!(
+                "\nbox: run {} ended\n  startup disclosure \u{b7} 1 more message\n  log      ",
+                launch.name
+            )),
+            "{console}"
+        );
+        assert!(
+            console.contains(&format!("\n  history  box runs history {}\n", launch.name)),
+            "{console}"
+        );
         let arguments = console.split_once("box run ").unwrap().1;
         let parsed = std::process::Command::new("/bin/sh")
             .args(["-c", &format!("printf '%s\\n' {arguments}")])
@@ -268,11 +293,13 @@ mod tests {
             Log::open(&launch, File::open("/dev/null").unwrap()),
             Log::new(File::open("/dev/null").unwrap(), File::open(&target)),
         ] {
-            log.push(b"strands-box: error: important failure\n");
+            log.push(b"strands-box: error[B0105]: important failure\n");
             let console = log.report(&launch, true);
-            assert!(console.contains("  strands-box: error: important failure\n"));
-            assert!(console.contains("could not write log"));
-            assert!(!console.contains("box: full log:"));
+            assert!(console.contains("  strands-box: error[B0105]: important failure\n"));
+            assert!(
+                console.contains("\n  log      could not write "),
+                "{console}"
+            );
         }
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
 
@@ -289,6 +316,14 @@ mod tests {
             "/two\\\\slashes",
         ] {
             launch.policy.argument = argument.into();
+            assert!(
+                log_report(&launch).contains(&format!(
+                    "\n  reuse    repeat your command with --box-id {} before any --\n",
+                    launch.name
+                )),
+                "{}",
+                log_report(&launch)
+            );
             assert_eq!(
                 launch.reuse_instruction(),
                 format!(

@@ -4,6 +4,11 @@
 # Pass: npm 11.19.1 / Node 22.16.0.
 # Fail: npm 11.19.1 / Node 22.22.2 or 24.22.1; npm 12.2.1 / Node 24.22.1.
 # Target, untested: npm 11.20.0 or 12.2.1 / Node 26.13.0.
+# MCP compatibility on Linux aarch64:
+# Pass: bundled npm 10.9.7 / Node 22.22.2; 11.19.1 / Node 24.22.1; 11.20.0 / Node 26.12.1
+# and 26.13.1.
+# Fail: npm 10.9.7, 11.19.1, 11.20.0, 12.2.1, and 12.2.3 in a separate npm prefix / Node 22.22.2,
+# 24.22.1, and 26.13.1.
 # Test scope and fixtures: docs/dev/engine-tests.md, Launcher tests.
 [pack]
 name = "@box/npx"

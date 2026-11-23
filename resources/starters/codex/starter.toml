@@ -2,7 +2,8 @@
 [starter]
 name = "@box/codex"
 label = "Codex"
-packs = ["@box/codex"]
+# Codex searches with rg first, so a new profile lists @box/rg, where the operator can delete it.
+packs = ["@box/codex", "@box/rg"]
 ask = ["bedrock.region", "bedrock.sign-in", "codex.import-mcp"]
 
 # What Codex on this host already uses, from its own configuration file.

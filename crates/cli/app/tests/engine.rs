@@ -292,7 +292,19 @@ fn a_helper_python_outside_homebrew_passes_core_validation() {
         filesystem["read"].as_array().unwrap().contains(&python),
         "{filesystem}"
     );
-    assert!(filesystem.get("read_file").is_none(), "{filesystem}");
+    // The helper's Python keeps only its `read`. The one `read_file` is the pack's own `/bin/sh`,
+    // which uv's tool scripts start with, shown at its real file.
+    let shell = std::path::Path::new("/bin")
+        .canonicalize()
+        .unwrap()
+        .join("sh");
+    assert_eq!(
+        filesystem.get("read_file"),
+        Some(&toml::Value::Array(vec![toml::Value::from(
+            shell.display().to_string()
+        )])),
+        "{filesystem}"
+    );
 }
 
 fn wait_for_output(mut child: Child) -> Output {
@@ -3749,6 +3761,76 @@ fn a_run_prints_the_box_id_that_brings_it_back() {
     );
 }
 
+/// **A run with redirected output still prints the startup disclosure on stderr**, before the
+/// workload's own output, because no `fs:*` decision covers a grant.
+#[test]
+fn a_redirected_run_prints_the_startup_disclosure_on_stderr() {
+    let scene = Scene::new();
+    let output = scene.probe(&scene.workspace(), "echo WORKLOAD_RAN >&2");
+    succeeded(&output);
+    let text = stderr(&output);
+    let workload = text.find("WORKLOAD_RAN").expect("the workload ran");
+    for heading in [
+        "strands-box: note[B0201]: [agent] runs ",
+        "strands-box: note[B0201]: [agent] runtime minimum, added by Core:",
+        "\n  exec        /bin/bash",
+        "strands-box: note[B0201]: [agent] HOME=",
+    ] {
+        let at = text
+            .find(heading)
+            .unwrap_or_else(|| panic!("{heading:?}\n{text}"));
+        assert!(at < workload, "{heading:?} after the workload\n{text}");
+    }
+}
+
+/// **A terminal run ends with the short exit block**, while the full startup disclosure goes to the
+/// run's log and not to the screen.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_terminal_run_ends_with_the_exit_block_and_logs_the_disclosure() {
+    use std::io::Read as _;
+
+    let scene = Scene::new();
+    let command = scene.command_with(
+        &scene.workspace(),
+        "probe",
+        &["--no-banner"],
+        &["-c", "true"],
+    );
+    let (child, mut output) = spawn_at_terminal(command);
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = Vec::new();
+        // A closed PTY can finish with EIO.
+        let _ = output.read_to_end(&mut text);
+        let _ = sent.send(text);
+    });
+    let result = wait_for_output(child);
+    let text = received.recv_timeout(Duration::from_secs(5)).unwrap();
+    let text = String::from_utf8_lossy(&text).replace('\r', "");
+    assert_eq!(result.status.code(), Some(0), "{text}");
+    let run = new_run(&[], &scene.runs());
+    let id = box_id(&run);
+    let block = text
+        .split_once(&format!("box: run {id} ended\n  "))
+        .unwrap_or_else(|| panic!("no exit block\n{text}"))
+        .1;
+    assert!(block.starts_with("startup disclosure \u{b7} "), "{text}");
+    for line in [
+        format!("\n  log      {}\n", run.join("box.log").display()),
+        format!("\n  history  box runs history {id}\n"),
+        format!("\n  reuse    box run probe --box-id {id}\n"),
+    ] {
+        assert!(block.contains(&line), "{line:?}\n{text}");
+    }
+    assert!(!text.contains("runtime minimum, added by Core"), "{text}");
+    let log = std::fs::read_to_string(run.join("box.log")).expect("the run log");
+    assert!(
+        log.contains("strands-box: note[B0201]: [agent] runtime minimum, added by Core:"),
+        "{log}"
+    );
+}
+
 #[test]
 fn a_box_id_reruns_the_same_box_and_its_history_keeps_counting() {
     let scene = Scene::new();
@@ -3955,7 +4037,7 @@ fn a_startup_failure_at_a_terminal_shows_the_error_and_leaves_no_run_folder() {
         "{text}"
     );
     assert!(!text.contains("to reuse this box run"), "{text}");
-    assert!(!text.contains("box: full log"), "{text}");
+    assert!(!text.contains(" ended\n  "), "{text}");
     let leftovers: Vec<PathBuf> = std::fs::read_dir(long.join("r"))
         .expect("the runs folder")
         .map(|entry| entry.expect("a run").path())
