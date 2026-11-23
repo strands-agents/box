@@ -698,6 +698,26 @@ restriction. A capability returns `Result<Vec<Mutation>, String>`, containing ed
 never an allow. `egress-gateway` keeps no dependency on `policy` at all. Do not add a second allow
 path, and do not give a mechanism its own verdict to save a round trip.
 
+The one exception is
+[log-only mode](#log-only-mode-turns-only-a-recorded-policy-denial-into-an-allow), where the
+engine itself lets a recorded policy denial go ahead.
+
+<a id="log-only-mode-turns-only-a-recorded-policy-denial-into-an-allow"></a>
+### Log-only mode turns only a recorded policy denial into an allow
+
+`PolicyEngine::log_only` lets an engine return `Allow` for a `forbid` or a missing `permit`, so a
+builder can trial a policy on real work. It does so only for a request that entered history, so
+the outcome is recorded as it happened. The `Allow` carries `would_deny` and the denial's rule, and
+the observer sees that same verdict. An absent policy, a pending one, an evaluation fault, and a
+degraded MCP tool still deny, so a missing or broken policy never fails open.
+
+**Rejected.** Showing the observer the real denial while the caller gets the allow, because every
+record would then reconcile two answers for one request. A new `Decision` variant, which every
+caller would have to handle.
+
+**Cost.** The policy protects nothing while the mode is on. Code that reads an `Allow` must check
+`would_deny` before treating it as a permit the policy gave.
+
 <a id="no-connection-is-opaque-to-the-boundary"></a>
 ### The gateway terminates every connection, so no tunnel is opaque
 
@@ -1076,6 +1096,8 @@ human-review mechanism must fail closed: a timeout, a backend error, an explicit
 missing backend all resolve to deny. A backend may resolve only an approval the engine already
 emitted. It must never turn a deny into an allow. Until then, gate a risky action with a `forbid`
 and a second run.
+[Log-only mode](#log-only-mode-turns-only-a-recorded-policy-denial-into-an-allow) is not an
+approval: it is set for the engine's whole life and never pauses for a person.
 
 <a id="mcp-authorization-is-two-gates"></a>
 ### An MCP tool call passes two gates, and the second is not default-deny
