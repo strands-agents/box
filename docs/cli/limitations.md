@@ -102,8 +102,7 @@ After a run, and before you run anything in the project:
 2. Run `git status --ignored` and `git diff`, and read each change. `--ignored` matters: a file
    your `.gitignore` hides, such as `.envrc` or `.claude/settings.local.json`, shows up only with
    it.
-3. Open each file from the table, and each file your agent's pack README names, that changed or is
-   new, even when its diff looks harmless.
+3. Open each file from the table that changed or is new, even when its diff looks harmless.
 
 If you don't trust the work, clone the project into a new folder and run `box run claude` there
 instead. When you've read the changes (step 1 first), bring back the ones you want as a patch:
