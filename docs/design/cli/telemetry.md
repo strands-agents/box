@@ -18,7 +18,8 @@ context construction and identity persistence.
 
 `Session::delivering` connects event capture to `Delivery`. Each event is one compact JSON
 `POST` to `https://telemetry.strandsagents.com/box/ping`, with
-`Content-Type: application/json`. The request has no authentication header or cookies.
+`Content-Type: application/json` and `User-Agent: box/<version>`, where `<version>` is the
+`context.box_version` the events carry. The request has no authentication header or cookies.
 The service accepts the existing envelope and returns 204. It does not deduplicate requests,
 so delivery makes one attempt per event, with no retries or redirects.
 
