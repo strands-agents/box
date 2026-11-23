@@ -1693,6 +1693,14 @@ mod tests {
         let path = std::ffi::CString::new(file.as_os_str().as_encoded_bytes()).unwrap();
         let held = std::fs::File::open(&file).expect("open the xattr fixture");
         let descriptor = std::os::fd::AsRawFd::as_raw_fd(&held);
+        let name = c"user.box";
+        // Give the file an attribute before the filters go on, so the names come back non-empty and
+        // `getxattr` has a value to refuse. ext4 and tmpfs from Linux 6.6 accept a `user.` name; a
+        // filesystem that refuses it leaves the file with none, and the name check below is skipped.
+        // SAFETY: both strings and the value stay live for the call.
+        let labelled =
+            unsafe { libc::setxattr(path.as_ptr(), name.as_ptr(), b"hello".as_ptr().cast(), 5, 0) }
+                == 0;
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
             .expect("the filters compile");
@@ -1704,11 +1712,22 @@ mod tests {
                     Err(std::io::Error::last_os_error().raw_os_error())
                 }
             };
-            // SAFETY: the path stays live, and a null buffer of size 0 asks only for the length.
-            if answer(unsafe { libc::listxattr(path.as_ptr(), std::ptr::null_mut(), 0) }).is_err() {
+            let mut names = [0_u8; 256];
+            // SAFETY: the path stays live, and the buffer is writable for its whole length.
+            let listed =
+                unsafe { libc::listxattr(path.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+            if answer(listed).is_err() {
                 return 10;
             }
-            // SAFETY: as above.
+            let listed = usize::try_from(listed).unwrap_or_default();
+            if labelled
+                && !names[..listed]
+                    .split(|byte| *byte == 0)
+                    .any(|n| n == b"user.box")
+            {
+                return 14;
+            }
+            // SAFETY: the path stays live, and a null buffer of size 0 asks only for the length.
             if answer(unsafe { libc::llistxattr(path.as_ptr(), std::ptr::null_mut(), 0) }).is_err()
             {
                 return 11;
@@ -1717,7 +1736,6 @@ mod tests {
             if answer(unsafe { libc::flistxattr(descriptor, std::ptr::null_mut(), 0) }).is_err() {
                 return 12;
             }
-            let name = c"user.box";
             // SAFETY: both strings stay live, and a null buffer of size 0 asks only for the length.
             let value =
                 unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
@@ -1731,7 +1749,8 @@ mod tests {
             outcome, 0,
             "10/11/12 = listxattr, llistxattr or flistxattr was refused (EPERM fails Python's \
              shutil.copy2, which treats only ENOTSUP, ENODATA and EINVAL as no attributes), \
-             13 = getxattr was not refused with EPERM"
+             13 = getxattr was not refused with EPERM, 14 = listxattr did not return the \
+             fixture's user.box name"
         );
     }
 

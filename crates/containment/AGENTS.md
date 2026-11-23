@@ -1045,9 +1045,11 @@ different mounts (`EXDEV`). `copy2` lists the source's attribute names, and Pyth
 `ENOTSUP`, `ENODATA` and `EINVAL` as "none", so it raised the `EPERM`.
 
 The permit admits `listxattr`, `llistxattr` and `flistxattr`, which return the names of a file's
-extended attributes and no value. `getxattr`, `setxattr` and `removexattr` stay refused, so a copy of a
-file that carries an attribute still fails, and nothing reads or sets `security.capability`. The names
-are of files the box already sees through its own mounts.
+extended attributes and no value. `getxattr`, `setxattr` and `removexattr` stay refused, so nothing
+reads or sets `security.capability`. A copy of a file that carries an attribute now succeeds without
+it: `copy2` ignores the `EPERM` from `getxattr` and `setxattr`, so the attribute is skipped and nothing
+says so. On an SELinux host every file carries `security.selinux`, so every such copy drops it. The
+names are of files the box already sees through its own mounts.
 `a_file_lists_its_attribute_names_but_reads_no_value_under_the_filters` runs the three calls and a
 `getxattr` under the filters.
 
