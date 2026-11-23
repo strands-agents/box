@@ -1,0 +1,42 @@
+# gh, the GitHub CLI, as the operator's PATH finds it.
+# Tested on macOS with Homebrew gh 2.103.3, and on Linux with the runner image's gh and `-R owner/repo`.
+# Its config, login, cache, and state go in the tool's cache, so it never reads
+# ~/.config/gh/hosts.yml or a Keychain login. It starts git for the repository's remotes. @box/gh
+# extends @box/git, so gh runs with [tool.git]'s variables and grants, with git's folder on its
+# PATH, and a @box/git fix reaches it too.
+# The pack sends no token, because a tool pack cannot hold a route (README.md shows the route).
+# gh hands git the route's stand-in as a Basic password, which the box does not swap, so git over
+# HTTPS to github.com gets no credential from that route.
+[pack]
+name = "@box/gh"
+version = 1
+kind = "tool"
+extend = ["@box/git"]
+
+[inputs.gh.path]
+description = "The gh program."
+type = "program"
+program = "gh"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.gh.path }}"]
+# github.com and api.github.com, and the hosts that gh's API redirects lead to: CI logs, source
+# archives, and release downloads.
+hosts = [
+  "github.com",
+  "api.github.com",
+  "results-receiver.actions.githubusercontent.com",
+  "codeload.github.com",
+  "release-assets.githubusercontent.com",
+]
+
+[env]
+GH_CONFIG_DIR = "${{ cache }}/config"
+XDG_CACHE_HOME = "${{ cache }}"
+XDG_STATE_HOME = "${{ cache }}/state"
+XDG_DATA_HOME = "${{ cache }}/data"
+GH_NO_UPDATE_NOTIFIER = "1"
+GH_NO_EXTENSION_UPDATE_NOTIFIER = "1"
+GH_PROMPT_DISABLED = "1"
+GH_TELEMETRY = "false"

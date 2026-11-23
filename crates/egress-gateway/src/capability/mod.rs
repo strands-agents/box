@@ -24,6 +24,14 @@ use crate::intercept::mitm::BackendDial;
 /// egress.
 type Outcome = std::result::Result<Vec<Mutation>, String>;
 
+/// The host half of `pattern` as written, without its port or path, so a wildcard keeps its `*`.
+#[cfg(feature = "tls-intercept")]
+fn written_host(pattern: &credentials::DestinationPattern) -> String {
+    let written = pattern.as_written();
+    let end = written.find([':', '/']).unwrap_or(written.len());
+    written[..end].to_string()
+}
+
 /// The body checks retained after response-header edits have passed the capability fold.
 #[cfg(feature = "tls-intercept")]
 #[derive(Debug, Default)]
@@ -52,6 +60,20 @@ impl CapabilitySet {
         self.credentials
             .iter()
             .any(|credential| credential.pattern().matches(destination))
+    }
+
+    /// Whether some credential matches `destination` and each match names `host` exactly.
+    #[cfg(feature = "tls-intercept")]
+    pub(crate) fn every_match_names_host(
+        &self,
+        destination: &credentials::Destination<'_>,
+        host: &str,
+    ) -> bool {
+        let matching = self.matching(destination);
+        !matching.is_empty()
+            && matching
+                .iter()
+                .all(|credential| written_host(credential.pattern()) == host)
     }
 
     /// The credentials whose pattern matches `destination`. Only these act, so an off-route
@@ -106,7 +128,8 @@ impl CapabilitySet {
             return Ok(Vec::new());
         }
         // Sign over the headers already present (backend `Host`, phantom stripped) plus forced
-        // `identity`, the forwarded target, and the forwarded body — exactly the bytes that leave.
+        // `identity`, the forwarded target, and the forwarded body — the bytes that leave, less the
+        // headers that botocore does not sign.
         let headers = credential::headers_for_signing(req_headers);
         let scheme = if backend.tls { "https" } else { "http" };
         let default_port = if backend.tls { 443 } else { 80 };

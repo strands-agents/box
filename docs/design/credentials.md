@@ -33,7 +33,7 @@ scheme determines how Box reads and uses the secret.
 | The secret comes from | The variable `NAME` in the environment of `box run` | The AWS profile `PROFILE`, resolved through the SDK (static keys, `credential_process`, assume-role, or web identity) | The AWS SDK default credential provider chain (the host's ambient identity) |
 | Box reads it | Once, at startup | On each request | On each request |
 | A process in the box gets | A placeholder in `NAME` | Placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` | The same placeholder AWS keys |
-| The gateway | Swaps the placeholder for the secret | Signs the request with SigV4 | Signs with SigV4, and warns that it used the ambient identity |
+| The gateway | Swaps the placeholder for the secret | Signs the request with SigV4 | Signs with SigV4, with a [warning](../user/egress.md#credential-sources) that it uses the ambient identity |
 | Where the secret goes | A header, HTTP basic auth, or a query parameter | The SigV4 headers | The SigV4 headers |
 | The response | Every copy of the secret is redacted | Not scanned | Not scanned |
 | The usual failure | A request without the placeholder gets a 403 | The host names no AWS service and region | The chain resolves no credentials |
@@ -48,7 +48,7 @@ credential the box can't deliver is refused at
 load](./decisions.md#an-undeliverable-credential-is-refused-at-load).
 
 A `[secret-source.<scheme>]` table names a host program that reads a secret, such as the 1Password
-CLI. The table is experimental, and it loads on macOS only. Box checks the table and stores it in
+CLI. The table is experimental. Box checks the table and stores it in
 the record when the configuration loads. A route in that scheme then works as an `env://NAME` route
 does, with two differences: the program supplies the secret, and `secret.env` names the variable
 that holds the placeholder.
@@ -82,7 +82,7 @@ that same early step, Box refuses a grant of the agent, a tool, or a local MCP s
 one of those paths, a path inside it, or a folder that holds it, and a write grant over the
 folder that holds a symbolic link on the way to one. A credential store that a grant can
 otherwise name exactly, such as `~/.aws`, has no exception here. Each sandbox also denies
-those paths, so they stay closed when they appear after the box starts. Box gives the
+those paths. On macOS they stay closed when they appear after the box starts. On Linux a sandbox covers a path with an empty mount, and a mount needs a path that exists, so no sandbox denies an entry whose path is absent when the box starts, and Box names it on stderr. It refuses an entry whose path is not a folder or a regular file. Box gives the
 operator's value of a `pass-secret-env` variable to the program alone. It doesn't look for that
 value in a table's `env` or `command`. A workload gets no variable from the operator's shell
 but `HOME` and `PATH`, so it holds the value only when the operator writes it in a table.
@@ -190,8 +190,9 @@ flowchart TD
 ```
 
 1. The gateway adds a secret only to a request inside a `CONNECT` tunnel. It refuses a plain
-   `http://` request to a bound destination before it adds anything. See [credentials require
-   TLS](./decisions.md#a-secret-rides-only-tls).
+   `http://` request to a bound destination before it adds anything, except for a route that
+   names `host.box.internal` exactly. See [credentials
+   require TLS](./decisions.md#a-secret-rides-only-tls).
 2. The gateway gives the request to each route whose destination matches it. A request that matches
    no route goes on with nothing added.
 3. An `env://` route replaces the placeholder. A signed route signs the request. Either way, the
@@ -342,7 +343,7 @@ instead. With `always`, a plain `git ls-remote` works.
 |---|---|
 | No process in a box can read a real `env://` or `aws://` secret | A secret an operator writes into an `env` table |
 | A secret goes only to its route's destinations | A credential file a filesystem grant exposes, such as `~/.aws/credentials`. See [containment](./containment.md) |
-| A secret goes only over TLS | Keeping one route from one process in the box. Every process gets every route. |
+| A secret goes only over TLS, except to `host.box.internal` | Keeping one route from one process in the box. Every process gets every route. |
 | A copy of an `env://` secret in a response is redacted | A server that returns the secret in a form the scrub can't match, for example re-encoded |
 | A request goes out only if policy permits it | What a permitted request does with the credential at the server |
 

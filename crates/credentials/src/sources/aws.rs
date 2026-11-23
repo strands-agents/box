@@ -16,6 +16,25 @@ const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 /// The fixed terminator string for the credential scope and signing-key derivation.
 const REQUEST_TYPE: &str = "aws4_request";
 
+/// The headers that the signer does not sign, which are the same as in
+/// `SigV4Auth.headers_to_sign` of `botocore/auth.py` in botocore 1.43.127.
+const UNSIGNED_HEADERS: &[&str] = &[
+    "baggage",
+    "connection",
+    "expect",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "traceparent",
+    "tracestate",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "user-agent",
+    "x-amzn-trace-id",
+];
+
 /// Sign an outbound request with AWS Signature Version 4, returning the headers to attach.
 pub(crate) fn sign_request(
     credentials: &AwsSessionCredentials,
@@ -71,9 +90,9 @@ fn sign_request_at(
         .filter(|t| !t.is_empty());
 
     // --- Canonical headers -----------------------------------------------------------------------
-    // Collect the headers we sign: the caller's clean headers, plus the amz headers we add. Keyed by
-    // lowercased name (BTreeMap → sorted); duplicate names have their values comma-joined per the
-    // SigV4 spec.
+    // Collect the headers we sign: the clean headers from the caller but not `UNSIGNED_HEADERS`,
+    // plus the amz headers we add. Keyed by lowercased name (BTreeMap → sorted); duplicate names
+    // have their values comma-joined per the SigV4 spec.
     use std::collections::BTreeMap;
     fn add(signed: &mut BTreeMap<String, Vec<String>>, name: &str, value: String) {
         signed
@@ -82,7 +101,11 @@ fn sign_request_at(
             .push(value);
     }
     let mut signed: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (name, value) in clean_headers {
+    for (name, value) in clean_headers.iter().filter(|(name, _)| {
+        !UNSIGNED_HEADERS
+            .iter()
+            .any(|unsigned| name.eq_ignore_ascii_case(unsigned))
+    }) {
         add(&mut signed, name, canonical_header_value(value));
     }
     // A host header is mandatory in the signature; derive it from the URL when absent.
@@ -474,11 +497,7 @@ impl AwsAcquisition {
     pub(crate) fn warning(&self) -> Option<&'static str> {
         match self {
             AwsAcquisition::Profile(_) | AwsAcquisition::Credsd(_) => None,
-            AwsAcquisition::DefaultChain => Some(
-                "signing with the host's ambient AWS identity: a bare aws:// resolved the default \
-                 credential provider chain. Name a scoped profile (aws://PROFILE) to pin which \
-                 identity signs, and grant the workload no write access to ~/.aws",
-            ),
+            AwsAcquisition::DefaultChain => Some("signs with this machine's AWS identity"),
         }
     }
 }
@@ -995,6 +1014,144 @@ mod tests {
         );
     }
 
+    const GATEWAY_HOST: &str = "gw.gateway.bedrock-agentcore.us-east-1.amazonaws.com";
+
+    const GATEWAY_BODY: &[u8] = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+
+    /// The signed headers of a request to an AgentCore Gateway.
+    fn gateway_headers() -> Vec<(String, String)> {
+        [
+            ("Host", GATEWAY_HOST),
+            ("Content-Type", "application/json"),
+            ("Accept-Encoding", "identity"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+    }
+
+    /// One of each header that botocore does not sign, with mixed uppercase and lowercase letters.
+    fn unsigned_headers() -> Vec<(String, String)> {
+        [
+            (
+                "X-Amzn-Trace-Id",
+                "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1",
+            ),
+            (
+                "traceparent",
+                "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            ),
+            ("TraceState", "rojo=00f067aa0ba902b7"),
+            ("BAGGAGE", "userId=alice"),
+            ("User-Agent", "Boto3/1.40.0 md/Botocore#1.43.127"),
+            ("Expect", "100-continue"),
+            ("Connection", "keep-alive"),
+            ("Keep-Alive", "timeout=5"),
+            ("TE", "trailers"),
+            ("Trailer", "Expires"),
+            ("Transfer-Encoding", "chunked"),
+            ("Upgrade", "websocket"),
+            ("Proxy-Authorization", "Basic ZHVtbXk6ZHVtbXk="),
+            ("Proxy-Authenticate", "Basic realm=\"dummy\""),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+    }
+
+    /// The `Authorization` value for a `POST` of `body` to `url` with `headers`.
+    fn authorization_for(
+        service: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> String {
+        sign_request_at(
+            &fixed_creds(),
+            service,
+            "us-east-1",
+            "POST",
+            url,
+            headers,
+            body,
+            &SigningTime::from_unix_secs(1_440_938_160),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|(name, _)| name == "Authorization")
+        .expect("Authorization header present")
+        .1
+        .to_string()
+    }
+
+    /// A request with the headers that botocore does not sign gets the signature that botocore
+    /// 1.43.127 calculates for the same input.
+    #[test]
+    fn sign_request_matches_botocore_when_the_request_carries_unsigned_headers() {
+        let mut headers = gateway_headers();
+        headers.extend(unsigned_headers());
+        assert_eq!(
+            authorization_for(
+                "bedrock-agentcore",
+                &format!("https://{GATEWAY_HOST}/mcp"),
+                &headers,
+                GATEWAY_BODY,
+            ),
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock-agentcore/aws4_request, \
+             SignedHeaders=accept-encoding;content-type;host;x-amz-date, \
+             Signature=738d2b606d098cc4c8bf2efa4091bb40259b2c49ac2530f2afc660d244f18dba",
+        );
+    }
+
+    /// Each unsigned header, in lowercase, uppercase, or mixed letters, keeps the canonical request
+    /// the same.
+    #[test]
+    fn an_unsigned_header_in_any_case_leaves_the_signature_unchanged() {
+        let url = format!("https://{GATEWAY_HOST}/mcp");
+        let baseline =
+            authorization_for("bedrock-agentcore", &url, &gateway_headers(), GATEWAY_BODY);
+        for (name, value) in unsigned_headers() {
+            for spelling in [
+                name.clone(),
+                name.to_ascii_lowercase(),
+                name.to_ascii_uppercase(),
+            ] {
+                let mut headers = gateway_headers();
+                headers.push((spelling.clone(), value.clone()));
+                assert_eq!(
+                    authorization_for("bedrock-agentcore", &url, &headers, GATEWAY_BODY),
+                    baseline,
+                    "{spelling} must stay out of the signature"
+                );
+            }
+        }
+    }
+
+    /// A header that only starts with an unsigned name is signed, and so is the S3 payload hash.
+    #[test]
+    fn sign_request_still_signs_every_other_header() {
+        let mut headers = vec![
+            ("Host".to_string(), "s3.us-east-1.amazonaws.com".to_string()),
+            ("Content-Type".to_string(), "text/plain".to_string()),
+            ("X-Amzn-Trace-Id-Copy".to_string(), "copy".to_string()),
+            ("User-Agent-Extra".to_string(), "extra".to_string()),
+        ];
+        headers.extend(unsigned_headers());
+        let authorization = authorization_for(
+            "s3",
+            "https://s3.us-east-1.amazonaws.com/bucket/key",
+            &headers,
+            b"payload-bytes",
+        );
+        assert!(
+            authorization.contains(
+                "SignedHeaders=content-type;host;user-agent-extra;x-amz-content-sha256;\
+                 x-amz-date;x-amzn-trace-id-copy,"
+            ),
+            "{authorization}"
+        );
+    }
+
     /// Empty service or region, or a URL with no host, is a hard, fail-closed error.
     #[test]
     fn sign_request_rejects_missing_scope_or_host() {
@@ -1145,18 +1302,6 @@ mod tests {
             "the default chain must warn"
         );
         assert_eq!(recorder.0.lock().unwrap().as_slice(), [None]);
-    }
-
-    /// The no-profile acquisition names the default chain and carries the ambient-identity warning.
-    #[test]
-    fn default_chain_acquisition_warns() {
-        let warning = AwsAcquisition::DefaultChain
-            .warning()
-            .expect("the default chain warns");
-        assert!(
-            warning.contains("ambient") && warning.contains("aws://"),
-            "the warning names the ambient identity and the bare spelling: {warning}"
-        );
     }
 
     /// A scoped profile names its identity, so its acquisition carries no warning.

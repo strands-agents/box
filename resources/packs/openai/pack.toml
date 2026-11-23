@@ -1,0 +1,12 @@
+# The OpenAI API as the model provider.
+[pack]
+name = "@box/openai"
+version = 1
+kind = "support"
+
+# The box adds your API key to each request, as `Authorization: Bearer`. The agent gets a stand-in
+# value that starts with sk-, so a harness that checks the key's format accepts it.
+[egress.openai]
+destinations = ["api.openai.com"]
+secret.ref = "env://OPENAI_API_KEY"
+secret.phantom_prefix = "sk-"

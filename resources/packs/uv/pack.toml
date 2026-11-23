@@ -1,0 +1,34 @@
+# uv, the Python package and project manager, as the operator's PATH finds it. Its cache and the
+# Pythons it downloads go in the project, because the box refuses a write to ~/.cache/uv and
+# ~/.local/share/uv/python. They are siblings, so `uv cache clean` keeps the Pythons a .venv uses.
+[pack]
+name = "@box/uv"
+version = 1
+kind = "tool"
+
+[inputs.uv.path]
+description = "The uv program."
+type = "program"
+program = "uv"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.uv.path }}"]
+hosts = ["pypi.org", "files.pythonhosted.org", "releases.astral.sh"]
+
+[env]
+UV_CACHE_DIR = "${{ cache }}/cache"
+UV_PYTHON_INSTALL_DIR = "${{ cache }}/python"
+# The box's egress gateway now and then fails to resolve a host. With uv's default of 50 parallel
+# downloads, enough of them fail that uv stops; four at a time gets through.
+UV_CONCURRENT_DOWNLOADS = "4"
+# `uv tool install` keeps each tool's environment in UV_TOOL_DIR and links its commands into
+# UV_TOOL_BIN_DIR. Their defaults, ~/.local/share/uv/tools and ~/.local/bin, are outside the
+# project, and the box refuses those writes. UV_TOOL_DIR is @box/uvx's agent tool folder
+# (docs/design/cli/decisions.md#uv-installs-into-the-uvx-tool-folder). uv git-ignores the tools
+# folder but not the bin folder, so each command link shows in `git status`.
+UV_TOOL_DIR = "${{ workspace }}/.cache/uvx/tools"
+UV_TOOL_BIN_DIR = "${{ cache }}/bin"
+
+[filesystem]
+read = ["${{ root }}"]

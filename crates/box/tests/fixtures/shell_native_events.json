@@ -1,0 +1,267 @@
+{
+  "streams": {
+    "directory_rename_permit_shell": [
+      ["fs:read", "request", "read_metadata", "~/workspace/destination", null, 0],
+      ["fs:read", "response", "read_metadata", "~/workspace/destination", "completed", 0],
+      ["fs:move", "request", "rename", "~/workspace/source", null, 1],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 2],
+      ["fs:move", "request", "rename", "~/workspace/destination", null, 3],
+      ["fs:read", "response", "read_content", "~/workspace/source", "completed", 2],
+      ["fs:move", "response", "rename", "~/workspace/destination", "completed", 3]
+    ],
+    "directory_rename_permit_native": [
+      ["fs:move", "request", "rename", "~/workspace/source", null, 0],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 1],
+      ["fs:move", "request", "rename", "~/workspace/destination", null, 2],
+      ["fs:read", "response", "read_content", "~/workspace/source", "completed", 1],
+      ["fs:move", "response", "rename", "~/workspace/destination", "completed", 2]
+    ],
+    "directory_rename_deny_content_shell": [
+      ["fs:read", "request", "read_metadata", "~/workspace/destination", null, 0],
+      ["fs:read", "response", "read_metadata", "~/workspace/destination", "completed", 0],
+      ["fs:move", "request", "rename", "~/workspace/source", null, 1],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 2]
+    ],
+    "directory_rename_deny_content_native": [
+      ["fs:move", "request", "rename", "~/workspace/source", null, 0],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 1]
+    ],
+    "directory_rename_deny_source_move_shell": [
+      ["fs:read", "request", "read_metadata", "~/workspace/destination", null, 0],
+      ["fs:read", "response", "read_metadata", "~/workspace/destination", "completed", 0],
+      ["fs:move", "request", "rename", "~/workspace/source", null, 1]
+    ],
+    "directory_rename_deny_source_move_native": [
+      ["fs:move", "request", "rename", "~/workspace/source", null, 0]
+    ],
+    "directory_rename_deny_destination_move_shell": [
+      ["fs:read", "request", "read_metadata", "~/workspace/destination", null, 0],
+      ["fs:read", "response", "read_metadata", "~/workspace/destination", "completed", 0],
+      ["fs:move", "request", "rename", "~/workspace/source", null, 1],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 2],
+      ["fs:move", "request", "rename", "~/workspace/destination", null, 3]
+    ],
+    "directory_rename_deny_destination_move_native": [
+      ["fs:move", "request", "rename", "~/workspace/source", null, 0],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 1],
+      ["fs:move", "request", "rename", "~/workspace/destination", null, 2]
+    ],
+    "replacement_permit_shell": [
+      ["fs:read", "request", "read_metadata", "~/workspace/destination", null, 0],
+      ["fs:read", "response", "read_metadata", "~/workspace/destination", "completed", 0],
+      ["fs:move", "request", "rename", "~/workspace/source", null, 1],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 2],
+      ["fs:delete", "request", "remove_file", "~/workspace/destination", null, 3],
+      ["fs:move", "request", "rename", "~/workspace/destination", null, 4],
+      ["fs:read", "response", "read_content", "~/workspace/source", "completed", 2],
+      ["fs:delete", "response", "remove_file", "~/workspace/destination", "completed", 3],
+      ["fs:move", "response", "rename", "~/workspace/destination", "completed", 4]
+    ],
+    "replacement_permit_native": [
+      ["fs:move", "request", "rename", "~/workspace/source", null, 0],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 1],
+      ["fs:delete", "request", "remove_file", "~/workspace/destination", null, 2],
+      ["fs:move", "request", "rename", "~/workspace/destination", null, 3],
+      ["fs:write", "request", "write_content", "~/workspace/destination", null, 4],
+      ["fs:read", "response", "read_content", "~/workspace/source", "completed", 1],
+      ["fs:delete", "response", "remove_file", "~/workspace/destination", "completed", 2],
+      ["fs:move", "response", "rename", "~/workspace/destination", "completed", 3],
+      ["fs:write", "response", "write_content", "~/workspace/destination", "completed", 4]
+    ],
+    "replacement_deny_content_shell": [
+      ["fs:read", "request", "read_metadata", "~/workspace/destination", null, 0],
+      ["fs:read", "response", "read_metadata", "~/workspace/destination", "completed", 0],
+      ["fs:move", "request", "rename", "~/workspace/source", null, 1],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 2]
+    ],
+    "replacement_deny_source_move_shell": [
+      ["fs:read", "request", "read_metadata", "~/workspace/destination", null, 0],
+      ["fs:read", "response", "read_metadata", "~/workspace/destination", "completed", 0],
+      ["fs:move", "request", "rename", "~/workspace/source", null, 1]
+    ],
+    "replacement_deny_destination_move_shell": [
+      ["fs:read", "request", "read_metadata", "~/workspace/destination", null, 0],
+      ["fs:read", "response", "read_metadata", "~/workspace/destination", "completed", 0],
+      ["fs:move", "request", "rename", "~/workspace/source", null, 1],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 2],
+      ["fs:delete", "request", "remove_file", "~/workspace/destination", null, 3],
+      ["fs:move", "request", "rename", "~/workspace/destination", null, 4]
+    ],
+    "replacement_deny_destination_move_native": [
+      ["fs:move", "request", "rename", "~/workspace/source", null, 0],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 1],
+      ["fs:delete", "request", "remove_file", "~/workspace/destination", null, 2],
+      ["fs:move", "request", "rename", "~/workspace/destination", null, 3]
+    ],
+    "replacement_deny_destination_write_native": [
+      ["fs:move", "request", "rename", "~/workspace/source", null, 0],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 1],
+      ["fs:delete", "request", "remove_file", "~/workspace/destination", null, 2],
+      ["fs:move", "request", "rename", "~/workspace/destination", null, 3],
+      ["fs:write", "request", "write_content", "~/workspace/destination", null, 4]
+    ],
+    "replacement_deny_destination_delete_shell": [
+      ["fs:read", "request", "read_metadata", "~/workspace/destination", null, 0],
+      ["fs:read", "response", "read_metadata", "~/workspace/destination", "completed", 0],
+      ["fs:move", "request", "rename", "~/workspace/source", null, 1],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 2],
+      ["fs:delete", "request", "remove_file", "~/workspace/destination", null, 3]
+    ],
+    "replacement_deny_destination_delete_native": [
+      ["fs:move", "request", "rename", "~/workspace/source", null, 0],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 1],
+      ["fs:delete", "request", "remove_file", "~/workspace/destination", null, 2]
+    ],
+    "list_permit_shell": [
+      ["fs:read", "request", "read_metadata", "~/workspace/source", null, 0],
+      ["fs:read", "response", "read_metadata", "~/workspace/source", "completed", 0],
+      ["fs:read", "request", "enumerate", "~/workspace/source", null, 1],
+      ["fs:read", "response", "enumerate", "~/workspace/source", "completed", 1]
+    ],
+    "list_permit_native": [
+      ["fs:read", "request", "enumerate", "~/workspace/source", null, 0],
+      ["fs:read", "response", "enumerate", "~/workspace/source", "descriptor_issued", 0]
+    ],
+    "list_deny_enumerate_shell": [
+      ["fs:read", "request", "read_metadata", "~/workspace/source", null, 0],
+      ["fs:read", "response", "read_metadata", "~/workspace/source", "completed", 0],
+      ["fs:read", "request", "enumerate", "~/workspace/source", null, 1]
+    ],
+    "list_deny_enumerate_native": [
+      ["fs:read", "request", "enumerate", "~/workspace/source", null, 0]
+    ],
+    "read_permit_shell": [
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 0],
+      ["fs:read", "response", "read_content", "~/workspace/source", "descriptor_issued", 0]
+    ],
+    "read_permit_native": [
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 0],
+      ["fs:read", "response", "read_content", "~/workspace/source", "descriptor_issued", 0]
+    ],
+    "read_deny_content_shell": [
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 0]
+    ],
+    "temporal_path_shell": [
+      ["fs:read", "request", "read_metadata", "~/workspace/destination", null, 0],
+      ["fs:read", "response", "read_metadata", "~/workspace/destination", "completed", 0],
+      ["fs:move", "request", "rename", "~/workspace/source", null, 1],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 2],
+      ["fs:move", "request", "rename", "~/workspace/destination", null, 3],
+      ["fs:read", "response", "read_content", "~/workspace/source", "completed", 2],
+      ["fs:move", "response", "rename", "~/workspace/destination", "completed", 3],
+      ["fs:read", "request", "read_content", "~/workspace/probe", null, 4]
+    ],
+    "temporal_path_native": [
+      ["fs:move", "request", "rename", "~/workspace/source", null, 0],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 1],
+      ["fs:move", "request", "rename", "~/workspace/destination", null, 2],
+      ["fs:read", "response", "read_content", "~/workspace/source", "completed", 1],
+      ["fs:move", "response", "rename", "~/workspace/destination", "completed", 2],
+      ["fs:read", "request", "read_content", "~/workspace/probe", null, 3]
+    ],
+    "temporal_path_unprimed_shell": [
+      ["fs:read", "request", "read_content", "~/workspace/probe", null, 0],
+      ["fs:read", "response", "read_content", "~/workspace/probe", "descriptor_issued", 0]
+    ],
+    "temporal_path_unprimed_native": [
+      ["fs:read", "request", "read_content", "~/workspace/probe", null, 0],
+      ["fs:read", "response", "read_content", "~/workspace/probe", "descriptor_issued", 0]
+    ],
+    "temporal_wildcard_native": [
+      ["fs:move", "request", "rename", "~/workspace/source", null, 0],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 1],
+      ["fs:move", "request", "rename", "~/workspace/destination", null, 2],
+      ["fs:read", "response", "read_content", "~/workspace/source", "completed", 1],
+      ["fs:move", "response", "rename", "~/workspace/destination", "completed", 2],
+      ["fs:read", "request", "read_content", "~/workspace/probe", null, 3]
+    ],
+    "temporal_count_shell": [
+      ["fs:read", "request", "read_metadata", "~/workspace/destination", null, 0],
+      ["fs:read", "response", "read_metadata", "~/workspace/destination", "completed", 0],
+      ["fs:move", "request", "rename", "~/workspace/source", null, 1],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 2],
+      ["fs:move", "request", "rename", "~/workspace/destination", null, 3],
+      ["fs:read", "response", "read_content", "~/workspace/source", "completed", 2],
+      ["fs:move", "response", "rename", "~/workspace/destination", "completed", 3],
+      ["fs:read", "request", "read_content", "~/workspace/probe", null, 4],
+      ["fs:read", "response", "read_content", "~/workspace/probe", "descriptor_issued", 4]
+    ],
+    "temporal_count_native": [
+      ["fs:move", "request", "rename", "~/workspace/source", null, 0],
+      ["fs:read", "request", "read_content", "~/workspace/source", null, 1],
+      ["fs:move", "request", "rename", "~/workspace/destination", null, 2],
+      ["fs:read", "response", "read_content", "~/workspace/source", "completed", 1],
+      ["fs:move", "response", "rename", "~/workspace/destination", "completed", 2],
+      ["fs:read", "request", "read_content", "~/workspace/probe", null, 3],
+      ["fs:read", "response", "read_content", "~/workspace/probe", "descriptor_issued", 3]
+    ]
+  },
+  "cases": {
+    "directory_rename/permit/shell": "directory_rename_permit_shell",
+    "directory_rename/permit/native": "directory_rename_permit_native",
+    "directory_rename/deny_content/shell": "directory_rename_deny_content_shell",
+    "directory_rename/deny_content/native": "directory_rename_deny_content_native",
+    "directory_rename/deny_enumerate/shell": "directory_rename_permit_shell",
+    "directory_rename/deny_enumerate/native": "directory_rename_permit_native",
+    "directory_rename/deny_source_move/shell": "directory_rename_deny_source_move_shell",
+    "directory_rename/deny_source_move/native": "directory_rename_deny_source_move_native",
+    "directory_rename/deny_destination_move/shell": "directory_rename_deny_destination_move_shell",
+    "directory_rename/deny_destination_move/native": "directory_rename_deny_destination_move_native",
+    "directory_rename/deny_destination_write/shell": "directory_rename_permit_shell",
+    "directory_rename/deny_destination_write/native": "directory_rename_permit_native",
+    "directory_rename/deny_destination_delete/shell": "directory_rename_permit_shell",
+    "directory_rename/deny_destination_delete/native": "directory_rename_permit_native",
+    "file_rename/permit/shell": "directory_rename_permit_shell",
+    "file_rename/permit/native": "directory_rename_permit_native",
+    "file_rename/deny_content/shell": "directory_rename_deny_content_shell",
+    "file_rename/deny_content/native": "directory_rename_deny_content_native",
+    "file_rename/deny_enumerate/shell": "directory_rename_permit_shell",
+    "file_rename/deny_enumerate/native": "directory_rename_permit_native",
+    "file_rename/deny_source_move/shell": "directory_rename_deny_source_move_shell",
+    "file_rename/deny_source_move/native": "directory_rename_deny_source_move_native",
+    "file_rename/deny_destination_move/shell": "directory_rename_deny_destination_move_shell",
+    "file_rename/deny_destination_move/native": "directory_rename_deny_destination_move_native",
+    "file_rename/deny_destination_write/shell": "directory_rename_permit_shell",
+    "file_rename/deny_destination_write/native": "directory_rename_permit_native",
+    "file_rename/deny_destination_delete/shell": "directory_rename_permit_shell",
+    "file_rename/deny_destination_delete/native": "directory_rename_permit_native",
+    "replacement/permit/shell": "replacement_permit_shell",
+    "replacement/permit/native": "replacement_permit_native",
+    "replacement/deny_content/shell": "replacement_deny_content_shell",
+    "replacement/deny_content/native": "directory_rename_deny_content_native",
+    "replacement/deny_enumerate/shell": "replacement_permit_shell",
+    "replacement/deny_enumerate/native": "replacement_permit_native",
+    "replacement/deny_source_move/shell": "replacement_deny_source_move_shell",
+    "replacement/deny_source_move/native": "directory_rename_deny_source_move_native",
+    "replacement/deny_destination_move/shell": "replacement_deny_destination_move_shell",
+    "replacement/deny_destination_move/native": "replacement_deny_destination_move_native",
+    "replacement/deny_destination_write/shell": "replacement_permit_shell",
+    "replacement/deny_destination_write/native": "replacement_deny_destination_write_native",
+    "replacement/deny_destination_delete/shell": "replacement_deny_destination_delete_shell",
+    "replacement/deny_destination_delete/native": "replacement_deny_destination_delete_native",
+    "list/permit/shell": "list_permit_shell",
+    "list/permit/native": "list_permit_native",
+    "list/deny_content/shell": "list_permit_shell",
+    "list/deny_content/native": "list_permit_native",
+    "list/deny_enumerate/shell": "list_deny_enumerate_shell",
+    "list/deny_enumerate/native": "list_deny_enumerate_native",
+    "read/permit/shell": "read_permit_shell",
+    "read/permit/native": "read_permit_native",
+    "read/deny_content/shell": "read_deny_content_shell",
+    "read/deny_content/native": "read_deny_content_shell",
+    "read/deny_enumerate/shell": "read_permit_shell",
+    "read/deny_enumerate/native": "read_permit_native",
+    "temporal/path/shell": "temporal_path_shell",
+    "temporal/path/native": "temporal_path_native",
+    "temporal/path_unprimed/shell": "temporal_path_unprimed_shell",
+    "temporal/path_unprimed/native": "temporal_path_unprimed_native",
+    "temporal/wildcard/shell": "temporal_path_shell",
+    "temporal/wildcard/native": "temporal_wildcard_native",
+    "temporal/wildcard_unprimed/shell": "temporal_path_unprimed_shell",
+    "temporal/wildcard_unprimed/native": "temporal_path_unprimed_native",
+    "temporal/count/shell": "temporal_count_shell",
+    "temporal/count/native": "temporal_count_native",
+    "temporal/count_unprimed/shell": "temporal_path_unprimed_shell",
+    "temporal/count_unprimed/native": "temporal_path_unprimed_native"
+  }
+}
