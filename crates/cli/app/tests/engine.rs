@@ -4106,11 +4106,16 @@ fn a_folder_too_deep_for_any_profile_name_is_left_to_box_core() {
         .output()
         .expect("box runs");
     assert!(!output.status.success(), "{}", stderr(&output));
+    // The history line names the moved box home so another shell can run it; it is not advice.
+    let text = stderr(&output);
+    let others: Vec<_> = text
+        .lines()
+        .filter(|line| !line.starts_with("box: policy history: "))
+        .collect();
     for advice in ["BOX_HOME", "profile name", "cannot start"] {
         assert!(
-            !stderr(&output).contains(advice),
-            "box gives no advice when no profile name would help: {}",
-            stderr(&output)
+            !others.iter().any(|line| line.contains(advice)),
+            "box gives no advice when no profile name would help: {text}"
         );
     }
 }
