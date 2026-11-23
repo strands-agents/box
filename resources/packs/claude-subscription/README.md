@@ -36,9 +36,9 @@ check that a site is safe to fetch. So the box adds your token to every request 
 `api.anthropic.com`, whether or not the request carries the stand-in. That keeps every Claude Code
 feature working, whatever paths a new release calls.
 
-The cost: for this one host, the box can't tell whether a request came from Claude Code or from
-another program in the box. Any program in the box can call `api.anthropic.com` with your
-subscription. The token still goes nowhere else. Each time the box adds the token to a request
+The cost: on this host, the box adds the token even to a request that carries no stand-in, so it
+no longer checks that a request came from a program that holds the stand-in. Any program in the
+box can call `api.anthropic.com` with your subscription. The token still goes nowhere else. Each time the box adds the token to a request
 that carried no stand-in, it writes a warning to the run's `box.log`, not to your screen. When
 the run ends, `box` prints where that log is.
 
