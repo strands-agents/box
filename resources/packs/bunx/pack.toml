@@ -3,6 +3,9 @@
 # Pass: Bun 1.4.4 / Node 22.22.2 and 22.23.4 (oldest LTS line).
 # Bun publishes no separate LTS track; this records specific tested versions.
 # Fail: Bun 1.3.4 during current-directory inspection.
+# MCP compatibility on Linux aarch64:
+# Pass: Bun 1.4.4 and 1.4.5 / Node 22.22.2, 24.22.1, and 26.13.1.
+# Fail: Bun 1.3.4 / Node 22.22.2, 24.22.1, and 26.13.1.
 # Test scope and fixtures: docs/dev/engine-tests.md, Launcher tests.
 [pack]
 name = "@box/bunx"
@@ -30,7 +33,9 @@ BUN_INSTALL_CACHE_DIR = "${{ cache }}"
 read = ["${{ root.parent }}"]
 # node resolves `localhost` from the hosts file, so a test runner or dev server that looks it up
 # starts. This tool runs node as a helper, so node gets this tool's grants.
+# A package's bin often starts with #!/usr/bin/env node.
 read_file = [
+    "/usr/bin/env",
     { path = "/private/etc/hosts", when = "macos" },
     { path = "/etc/hosts", when = "linux" },
 ]

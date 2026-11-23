@@ -1774,10 +1774,11 @@ fn keys(
                     {
                         continue;
                     }
+                    // An RFC 7230 token, the rule Box Core checks the secret's header by.
                     if header.is_empty()
                         || !header
-                            .chars()
-                            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
                     {
                         return Err(format!(
                             "its {field} header {header:?} is not a header name"
@@ -5497,7 +5498,15 @@ mod tests {
             ("header-references", "${TOKEN}"),
             ("header-variables", "TOKEN"),
         ] {
-            for header in ["X_Client", "X.Trace", "X Key", ""] {
+            for header in [
+                "X Key",
+                "",
+                "X:Key",
+                "X\tKey",
+                "X\u{7f}Key",
+                "X(Key)",
+                "Ключ",
+            ] {
                 let mut host = Host::new();
                 host.set = vec![("TOKEN", "a-key")];
                 let file = host.file(
@@ -5520,6 +5529,57 @@ mod tests {
                 );
                 assert_eq!(mcp, toml::Table::new());
                 assert_eq!(servers.detected_lines(&host.home()), Vec::new());
+            }
+        }
+    }
+
+    #[test]
+    fn a_variable_header_named_by_any_rfc_7230_token_is_declared() {
+        let mut names: Vec<String> = "!#$%&'*+.^_`|~"
+            .chars()
+            .map(|c| format!("X{c}Key"))
+            .collect();
+        names.extend(["CONTEXT7_API_KEY".to_string(), "x-key-2".to_string()]);
+        for (role, value) in [
+            ("header-references", "${TOKEN}"),
+            ("header-variables", "TOKEN"),
+        ] {
+            for header in &names {
+                let mut host = Host::new();
+                host.set = vec![("TOKEN", "a-key")];
+                let file = host.file(
+                    ".agent.json",
+                    &serde_json::json!({"s": {
+                        "remote": {"url": "https://remote.example.com", "headers": {header: value}}
+                    }})
+                    .to_string(),
+                );
+                let mut mcp = toml::Table::new();
+                let servers = host.detect(
+                    &[with_roles(row(&file, &["s"]), &[("headers", role)])],
+                    &mut mcp,
+                );
+                assert_eq!(reasons(&servers), Vec::new(), "{role} {header}");
+                let mut expected = toml::Table::new();
+                expected.insert(
+                    "remote".into(),
+                    toml::Value::Table(toml::Table::from_iter([
+                        ("type".to_string(), toml::Value::from("http")),
+                        (
+                            "destinations".to_string(),
+                            toml::Value::from(vec!["remote.example.com"]),
+                        ),
+                        (
+                            "secret".to_string(),
+                            toml::Value::Table(toml::Table::from_iter([
+                                ("ref".to_string(), toml::Value::from("env://TOKEN")),
+                                ("header".to_string(), toml::Value::from(header.as_str())),
+                                ("prefix".to_string(), toml::Value::from("")),
+                            ])),
+                        ),
+                    ])),
+                );
+                assert_eq!(mcp, expected, "{role} {header}");
             }
         }
     }
