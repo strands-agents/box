@@ -88,7 +88,9 @@ impl Panel {
                 }
             }
         }
-        panel.write("\x1b[?1049h")?;
+        // The alternate screen keeps the cursor on its row, so home it or the first page starts
+        // wherever the shell prompt was.
+        panel.write("\x1b[?1049h\x1b[H")?;
         Ok(panel)
     }
 
