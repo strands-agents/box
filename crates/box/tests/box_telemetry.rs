@@ -816,6 +816,64 @@ fn a_run_records_its_workload_start_between_its_start_and_stop() {
     );
 }
 
+/// **A workload whose `exec` fails inside the box records no start.**
+///
+/// The program resolves on the host, so the box spawns the trampoline, and the trampoline's `exec`
+/// then fails. `workload_started` waits for that `exec`, so this run records `box_started` and a
+/// refused `box_stopped` with no `workload_started` between them.
+#[test]
+fn a_workload_whose_exec_fails_after_the_spawn_records_no_start() {
+    needs_a_box!("a_workload_whose_exec_fails_after_the_spawn_records_no_start");
+    let configured = Request::with_policy("telemetry-exec-fails", READ_ONE_FILE).expect();
+    let program = configured.box_home().join("not-a-program");
+    std::fs::write(
+        &program,
+        b"\x00\x01\x02\x03 no shebang and no executable format\n",
+    )
+    .expect("the program file");
+    std::fs::set_permissions(
+        &program,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("the program's mode");
+
+    let refused = configured.run(&[program.to_str().expect("a UTF-8 path")]);
+    assert!(
+        !refused.status.success(),
+        "a program that cannot exec must fail the run: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    let path = default_records(&configured.root());
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} must hold the records: {error}", path.display()));
+    let control = control_records(&text);
+    let count = |name: &str| {
+        control
+            .iter()
+            .filter(|(operation, ..)| operation == name)
+            .count()
+    };
+    assert_eq!(
+        count("box_started"),
+        2,
+        "the creating run and the failed run each start a box: {control:?}"
+    );
+    assert_eq!(
+        count("workload_started"),
+        1,
+        "only the creating run launched its workload: {control:?}"
+    );
+    let last_stop = control
+        .iter()
+        .rposition(|(operation, ..)| operation == "box_stopped")
+        .expect("the failed run records its stop");
+    assert_eq!(
+        control[last_stop].1, "refused",
+        "the failed exec ends the run as refused: {control:?}"
+    );
+}
+
 /// **A run that fails before its workload starts records its stop, and records it as refused.**
 ///
 /// `execute` is the one teardown point, and this is what pins it: an unresolvable workload fails in

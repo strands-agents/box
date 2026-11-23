@@ -1176,6 +1176,7 @@ mod tests {
                 ControlOperation::SchemaInstalled,
                 ControlOperation::DiscoveryComplete,
                 ControlOperation::BoxStarted,
+                ControlOperation::WorkloadStarted,
                 ControlOperation::BoxStopped,
                 ControlOperation::SecretFetched,
             ]
@@ -1186,6 +1187,7 @@ mod tests {
                 "schema_installed",
                 "discovery_complete",
                 "box_started",
+                "workload_started",
                 "box_stopped",
                 "secret_fetched",
             ]

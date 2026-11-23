@@ -327,10 +327,10 @@ A control-plane record states one change to the authority this box holds. The sc
 | `strands.box.control.reason` | why a refusal happened |
 | `strands.box.control.detail` | further text the operation carries |
 
-A `workload_started` record states that the box finished its setup and launched the workload. The box
-writes `box_started` before it installs the policy and builds the sandbox, and `workload_started` after
-the workload runs and its network relays serve. The subject is the box's name. A run that fails before
-its workload starts has no `workload_started` record.
+A `workload_started` record states that the box finished its setup and the workload is running inside
+its containment. The box writes `box_started` before it installs the policy and builds the sandbox, and
+`workload_started` once the workload's `exec` succeeds. The subject is the box's name. A run whose
+containment or `exec` fails has no `workload_started` record, and its `box_stopped` is `refused`.
 
 A `secret_fetched` record states one read of a secret through a
 [declared secret source](config.md#secret-sourcescheme), when the box starts. The subject is the

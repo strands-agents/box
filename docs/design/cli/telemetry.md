@@ -125,8 +125,8 @@ A nonzero Core exit does not establish a preparation failure.
 
 `startup_latency_ms` measures from launch preparation to the source `timeUnixNano` of the
 current invocation's `workload_started` control record with outcome `ok`. Core writes that record
-once it has installed the policy, built the sandbox, launched the workload, and started its
-relays. Its wall-clock origin follows optional profile creation on every run, before guide
+once it has installed the policy and built the sandbox, and the workload's `exec` succeeded inside
+it. Its wall-clock origin follows optional profile creation on every run, before guide
 refresh and run preparation. It excludes profile creation and its prompts, and includes
 resolution, compilation, storage preparation, and all of Core's setup. It ends when the workload
 launches, before the agent's own startup. Export and reader delays do not affect it. It rounds

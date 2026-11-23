@@ -471,6 +471,16 @@ impl Contained {
         .await
     }
 
+    /// Call `launched` once the workload's `exec` succeeded inside its containment. A containment
+    /// or `exec` failure never calls it.
+    #[cfg(unix)]
+    pub(crate) fn watch_launch(
+        &mut self,
+        launched: impl FnOnce() + Send + 'static,
+    ) -> Result<(), BoxError> {
+        Ok(self.trampoline.watch_launch(launched)?)
+    }
+
     /// Spawn an isolated workload without applying containment.
     #[cfg(all(test, unix))]
     pub(crate) async fn testing_spawn_uncontained(
