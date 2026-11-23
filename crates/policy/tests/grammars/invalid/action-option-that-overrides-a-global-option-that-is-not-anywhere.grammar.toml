@@ -1,0 +1,15 @@
+# expect: `<grammar>.shell.publish.options.offline`: sets `overrides`, but the usage has no `[global options]` with an `anywhere` option of this name
+# The global `offline` is not `anywhere`, so it is read only before the command words.
+
+name    = "uv"
+program = "uv"
+format  = 1
+version = 1
+
+[global]
+options.quiet   = { flag = ["-q"], anywhere = true }
+options.offline = { flag = ["--offline"] }
+
+[shell.publish]
+usage = "uv [global options] publish [options]"
+options.offline = { flag = ["--offline"], overrides = true }

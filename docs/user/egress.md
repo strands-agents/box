@@ -220,14 +220,18 @@ compiled out to keep the dependency surface small). Such a profile, named or def
 and the refusal names the missing provider. If your identity is SSO, log in with a tool that writes
 static or session keys to `~/.aws/credentials`.
 
-Because a bare `aws://` signs with whatever identity the host carries, the box prints a warning on
-**every** request it signs that way:
+Because a bare `aws://` signs with whatever identity the host carries, the box prints a warning in
+the startup disclosure, once for each destination that signs this way:
 
 ```
-strands-box credentials [<tenant>]: signing with the host's ambient AWS identity: a bare aws://
-resolved the default credential provider chain. Name a scoped profile (aws://PROFILE) to pin which
-identity signs, and grant the workload no write access to ~/.aws
+strands-box: warning: aws:// for bedrock-runtime.us-west-2.amazonaws.com signs with this machine's AWS identity
 ```
+
+The line names the destination as the route writes it, so a box with two such destinations prints
+two lines.
+
+Each request it signs that way still gets its own audit record. To pin which identity signs, name a
+profile with `aws://PROFILE`, and grant the workload no write access to `~/.aws`.
 
 Naming a profile with `aws://PROFILE` pins *which* identity signs and does not warn. The shipped box
 has no setting that refuses a bare `aws://` outright. It always signs with a warning. So a
@@ -391,10 +395,27 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 | `request authority rejected` | The request inside a `CONNECT` named a different host. |
 | `response blocked by egress control` | The server sent a compressed response to a credentialed request. |
 
-A 502 with no `x-strands-box-egress` header means the gateway couldn't resolve or reach the server.
-A connection that policy permitted but that closes with no reply, such as curl exit 52 or 56, means
-the server's certificate chains to no root the gateway trusts. See
-[networks that re-sign TLS](#networks-that-re-sign-tls).
+A request inside a `CONNECT` that the gateway can't read gets an HTTP 400 with the same header. The
+body says why, such as `response limit exceeded: body length exceeds limit 16777216` for a body over
+the request limit, or `intercept error: malformed Connection header`. Nothing reaches the server.
+
+A request the gateway doesn't refuse but can't complete gets an HTTP 502 with the header
+`x-strands-box-egress: failed`. The body says why, for example:
+
+| Body | Cause |
+|---|---|
+| `io error: upstream TLS handshake: <reason>` | The server's certificate chains to no root the gateway trusts, or the TLS handshake failed. See [networks that re-sign TLS](#networks-that-re-sign-tls). |
+| `io error: upstream exchange: <reason>` | The server closed the connection before it replied. |
+| `io error: upstream deadline passed` | The server didn't reply within the upstream deadline. |
+| `effect interceptor unavailable` | The box's policy check failed. |
+
+Except for `effect interceptor unavailable`, policy permitted the request, so it may have reached
+the server. The box also prints the reason on stderr, naming the backend when the destination
+re-routes to one:
+`strands-box: warning: egress request to <host>:<port> failed: <reason>`.
+
+A 502 with no `x-strands-box-egress` header answers a `CONNECT`, or a plain `http://` request, that
+the gateway couldn't resolve or connect to. Any other 502 without the header comes from the server.
 
 Responses arrive progressively, including on credentialed routes. Credential redaction retains a
 short tail until more bytes arrive or the response completes cleanly. Requests and HTTP MCP

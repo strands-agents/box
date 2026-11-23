@@ -1,0 +1,51 @@
+# `box profile create claude` asks these questions. A run never reads this file.
+[starter]
+name = "@box/claude"
+label = "Claude Code"
+packs = ["@box/claude"]
+ask = ["bedrock.region", "bedrock.sign-in", "claude.import-mcp"]
+
+# What Claude Code on this host already uses. Each `places` list is in Claude Code's own order.
+[[source]]
+id = "use-bedrock"
+label = "Provider"
+places = [
+  { file = "~/.claude/settings.json", kind = "json", key = ["env", "CLAUDE_CODE_USE_BEDROCK"] },
+  { env = "CLAUDE_CODE_USE_BEDROCK" },
+]
+
+[[source]]
+id = "aws-region"
+label = "Region"
+input = "bedrock.region"
+places = [
+  { file = "~/.claude/settings.json", kind = "json", key = ["env", "AWS_REGION"] },
+  { env = "AWS_REGION" },
+  { file = "~/.claude/settings.json", kind = "json", key = ["env", "AWS_DEFAULT_REGION"] },
+  { env = "AWS_DEFAULT_REGION" },
+]
+
+[[question]]
+id = "provider"
+prompt = "Which model provider should Claude Code use?"
+
+[[question.choice]]
+id = "bedrock"
+label = "Amazon Bedrock"
+packs = ["@box/bedrock"]
+options = { "claude.host" = "bedrock" }
+detect = { source = "use-bedrock", equals = ["1", "true", "True", "TRUE", "yes", "on"] }
+
+# No detect: the API key is the only sign of this choice, and detection does not read a key.
+[[question.choice]]
+id = "anthropic"
+label = "The Anthropic API"
+packs = ["@box/anthropic"]
+options = { "claude.host" = "anthropic" }
+
+# No detect: the setup token is the only sign of this choice, and detection does not read a key.
+[[question.choice]]
+id = "subscription"
+label = "A Claude subscription"
+packs = ["@box/claude-subscription"]
+options = { "claude.host" = "anthropic" }

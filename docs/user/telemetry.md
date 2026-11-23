@@ -294,8 +294,8 @@ Box refuses it with a message that says `tool-call records are logs and it accep
 covers `langfuse`, `langsmith`, `cloudwatch_traces`, and an `otlp` target whose `accepts` leaves out
 `logs`.
 
-Keys arrive as the tool wrote them. When two keys flatten to one path, such as `"a.b"` and `{"a":
-{"b": …}}`, the first is kept and the second is counted as left out. At most 64 fields are reported
+Keys arrive as the tool wrote them. When two keys flatten to one path, such as `"a.b"` and
+`{"a": {"b": …}}`, the first is kept and the second is counted as left out. At most 64 fields are reported
 per record, each value at most 4 KiB; when a call has more, the record also carries
 `strands.box.mcp.tool.arguments_omitted` or `strands.box.mcp.tool.output_omitted` with the count
 left out.

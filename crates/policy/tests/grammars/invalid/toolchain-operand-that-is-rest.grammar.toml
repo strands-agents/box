@@ -1,0 +1,14 @@
+# expect: `<grammar>.shell.version.operands.toolchain`: `rest` needs this operand alone in the usage, written as `<name>...` and not after a required `--`
+# The `[+<toolchain>]` word is one word, so its `operands` entry cannot be `rest`.
+
+name    = "cargo"
+program = "cargo"
+format  = 1
+version = 1
+
+[effects]
+install_toolchain = "The rustup proxy can download and install the toolchain that the line names"
+
+[shell.version]
+usage = "cargo [+<toolchain>] version"
+operands.toolchain = { adds = ["install_toolchain"], rest = true }

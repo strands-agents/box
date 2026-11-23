@@ -112,6 +112,10 @@ the scrub of an echoed secret. `strands-box-egress-gateway` applies the edits to
 - Resolve signed AWS routes per request; session credentials expire.
 - Strip every inbound signing artifact before signing. `STRIP_SIGNING_HEADERS` must cover the
   payload-hash and query-signature artifacts.
+- Sign no header in `UNSIGNED_HEADERS`, which is the list of headers that botocore does not sign.
+  A proxy or a trace service between the box and AWS can change one of these headers, and AWS then
+  refuses the signature. The signer removes none of these headers from the request. It only keeps
+  them out of the canonical request.
 - Emit exactly one acquisition record per resolve, success or failure, including the per-request
   signing resolve. The discarding sink drops the record, never the build.
 - Keep phantom tokens distinct from real material: non-secret, unguessable at 256 CSPRNG bits. A
@@ -269,7 +273,14 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   broken chain fails at `box run` rather than on the first request. Only when a bare route exists and
   `ambient_policy != Deny`; a named-profile-only or `credsd://` vault does no resolve at open, so a
   box that never signs a bare route forces no credentials to exist. The resolve primes the shared
-  cache and emits the one prepare-step audit record.
+  cache and emits the one prepare-step audit record. It is also where the vault prints the one
+  ambient-identity warning (`warn_at_open`), one line for each bare route, naming its destination. `sign_aws` warns no more: each sign keeps its audit
+  record, and a repeated warning told the operator nothing new.
+  `sign_aws_warns_on_bare_and_not_on_scoped` and `many_bare_signs_leave_one_ambient_warning` pin
+  one warning at open and none per sign; `each_bare_route_names_its_host_at_open` pins one line per
+  bare route. A destination warns once for the process (`first_warning`), because a box opens more
+  than one vault for one destination: a telemetry target's `preflight_aws` opens a second.
+  `a_destination_warns_once_across_vaults` pins it, and each warning test uses its own destination.
 - Build the per-request resolve from the vault's retained `ambient_policy` via
   `AwsSource::with_provider(self.aws_provider(), …)`, never `AwsSource::new()`, or
   `require_scoped_aws_profile` is unreachable.

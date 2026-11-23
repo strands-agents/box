@@ -1,0 +1,19 @@
+# The host python3, so that a tool whose #! line names it, such as poetry, can start. The Shell still
+# runs the bare name python3 as Monty. The read assumes a Homebrew or framework python, whose
+# root.parent is its own install; for Apple's /usr/bin/python3 it would be all of /usr.
+[pack]
+name = "python3"
+version = 1
+kind = "tool"
+
+[inputs.python3.path]
+description = "The python3 program."
+type = "program"
+program = "python3"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.python3.path }}"]
+
+[filesystem]
+read = ["${{ root.parent }}"]

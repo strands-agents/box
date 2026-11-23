@@ -35,8 +35,8 @@ In CI this is `.github/workflows/containment-deterministic.yml`, called from
 `ci.yml` so it reports under the single `CI Gate` status. It runs on
 `ubuntu-24.04-arm` and `ubuntu-24.04` (x86-64) on the plain `pull_request` trigger: the
 suite needs no secrets, so a fork PR runs it with a read-only token and no
-approval gate is required for safety. The macOS run is a set of steps in the
-macOS job `Rust / Unit Tests (macos-latest)` of `rust-test-lint.yml`, so a push holds one macOS runner.
+approval gate is required for safety. The macOS run is the job
+`Rust / Containment (macos-latest)` of `rust-test-lint.yml`.
 
 ### All three runners block
 

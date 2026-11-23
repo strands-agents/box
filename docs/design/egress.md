@@ -173,7 +173,12 @@ file is not judged.
 
 A request the gateway refuses gets a 403 with the header `x-strands-box-egress: refused`, and a body
 that says why. A `net:connect` refusal of a `CONNECT` arrives before the `200`, so the client never
-starts TLS. A policy refusal of a request to an HTTP MCP server gets a JSON-RPC error body.
+starts TLS. A policy refusal of a request to an HTTP MCP server gets a JSON-RPC error body. A
+request inside a `CONNECT` that the gateway can't read gets a 400 with the same header.
+
+A request the gateway doesn't refuse but can't complete gets a 502 with the header
+`x-strands-box-egress: failed`, and a body that says why. The header says that the gateway wrote
+the response. It doesn't say whether the request reached the server.
 
 ### Cloud instance metadata
 
@@ -288,7 +293,7 @@ forward each request. The route specifies which credential to add and grants no 
 |---|---|---|
 | An environment variable | `env://NAME` | Reads `NAME` from the environment of `box run` once, at startup, and swaps it in for a placeholder |
 | An AWS profile | `aws://PROFILE` | Signs each request with SigV4, resolving the named profile through the AWS SDK |
-| The AWS default chain | `aws://` (no profile) | Signs each request with SigV4, from the AWS SDK default credential provider chain (the host's ambient identity), and warns on every signed request |
+| The AWS default chain | `aws://` (no profile) | Signs each request with SigV4, from the AWS SDK default credential provider chain (the host's ambient identity), with a [warning](../user/egress.md#credential-sources) |
 
 ### The placeholder swap
 
@@ -344,7 +349,7 @@ request, and the gateway replaces the signature.
 
 Both forms resolve through the AWS SDK: `aws://PROFILE` resolves only the named profile (never the
 ambient env keys or instance metadata, and a missing profile is refused), and a bare `aws://`
-resolves the default chain, the host's ambient identity, which the box warns about on every request.
+resolves the default chain, the host's ambient identity, with a [warning](../user/egress.md#credential-sources).
 The decision
 [Both aws:// forms resolve through the AWS SDK and share one risk](decisions.md#a-bare-aws-resolves-the-default-credential-chain)
 states both forms and the writable-`~/.aws` cost.

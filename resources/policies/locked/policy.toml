@@ -1,0 +1,6 @@
+# A policy starter. `box profile create` copies its policy.dw into a new profile.
+[policy]
+name = "@box/locked"
+label = "Locked"
+description = "The agent can read your project but not change it, the box's shell runs none of its own commands, and the agent reaches only what your packs and profile allow."
+project = "read"
