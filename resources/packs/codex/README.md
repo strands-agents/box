@@ -220,8 +220,9 @@ Codex's default shell tool does not kill a command at a timeout. After 10 second
   an `mcp_tool` hook. [Your hooks](#your-hooks) says which hooks do.
 - `box` doesn't read `[features] hooks = false` in your `~/.codex/config.toml`. To run Codex in the
   box without your hooks, leave `codex.import-hooks` off.
-- The agent can write `.codex/config.toml` and `.codex/hooks.json`. In a trusted project, Codex on
-  your machine starts their MCP servers without asking, and asks before a new or changed hook.
+- The agent can write `.codex/config.toml`, `.codex/hooks.json`, and `.codex/rules/`. In a trusted
+  project, Codex on your machine starts their MCP servers without asking, takes from them what it
+  runs without asking and what its sandbox allows, and asks before a new or changed hook.
   [Read them after a run](../../../docs/cli/limitations.md#the-agent-can-plant-code-that-runs-outside-the-box-later).
 
 ## Troubleshooting
