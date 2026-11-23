@@ -193,19 +193,29 @@ impl Panel {
         };
         let text = format!("{label}{command} ");
         let row = self.buffer.area.height - 2;
-        let start = self.buffer.area.width - 2 - display_width(&text) as u16;
+        // Line the label up with the activity table's left edge, which is what it lists, and
+        // move it left only as far as it needs to fit.
+        let table = section_areas(self.buffer.area)[1].x.saturating_sub(1);
+        let start = table.min(self.buffer.area.width - 2 - display_width(&text) as u16);
         let command_start = start + display_width(&label) as u16;
+        // The terminal's own foreground, so the line reads on a light or a dark background.
         self.buffer.set_string(
             start,
             row,
             &label,
-            Style::default().fg(if copied { ACCENT } else { MUTED }),
+            if copied {
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Reset)
+            },
         );
         self.buffer.set_string(
             command_start,
             row,
             format!("{command} "),
-            Style::default().fg(TEXT),
+            Style::default()
+                .fg(Color::Reset)
+                .add_modifier(Modifier::BOLD),
         );
         self.files
             .push((Rect::new(command_start, row, width as u16, 1), command));
@@ -900,7 +910,17 @@ mod tests {
             let panel = banner.view(120, false);
             let row = border(&panel);
             assert!(row.starts_with('╰') && row.ends_with("─╯"), "{row}");
-            assert!(row.contains(&format!(" Full list: {command} ─╯")), "{row}");
+            assert!(row.contains(&format!("─ Full list: {command} ─")), "{row}");
+            let table = section_areas(panel.buffer.area)[1].x;
+            let label = row.chars().position(|c| c == 'F').unwrap() as u16;
+            assert_eq!(label, table, "{row}");
+            let (area, _) = panel.files.last().unwrap();
+            assert_eq!(panel.buffer[(area.x, area.y)].fg, Color::Reset);
+            assert!(
+                panel.buffer[(area.x, area.y)]
+                    .modifier
+                    .contains(Modifier::BOLD)
+            );
             let (area, target) = panel.files.last().unwrap();
             assert_eq!(target, command);
             assert_eq!(area.y, BANNER_ROWS - 2);
