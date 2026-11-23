@@ -97,6 +97,8 @@ folder or a program the agent can use takes effect on the next run.
 The full view's table shortens long reasons and shows only the latest rows. Its bottom edge shows
 the [`box runs history`](#box-runs-history) command for this run, which lists every decision in
 full, even while the run goes on. Click the command to copy it, and run it in another terminal.
+When `BOX_HOME` moves the box home, the command starts with `BOX_HOME=<path>`, so it works in a
+terminal that doesn't set it.
 
 The banner's display doesn't pass through clipboard reads or terminal graphics, so turn it off for
 an agent that needs them: add `--no-banner` for one run, set

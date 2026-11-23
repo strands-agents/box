@@ -3909,6 +3909,60 @@ fn long_box_home(scene: &Scene, length: usize) -> PathBuf {
 }
 
 #[test]
+fn the_history_command_names_a_moved_box_home_so_another_shell_can_run_it() {
+    let scene = Scene::new();
+    let moved = scene.root.join("moved home");
+    let folder = moved.join("profiles/probe");
+    std::fs::create_dir_all(&folder).expect("a profile folder");
+    for file in ["profile.toml", "policy.dw"] {
+        std::fs::copy(
+            scene.home().join(".strands/box/profiles/probe").join(file),
+            folder.join(file),
+        )
+        .expect("a copy of the probe profile");
+    }
+    let output = scene
+        .command(&scene.workspace(), "probe", &["-c", "true"])
+        .env("BOX_HOME", &moved)
+        .output()
+        .expect("box runs");
+    succeeded(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let command = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("box: policy history: "))
+        .unwrap_or_else(|| panic!("no history line\n{stderr}"));
+    let id = std::fs::read_dir(moved.join("r"))
+        .expect("the runs folder")
+        .next()
+        .expect("a run")
+        .expect("a run")
+        .file_name();
+    let id = id.to_str().expect("a UTF-8 box ID");
+    assert_eq!(
+        command,
+        format!("BOX_HOME='{}' box runs history {id}", moved.display())
+    );
+    // A shell with no BOX_HOME runs the command as printed, and finds the run only through it.
+    let program = format!(" '{}' runs history ", env!("CARGO_BIN_EXE_box"));
+    let shell = |command: &str| {
+        scene
+            .process(Path::new("/bin/sh"))
+            .arg("-c")
+            .arg(command.replacen(" box runs history ", &program, 1))
+            .current_dir(scene.workspace())
+            .output()
+            .expect("the shell runs")
+    };
+    succeeded(&shell(command));
+    assert!(
+        !shell(&format!("exec box runs history {id}"))
+            .status
+            .success()
+    );
+}
+
+#[test]
 fn a_run_whose_longest_path_is_exactly_at_the_limit_starts() {
     let scene = Scene::new();
     let long = long_box_home(&scene, 65);

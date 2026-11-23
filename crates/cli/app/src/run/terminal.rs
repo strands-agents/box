@@ -14,7 +14,7 @@ use ratatui::layout::Rect;
 use signal_hook::iterator::Signals;
 
 use super::Launch;
-use super::banner::{BANNER_ROWS, Banner, Decision, PolicyStatus};
+use super::banner::{BANNER_ROWS, Banner, Decision, HistoryCommands, PolicyStatus};
 use super::policy::PolicyControl;
 use super::startup;
 use crate::error::Error;
@@ -87,7 +87,10 @@ pub(super) fn run(
             .display()
             .to_string(),
     );
-    banner.history = format!("box runs history {}", launch.name());
+    banner.history = Some(HistoryCommands {
+        all: launch.history_command(false),
+        denials: launch.history_command(true),
+    });
     // Box Core has not started, and this launch holds the box's lock, so the records hold every
     // earlier run of this box and nothing of this one. The run waits for this read
     // (docs/design/cli/profiles.md#start-box-core).

@@ -171,13 +171,17 @@ impl Panel {
     /// right, as a copy target, since the table cuts reasons and keeps only the latest rows. A
     /// command that does not fit whole is left out.
     fn history(&mut self, banner: &Banner) {
-        if banner.history.is_empty() || self.buffer.area.height < 3 {
+        let Some(history) = banner
+            .history
+            .as_ref()
+            .filter(|_| self.buffer.area.height >= 3)
+        else {
             return;
-        }
+        };
         let command = if banner.activity == ActivityView::AllOperations {
-            banner.history.clone()
+            history.all.clone()
         } else {
-            format!("{} --deny", banner.history)
+            history.denials.clone()
         };
         let copied = banner.copied.as_ref().is_some_and(|(copied, at)| {
             *copied == command && at.elapsed() < Duration::from_secs(2)
@@ -884,7 +888,10 @@ mod tests {
     #[test]
     fn the_full_view_offers_the_history_command_for_its_view_in_the_bottom_border() {
         let mut banner = sample(1);
-        banner.history = "box runs history b-0123".into();
+        banner.history = Some(crate::run::banner::HistoryCommands {
+            all: "box runs history b-0123".into(),
+            denials: "box runs history b-0123 --deny".into(),
+        });
         let border = |panel: &Panel| {
             text(panel)
                 .lines()
