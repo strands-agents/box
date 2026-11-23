@@ -6640,32 +6640,13 @@ impl<S: Sources> Resolver<'_, S> {
         resolved: crate::install_layout::Resolved,
     ) -> Result<String, String> {
         let writable = self.writable();
-        for source in &resolved.sources {
-            if let Some(what) = writable.root(source) {
-                return Err(format!(
-                    "chosen through {}, which lies in {what}, which a box can write",
-                    source.display()
-                ));
-            }
-        }
         let checked = crate::program::check(&resolved.program, &writable).map_err(|_| {
             format!(
                 "resolved to {}, which the box cannot run",
                 resolved.program.display()
             )
         })?;
-        let metadata = std::fs::metadata(&checked.real)
-            .map_err(|error| format!("{}: {error}", checked.real.display()))?;
-        if (
-            std::os::unix::fs::MetadataExt::dev(&metadata),
-            std::os::unix::fs::MetadataExt::ino(&metadata),
-        ) != resolved.identity
-        {
-            return Err(format!(
-                "resolved to {}, which changed while box read it",
-                resolved.program.display()
-            ));
-        }
+        crate::install_layout::still_chosen(&checked.real, &resolved)?;
         self.program_sources
             .extend(resolved.sources.iter().map(|source| HostProgram {
                 name: format!("inputs.{input}"),

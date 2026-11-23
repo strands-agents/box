@@ -1278,7 +1278,7 @@ fn an_npm_installed_codex_runs_the_program_of_its_platform_package_and_reaches_n
     assert_eq!(agent_command(&generated)[0], program);
     let config: toml::Value = toml::from_str(generated.box_toml()).expect("box.toml parses");
     let filesystem = &config["agent"]["filesystem"];
-    let installation = resolved(&host.home().join(".npm-global/lib/node_modules"));
+    let installation = resolved(&host.home().join(".npm-global"));
     let under = |key: &str| -> Vec<String> {
         string_list(filesystem.get(key))
             .into_iter()
@@ -1442,7 +1442,8 @@ fn an_npm_launcher_without_its_platform_package_is_passed_over_once_at_create() 
         .collect::<Vec<_>>()
         .join(" ");
     assert!(
-        guided.contains("Codex is not on this host as a program the box can run:"),
+        guided.contains("Codex is not on this host as a program the box can run:")
+            && guided.contains("(npm installed @openai/codex without a platform package for"),
         "{guided}"
     );
     assert_eq!(

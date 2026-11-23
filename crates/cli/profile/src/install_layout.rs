@@ -587,6 +587,22 @@ pub(crate) struct Resolved {
     pub(crate) identity: (u64, u64),
 }
 
+/// Whether `real` is still the file that `resolved` chose, by device and inode.
+pub(crate) fn still_chosen(real: &Path, resolved: &Resolved) -> Result<(), String> {
+    let metadata = fs::metadata(real).map_err(|error| format!("{}: {error}", real.display()))?;
+    if (
+        std::os::unix::fs::MetadataExt::dev(&metadata),
+        std::os::unix::fs::MetadataExt::ino(&metadata),
+    ) != resolved.identity
+    {
+        return Err(format!(
+            "resolved to {}, which changed while box read it",
+            resolved.program.display()
+        ));
+    }
+    Ok(())
+}
+
 /// The package manager whose launcher `box` does not resolve, by the launcher's real file.
 pub(crate) fn unsupported_launcher(real: &Path) -> Option<&'static str> {
     let text = real.to_string_lossy();
@@ -699,6 +715,7 @@ pub(crate) fn resolve_program(
             .collect();
         let dependency = tree.read_json(&file)?;
         let file = tree.path(&file);
+        sources.push(file.clone());
         found.push(key.clone());
         let native = check_platform(&dependency, platform, platform.cpu)?;
         let translated = platform.os == "darwin"
@@ -739,7 +756,7 @@ pub(crate) fn resolve_program(
     let (_, key, folder, dependency, file) = chosen;
     let folder: Vec<&str> = folder.iter().map(String::as_str).collect();
     let folder = folder.as_slice();
-    sources.push(file.clone());
+    let _ = file;
     let (entry, manifest_file) = entrypoint(&tree, folder, dependency, name)
         .map_err(|why| format!("the platform package {key} of {package_name} {why}"))?;
     sources.extend(manifest_file);
@@ -765,17 +782,26 @@ fn entrypoint(
     folder: &[&str],
     dependency: &serde_json::Value,
     name: &str,
-) -> Result<(Vec<String>, Option<PathBuf>), String> {
+) -> Result<(Vec<String>, Vec<PathBuf>), String> {
     if let Some(target) = normalized_bin(dependency)?.get(name) {
-        return Ok((target.split('/').map(str::to_string).collect(), None));
+        return Ok((target.split('/').map(str::to_string).collect(), Vec::new()));
     }
     let vendor = [folder, &["vendor"]].concat();
     let mut manifests = Vec::new();
+    let mut read = Vec::new();
     for target in tree.list(&vendor)? {
+        let folder = [vendor.as_slice(), &[target.as_str()]].concat();
+        if !tree
+            .entry(&folder)?
+            .is_some_and(|(_, stat)| stat.st_mode & nix::libc::S_IFMT == nix::libc::S_IFDIR)
+        {
+            continue;
+        }
         let file = [vendor.as_slice(), &[target.as_str(), "codex-package.json"]].concat();
         if !tree.exists(&file)? {
             continue;
         }
+        read.push(tree.path(&file));
         let manifest = tree.read_json(&file)?;
         if manifest.get("layoutVersion") != Some(&serde_json::Value::from(1)) {
             return Err(format!(
@@ -816,8 +842,8 @@ fn entrypoint(
     }
     match manifests.len() {
         1 => {
-            let (entry, file) = manifests.remove(0);
-            Ok((entry, Some(file)))
+            let (entry, _) = manifests.remove(0);
+            Ok((entry, read))
         }
         0 => Err(format!(
             "names no entry point for `{name}`: no `bin` and no vendor/<target>/codex-package.json"
@@ -883,7 +909,9 @@ fn check_platform(
 ) -> Result<bool, String> {
     let field = |key: &str| -> Result<Option<Vec<String>>, String> {
         match manifest.get(key) {
-            None | Some(serde_json::Value::Null) => Ok(None),
+            None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false)) => Ok(None),
+            Some(serde_json::Value::String(entry)) if entry.is_empty() => Ok(None),
+            Some(serde_json::Value::Number(number)) if number.as_f64() == Some(0.0) => Ok(None),
             Some(serde_json::Value::String(entry)) => Ok(Some(vec![entry.clone()])),
             Some(serde_json::Value::Array(entries)) => entries
                 .iter()
@@ -962,6 +990,11 @@ impl Tree {
     fn refused(&self, rel: &[&str], error: std::io::Error) -> String {
         let path = self.path(rel);
         match error.raw_os_error() {
+            Some(nix::libc::ELOOP | nix::libc::ENOTDIR)
+                if fs::symlink_metadata(&path).is_ok_and(|metadata| !metadata.is_symlink()) =>
+            {
+                format!("{} is not a folder", path.display())
+            }
             Some(nix::libc::ELOOP | nix::libc::ENOTDIR) => {
                 format!(
                     "{} is a link, and box follows no link in an npm installation",
@@ -2067,10 +2100,11 @@ mod tests {
         let marker = temp.path().join("ran");
         let package = prefix.join("lib/node_modules/@openai/codex");
         let run = format!("touch {}", marker.display());
-        crate::fixtures::script(&package.join("bin/codex.js"), &run);
         crate::fixtures::write(
             &package.join("bin/codex.js"),
-            &format!("#!/usr/bin/env node\nrequire('child_process').execSync('{run}')\n"),
+            &format!(
+                "#!/usr/bin/env node\nimport {{ execSync }} from 'node:child_process';\nexecSync('{run}');\n"
+            ),
         );
         crate::fixtures::executable(&package.join("bin/codex.js"));
         let manifest = fs::read_to_string(package.join("package.json"))
@@ -2122,5 +2156,51 @@ mod tests {
             "#!/usr/bin/env node\n",
         );
         assert_eq!(unsupported_launcher(&npm), None);
+    }
+
+    #[test]
+    fn a_file_beside_the_target_folders_is_skipped_and_every_metadata_file_is_a_source() {
+        let (_temp, prefix) = prefix();
+        let programs = crate::fixtures::npm_codex(&prefix, &["darwin-arm64", "linux-x64"]);
+        let packages = prefix.join("lib/node_modules/@openai/codex/node_modules/@openai");
+        file(&packages.join("codex-darwin-arm64/vendor"), ".DS_Store", "");
+        let resolved = resolve_codex(&prefix, &MAC_ARM).unwrap().unwrap();
+        assert_eq!(resolved.program, programs[0]);
+        assert!(
+            resolved
+                .sources
+                .contains(&packages.join("codex-linux-x64/package.json")),
+            "a package that was read but not chosen is a source: {:?}",
+            resolved.sources
+        );
+    }
+
+    #[test]
+    fn a_program_replaced_after_it_was_chosen_is_refused() {
+        let (_temp, prefix) = prefix();
+        let programs = crate::fixtures::npm_codex(&prefix, &["darwin-arm64"]);
+        let resolved = resolve_codex(&prefix, &MAC_ARM).unwrap().unwrap();
+        still_chosen(&programs[0], &resolved).unwrap();
+        fs::remove_file(&programs[0]).unwrap();
+        crate::fixtures::binary(&programs[0].with_extension("new"));
+        fs::rename(programs[0].with_extension("new"), &programs[0]).unwrap();
+        let error = still_chosen(&programs[0], &resolved).unwrap_err();
+        assert!(error.contains("changed while box read it"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_or_false_platform_field_is_absent_as_npm_reads_it() {
+        let manifest = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+        for text in [
+            r#"{"os":""}"#,
+            r#"{"os":false}"#,
+            r#"{"cpu":0}"#,
+            r#"{"libc":null}"#,
+        ] {
+            assert!(
+                check_platform(&manifest(text), &LINUX_X64, "x64").unwrap(),
+                "{text}"
+            );
+        }
     }
 }
