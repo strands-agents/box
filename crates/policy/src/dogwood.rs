@@ -984,6 +984,7 @@ impl DogwoodEngine {
                     rule,
                     attribution,
                     resource: String::new(),
+                    would_deny: None,
                 },
                 DogwoodDecision::Deny => {
                     let reason = if attribution.is_empty() {
@@ -3557,6 +3558,7 @@ when temporal {
                     rule,
                     attribution,
                     resource: String::new(),
+                    would_deny: None,
                 }
             } else {
                 Decision::Deny {

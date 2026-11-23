@@ -125,9 +125,13 @@ It uses a five-second deadline for descendant cleanup and callback draining.
 Startup checks subscriptions and removes path mutes that would suppress required events.
 It refuses startup if required events remain muted or any process mute exists.
 
-The signed tests cover detached-child cleanup and durable history across mode changes.
-They do not establish enforcement after the trusted Box process crashes or validate every shutdown failure.
-Production use still requires further review and tests for those failures.
+Native policy requires the trusted Box process to remain alive. On macOS, an uncatchable
+termination such as `SIGKILL` can leave a descendant running. That descendant can perform new
+file operations within its filesystem grants without Dogwood checks, even when policy denied
+those operations before Box stopped. Normal shutdown cleanup does not protect this case.
+
+The signed tests cover normal detached-child cleanup and durable history across mode changes.
+Standard-release support still requires the remaining failure review and tests.
 
 ### Linux ARM64
 
@@ -151,6 +155,31 @@ Ordinary symbolic links and parent components (`..`) resolve inside the captured
 Policy checks use the resolved object, and effects use its pinned descriptor or parent directory.
 `O_NOFOLLOW` preserves the final-link restriction. Kernel magic links remain restricted.
 Other unsupported open flags and file kinds receive a refusal.
+
+Hard links are different names for the same file contents. Box checks the requested name against
+filesystem grants and policy. Denying one name does not deny every link to that file. An allowed
+write through another name changes the shared contents, including contents visible through a denied
+name or a name outside the workload grants. Those other names do not become accessible.
+
+Native entry handling has these limits in addition to baseline containment:
+
+- `renameat2` is supported only with zero flags. Box refuses nonzero flags, including
+  `RENAME_NOREPLACE` (refuse an existing destination), even when ordinary containment permits them.
+  GNU `mv` can request `RENAME_NOREPLACE` even for a plain move to a new name. With native
+  filesystem policy enabled, Box refuses that request with a permission error even when
+  filesystem grants and policy would permit the move.
+- A rename cannot replace an existing directory, including an empty directory. Moving a directory
+  to a new name is supported.
+- File and directory creation accept only the ordinary permission bits (`0000` through `0777`).
+  Native checks refuse creation with the sticky bit. Baseline containment already refuses
+  the set-group-ID and set-user-ID bits, whether native checks are enabled or disabled.
+
+These operations are refused before a Dogwood decision or file effect.
+The workload receives an operating-system permission error; the source and destination entries remain unchanged.
+
+For native rename cases, the [comparison suite](../dev/linux-native-tests.md#compare-shell-and-native-policy-events)
+uses a test program that calls `renameat` directly; it does not execute GNU `mv`.
+Its permitted rename cases do not establish that GNU `mv` works with native filesystem policy.
 
 An existing descriptor can carry later reads, writes, or directory listings without another Dogwood check.
 Linux permission changes remain subject to filesystem grants, without a fresh Dogwood permission-change check.
@@ -296,7 +325,8 @@ Read the recorded operation and outcome instead of treating every allow as a com
 
 The shutdown path terminates tracked descendants, including detached children, before interception stops.
 On macOS, descendant cleanup and callback draining share a five-second deadline.
-Tests cover normal detached-child cleanup, but not every shutdown failure or enforcement after the trusted process crashes.
+This describes normal shutdown. On macOS, an uncatchable termination such as `SIGKILL` can leave
+a descendant running without native policy checks; its filesystem grants still apply.
 
 ### Can I immediately return to an older binary?
 
@@ -319,7 +349,7 @@ A second build enables deliberate storage, registration, deadline, and worker fa
 The script stops on a failed build or test and prints the directory containing retained fixtures.
 
 Privileged tests require the private `box_native_kernel_tests` build setting.
-Deliberate faults additionally require `box_native_test_faults`.
+Deliberate faults also require `box_native_test_faults`.
 The script sets these values; ordinary `cargo test --all-features` runs the unprivileged unit tests without enabling them.
 Ordinary unit-test success does not replace this kernel suite.
 Neither setting is required to build or use the feature.
@@ -338,10 +368,11 @@ Record the source revision, source changes, and signed executable hash beside th
 The test package requires the binary path and bounds each workload to 60 seconds.
 Ordinary workspace tests do not need a signing identity.
 
-The required macOS unit-test job builds the feature and runs adapter and configuration tests.
-It tests the receipt checker and reports receipt freshness as informational.
+The required macOS unit-test jobs build the feature.
+`Unit Tests (box, macos-latest)` runs the adapter and configuration tests.
+`Unit Tests (others, macos-latest)` tests the receipt checker and reports receipt freshness as informational.
 An outdated or invalid receipt does not fail the job.
-Its summary distinguishes the automated adapter and startup tests from the full signed native enforcement suite.
+Its summary distinguishes the automated startup tests from the full signed native enforcement suite.
 That signed suite does not run in this job.
 Pull requests can merge without fresh signed native test evidence.
 The manual signed suite and receipt tool remain available.
@@ -373,7 +404,7 @@ The receipt covers workspace package sources and assets, build configuration, lo
 the native test package, its shared capture helper, and the unit-test workflow.
 Cargo supplies the workspace package list, including nested packages.
 Separate crate tests, examples, benchmarks, documentation, and unrelated workflows do not invalidate that receipt.
-The required macOS unit-test job also runs startup-refusal tests with and without the Cargo feature.
+`Unit Tests (others, macos-latest)` also runs startup-refusal tests with and without the Cargo feature.
 
 
 ## Run real-agent workloads

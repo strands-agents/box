@@ -92,7 +92,8 @@ the table, and gives your values of the `pass-secret-env` variables to that prog
   paths and the program of a source, and the next run starts
   what the server left there. Run `policy generate-schema` only with servers that you trust as
   yourself.
-- All of this is macOS only. A secret source doesn't load on Linux.
+- On Linux, a sandbox denies a `reads` or `deny` path only when it exists at startup. Box skips an entry whose path is absent and prints one line that names it. No grant can reach that path, but no sandbox denies it until the next start, so a sandbox can see it inside a system folder that Box adds itself. One exception: Box makes the sandboxes after it reads the secrets. So each sandbox denies a path that appears during that read, such as a folder that the program of the source makes on its first run, though the line says that no sandbox denies it. A path that goes away during that read gets no line, and no sandbox denies it. A typing error in a path doesn't stop the box on Linux, so the line is the only sign. Box refuses an entry that names a socket or another path that is not a folder or a regular file, so name the folder that holds a socket. macOS protects an absent path and a socket by name.
+- On Linux, a `reads` or `deny` path must stay in place during a run. If one goes away, a tool or a stdio MCP server whose program is a script doesn't start until the path is back. Box adds a few system folders, such as `/usr/share/zoneinfo`, to a sandbox itself. If a path inside one of them goes away and comes back, a sandbox that already runs can read the new path. The agent can also read a protected file through `/etc/localtime` when that name is a link to the file.
 
 ## Protections Box doesn't provide
 

@@ -1,0 +1,25 @@
+# A tool grammar for uv where `publish` declares its own `--offline`, which takes the place of the
+# global `anywhere` option of that name for `publish` alone.
+
+name    = "uv_override"
+program = "uv"
+format  = 1
+version = 1
+
+[effects]
+network = "uv may contact a package index"
+publish = "Uploads distributions to a package index"
+
+[global]
+options.offline = { flag = ["--offline"], removes = ["network"], anywhere = true }
+options.quiet   = { flag = ["-q", "--quiet"], anywhere = true }
+
+[shell.sync]
+usage = "uv [global options] sync [options]"
+adds  = ["network"]
+
+[shell.publish]
+usage = "uv [global options] publish [options] [<files>...]"
+adds  = ["network", "publish"]
+options.offline = { flag = ["--offline"], overrides = true }
+options.dry_run = { flag = ["--dry-run"], removes = ["publish"] }

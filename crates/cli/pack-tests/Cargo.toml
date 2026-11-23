@@ -1,0 +1,16 @@
+[package]
+name = "strands-box-cli-pack-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Tests of the packs that the Strands Box product CLI ships, one module for each pack."
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+strands-box-cli = { path = "../app", features = ["test-support"] }
+strands-box-cli-profile = { path = "../profile", features = ["test-support"] }
+tempfile = "3"
+toml = "1"
+
+[lints.rust]
+unused_must_use = "deny"

@@ -223,6 +223,9 @@ by reading `src/` belongs in `src/` — the README describes the shape.
 
 ## macOS, measured
 
+- **`sysconf(_SC_ARG_MAX)` reads the `kern.argmax` sysctl.** Under the seven-name profile, Python's
+  `os.sysconf('SC_ARG_MAX')` raised `PermissionError: [Errno 1]`, which stops pre-commit on import;
+  with `kern.argmax` named it returned `1048576`. The name is a public host limit.
 - **The profile carries no `/`, `/etc`, `/private/tmp`, or `/dev/null` rule of its own.** Each arrives
   as a grant instead, because static text gave every box every harness's needs — a Python box carried
   Bun's `/private/tmp` entry. The measurement that first put that entry in the profile still holds,
@@ -1016,6 +1019,21 @@ The native filesystem broker mediates `renameat2` itself and answers any call wi
 `EACCES` (`broker.rs`), so under native filesystem policy tempfile still cannot persist a file.
 `a_name_is_created_without_replacing_one_with_renameat2_under_the_filters` checks each flag under
 the filters, and runs tempfile's `persist_noclobber`.
+
+### Resetting ids to the ones a workload has
+
+On Amazon Linux 2023 (aarch64, glibc 2.34), GNU make 4.3 failed every recipe in a box with
+`make: echo: Operation not permitted`. make starts each recipe with `posix_spawn` and
+`POSIX_SPAWN_RESETIDS`, and glibc's child then calls `setresuid(-1, getuid(), -1)` and
+`setresgid(-1, getgid(), -1)`. The filter admitted only `setresuid(0, 0, 0)` and
+`setresgid(-1, -1, -1)`, so it answered `EPERM` and the spawn failed before `execve`.
+
+The user namespace maps one uid and one gid, both `0`, so every id the workload has is `0`. The
+permit admits each call whose three arguments are each `0` or `-1`, which leaves every id as it
+is. Any other id still gets `EPERM` from the filter, before the kernel would answer `EINVAL` for
+an unmapped id. `setuid` and `setgid` stay refused, so musl's `POSIX_SPAWN_RESETIDS`, which calls
+them, still fails. `a_workload_resets_its_own_ids_and_cannot_change_them` runs
+`posix_spawn` with the flag under the real trampoline, and checks each form.
 
 ### The host's top-level links into /usr
 

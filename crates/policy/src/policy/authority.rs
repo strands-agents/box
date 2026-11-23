@@ -73,12 +73,16 @@ struct LiveAuthority {
     /// cannot ride the coarse `mcp:call` permit with its argument constraint unenforced. Empty
     /// until `finish_mcp_discovery` degrades, and empty again once a complete bundle installs.
     degraded_tools: BTreeSet<(String, String)>,
+    /// Whether an authored policy is installed; with none, log-only mode lets nothing through.
+    installed_policy: bool,
 }
 
 pub(super) struct Authority {
     proposal: Mutex<Option<ProposalState>>,
     live: Mutex<LiveAuthority>,
     warnings: Vec<PolicyWarning>,
+    /// Whether a policy denial is recorded and let through instead of enforced.
+    log_only: bool,
 }
 
 impl Authority {
@@ -112,8 +116,10 @@ impl Authority {
                 readiness: Readiness::Ready,
                 pending_tools: BTreeSet::new(),
                 degraded_tools: BTreeSet::new(),
+                installed_policy: !sources.is_empty(),
             }),
             warnings,
+            log_only: false,
         })
     }
 
@@ -224,8 +230,10 @@ impl Authority {
                 readiness,
                 pending_tools,
                 degraded_tools: BTreeSet::new(),
+                installed_policy: !sources.is_empty(),
             }),
             warnings,
+            log_only: false,
         })
     }
 
@@ -280,6 +288,7 @@ impl Authority {
         live.readiness = Readiness::Ready;
         live.pending_tools = BTreeSet::new();
         live.degraded_tools.clear();
+        live.installed_policy = !sources.is_empty();
         drop(live);
         *proposal_guard = Some(proposed);
         Ok(())
@@ -454,8 +463,30 @@ impl Authority {
         Ok(servers.into_iter().collect())
     }
 
-    /// Decides through a ready live authority and denies every other state.
+    /// Let every later recorded policy denial through instead of enforcing it.
+    pub(super) fn set_log_only(&mut self) {
+        self.log_only = true;
+    }
+
+    /// Decides one request; in log-only mode, a recorded policy denial is let through.
     pub(super) fn decide(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request: ActionRequest<'_>,
+    ) -> (Decision, Option<RequestId>) {
+        self.decide_as_authored(governed, principal, request)
+    }
+
+    /// Whether log-only mode applies to `live`: it is on, and an authored policy is installed, so
+    /// an absent policy still denies by default.
+    fn lets_denials_through(&self, live: &LiveAuthority) -> bool {
+        self.log_only && live.installed_policy
+    }
+
+    /// Decides through a ready live authority and denies every other state, under one hold of the
+    /// live lock, so a reload cannot change whether log-only mode applies mid-decision.
+    fn decide_as_authored(
         &self,
         governed: &GovernedBox,
         principal: &Principal,
@@ -487,10 +518,15 @@ impl Authority {
                         {
                             return (Decision::policy_pending(), None);
                         }
-                        live.engine.decide(governed, principal, request)
                     }
-                    Readiness::Ready => live.engine.decide(governed, principal, request),
+                    Readiness::Ready => {}
                 }
+                let (decision, request_id) = live.engine.decide(governed, principal, request);
+                (
+                    decision
+                        .unenforced_when(self.lets_denials_through(&live), request_id.is_some()),
+                    request_id,
+                )
             }
             Err(_) => (Decision::internal_fault(), None),
         }
@@ -615,9 +651,11 @@ impl Authority {
                 rule: crate::RuleId::default_deny(),
                 attribution: Vec::new(),
                 resource: String::new(),
+                would_deny: None,
             },
-            // An explicit `forbid`, an internal fault, or an allow — enforce as decided.
-            other => other,
+            // An explicit `forbid`, an internal fault, or an allow — enforce as decided, unless
+            // log-only mode lets a recorded `forbid` through.
+            other => other.unenforced_when(self.lets_denials_through(&live), pending.is_some()),
         };
         // Only a call that goes on to the server owes a response.
         let pending = pending.filter(|_| decision.is_allow());
@@ -657,8 +695,10 @@ impl Authority {
                 readiness: Readiness::Ready,
                 pending_tools: BTreeSet::new(),
                 degraded_tools: BTreeSet::new(),
+                installed_policy: !sources.is_empty(),
             }),
             warnings: Vec::new(),
+            log_only: false,
         })
     }
 
@@ -684,8 +724,10 @@ impl Authority {
                 readiness: Readiness::Ready,
                 pending_tools: BTreeSet::new(),
                 degraded_tools: BTreeSet::new(),
+                installed_policy: !sources.is_empty(),
             }),
             warnings: Vec::new(),
+            log_only: false,
         })
     }
 

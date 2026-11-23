@@ -10,7 +10,9 @@ use opentelemetry_proto::transform::common::tonic::ResourceAttributesWithSchema;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
 use opentelemetry_sdk::logs::LogBatch;
-use tokio::io::AsyncWriteExt as _;
+use std::io::Write as _;
+use std::sync::Arc;
+
 use tokio::sync::Mutex;
 
 use crate::config::{Payload, Target, TargetKind, TargetSecret};
@@ -42,7 +44,7 @@ pub(crate) const REQUEST_DEADLINE: Duration = Duration::from_secs(4);
 #[derive(Debug)]
 enum Wire {
     /// One OTLP-JSON request per line, appended through one handle held open.
-    File(Mutex<tokio::fs::File>),
+    File(Arc<Mutex<std::fs::File>>),
     /// OTLP over HTTP, protobuf.
     Otlp {
         base: String,
@@ -90,7 +92,7 @@ impl TargetExporter {
                         reason: format!("{} could not be cloned: {source}", target.destination()),
                     })?;
                     return Ok(Self {
-                        wire: Wire::File(Mutex::new(tokio::fs::File::from_std(file))),
+                        wire: Wire::File(Arc::new(Mutex::new(file))),
                         accepts,
                         resource: std::sync::OnceLock::new(),
                         dropped,
@@ -118,7 +120,7 @@ impl TargetExporter {
                     .map_err(|source| TelemetryError::Config {
                         reason: format!("{} could not be opened: {source}", target.destination()),
                     })?;
-                Wire::File(Mutex::new(tokio::fs::File::from_std(file)))
+                Wire::File(Arc::new(Mutex::new(file)))
             }
             TargetKind::Otlp => Wire::Otlp {
                 base: crate::config::dialed(target.destination())
@@ -236,12 +238,11 @@ impl TargetExporter {
         match &self.wire {
             Wire::File(handle) => {
                 let line = one_line(request)?;
-                let mut file = handle.lock().await;
-                file.write_all(&line)
+                // Waiting for the file stays cancellable; once held, the write runs to its end.
+                let mut file = Arc::clone(handle).lock_owned().await;
+                tokio::task::spawn_blocking(move || append(&mut file, &line))
                     .await
-                    .map_err(|source| OTelSdkError::InternalFailure(source.to_string()))?;
-                file.sync_all()
-                    .await
+                    .map_err(|source| OTelSdkError::InternalFailure(source.to_string()))?
                     .map_err(|source| OTelSdkError::InternalFailure(source.to_string()))
             }
             Wire::Otlp {
@@ -607,6 +608,44 @@ fn box_spans(logs: &ExportLogsServiceRequest) -> ExportTraceServiceRequest {
     ExportTraceServiceRequest { resource_spans }
 }
 
+/// Append one whole line and sync it.
+fn append(file: &mut std::fs::File, line: &[u8]) -> std::io::Result<()> {
+    let before = file.metadata().map(|metadata| metadata.len()).ok();
+    let mut written = 0;
+    while written < line.len() {
+        match file.write(&line[written..]) {
+            Ok(0) => {
+                return Err(cut_back(
+                    file,
+                    before,
+                    written,
+                    std::io::ErrorKind::WriteZero.into(),
+                ));
+            }
+            Ok(count) => written += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(cut_back(file, before, written, error)),
+        }
+    }
+    file.sync_all()
+}
+
+/// Remove the fragment a failed append left, when no other writer appended after it.
+fn cut_back(
+    file: &std::fs::File,
+    before: Option<u64>,
+    written: usize,
+    error: std::io::Error,
+) -> std::io::Error {
+    if let Some(before) = before
+        && written > 0
+        && file.metadata().map(|metadata| metadata.len()).ok() == Some(before + written as u64)
+    {
+        let _ = file.set_len(before);
+    }
+    error
+}
+
 /// One request as one newline-terminated JSON line, so a reader never sees half a record.
 fn one_line<T: serde::Serialize>(request: &T) -> std::result::Result<Vec<u8>, OTelSdkError> {
     let mut line = serde_json::to_vec(request)
@@ -618,6 +657,7 @@ fn one_line<T: serde::Serialize>(request: &T) -> std::result::Result<Vec<u8>, OT
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt as _;
 
     /// A file target opens under a directory that does not exist yet.
     #[test]
@@ -665,6 +705,232 @@ mod tests {
         let line = one_line(&request).expect("serialize");
         assert_eq!(line.iter().filter(|byte| **byte == b'\n').count(), 1);
         assert_eq!(line.last(), Some(&b'\n'));
+    }
+
+    /// A file target on a full FIFO, so its next write blocks, and the handle that keeps it open.
+    fn stalled_pipe(directory: &std::path::Path) -> (Target, std::fs::File) {
+        let fifo = directory.join("stalled");
+        let named = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).expect("a C path");
+        // SAFETY: `named` is a valid NUL-terminated path that outlives the call.
+        let made = unsafe { libc::mkfifo(named.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+        // A read-write handle keeps a reader on the pipe, and the fill makes the next write block.
+        let mut pipe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+            .expect("open the pipe");
+        let chunk = [0_u8; 4096];
+        loop {
+            match pipe.write(&chunk) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill the pipe: {error}"),
+            }
+        }
+        let target = Target::new(TargetKind::File, fifo.to_string_lossy().to_string());
+        (target, pipe)
+    }
+
+    /// Everything the pipe receives until `written` is set and it is empty, without the fill.
+    fn drained(pipe: &mut std::fs::File, written: &std::sync::atomic::AtomicBool) -> Vec<u8> {
+        use std::io::Read as _;
+
+        let mut received = Vec::new();
+        let mut buffer = [0_u8; 65536];
+        loop {
+            match pipe.read(&mut buffer) {
+                Ok(read) => received.extend_from_slice(&buffer[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if written.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("empty the pipe: {error}"),
+            }
+        }
+        let start = received
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(received.len());
+        received.split_off(start)
+    }
+
+    /// A relay cancelled during its write still writes the whole line.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_relay_never_tears_the_file() {
+        use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
+        use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (target, mut pipe) = stalled_pipe(directory.path());
+        let exporter = std::sync::Arc::new(
+            TargetExporter::open(&target, std::sync::Arc::default()).expect("open"),
+        );
+
+        let large = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![Span {
+                        attributes: vec![KeyValue {
+                            key: "padding".to_string(),
+                            value: Some(AnyValue {
+                                value: Some(any_value::Value::StringValue(
+                                    "x".repeat(3 * 1024 * 1024),
+                                )),
+                            }),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        // The full pipe blocks the write, so the deadline always cuts the relay inside it.
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(100), exporter.relay_trace(&large)).await;
+        assert!(
+            cancelled.is_err(),
+            "the relay finished before it was cancelled"
+        );
+
+        // The next record waits behind the cut write, so the pipe must empty while it waits.
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let written = std::sync::Arc::clone(&written);
+            std::thread::spawn(move || drained(&mut pipe, &written))
+        };
+        let next = exporter
+            .relay_trace(&ExportTraceServiceRequest {
+                resource_spans: Vec::new(),
+            })
+            .await;
+        written.store(true, std::sync::atomic::Ordering::Release);
+        // `fsync` on a pipe is `EINVAL` on Linux, so the pipe's bytes are the evidence, not the result.
+        let _ = next;
+
+        let written = reader.join().expect("the pipe is read");
+        assert_eq!(written.last(), Some(&b'\n'), "the pipe ends inside a line");
+        let lines: Vec<&[u8]> = written
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .collect();
+        for line in &lines {
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(line).is_ok(),
+                "a torn line of {} bytes",
+                line.len()
+            );
+        }
+        assert_eq!(lines.len(), 2, "the cut relay and the next record");
+    }
+
+    /// An append that fails partway leaves no fragment for the next record to join.
+    #[test]
+    fn a_failed_append_leaves_no_fragment() {
+        const CHILD: &str = "STRANDS_BOX_TELEMETRY_FAILED_APPEND_CHILD";
+        // The file-size limit is per process, so the test runs alone in a child process.
+        if std::env::var_os(CHILD).is_none() {
+            let module = module_path!();
+            let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+            let name = format!("{module}::a_failed_append_leaves_no_fragment");
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", &name, "--test-threads=1"])
+                .env(CHILD, "1")
+                .output()
+                .expect("run the child");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "the child failed: {stdout}");
+            // A renamed or moved test matches nothing, and libtest still exits 0.
+            assert!(
+                stdout.contains("test result: ok. 1 passed"),
+                "the child ran no test named {name}: {stdout}"
+            );
+            return;
+        }
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let destination = directory.path().join("records.jsonl");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&destination)
+            .expect("open");
+        append(&mut file, b"{}\n").expect("the first line is written");
+
+        // SAFETY: plain libc calls on this single-threaded child process.
+        let limit = unsafe {
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            let mut limit = std::mem::zeroed::<libc::rlimit>();
+            assert_eq!(libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit), 0);
+            let lowered = libc::rlimit {
+                rlim_cur: 4096,
+                rlim_max: limit.rlim_max,
+            };
+            assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &lowered), 0);
+            limit
+        };
+        let large = [b'x'; 8192];
+        let failed = append(&mut file, &large);
+        // SAFETY: restores the soft limit read above, which the hard limit still allows.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) }, 0);
+        assert!(failed.is_err(), "the append past the limit succeeded");
+
+        append(&mut file, b"{}\n").expect("the next line is written");
+        assert_eq!(
+            std::fs::read(&destination).expect("read"),
+            b"{}\n{}\n",
+            "a fragment stayed in the file"
+        );
+    }
+
+    /// A relay cancelled while it waits for the file leaves no write behind.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_relay_cancelled_while_waiting_leaves_no_write_behind() {
+        use std::io::Read as _;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (target, mut pipe) = stalled_pipe(directory.path());
+        let exporter = std::sync::Arc::new(
+            TargetExporter::open(&target, std::sync::Arc::default()).expect("open"),
+        );
+        let empty = || ExportTraceServiceRequest {
+            resource_spans: Vec::new(),
+        };
+        // The first relay holds the file inside a write the full pipe blocks.
+        let holder = {
+            let exporter = std::sync::Arc::clone(&exporter);
+            tokio::spawn(async move { exporter.relay_trace(&empty()).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        for _ in 0..20 {
+            let waited =
+                tokio::time::timeout(Duration::from_millis(5), exporter.relay_trace(&empty()))
+                    .await;
+            assert!(waited.is_err(), "a relay finished while the file was held");
+        }
+
+        // Empty the pipe until the held write and anything queued behind it have arrived.
+        let mut received = Vec::new();
+        let mut buffer = [0_u8; 65536];
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        while tokio::time::Instant::now() < deadline {
+            match pipe.read(&mut buffer) {
+                Ok(read) => received.extend_from_slice(&buffer[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("empty the pipe: {error}"),
+            }
+        }
+        let _ = holder.await.expect("the held relay ends");
+
+        let lines = received.iter().filter(|byte| **byte == b'\n').count();
+        assert_eq!(lines, 1, "a cancelled relay still wrote its line");
     }
 
     /// **A redirect never carries the credential to the host it names.**

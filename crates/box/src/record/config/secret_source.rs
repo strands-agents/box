@@ -128,13 +128,33 @@ pub(crate) struct ProtectedPath {
     pub(crate) entry: String,
 }
 
+/// What one `reads` or `deny` entry names when Box resolves it, which no grant may reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Spelled {
+    /// The path as written, then as it resolves when that differs.
+    pub(crate) spellings: Vec<PathBuf>,
+    /// Each symbolic link on the way.
+    pub(crate) links: Vec<PathBuf>,
+    /// Whether each sandbox denies the path: not where a sandbox denies only a path that is
+    /// there, and this one is absent.
+    pub(crate) covered: bool,
+}
+
 impl ProtectedPath {
     /// This path as written under `operator_home` and as it resolves through each symbolic link,
     /// also a link whose target is not there yet, then each link on the way.
-    pub(crate) fn spellings(
+    pub(crate) fn spellings(&self, operator_home: &Path) -> Result<Spelled, ConfigError> {
+        self.spellings_on(operator_home, cfg!(target_os = "linux"))
+    }
+
+    /// [`spellings`](Self::spellings) on an operating system whose sandbox denies a path that is
+    /// absent by its name, or one whose sandbox denies a path only when it is there
+    /// (`present_only`).
+    fn spellings_on(
         &self,
         operator_home: &Path,
-    ) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ConfigError> {
+        present_only: bool,
+    ) -> Result<Spelled, ConfigError> {
         let refuse = |reason: String| ConfigError::SecretSource {
             scheme: self.scheme.clone(),
             reason: format!("`{}` entry {:?} {reason}", self.list, self.entry),
@@ -145,11 +165,39 @@ impl ProtectedPath {
         // link must be closed too.
         let (resolved, links) = crate::record::layout::resolved_through_links(&written)
             .map_err(|error| refuse(format!("cannot be inspected: {error}")))?;
+        let mut covered = true;
+        if present_only {
+            // A mount covers only a folder or a regular file that is there.
+            match std::fs::metadata(&resolved) {
+                Ok(metadata) if metadata.is_dir() || metadata.is_file() => {}
+                Ok(_) => {
+                    return Err(refuse(format!(
+                        "names {}, which is not a folder or a regular file. On Linux, Box \
+                         protects only a folder or a regular file: name the folder that holds \
+                         it, or remove the entry",
+                        resolved.display()
+                    )));
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    covered = false;
+                }
+                Err(error) => return Err(refuse(format!("cannot be inspected: {error}"))),
+            }
+        }
         let mut spellings = vec![written];
         if !spellings.contains(&resolved) {
             spellings.push(resolved);
         }
-        Ok((spellings, links))
+        Ok(Spelled {
+            spellings,
+            links,
+            covered,
+        })
     }
 }
 
@@ -191,27 +239,12 @@ impl DeclaredSources {
         entries: &BTreeMap<String, SecretSourceEntry>,
         enabled: bool,
     ) -> Result<Self, ConfigError> {
-        Self::check_on(entries, enabled, cfg!(target_os = "macos"))
-    }
-
-    /// [`check`](Self::check) on an operating system that is `protected` or not.
-    fn check_on(
-        entries: &BTreeMap<String, SecretSourceEntry>,
-        enabled: bool,
-        protected: bool,
-    ) -> Result<Self, ConfigError> {
         let mut declarations = BTreeMap::new();
         for (scheme, entry) in entries {
             let refuse = |reason: &str| ConfigError::SecretSource {
                 scheme: scheme.clone(),
                 reason: reason.to_string(),
             };
-            if !protected {
-                return Err(refuse(
-                    "a secret source loads on macOS only: protection of its program and its \
-                     files from the workload is not built for Linux yet",
-                ));
-            }
             if !enabled {
                 return Err(refuse(
                     "a secret source is experimental: set `secret-sources = true` in \
@@ -257,10 +290,10 @@ impl DeclaredSources {
             .map(|(scheme, _)| scheme.as_str())
     }
 
-    /// The checked declarations of `entries` on a protected operating system, with the feature on.
+    /// The checked declarations of `entries`, with the feature on.
     #[cfg(test)]
     pub(crate) fn for_tests(entries: &BTreeMap<String, SecretSourceEntry>) -> Self {
-        Self::check_on(entries, true, true).expect("the test declarations are valid")
+        Self::check(entries, true).expect("the test declarations are valid")
     }
 }
 
@@ -331,7 +364,7 @@ pub(crate) mod tests {
     /// One `[secret-source.op]` table with `body` in place of the valid keys.
     fn refusal(body: &str) -> String {
         let entries = entries(&format!("[secret-source.op]\n{body}"));
-        DeclaredSources::check_on(&entries, true, true)
+        DeclaredSources::check(&entries, true)
             .expect_err("the declaration is refused")
             .to_string()
     }
@@ -351,7 +384,7 @@ pub(crate) mod tests {
         assert!(!DeclaredSources::none().enabled());
         assert!(switched_on().enabled());
         assert!(
-            !DeclaredSources::check_on(&BTreeMap::new(), false, true)
+            !DeclaredSources::check(&BTreeMap::new(), false)
                 .expect("no table needs no switch")
                 .enabled()
         );
@@ -412,37 +445,15 @@ pub(crate) mod tests {
 
     #[test]
     fn a_declaration_without_the_feature_is_refused() {
-        let error = DeclaredSources::check_on(&entries(DECLARED), false, true)
-            .expect_err("the feature is off");
+        let error =
+            DeclaredSources::check(&entries(DECLARED), false).expect_err("the feature is off");
         assert_eq!(
             error.to_string(),
             "invalid `[secret-source.aws-secretsmanager]` table: a secret source is experimental: \
              set `secret-sources = true` in `[experimental-features]` to load it"
         );
-        DeclaredSources::check_on(&BTreeMap::new(), false, true)
+        DeclaredSources::check(&BTreeMap::new(), false)
             .expect("a configuration with no declaration needs no feature");
-    }
-
-    #[test]
-    fn a_declaration_on_an_unprotected_operating_system_is_refused() {
-        for enabled in [false, true] {
-            let error = DeclaredSources::check_on(&entries(DECLARED), enabled, false)
-                .expect_err("the operating system has no protection");
-            assert_eq!(
-                error.to_string(),
-                "invalid `[secret-source.aws-secretsmanager]` table: a secret source loads on \
-                 macOS only: protection of its program and its files from the workload is not \
-                 built for Linux yet"
-            );
-        }
-        DeclaredSources::check_on(&BTreeMap::new(), false, false)
-            .expect("a configuration with no declaration loads on each operating system");
-    }
-
-    #[test]
-    fn the_operating_system_check_follows_the_build_target() {
-        let checked = DeclaredSources::check(&entries(DECLARED), true);
-        assert_eq!(checked.is_ok(), cfg!(target_os = "macos"));
     }
 
     #[test]
@@ -473,7 +484,7 @@ pub(crate) mod tests {
             // No `protocol`, so the scheme check is the first one.
             let entries = entries(&format!("[secret-source.{scheme}]\n{COMMAND}"));
             assert_eq!(
-                DeclaredSources::check_on(&entries, true, true)
+                DeclaredSources::check(&entries, true)
                     .expect_err("the scheme is refused")
                     .to_string(),
                 format!("invalid `[secret-source.{scheme}]` table: credential error: {reason}")
@@ -556,7 +567,7 @@ pub(crate) mod tests {
         let entries = entries(&format!(
             "[secret-source.op]\n{PROTOCOL}{COMMAND}reads = [\"~\", \"~/.config/op\", \"/etc/op\"]\n"
         ));
-        DeclaredSources::check_on(&entries, true, true).expect("each spelling names one host path");
+        DeclaredSources::check(&entries, true).expect("each spelling names one host path");
     }
 
     #[test]
@@ -594,7 +605,7 @@ pub(crate) mod tests {
         let entries = entries(&format!(
             "[secret-source.op]\n{PROTOCOL}{COMMAND}reads = [\"~/.config/op..d\", \"/etc/..op\"]\n"
         ));
-        DeclaredSources::check_on(&entries, true, true).expect("no `..` component, no refusal");
+        DeclaredSources::check(&entries, true).expect("no `..` component, no refusal");
     }
 
     #[test]
@@ -613,6 +624,106 @@ pub(crate) mod tests {
             "the `aws-secretsmanager` table of the fixture names no path"
         );
         assert_eq!(protected_paths(&BTreeMap::new()), []);
+    }
+
+    /// **Where a sandbox denies only a present folder or file, an entry whose path is absent
+    /// keeps its spellings with no cover, and an entry that names a socket is refused**, and a
+    /// present folder or file is covered.
+    #[test]
+    fn an_absent_path_is_skipped_and_a_socket_is_refused_where_only_a_present_path_is_protected() {
+        let directory = tempfile::tempdir().expect("a home");
+        let home = directory.path().canonicalize().expect("the home resolves");
+        std::fs::create_dir_all(home.join("vault/store")).expect("a folder of the vault");
+        std::fs::write(home.join("vault/token"), "").expect("a file of the vault");
+        std::os::unix::fs::symlink(home.join("vault/store"), home.join("linked"))
+            .expect("a link to the folder");
+        std::os::unix::fs::symlink(home.join("app/socket"), home.join("dangling"))
+            .expect("a link whose target is not there");
+        let protected = |entry: &str| ProtectedPath {
+            scheme: "op".to_string(),
+            list: "deny",
+            entry: entry.to_string(),
+        };
+        // An absent name, an absent name below one, a link whose target is absent, and a name
+        // below a file.
+        for (entry, named) in [
+            ("~/later", home.join("later")),
+            ("~/later/socket", home.join("later/socket")),
+            ("~/dangling", home.join("app/socket")),
+            ("~/vault/token/below", home.join("vault/token/below")),
+        ] {
+            let path = protected(entry);
+            let by_name = path.spellings_on(&home, false).expect("an absent path");
+            assert!(by_name.covered, "{entry}");
+            assert_eq!(by_name.spellings.last(), Some(&named), "{entry}");
+            // No grant reaches the same spellings, and no sandbox denies them.
+            assert_eq!(
+                path.spellings_on(&home, true).expect("an absent path"),
+                Spelled {
+                    covered: false,
+                    ..by_name
+                },
+                "{entry}"
+            );
+        }
+        for entry in ["~/vault/store", "~/vault/token", "~/linked", "~"] {
+            let path = protected(entry);
+            let spelled = path.spellings_on(&home, true).expect("the path is there");
+            assert!(spelled.covered, "{entry}");
+            assert_eq!(
+                spelled,
+                path.spellings_on(&home, false).expect("the path is there"),
+                "{entry}"
+            );
+        }
+        // A socket, and a link to it: a mount covers a folder or a regular file alone.
+        let _socket =
+            std::os::unix::net::UnixListener::bind(home.join("agent.sock")).expect("a socket");
+        std::os::unix::fs::symlink(home.join("agent.sock"), home.join("linked.sock"))
+            .expect("a link to the socket");
+        for entry in ["~/agent.sock", "~/linked.sock"] {
+            let path = protected(entry);
+            assert_eq!(
+                path.spellings_on(&home, true)
+                    .expect_err("the path is a socket")
+                    .to_string(),
+                format!(
+                    "invalid `[secret-source.op]` table: `deny` entry {entry:?} names {}, which \
+                     is not a folder or a regular file. On Linux, Box protects only a folder or \
+                     a regular file: name the folder that holds it, or remove the entry",
+                    home.join("agent.sock").display()
+                )
+            );
+            path.spellings_on(&home, false)
+                .expect("the other rule protects a socket by its name");
+        }
+    }
+
+    /// **The rule for an absent path follows the build target**: on Linux no sandbox denies it,
+    /// and macOS denies it by its name.
+    #[test]
+    fn the_rule_for_an_absent_path_follows_the_build_target() {
+        let directory = tempfile::tempdir().expect("a home");
+        let home = directory.path().canonicalize().expect("the home resolves");
+        let path = ProtectedPath {
+            scheme: "op".to_string(),
+            list: "reads",
+            entry: "~/.config/op".to_string(),
+        };
+        let present = Spelled {
+            spellings: vec![home.join(".config/op")],
+            links: Vec::new(),
+            covered: true,
+        };
+        assert_eq!(
+            path.spellings(&home).expect("an absent path"),
+            Spelled {
+                covered: !cfg!(target_os = "linux"),
+                ..present.clone()
+            }
+        );
+        std::fs::create_dir_all(home.join(".config/op")).expect("the folder of the vault");
+        assert_eq!(path.spellings(&home).expect("a present path"), present);
     }
 
     #[test]

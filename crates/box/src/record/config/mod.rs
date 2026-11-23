@@ -55,7 +55,7 @@ use crate::error::{BoxError, ConfigError};
 use self::egress::routes_for;
 use self::egress::{
     BackendTarget, EgressEntry, EgressRoute, Protocol, host_of, routes_for_and_remote,
-    validate_egress, validate_egress_and_remote,
+    validate_egress, validate_egress_and_remote, validate_host_loopback_secrets,
 };
 #[cfg(test)]
 use self::env::{LOADER_HOOK_PREFIXES, LOADER_HOOKS};
@@ -578,6 +578,11 @@ impl RunContract {
         let remote_mcp = remote_mcp_entries(http_mcp);
         let declared = self.file.declared_sources()?;
         validate_egress_and_remote(&egress, &remote_mcp, &declared)?;
+        validate_host_loopback_secrets(
+            &egress,
+            &remote_mcp,
+            agent_ingress(self.file.agent.as_ref()),
+        )?;
         let _ = routes_for_and_remote(&egress, &remote_mcp, &declared)?;
         let mut sources = vec![self.source];
         if let Some(source) = policy_source {
@@ -1743,6 +1748,11 @@ impl ConfigFile {
                 ),
             });
         }
+        validate_host_loopback_secrets(
+            &self.egress,
+            &BTreeMap::new(),
+            agent_ingress(self.agent.as_ref()),
+        )?;
         validate_egress(&self.egress, &self.declared_sources()?)
     }
 
@@ -1758,6 +1768,11 @@ impl ConfigFile {
                     .map(|(label, tool)| (format!("[tool.{label}]"), tool)),
             )
     }
+}
+
+/// The `[[agent.ingress]]` entries of `agent`, or none.
+fn agent_ingress(agent: Option<&ProcessSpec>) -> &[ingress::Ingress] {
+    agent.map_or(&[], |agent| agent.ingress.as_slice())
 }
 
 /// Refuse a `[tool.<name>]` label that is not one plain component.
@@ -5171,7 +5186,6 @@ command = ["mcp-server-fetch"]
          reads = [\"~/.config/op\"]\ndeny = [\"/var/run/op\"]\n";
 
     /// A route, a remote MCP server, a backend auth, and a telemetry target that each name `op://`.
-    #[cfg(target_os = "macos")]
     const OP_USE_SITES: &str = "[egress.github]\ndestinations = [\"api.github.com\"]\n\
          secret.ref = \"op://Personal/GitHub/token\"\nsecret.env = \"GH_TOKEN\"\n\
          [egress.internal]\ndestinations = [\"internal.example.com\"]\n\
@@ -5182,33 +5196,23 @@ command = ["mcp-server-fetch"]
          [telemetry.otlp]\nkind = \"otlp\"\ndestination = \"https://otlp.example.com\"\n\
          secret.ref = \"op://Personal/Otlp/key\"\nsecret.header = \"x-api-key\"\n";
 
-    /// The refusal of a declaration on an operating system with no protection for it.
-    const UNPROTECTED: &str = "invalid `[secret-source.op]` table: a secret source loads on macOS \
-         only: protection of its program and its files from the workload is not built for Linux yet";
-
-    /// **`[secret-source.<scheme>]` needs the `secret-sources` switch**, and it loads on macOS
-    /// only.
+    /// **`[secret-source.<scheme>]` needs the `secret-sources` switch.**
     #[test]
     fn a_secret_source_table_needs_the_secret_sources_switch() {
         let without = load(OP_SOURCE).expect_err("the switch is off").to_string();
         let with = load(&format!("{SECRET_SOURCES_ON}{OP_SOURCE}"));
-        if cfg!(target_os = "macos") {
-            assert_eq!(
-                without,
-                "invalid `[secret-source.op]` table: a secret source is experimental: set \
-                 `secret-sources = true` in `[experimental-features]` to load it"
-            );
-            let file = with.expect("the switch is on");
-            assert_eq!(
-                file.secret_source.keys().collect::<Vec<_>>(),
-                ["op"],
-                "the table is kept under its scheme"
-            );
-        } else {
-            assert_eq!(without, UNPROTECTED);
-            assert_eq!(with.expect_err("no protection").to_string(), UNPROTECTED);
-        }
-        // The switch alone declares nothing, on each operating system.
+        assert_eq!(
+            without,
+            "invalid `[secret-source.op]` table: a secret source is experimental: set \
+             `secret-sources = true` in `[experimental-features]` to load it"
+        );
+        let file = with.expect("the switch is on");
+        assert_eq!(
+            file.secret_source.keys().collect::<Vec<_>>(),
+            ["op"],
+            "the table is kept under its scheme"
+        );
+        // The switch alone declares nothing.
         let file = load(SECRET_SOURCES_ON).expect("the switch alone loads");
         assert!(file.experimental_features.secret_sources);
         assert!(file.secret_source.is_empty());
@@ -5256,7 +5260,6 @@ command = ["mcp-server-fetch"]
 
     /// **The stored record holds each declaration and each use site, at the secret source record
     /// version**, and this build reads its own record.
-    #[cfg(target_os = "macos")]
     #[test]
     fn a_declaration_is_stored_at_a_version_no_earlier_build_reads() {
         let stored = pinned_record(&format!("{SECRET_SOURCES_ON}{OP_SOURCE}{OP_USE_SITES}"));
@@ -5479,8 +5482,8 @@ command = ["mcp-server-fetch"]
         stored
     }
 
-    /// **A stored declaration is checked again when the record is read**: the switch, the
-    /// operating system, and the declaration's own rules.
+    /// **A stored declaration is checked again when the record is read**: the switch and the
+    /// declaration's own rules.
     #[test]
     fn a_stored_declaration_is_checked_again_when_the_record_is_read() {
         let parse = |stored: Record| {
@@ -5488,27 +5491,23 @@ command = ["mcp-server-fetch"]
                 .map_err(|error| error.to_string())
         };
         let valid = declared_record(true, &["/opt/op", "read", "op://{ref}"]);
-        if cfg!(target_os = "macos") {
-            assert_eq!(parse(valid.clone()), Ok(valid));
-            assert_eq!(
-                parse(declared_record(false, &["/opt/op", "read", "op://{ref}"])),
-                Err(
-                    "invalid `[secret-source.op]` table: a secret source is experimental: set \
-                     `secret-sources = true` in `[experimental-features]` to load it"
-                        .to_string()
-                )
-            );
-            assert_eq!(
-                parse(declared_record(true, &["op", "read", "op://{ref}"])),
-                Err(
-                    "invalid `[secret-source.op]` table: credential error: the secret source \
-                     \"op\" names the program \"op\", which is not an absolute path"
-                        .to_string()
-                )
-            );
-        } else {
-            assert_eq!(parse(valid), Err(UNPROTECTED.to_string()));
-        }
+        assert_eq!(parse(valid.clone()), Ok(valid));
+        assert_eq!(
+            parse(declared_record(false, &["/opt/op", "read", "op://{ref}"])),
+            Err(
+                "invalid `[secret-source.op]` table: a secret source is experimental: set \
+                 `secret-sources = true` in `[experimental-features]` to load it"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            parse(declared_record(true, &["op", "read", "op://{ref}"])),
+            Err(
+                "invalid `[secret-source.op]` table: credential error: the secret source \
+                 \"op\" names the program \"op\", which is not an absolute path"
+                    .to_string()
+            )
+        );
     }
 
     /// **A stored route is judged against the stored declarations when it is read**, so a record
@@ -5569,10 +5568,10 @@ command = ["mcp-server-fetch"]
         assert_eq!(
             error,
             "invalid credential entry for host \"api.example.com\": secret scheme \"op\" has \
-             no `[secret-source.op]` table: declare the secret source that reads it, which Box \
-             loads on macOS only, or use env://NAME for a credential the workload presents as \
-             a placeholder, aws://profile for one signed in the boundary, or \
-             credsd://<environment> for a credsd-vended credential"
+             no `[secret-source.op]` table: declare the secret source that reads it, or use \
+             env://NAME for a credential the workload presents as a placeholder, aws://profile \
+             for one signed in the boundary, or credsd://<environment> for a credsd-vended \
+             credential"
         );
     }
 
@@ -5599,53 +5598,46 @@ command = ["mcp-server-fetch"]
                 .map(|server| (server.name, server.secret.map(|secret| secret.reference)))
                 .collect::<Vec<_>>()
         });
-        if cfg!(target_os = "macos") {
-            assert_eq!(
-                read.map_err(|error| error.to_string()),
-                Ok(vec![(
-                    "web".to_string(),
-                    Some("op://Personal/Web/token".to_string())
-                )])
-            );
-            let (sources, enabled, tables) = read_secret_sources(&path).unwrap();
-            assert!(tables.tables.is_empty() && !tables.declares_stdio_mcp);
-            assert_eq!(sources.keys().collect::<Vec<_>>(), ["op"]);
-            assert!(enabled);
-            // The paths of the source go with the tables of the file, as they do for a record.
-            assert_eq!(
-                tables.source_paths,
-                [("reads", "~/.config/op"), ("deny", "/var/run/op")].map(|(list, entry)| {
-                    ProtectedPath {
-                        scheme: "op".to_string(),
-                        list,
-                        entry: entry.to_string(),
-                    }
-                })
-            );
-            // A server that names no declared scheme is read beside the declaration.
-            std::fs::write(&path, server("")).unwrap();
-            assert_eq!(read_remote_mcp_servers(&path).unwrap().len(), 1);
-            // Discovery sends the server's credential, so it cannot be the vault's own.
-            std::fs::write(
-                &path,
-                server("secret.ref = \"env://OP_SERVICE_ACCOUNT_TOKEN\"\n"),
-            )
-            .unwrap();
-            let error = match read_remote_mcp_servers(&path) {
-                Ok(_) => panic!("the credential of the vault must not reach a server"),
-                Err(error) => error.to_string(),
-            };
-            assert_eq!(
-                error,
-                "invalid credential entry for host \"api.example.com\": the variable \
-                 OP_SERVICE_ACCOUNT_TOKEN is a credential of the secret source `op` (its \
-                 `pass-secret-env` names it), so no env:// or secret:// reference can read it"
-            );
-        } else {
-            assert_eq!(
-                read.map_err(|error| error.to_string()),
-                Err(UNPROTECTED.to_string())
-            );
-        }
+        assert_eq!(
+            read.map_err(|error| error.to_string()),
+            Ok(vec![(
+                "web".to_string(),
+                Some("op://Personal/Web/token".to_string())
+            )])
+        );
+        let (sources, enabled, tables) = read_secret_sources(&path).unwrap();
+        assert!(tables.tables.is_empty() && !tables.declares_stdio_mcp);
+        assert_eq!(sources.keys().collect::<Vec<_>>(), ["op"]);
+        assert!(enabled);
+        // The paths of the source go with the tables of the file, as they do for a record.
+        assert_eq!(
+            tables.source_paths,
+            [("reads", "~/.config/op"), ("deny", "/var/run/op")].map(|(list, entry)| {
+                ProtectedPath {
+                    scheme: "op".to_string(),
+                    list,
+                    entry: entry.to_string(),
+                }
+            })
+        );
+        // A server that names no declared scheme is read beside the declaration.
+        std::fs::write(&path, server("")).unwrap();
+        assert_eq!(read_remote_mcp_servers(&path).unwrap().len(), 1);
+        // Discovery sends the server's credential, so it cannot be the vault's own.
+        std::fs::write(
+            &path,
+            server("secret.ref = \"env://OP_SERVICE_ACCOUNT_TOKEN\"\n"),
+        )
+        .unwrap();
+        let error = match read_remote_mcp_servers(&path) {
+            Ok(_) => panic!("the credential of the vault must not reach a server"),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(
+            error,
+            "invalid credential entry for host \"api.example.com\": the variable \
+             OP_SERVICE_ACCOUNT_TOKEN is a credential of the secret source `op` (its \
+             `pass-secret-env` names it), so no env:// or secret:// reference can read it"
+        );
     }
 }

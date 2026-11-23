@@ -950,6 +950,10 @@ impl HostedBox {
                 backends: backend_dials,
                 // The hosts whose plain HTTP on port 80 is decided and sent as HTTPS on 443.
                 upgrade_http: record.gateway.upgrade_http.clone(),
+                // The host's own trusted roots, beside the built-in ones.
+                upstream_host_roots: true,
+                // The reserved name of the surrounding OS's loopback, dialed with no DNS lookup.
+                dns_overrides: host_loopback_overrides(),
                 ..MitmConfig::default()
             },
             capabilities,
@@ -961,6 +965,16 @@ impl HostedBox {
             Some(&trust_certificate),
         )
         .map_err(BoxError::from)?;
+        if let Some(roots) = proxy.upstream_host_roots() {
+            eprintln!(
+                "strands-box: the egress gateway also trusts {} root certificates from this \
+                 host's trust store for upstream servers ({} ignored)",
+                roots.added, roots.ignored
+            );
+            for error in &roots.errors {
+                eprintln!("strands-box: warning: reading the host's trust store: {error}");
+            }
+        }
         let proxy_port = proxy
             .port()
             .ok_or_else(|| BoxError::from(DaemonError::NoProxyPort))?;
@@ -1318,6 +1332,16 @@ async fn history_failed(snapshot: impl Fn() -> policy::HistoryFlushSnapshot) -> 
     }
 }
 
+/// The gateway's fixed address map, which sends the reserved loopback name to `127.0.0.1` alone.
+fn host_loopback_overrides() -> Vec<(String, std::net::IpAddr)> {
+    // Policy decides the name before the map applies, and `127.0.0.1` after it
+    // (docs/design/decisions.md#host-box-internal-names-the-surrounding-oss-loopback).
+    vec![(
+        crate::record::config::egress::HOST_LOOPBACK_NAME.to_string(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+    )]
+}
+
 /// The PEM label that marks key material, whatever the file is called.
 const PRIVATE_KEY_LABEL: &[u8] = b"PRIVATE KEY";
 
@@ -1351,6 +1375,17 @@ fn require_no_private_key(root: &BoxRoot, trust: &Path) -> Result<(), BoxError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserved_name_maps_to_ipv4_loopback() {
+        assert_eq!(
+            host_loopback_overrides(),
+            vec![(
+                "host.box.internal".to_string(),
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            )]
+        );
+    }
 
     #[test]
     fn an_uninspectable_trust_directory_is_refused() {

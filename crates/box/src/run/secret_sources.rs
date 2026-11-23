@@ -3,7 +3,7 @@
 //!
 //! | Step | Owner |
 //! |---|---|
-//! | Check each program file, refuse a table that lets a workload go around a source, and name each source on stderr | [`SecretSources::check`] |
+//! | Resolve each `reads` and `deny` path, check each program file, refuse a table that lets a workload go around a source, and name each source and each path that no sandbox denies on stderr | [`SecretSources::check`] |
 //! | Read the secret of each telemetry target, and state each outcome | [`SecretSources::fetch_telemetry`] |
 //! | Read each other secret, and state each outcome | [`TelemetrySecrets::fetch_routes`] |
 //! | Drop each held secret after the vaults open | [`RouteSecrets`], which the vaults consume |
@@ -15,8 +15,11 @@ use credentials::{Backend, Locator};
 
 use crate::error::{BoxError, ConfigError};
 use crate::record::config::egress::EgressEntry;
-use crate::record::config::secret_source::{DeclaredSources, SecretSourceEntry, routed_scheme};
+use crate::record::config::secret_source::{
+    DeclaredSources, SecretSourceEntry, protected_paths, routed_scheme,
+};
 use crate::record::config::{AuthoritySource, ProcessTables, Record};
+use crate::record::layout::{canonical, operator_home_directory};
 use crate::run::commands::ConfiguredCommands;
 use crate::run::contain::boundary::judge_lists;
 use crate::run::telemetry::{ControlOperation, ControlRecord};
@@ -38,6 +41,8 @@ pub(crate) struct SecretSources {
     telemetry: Vec<SecretUse>,
     /// Each egress route, remote MCP server, and backend whose secret a source reads.
     routes: Vec<SecretUse>,
+    /// The scheme and the line of each `reads` or `deny` entry that no sandbox of this run denies.
+    skipped: Vec<(String, String)>,
 }
 
 /// The secret sources of one run after the read of each telemetry secret, with which the
@@ -87,9 +92,10 @@ impl Fetched {
 }
 
 impl SecretSources {
-    /// Check the program file of each `[secret-source.<scheme>]` table of `record`, refuse each
-    /// process table that lets a workload go around a source, and write one line for each source
-    /// to `disclosure`.
+    /// Resolve each `reads` and `deny` path, check the program file of each
+    /// `[secret-source.<scheme>]` table of `record`, refuse each process table that lets a
+    /// workload go around a source, and write one line to `disclosure` for each source and for
+    /// each path that no sandbox of this run denies.
     pub(crate) fn check(
         record: &Record,
         protected_sources: &[AuthoritySource],
@@ -131,8 +137,8 @@ impl SecretSources {
         Self::checked(entries, declared, tables, &[], disclosure).map(SchemaSecrets)
     }
 
-    /// The one order of the check, which each constructor follows: the program files, the
-    /// process tables, then the lines.
+    /// The one order of the check, which each constructor follows: the protected paths, the
+    /// program files, the process tables, then the lines.
     fn checked(
         entries: &BTreeMap<String, SecretSourceEntry>,
         declared: DeclaredSources,
@@ -140,7 +146,26 @@ impl SecretSources {
         protected_sources: &[AuthoritySource],
         disclosure: impl std::io::Write,
     ) -> Result<Self, BoxError> {
-        let sources = Self::open(entries, declared)?;
+        // Also for a configuration with no process table, whose lists nothing judges.
+        let mut skipped = Vec::new();
+        if !entries.is_empty() {
+            let home = canonical(&operator_home_directory()?);
+            for path in protected_paths(entries) {
+                let spelled = path.spellings(&home)?;
+                if let (false, Some(resolved)) = (spelled.covered, spelled.spellings.last()) {
+                    let line = format!(
+                        "`{}` entry {:?} names {}, which does not exist when the box starts, \
+                         so no sandbox denies it in this run",
+                        path.list,
+                        path.entry,
+                        escaped(&resolved.display().to_string())
+                    );
+                    skipped.push((path.scheme, line));
+                }
+            }
+        }
+        let mut sources = Self::open(entries, declared)?;
+        sources.skipped = skipped;
         sources.refuse_exposure(tables, protected_sources)?;
         sources
             .disclose(disclosure)
@@ -169,6 +194,7 @@ impl SecretSources {
                 commands: ConfiguredCommands::default(),
                 telemetry: Vec::new(),
                 routes: Vec::new(),
+                skipped: Vec::new(),
             });
         }
         let commands = ConfiguredCommands::of_secret_sources(entries)?;
@@ -199,6 +225,7 @@ impl SecretSources {
             commands,
             telemetry: Vec::new(),
             routes: Vec::new(),
+            skipped: Vec::new(),
         })
     }
 
@@ -233,7 +260,8 @@ impl SecretSources {
             .filter(|locator| self.programs.contains_key(locator.scheme()))
     }
 
-    /// One line for each declared source, with the program that reads its secrets.
+    /// One line for each declared source, with the program that reads its secrets, then one line
+    /// for each entry of that source that no sandbox of this run denies.
     fn disclose(&self, mut output: impl std::io::Write) -> std::io::Result<()> {
         for (scheme, program) in &self.programs {
             writeln!(
@@ -241,6 +269,9 @@ impl SecretSources {
                 "strands-box: [secret-source.{scheme}]: reads each {scheme}:// secret with \
                  {program}, which runs outside every sandbox"
             )?;
+            for (_, entry) in self.skipped.iter().filter(|(of, _)| of == scheme) {
+                writeln!(output, "strands-box: [secret-source.{scheme}]: {entry}")?;
+            }
         }
         Ok(())
     }

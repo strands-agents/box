@@ -75,6 +75,13 @@ treat it as recorded: record a tool call's own response after it too.
 `open` validates the sources, recovers the store, and installs the current source set.
 `validate` checks source text in memory. `effective` returns the engine and source identity.
 
+`PolicyEngine::log_only()` returns the same engine in log-only mode, for its whole life. A
+`Forbidden` or `NoMatch` denial for a request that has a `RequestId` (or, for a per-tool call, a
+pending response) comes back as `Decision::Allow` with `would_deny` set to the denial's reason,
+attribution and rule unchanged. An engine with no authored policy, a `PolicyPending` or
+`InternalFault` denial, a degraded MCP tool, and a denial without a token still deny. The observer sees the same verdict the caller gets.
+`Decision::would_deny()` reads it, and `None` means the verdict was applied.
+
 Two calls sit off the lifecycle:
 
 ```text
@@ -224,7 +231,9 @@ decision and records no event, so a rule cannot read a response's attributes.
 
 `PolicyEngine::decide` returns `Decision::Allow` for a clean explicit permit. Explicit
 forbids, unmatched requests, representation faults, and evaluation faults return
-`Decision::Deny`. Treat every verdict other than `Allow` as denial.
+`Decision::Deny`. Treat every verdict other than `Allow` as denial. In log-only mode a recorded
+forbid or unmatched request returns `Allow` with `would_deny` set instead; see `PolicyEngine::log_only`
+above.
 
 | Deny reason | Meaning |
 |---|---|

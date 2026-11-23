@@ -1,4 +1,4 @@
-# Policy
+# Policy language
 
 A policy is the `policy.dw` file of `permit` and `forbid` rules that decides each request the
 workload makes through the box's trusted process (the part of Box that runs outside the box and
@@ -435,6 +435,35 @@ policy denied this operation on 'example.com:443' [default-deny]: No permit poli
 A `[egress.<name>]` table with no matching permit leaves the host unreachable. A permit with no
 binding sends the request with a placeholder in place of the secret, which the provider rejects.
 
+### Reach a service on your machine
+
+The agent reaches `http://host.box.internal:4259`, a service on your machine's loopback, and no other
+port there ([a service on your machine](egress.md#a-service-on-your-machine)):
+
+```text
+@id("local_llm_connect")
+permit (principal, action == Box::Action::"net:connect", resource)
+when { context.input.host == "host.box.internal" && context.input.port == 4259 };
+
+@id("local_llm_request")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "host.box.internal" && context.input.port == 4259 };
+```
+
+The gateway decides `net:connect` on the name, then on the address it dials, `ip4 = "127.0.0.1"`.
+So a forbid on loopback addresses also refuses the name. To keep it, exclude the name:
+
+```text
+@id("no_loopback")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when {
+  context.input has ip4 && context.input.ip4 like "127.*" &&
+  context.input.host != "host.box.internal"
+};
+```
+
+A permit on the name doesn't admit `127.0.0.1:4259`, and a wildcard host permit includes the name.
+
 ## History persistence and process crashes
 
 Box batches policy-history writes by default. Accepted events affect decisions during
@@ -718,7 +747,7 @@ destination that reaches the box as an IPv6 encoding of an IPv4 address carries 
 `ip4` as well. So one `ip4 like "169.254.*"` covers the dotted quad and every encoding in the table
 below, and you need no clause per encoding.
 
-**`ip6` matches the wire form** — the address the gateway actually dials. A destination that arrives
+**`ip6` matches the wire form**: the address the gateway dials. A destination that arrives
 wrapped carries both fields, so `ip6 like "64:ff9b::*"` refuses every address routed through the
 well-known NAT64 translator, whatever IPv4 address each one carries. Use `ip6` when the route is
 what you care about and `ip4` when the endpoint is.
@@ -787,7 +816,7 @@ refuse to load:
 
 What this does not catch is a wildcard pattern whose pieces are all plausible but whose prefix no
 address takes, such as `ip6 like "::ffff:a9fe:*"`. A mapped address is written with a dotted quad, so
-that pattern misses the mapped addresses it looks aimed at — but `::ffff:a9fe:a9fe:0` is a real
+that pattern misses the mapped addresses it looks aimed at. But `::ffff:a9fe:a9fe:0` is a real
 address it does match, so the load cannot prove it inert. Check an `ip6` pattern against the table
 above.
 

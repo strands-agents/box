@@ -1236,3 +1236,7 @@ mod path_tests {
         assert_eq!(bytes(&pinned), b"approved");
     }
 }
+
+#[cfg(test)]
+#[path = "outcome_tests.rs"]
+mod outcome_tests;

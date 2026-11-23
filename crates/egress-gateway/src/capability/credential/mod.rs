@@ -215,11 +215,12 @@ impl CredentialCapability {
 }
 
 /// The request headers to sign over: every header except `accept-encoding` and `content-length`,
-/// then `identity` forced. The signer must cover exactly the headers that leave. `accept-encoding`
-/// is re-added as `identity` (the scrub needs an unencoded response). `content-length` is dropped
-/// because the forwarding layer owns it — `write_request` refreshes it, and omits it entirely on a
-/// bodyless request — so signing the workload's value would attest a header the request may not
-/// send, which a strict SigV4 verifier rejects. AWS SDKs likewise leave `content-length` unsigned.
+/// then `identity` forced. The signer gets each header that leaves, with its wire value, and signs
+/// all but the headers that botocore does not sign. `accept-encoding` is re-added as `identity`
+/// (the scrub needs an unencoded response). `content-length` is dropped because the forwarding
+/// layer owns it — `write_request` refreshes it, and omits it entirely on a bodyless request — so
+/// signing the workload's value would attest a header the request may not send, which a strict
+/// SigV4 verifier rejects. AWS SDKs likewise leave `content-length` unsigned.
 pub(super) fn headers_for_signing<'a>(
     headers: impl Iterator<Item = (&'a str, &'a str)>,
 ) -> SigningHeaders {

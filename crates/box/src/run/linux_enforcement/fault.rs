@@ -2,6 +2,8 @@
 use std::io;
 #[cfg(box_native_test_faults)]
 pub(super) fn at(stage: &str) -> io::Result<()> {
+    #[cfg(test)]
+    run_outcome_hook(stage);
     let fault = std::env::var("BOX_NATIVE_TEST_FAULT").unwrap_or_default();
     let release = match stage {
         "entry-checked" => fault.strip_prefix("entry-race:"),
@@ -83,5 +85,43 @@ pub(super) fn at(stage: &str) -> io::Result<()> {
 
 #[cfg(not(box_native_test_faults))]
 pub(super) fn at(_stage: &str) -> io::Result<()> {
+    #[cfg(test)]
+    run_outcome_hook(_stage);
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static OUTCOME_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(super) fn with_outcome_hook<T>(hook: impl FnOnce() + 'static, body: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            OUTCOME_HOOK.with_borrow_mut(|slot| *slot = None);
+        }
+    }
+    OUTCOME_HOOK.with_borrow_mut(|slot| {
+        assert!(
+            slot.is_none(),
+            "an outcome hook already owns this test thread"
+        );
+        *slot = Some(Box::new(hook));
+    });
+    let _reset = Reset;
+    body()
+}
+
+#[cfg(test)]
+fn run_outcome_hook(stage: &str) {
+    if stage == "outcome" {
+        let hook = OUTCOME_HOOK.with_borrow_mut(Option::take);
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
 }
