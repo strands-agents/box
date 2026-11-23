@@ -1995,7 +1995,6 @@ mod tests {
     #[test]
     fn a_remote_mcp_server_the_gateway_cannot_recognize_is_refused() {
         for (destination, reason) in [
-            ("mcp.example.com.", "trailing dot"),
             ("bücher.example", "punycode (xn--)"),
             ("*.example.com", "may not be a wildcard"),
         ] {
@@ -2009,11 +2008,23 @@ mod tests {
         std::fs::write(
             &path,
             "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
-             [mcp.tools]\ntype = \"http\"\ndestinations = [\"xn--bcher-kva.example\"]\n",
+             [mcp.tools]\ntype = \"http\"\ndestinations = [\"xn--bcher-kva.example\"]\n\
+             [mcp.dotted]\ntype = \"http\"\ndestinations = [\"mcp.example.com.\"]\n",
         )
         .unwrap();
         let servers = read_remote_mcp_servers(&path).unwrap();
-        assert_eq!(servers[0].url, "https://xn--bcher-kva.example/mcp");
+        let url = |name: &str| {
+            servers
+                .iter()
+                .find(|server| server.name == name)
+                .map(|server| server.url.clone())
+        };
+        assert_eq!(url("tools").unwrap(), "https://xn--bcher-kva.example/mcp");
+        assert_eq!(
+            url("dotted").unwrap(),
+            "https://mcp.example.com/mcp",
+            "a trailing dot is stripped at load"
+        );
     }
 
     #[test]

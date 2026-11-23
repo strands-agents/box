@@ -350,10 +350,12 @@ parsed address. Box does not use DNS results to treat different hostnames, or a 
 IP address, as the same MCP server.
 
 Write each host as a connection names it: ASCII letters, digits, `.`, `-`, and `_`, with no empty
-label and no trailing dot. Write an internationalized name in its punycode form, such as
-`xn--bcher-kva.example`. A remote MCP server's destination may not be a `*.` wildcard, because MCP
-identification uses the exact host. The loader refuses each of these, because no request could
-enter MCP checks for it. The loader also refuses an egress backend whose `url` host is a remote MCP
+label. Write an internationalized name in its punycode form, such as `xn--bcher-kva.example`. A
+remote MCP server's destination may not be a `*.` wildcard, because MCP identification uses the
+exact host. The loader refuses each of these, because no request could enter MCP checks for it.
+The loader removes a trailing dot, so `mcp.example.com.` loads as `mcp.example.com`. Two server
+tables that name `mcp.example.com` and `mcp.example.com.` name one host, and the loader refuses
+the pair. The loader also refuses an egress backend whose `url` host is a remote MCP
 server's host, because the gateway dials a backend directly and would skip the server's
 `mcp:call` decisions.
 
@@ -418,7 +420,7 @@ stops the whole run, and the error names the server.
 | A `secret` error (a scheme that no table declares, a declared scheme with no `secret.env`, a `secret.env` while `secret-sources` is off, two entries with one placeholder variable and different secrets, or a reference to a `pass-secret-env` variable) | A remote MCP server's `secret` follows the egress secret rules. See [Errors in the egress guide](./egress.md#errors-and-exit-codes). |
 | `` `[mcp.<name>] secret.ref` names a secret that the secret source `<scheme>` (<program>) did not return `` | The program of a declared secret source returned no secret when the box started. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |
 | `` `[mcp.<name>]` filesystem entry "<entry>" is refused: this grant reaches <path>, which the secret source `<scheme>` keeps from each workload `` | A stdio server's `filesystem` entry reaches a `reads` or `deny` path of a declared secret source. Remove the entry. See [what Box protects](config.md#what-box-protects). |
-| `` destination host "<host>" is not the spelling the gateway matches a connection against `` | A `type = "http"` destination has an empty label, a trailing dot, or a character other than an ASCII letter, a digit, `.`, `-`, or `_`. Write an internationalized name in its punycode (`xn--`) form. See [remote destination matching](#remote-destination-matching). |
+| `` destination host "<host>" is not the spelling the gateway matches a connection against `` | A `type = "http"` destination has an empty label, or a character other than an ASCII letter, a digit, `.`, `-`, or `_`. Write an internationalized name in its punycode (`xn--`) form. See [remote destination matching](#remote-destination-matching). |
 | `a remote MCP server destination may not be a wildcard` | A `type = "http"` destination is a `*.` pattern. Name each host of the server. |
 | `` `<entry>` re-routes to backend host "<host>", which `<name>` declares as a remote MCP server `` | An egress or MCP backend `url` names this server's host. Point the backend at another host. |
 | A backend error (more than one backend, a bad backend `url`, a signed `secret` beside a backend, or a refused backend `auth`) | A remote MCP backend follows the egress backend rules. See [Errors in the egress guide](./egress.md#errors-and-exit-codes). |

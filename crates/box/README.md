@@ -477,7 +477,7 @@ Refused, each at startup with the destination named:
 | `destinations = ["*.*"]` | A misplaced wildcard names no destination. |
 | `destinations = [""]` | A destination must name a host. |
 | `destinations = ["api.test:0"]` | The port must be 1–65535. |
-| `destinations = [".api.test"]`, `["api.test."]`, or `["bücher.example"]` | No connecting host can equal it. Write the host without an empty label or a trailing dot, and an internationalized name in its punycode (`xn--`) form. |
+| `destinations = [".api.test"]`, `["api..test"]`, or `["bücher.example"]` | No connecting host can equal it. Write the host without an empty label, and an internationalized name in its punycode (`xn--`) form. A trailing dot is removed at load, so `api.test.` loads as `api.test`. |
 | A `[mcp.x] type = "http"` destination `*.example.com` | The gateway recognizes a remote MCP server by its exact host. |
 | `secret.ref = ""` | A destination alone is a reachability claim. |
 | `secret.ref = "STRIPE_KEY"` | A bare name is not a URI. |

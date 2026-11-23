@@ -697,6 +697,7 @@ impl Placement {
 pub(crate) struct EgressEntry {
     /// The destinations this entry governs. Each is a host, `host:port`, a path prefix or `/*`
     /// suffix, or a `*.`/bare `*` wildcard, in any combination.
+    #[serde(deserialize_with = "destinations_without_trailing_dot")]
     pub(crate) destinations: Vec<String>,
 
     /// What the destination speaks. `mcp` tells the gateway to parse JSON-RPC frames and raise
@@ -720,6 +721,7 @@ pub(crate) struct EgressEntry {
 pub(crate) struct EgressBackend {
     /// The backend to dial, as a `scheme://host[:port][/prefix]` URL. The path prefix joins in front
     /// of the agent's request path; a query or fragment is refused.
+    #[serde(deserialize_with = "destination_without_trailing_dot")]
     pub(crate) url: String,
 
     /// The credential the backend connection presents. It takes the full `EgressSecret` vocabulary
@@ -1758,28 +1760,57 @@ pub(crate) fn host_of(destination: &str) -> &str {
     }
 }
 
-/// Why `host` is not the one spelling the gateway compares a connecting host with, or `None` when
-/// it is that spelling or an IP address.
+/// `destination` with the trailing dots of its host removed, as `egress_gateway::normalize_host`
+/// removes them from a connecting host.
+pub(crate) fn without_trailing_dot(destination: &str) -> String {
+    let host = host_of(destination);
+    let start = host.as_ptr().addr() - destination.as_ptr().addr();
+    let end = start + host.len();
+    format!(
+        "{}{}{}",
+        &destination[..start],
+        host.trim_end_matches('.'),
+        &destination[end..]
+    )
+}
+
+fn destination_without_trailing_dot<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(|destination| without_trailing_dot(&destination))
+}
+
+pub(crate) fn destinations_without_trailing_dot<'de, D>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer).map(|destinations| {
+        destinations
+            .iter()
+            .map(|destination| without_trailing_dot(destination))
+            .collect()
+    })
+}
+
+/// Why `host` is not a spelling the gateway can compare a connecting host with, or `None` when it
+/// is one or an IP address.
 fn not_a_canonical_host(host: &str) -> Option<&'static str> {
     if host.parse::<std::net::IpAddr>().is_ok() {
         return None;
     }
-    if let Some(reason) = super::unbindable_host_name(host) {
-        return Some(reason);
-    }
-    if egress_gateway::normalize_host(host) != host.to_ascii_lowercase() {
-        return Some("it ends with a dot; write the host without the trailing dot");
-    }
-    None
+    super::unbindable_host_name(host)
 }
 
 /// The host key the config-time collision check and the runtime match must agree on: an IP in its
-/// canonical form, otherwise the lowercased DNS name, because `connect::same_host` compares a DNS
-/// name case-insensitively and an IP through `IpAddr`.
+/// canonical form, otherwise the DNS name as `egress_gateway::normalize_host` gives it, because
+/// `connect::same_host` compares a DNS name that way and an IP through `IpAddr`.
 fn normalized_host(host: &str) -> String {
     host.parse::<std::net::IpAddr>()
         .map(|ip| ip.to_string())
-        .unwrap_or_else(|_| host.to_ascii_lowercase())
+        .unwrap_or_else(|_| egress_gateway::normalize_host(host))
 }
 
 #[cfg(test)]
@@ -2372,12 +2403,9 @@ mod tests {
         for (destination, reason) in [
             (".api.example.com", "an empty label"),
             ("api..example.com", "an empty label"),
-            ("api.github.com.", "trailing dot"),
-            ("api.github.com.:8443", "trailing dot"),
             ("bücher.example", "punycode (xn--)"),
             ("*.bücher.example", "punycode (xn--)"),
             ("*..example.com", "an empty label"),
-            ("*.example.com.", "trailing dot"),
         ] {
             let plain =
                 format!("[egress.a]\ndestinations = [{destination:?}]\nsecret.ref = \"env://A\"\n");
@@ -2424,7 +2452,6 @@ mod tests {
     #[test]
     fn a_remote_mcp_destination_the_gateway_cannot_match_is_refused() {
         for (destination, reason) in [
-            ("mcp.example.com.", "trailing dot"),
             ("bücher.example", "punycode (xn--)"),
             ("*.example.com", "may not be a wildcard"),
             ("*.example.com:8931", "may not be a wildcard"),
@@ -2443,7 +2470,6 @@ mod tests {
     #[test]
     fn a_backend_url_host_the_gateway_cannot_dial_is_refused() {
         for (url, reason) in [
-            ("https://gw.example.com./github", "trailing dot"),
             ("https://bücher.example", "punycode (xn--)"),
             ("https://.gw.example.com", "an empty label"),
             ("https://gw..example.com:8443", "an empty label"),
@@ -2458,6 +2484,67 @@ mod tests {
             assert!(error.contains(reason), "{url:?}: {error}");
             assert!(error.contains("cannot dial as written"), "{url:?}: {error}");
         }
+    }
+
+    #[test]
+    fn a_trailing_dot_on_a_host_is_stripped_at_load() {
+        for (written, loaded) in [
+            ("api.github.com.", "api.github.com"),
+            ("API.GitHub.com..", "API.GitHub.com"),
+            ("api.github.com.:8443/v1", "api.github.com:8443/v1"),
+            ("*.example.com.", "*.example.com"),
+            ("10.0.0.1:8443", "10.0.0.1:8443"),
+        ] {
+            let entries = load(&format!(
+                "[egress.a]\ndestinations = [{written:?}]\nsecret.ref = \"env://A\"\n"
+            ))
+            .expect(written);
+            assert_eq!(entries["a"].destinations, [loaded], "{written:?}");
+        }
+        let entries = load(
+            "[egress.tools]\nprotocol = \"mcp\"\ndestinations = [\"mcp.example.com.\"]\n\
+             [egress.a]\ndestinations = [\"api.example.com.\"]\n\
+             [[egress.a.backends]]\nurl = \"https://gw.example.com./github\"\n",
+        )
+        .expect("trailing-dot hosts load");
+        assert_eq!(entries["tools"].destinations, ["mcp.example.com"]);
+        assert_eq!(entries["a"].destinations, ["api.example.com"]);
+        let backend = &entries["a"].backends[0];
+        assert_eq!(backend.url, "https://gw.example.com/github");
+        assert_eq!(backend.target().unwrap().host, "gw.example.com");
+    }
+
+    #[test]
+    fn a_trailing_dot_spelling_collides_with_the_bare_host() {
+        let error = load(
+            "[egress.a]\ndestinations = [\"api.example.com\"]\nsecret.ref = \"env://A\"\n\
+             [egress.b]\ndestinations = [\"api.example.com.\"]\nsecret.ref = \"env://B\"\n",
+        )
+        .expect_err("the two spellings name one host")
+        .to_string();
+        assert!(error.contains("`b` overlaps `a`"), "{error}");
+        let error = load(
+            "[egress.a]\nprotocol = \"mcp\"\ndestinations = [\"mcp.example.com\"]\n\
+             [egress.b]\nprotocol = \"mcp\"\ndestinations = [\"mcp.example.com.\"]\n",
+        )
+        .expect_err("two MCP servers on one host")
+        .to_string();
+        assert!(
+            error.contains("both name host \"mcp.example.com\""),
+            "{error}"
+        );
+        let error = load(
+            "[egress.a]\ndestinations = [\"api.example.com\"]\n\
+             [[egress.a.backends]]\nurl = \"https://gw1.example.com./a\"\n\
+             [egress.b]\ndestinations = [\"gw1.example.com\"]\n\
+             [[egress.b.backends]]\nurl = \"https://gw2.example.com\"\n",
+        )
+        .expect_err("a trailing-dot backend host is another entry's re-routed host")
+        .to_string();
+        assert!(
+            error.contains("`a` re-routes to backend host \"gw1.example.com\""),
+            "{error}"
+        );
     }
 
     #[test]
