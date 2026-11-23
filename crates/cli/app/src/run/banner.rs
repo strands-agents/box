@@ -62,6 +62,9 @@ pub(super) struct Banner {
     pub(super) box_file: String,
     pub(super) policy_file: String,
     pub(super) copied: Option<(String, Instant)>,
+    /// `box runs history <BOX_ID>` for this run, which the full view offers to copy. Empty shows
+    /// nothing.
+    pub(super) history: String,
     blocked: u64,
     total: u64,
     denials: VecDeque<Arc<Operation>>,
@@ -100,6 +103,7 @@ impl Banner {
             box_file: box_file.into(),
             policy_file: policy_file.into(),
             copied: None,
+            history: String::new(),
             blocked: 0,
             total: 0,
             denials: VecDeque::new(),

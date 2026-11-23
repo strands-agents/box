@@ -87,6 +87,7 @@ pub(super) fn run(
             .display()
             .to_string(),
     );
+    banner.history = format!("box runs history {}", launch.name());
     // Box Core has not started, and this launch holds the box's lock, so the records hold every
     // earlier run of this box and nothing of this one. The run waits for this read
     // (docs/design/cli/profiles.md#start-box-core).
