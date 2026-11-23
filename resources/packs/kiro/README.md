@@ -205,7 +205,8 @@ These don't work in the box yet:
 
 The agent can write `.kiro/settings/mcp.json` and `.kiro/agents/`. In a trusted workspace, Kiro CLI
 on your machine runs their servers and hooks without asking, and
-`kiro-cli chat --no-interactive --agent <name>` starts their servers in any workspace. [Read them after a run](../../../docs/cli/limitations.md#the-agent-can-plant-code-that-runs-outside-the-box-later).
+`kiro-cli chat --no-interactive --agent <name>` starts their servers in any workspace, and also
+runs their hooks when `chat.agentEngine` is `v3`. [Read them after a run](../../../docs/cli/limitations.md#the-agent-can-plant-code-that-runs-outside-the-box-later).
 
 On macOS, when file times are off, as with `file-attributes = false` or when you run `box` as
 root, Kiro CLI waits about 15 seconds each time it starts. See
