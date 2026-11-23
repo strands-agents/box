@@ -550,7 +550,8 @@ work in this order:
    `header-references` value with no variable is left to the agent, which sends it as on the
    host ([decisions.md](decisions.md#a-detected-server-carries-no-credential)). Its header name
    is not checked because it never becomes `secret.header`. Header names that carry a variable
-   must contain only letters, digits, and `-`, and must not be empty. A
+   must be RFC 7230 tokens, the rule Core checks `secret.header` by: letters, digits, and
+   `` !#$%&'*+-.^_`|~ ``, and not empty. A
    `header-references` value with a variable must end in one variable written in the
    row's `env-var-syntax`
    (`${NAME}` for `@box/claude`, `${NAME}` or `$NAME` for `@box/pi`), and the text before it becomes
