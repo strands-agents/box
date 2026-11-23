@@ -284,22 +284,24 @@ is a root or lies below one by whole components: `~/src/app-old` is not in `~/sr
 can be in more than one location, and a rule on each of them applies to it.
 [The filesystem actions](policy/actions.md#filesystem) describe the `locations` field.
 
-Write each root the way `context.input.path` spells a path: `~` for the operator's home, `~/…`
-below it, and an absolute path elsewhere. Box doesn't expand or resolve a root, so a root that
-crosses a symbolic link would match nothing. Box refuses a root no path can match, and says what
-to write instead:
+Write each root the way `context.input.path` spells a path: `~` or `~/` for the operator's home,
+`~/…` below it, and an absolute path elsewhere. Every part of Box spells a path under the home
+`~/…` against the home with its symbolic links resolved, so a `HOME` reached through a link works
+the same way. Box doesn't expand or resolve a root. When the
+spelling a path in the root is reported with differs from the root as written, for example
+because the root is under the home or crosses a symbolic link, Box refuses the root and gives the
+spelling to write:
 
 | Rule | Refusal |
 |---|---|
 | A name starts with an ASCII letter, holds at most 64 ASCII letters, digits, or `_`, and is not one of Cedar's reserved words (`true`, `false`, `if`, `then`, `else`, `in`, `is`, `like`, `has`). | ``` `[locations] <name>` is not a location name``` |
 | A location lists at least one directory. | ``` `[locations] <name>` lists no directory``` |
-| Each root is absolute, is `~` for the whole home, or starts with `~/`. | ``` `[locations] <name>` entry "<entry>" is refused: it is neither absolute nor `~/`-relative``` |
+| Each root is absolute, is `~` or `~/` for the whole home, or starts with `~/`. | ``` `[locations] <name>` entry "<entry>" is refused: it is neither absolute nor `~/`-relative``` |
 | A `~/` root has no empty component after `~/`, so `~//etc` is refused. | ``` `[locations] <name>` entry "<entry>" is refused: it holds an empty component after `~/` ``` |
 | A root has no `.` or `..` component. | ``` `[locations] <name>` entry "<entry>" is refused: it holds a `.` or `..` component``` |
 | A location lists each root once. | ``` `[locations] <name>` lists "<entry>" twice``` |
-| A root under the home is written `~/…`. | ``` `[locations] <name>` entry "<entry>" can never match a reported path: a path under the operator home is reported as `~/…`; write "~/<rest>"``` |
-| A root crosses no symbolic link, such as `/tmp` on macOS, which is `/private/tmp`. | ``` … can never match a reported path: it crosses a symbolic link, and a path is reported as resolved; write "<resolved>"``` |
-| A root that holds the home, such as `/Users`, is listed with `~`, because a path in the home is spelled `~/…`. | ``` … can never match a reported path: it holds the operator home, and a path in the home is reported as `~/…`, so this root matches none of them; add "~" to the list``` |
+| A root is written as a path in it is reported: `~/…` under the home, and through no symbolic link, so `/tmp` on macOS is `/private/tmp`. | ``` `[locations] <name>` entry "<entry>" can never match a reported path: a path here is reported as "<spelling>"; write "<spelling>"``` |
+| A root that holds the home, such as `/Users`, lists `~` too, because a path in the home is spelled `~/…`. | ``` `[locations] <name>` entry "<entry>" holds the operator home, and a path in the home is reported as `~/…`, outside this root; add "~" to include the home, or list the folders you mean, such as "/Users/Shared"``` |
 | A root has no trailing slash and no empty component. | ``` … can never match a reported path: a reported path has no trailing slash; write "<root>"``` |
 | A root, or the folder it would be created in, can be checked: it is not, and is not below, a broken symbolic link or a file, and no folder on its way refuses to be searched. | ``` `[locations] <name>` entry "<entry>" cannot be resolved: <reason>``` |
 

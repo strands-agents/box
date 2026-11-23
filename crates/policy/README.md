@@ -363,12 +363,13 @@ because Cedar types `has` on a closed record that lacks the field as false. The 
 refuses nor reports such a rule, because `has` is the author marking the location optional.
 
 A location names roots and grants no reach. A root is written as `path` spells a path: `~` for the
-home, `~/…` below it, and absolute elsewhere. It is not expanded or resolved, so a request and its
-outcome compare the same reported text. `with_locations` returns `PolicyError::UnmatchableLocation`
-for a root that no reported path can match, with the spelling to write: an absolute root under the
-home (`write "~/…"`), a root whose existing part crosses a symbolic link (`write "<resolved>"`), a
-root that holds the home when its list lacks `~` (`add "~" to the list`), and a root with a
-trailing slash or an empty component. A root that does not exist yet passes when its nearest
+home (`~/` too), `~/…` below it, and absolute elsewhere. It is not expanded or resolved, so a
+request and its outcome compare the same reported text. `with_locations` returns
+`PolicyError::UnmatchableLocation` for a root that no reported path can match: one whose final
+reported spelling differs from it, such as an absolute root under the home or one through a
+symbolic link (`a path here is reported as "<final>"; write "<final>"`), and one with a trailing
+slash or an empty component. It returns `PolicyError::LocationHoldsHome` for a root that holds the
+home when its list lacks `~`, because a path in the home is reported as `~/…`. A root that does not exist yet passes when its nearest
 existing folder does. It returns `PolicyError::UnresolvableLocation` for a root it cannot check,
 such as a broken symbolic link, a file, or one below a folder that refuses to be searched, and
 `PolicyError::Schema` for a bad name, an empty list, or a root that is relative or has a `.` or

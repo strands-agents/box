@@ -61,13 +61,13 @@ caches = ["~/.cache/my-agent", "~/.npm"]
 - Without a `[locations]` table, every file request carries an empty `locations`, and a policy
   that doesn't mention locations works as it does today.
 
-Box doesn't resolve a directory (D6). When it loads the policy, it refuses one that no path could
-match and says what to write instead:
+Box doesn't resolve a directory (D6). When it loads the policy, it refuses one written
+differently from how a path in it is reported, and gives the spelling to write in one message:
 
 - `/Users/dev/src/app`, under the home: write `~/src/app`.
 - `/tmp/work` on macOS, through a symlink: write `/private/tmp/work`.
-- `/Users`, which holds the home: add `~` to the list, because files in the home are spelled
-  `~/…`.
+- `/Users`, which holds the home: a file in the home is spelled `~/…` and falls outside it, so add
+  `~` to include the home, or list the folders you mean, such as `/Users/Shared`.
 
 A directory that doesn't exist yet is fine when the folder it would be created in passes the same
 checks, so `~/.cache/my-agent` matches once the agent creates it. A directory Box can't check,
@@ -260,9 +260,9 @@ when { context.input.path == "~/src/app" || context.input.path like "~/src/app/*
 This gives one way to think about a location. It also means a request and its recorded response
 compare the same text, so they always agree.
 
-It costs some spellings. A directory through a symlink, one under the home written as an absolute
-path, or one that holds the home would match nothing, so Box refuses it when it loads the policy
-and says what to write instead (section 2).
+It costs some spellings. A directory through a symlink, or one under the home written as an
+absolute path, would match nothing, and one that holds the home would miss the files in the home.
+Box refuses each when it loads the policy and says what to write instead (section 2).
 
 ## 8. Limitations
 

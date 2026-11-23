@@ -225,9 +225,10 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   outcome's own `~/…` text for an outcome) with each root as written, so the two legs always agree
   and a location never matches more or less than the hand-written rule. Roots are not resolved;
   `spelling::judge_location_root` refuses at load a root no reported path can match, with the
-  spelling to write (`PolicyError::UnmatchableLocation`), and still runs
-  `path::resolve_host_directory` to find a dangling link, a file, or a folder it cannot search
-  (`PolicyError::UnresolvableLocation`). Pinned by
+  spelling to write (`PolicyError::UnmatchableLocation`; it resolves first, so the advice is the
+  final spelling in one round; a root that holds the home is `PolicyError::LocationHoldsHome`), and
+  still runs `path::resolve_host_directory` to find a dangling link, a file, or a folder it cannot
+  search (`PolicyError::UnresolvableLocation`). Pinned by
   `tests/path_locations.rs::a_location_decides_as_the_two_path_comparisons_it_stands_for`.
   `with_locations` refuses locations for an operator with no home, because the refusals judge roots
   against it. Box prints `Operator::locations`, the roots as written. Before `classify_naming` holds
