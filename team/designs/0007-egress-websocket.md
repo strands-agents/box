@@ -8,7 +8,7 @@ This design lets a WebSocket through, and **policy decides each WebSocket once, 
 
 The design gives up control of single messages. Policy cannot close a WebSocket that is open, and the gateway does not remove a credential from a message. In return, no message waits for policy, and the gateway code stays small because it does not read messages.
 
-Merging this doc approves the interface changes in section 5. The code PR, #476, follows it. Dogwood, the policy engine, fixes the format of stored policy events when a box is created, and the new action changes that format. A box created before #476 must therefore be created again. HTTP/2 and headers in policy are out of scope, and each gets its own design.
+Merging this doc approves the interface changes in section 5. The code PR, #476, follows it. A box created before #476 keeps its policy history, because the new action does not change the format of stored events. HTTP/2 and headers in policy are out of scope, and each gets its own design.
 
 ## 1. Background
 
@@ -87,7 +87,7 @@ permit (principal, action == Box::Action::"websocket:connect", resource)
 when { context.input.host == "realtime.example.com" && context.input.path == "/v1/realtime" };
 ```
 
-`github_read` lets HTTP requests through to `api.github.com`, and no WebSocket. `none_after_key` refuses each HTTP request and each new WebSocket after the key read, but it cannot close a WebSocket that opened before the read. `realtime` lets one WebSocket through. #476 also adds a permit on `websocket:connect` to the `@box/open` starter, which lets the agent reach any host.
+`github_read` lets HTTP requests through to `api.github.com`, and no WebSocket. `none_after_key` refuses each HTTP request and each new WebSocket after the key read, but it cannot close a WebSocket that opened before the read. `realtime` lets one WebSocket through. The `@box/open` starter, which lets the agent reach any host, gets a permit on `websocket:connect` in a separate CLI PR after #476. Until then, it refuses every WebSocket.
 
 ## 5. Interface changes
 

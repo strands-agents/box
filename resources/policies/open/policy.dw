@@ -18,10 +18,6 @@ permit (principal, action == Box::Action::"net:connect", resource);
 @id("open_request")
 permit (principal, action == Box::Action::"http:request", resource);
 
-// Let the agent open a WebSocket to any host.
-@id("open_websocket")
-permit (principal, action == Box::Action::"websocket:connect", resource);
-
 // But never to a loopback address. A service on this machine that listens on all interfaces is
 // still reachable at this machine's network address.
 @id("open_loopback")

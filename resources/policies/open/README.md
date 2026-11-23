@@ -14,8 +14,6 @@ project. Both are yours: change them, and the next run uses them.
   it, the shell runs nothing.
 - `dev_null`: programs can read and write `/dev/null`.
 - `open_connect` and `open_request`: the agent can connect and send HTTP requests to any host.
-- `open_websocket`: the agent can open a WebSocket to any host. After the WebSocket opens, policy
-  decides nothing more, and Box doesn't redact a credential in its messages.
 - `open_loopback`: except to a loopback address, such as `127.0.0.1`.
 - `open_link_local`: or to a link-local address (`169.254.0.0/16`, `fe80::/10`). Most clouds serve
   the machine's credentials from `169.254.169.254`, so this blocks that metadata service.

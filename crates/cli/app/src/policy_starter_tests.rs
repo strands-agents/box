@@ -456,7 +456,6 @@ fn the_shipped_menu_offers_open_by_default_then_project() {
     for id in [
         "open_connect",
         "open_request",
-        "open_websocket",
         "open_loopback",
         "open_link_local",
     ] {
