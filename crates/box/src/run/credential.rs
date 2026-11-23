@@ -738,6 +738,7 @@ mod tests {
             remote_mcp: BTreeMap::new(),
             mcp: Vec::new(),
             contained_mcp: BTreeMap::new(),
+            locations: Default::default(),
             telemetry: BTreeMap::new(),
             secret_source: entries(&program.table("op", std::path::Path::new("/bin/sh"))),
         };
