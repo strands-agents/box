@@ -1,0 +1,91 @@
+# cargo, as the operator's PATH finds it: a rustup proxy, or a toolchain's own cargo.
+[pack]
+name = "@box/cargo"
+version = 1
+kind = "tool"
+
+[inputs.cargo.path]
+description = "The cargo program."
+type = "program"
+program = "cargo"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.cargo.path }}"]
+# cc links on Linux, and runs ld and as by the names PATH finds. Build scripts run ar to pack C code.
+helpers = ["cc", "ld", "as", "ar"]
+# static.rust-lang.org: rustup installs the toolchain a project pins, into the tool's storage.
+hosts = ["index.crates.io", "static.crates.io", "static.rust-lang.org"]
+# rustup on macOS checks certificates with the platform verifier, which cannot trust the box's
+# certificate authority. So rustup asks the gateway over plain http://, and the gateway makes the
+# https:// call and checks the server's certificate itself.
+upgrade_http = ["static.rust-lang.org"]
+
+[inputs.rust.home]
+description = "Where rustup keeps its toolchains."
+from = "env:RUSTUP_HOME"
+default = "${{ home }}/.rustup"
+
+[inputs.rust.cargo_home]
+description = "Where rustup keeps its proxies, in bin."
+from = "env:CARGO_HOME"
+default = "${{ home }}/.cargo"
+
+[env]
+PATH = "${{ root }}:/usr/bin:/bin"
+CARGO_HOME = "${{ workspace }}/.cargo"
+CARGO_TARGET_DIR = "${{ workspace }}/target"
+# rustup keeps one home. In the box it is in the tool's own storage, which links to your own
+# toolchains and settings, read-only, and holds each toolchain that a project pins and you lack
+# (decisions.md#a-tool-owns-its-state-outside-the-workspace).
+RUSTUP_HOME = "${{ storage.rustup }}"
+# On macOS only, rustup's downloads go to the gateway as plain http://, which `upgrade_http`
+# above sends as https://. On Linux rustup trusts the box's certificate and keeps https://.
+# rustup checks each file against the hash in its channel manifest.
+RUSTUP_DIST_SERVER = { value = "http://static.rust-lang.org", when = "macos" }
+# The box's certificate authority, for cargo. cargo reads none of the variables that Box Core
+# points at this file. Box Core refuses a table that sets a name it owns, so a Box Core that sets
+# CARGO_HTTP_CAINFO itself needs this line removed in the change that moves the pin.
+CARGO_HTTP_CAINFO = "${{ box }}/trust/cert.pem"
+# With full Xcode selected, /usr/bin/cc asks xcodebuild for the compiler, which cannot start in
+# a box, so cargo and rustc use the compiler and the SDK directly.
+SDKROOT = { value = "${{ macos.sdk_root }}", when = "macos" }
+CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = { value = "${{ macos.toolchain }}/cc", when = "macos" }
+CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER = { value = "${{ macos.toolchain }}/cc", when = "macos" }
+CC_aarch64_apple_darwin = { value = "${{ macos.toolchain }}/cc", when = "macos" }
+CC_x86_64_apple_darwin = { value = "${{ macos.toolchain }}/cc", when = "macos" }
+CXX_aarch64_apple_darwin = { value = "${{ macos.toolchain }}/c++", when = "macos" }
+CXX_x86_64_apple_darwin = { value = "${{ macos.toolchain }}/c++", when = "macos" }
+AR_aarch64_apple_darwin = { value = "${{ macos.toolchain }}/ar", when = "macos" }
+AR_x86_64_apple_darwin = { value = "${{ macos.toolchain }}/ar", when = "macos" }
+
+# The tool's own storage: the agent gets no grant to it.
+[storage]
+directories = ["rustup"]
+
+[[storage.files]]
+source = "${{ inputs.rust.home }}/settings.toml"
+target = "rustup/settings.toml"
+mode = "link"
+
+[[storage.files]]
+source = "${{ inputs.rust.home }}/toolchains"
+target = "rustup/toolchains"
+mode = "link-children"
+
+[filesystem]
+write = ["${{ storage.rustup }}"]
+read = [
+    "${{ inputs.rust.home }}",
+    "${{ inputs.rust.cargo_home }}/bin",
+    "${{ storage.rustup }}",
+    # Only rustc, never all of root: for a system install, root is /usr/bin.
+    "${{ root }}/rustc",
+    "${{ root.parent }}/lib/rustlib",
+    { path = "${{ macos.developer_dir }}", when = "macos" },
+    # GCC's own programs, such as collect2 and its lto plugin, on Fedora, RHEL, Amazon Linux and
+    # current Ubuntu. Older Debian keeps them in /usr/lib/gcc, which Box Core reads for every tool.
+    { path = "/usr/libexec/gcc", when = "linux" },
+    # The C headers, such as stdint.h, that build scripts compile against with cc.
+    { path = "/usr/include", when = "linux" },
+]

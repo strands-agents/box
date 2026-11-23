@@ -1,0 +1,43 @@
+# Tested on macOS and Linux with go 1.27.3 from setup-go, by the corpus's GO cells.
+# go, as the operator's PATH finds it: an official tarball, Homebrew, or setup-go. root.parent is
+# its GOROOT, which holds the standard library and the compiler and linker that go starts.
+# On macOS the floor is Go 1.27. From Go 1.27, crypto/x509 reads SSL_CERT_FILE on macOS
+# (golang/go#77865), and Box points it at the box's CA. An older Go uses macOS's own trust check,
+# which fails in a box with `x509: OSStatus -26276`, so the go command's module downloads fail. A
+# program that go builds from the project, such as a test binary or `go run`, reads SSL_CERT_FILE
+# only when the project's go.mod says go 1.27 or later; with an older go line, its TLS calls fail
+# the same way. Linux is not affected.
+[pack]
+name = "@box/go"
+version = 1
+kind = "tool"
+# go starts git to download a GOPRIVATE module straight from its git host. @box/go extends @box/git,
+# so go runs with [tool.git]'s variables and grants, with git's folder on its PATH.
+extend = ["@box/git"]
+
+[inputs.go.path]
+description = "The go program."
+type = "program"
+program = "go"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.go.path }}"]
+hosts = ["proxy.golang.org", "sum.golang.org"]
+
+# The module cache, the build cache, and GOPATH go in the project, because the box refuses a write
+# to ~/go and ~/Library/Caches/go-build. GOENV=off keeps go from reading a host env file, and
+# GOTOOLCHAIN=local keeps it from downloading another toolchain. With CGO_ENABLED=0 go never starts
+# the C compiler, which this pack does not grant. -modcacherw leaves the module cache writable, as
+# the rest of the project is, so a plain rm -r removes the project.
+[env]
+GOPATH = "${{ cache }}/path"
+GOMODCACHE = "${{ cache }}/mod"
+GOCACHE = "${{ cache }}/build"
+GOENV = "off"
+GOTOOLCHAIN = "local"
+CGO_ENABLED = "0"
+GOFLAGS = "-modcacherw"
+
+[filesystem]
+read = ["${{ root.parent }}"]

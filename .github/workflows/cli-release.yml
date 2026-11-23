@@ -1,0 +1,684 @@
+name: CLI release
+
+# Builds, packages, signs, and checks the box CLI for a release. The Release Box workflow calls
+# it after its scan and test jobs, and publishes what it uploads next to Box Core's archives.
+#
+#   box-cli-<tag>-<triple>.tar.gz   e.g. box-cli-v0.1.0-aarch64-apple-darwin.tar.gz
+#
+# Three targets build: macOS on Apple Silicon, and Linux (glibc) on x86_64 and aarch64. Both
+# Linux targets build against Amazon Linux 2023 and run their package in a container. The
+# cli-release-bundle artifact holds the macOS and ARM64 Linux archives, and the x86_64 Linux
+# archive when publish_linux_x86 is true. Otherwise the x86_64 archive stays a run artifact.
+#
+# Shape: build -> sign-macos -> verify-macos -> bundle. With sign=true the macOS archive in the
+# bundle is the signed one, checked by its hash. Every artifact this workflow uploads starts
+# with cli-, so a caller that downloads box-* artifacts does not pick them up.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version to stamp, e.g. 0.2.1 (no v)'
+        required: true
+        type: string
+      tag:
+        description: 'Release tag, e.g. v0.2.1'
+        required: true
+        type: string
+      sha:
+        description: 'Commit to build'
+        required: true
+        type: string
+      publish_linux_x86:
+        description: 'Bundle the x86_64 Linux archive for the release'
+        required: false
+        default: false
+        type: boolean
+      native_filesystem_policy:
+        description: 'Compile native policy into the ARM64 packages (experimental dry run)'
+        required: false
+        default: false
+        type: boolean
+      sign:
+        description: 'Sign, notarize, and check the macOS package'
+        required: false
+        default: false
+        type: boolean
+    outputs:
+      signed:
+        description: "'true' when the bundle holds the signed and checked macOS package"
+        value: ${{ jobs.bundle.outputs.signed }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target.triple }}
+    # The build uses no cache, so a commit it builds can never write one.
+    cache-mode: none
+    runs-on: ${{ matrix.target.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - triple: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - triple: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - triple: aarch64-apple-darwin
+            runner: ${{ inputs.native_filesystem_policy && 'xcode-27' || 'macos-latest' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+
+      - name: Prepare the Amazon Linux 2023 builder
+        if: endsWith(matrix.target.triple, '-unknown-linux-gnu')
+        run: |
+          set -euo pipefail
+          rust_version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          test -n "$rust_version"
+          docker build --file scripts/linux-release.Dockerfile \
+            --build-arg "RUST_VERSION=$rust_version" \
+            --tag box-linux-release .
+
+      - name: Add rust target
+        run: rustup target add ${{ matrix.target.triple }}
+
+      - name: Install cargo-edit
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-edit
+
+      - name: Stamp the release version into the crates
+        # Stamp the release version onto the shipped crates; this also rewrites
+        # Cargo.lock, so the --locked build still passes.
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # Box Core's crates too: release.json records Core's version, and one tag names both.
+          cargo set-version -p strands-box-cli -p strands-box -p strands-box-containment "$VERSION"
+
+      # Standard releases exclude test-support features.
+      - name: Build Box (release)
+        id: build_box
+        # Box, sock-alias, and contain-trampoline must ship together.
+        if: matrix.target.triple == 'aarch64-apple-darwin'
+        env:
+          TARGET: ${{ matrix.target.triple }}
+          NATIVE_FILESYSTEM_POLICY: ${{ inputs.native_filesystem_policy }}
+        run: |
+          set -euo pipefail
+          set --
+          if [ "${NATIVE_FILESYSTEM_POLICY:-false}" = true ] && [ "$TARGET" = aarch64-apple-darwin ]; then
+            sdkroot=$(xcrun --sdk "${SDKROOT:-macosx}" --show-sdk-path) || { echo "::error::Could not resolve the macOS SDK"; exit 1; }
+            case "$sdkroot" in /*) ;; *) echo "::error::macOS SDK path must be absolute"; exit 1 ;; esac
+            [ -d "$sdkroot" ] || { echo "::error::macOS SDK directory is missing: $sdkroot"; exit 1; }
+            sdk_version=$(xcrun --sdk "$sdkroot" --show-sdk-version) || { echo "::error::Could not read the macOS SDK version"; exit 1; }
+            case "$sdk_version" in
+              ''|*[!0-9.]*|.*|*.|*..*|*.*.*.*) echo "::error::Invalid macOS SDK version: $sdk_version"; exit 1 ;;
+            esac
+            [ "${sdk_version%%.*}" -ge 27 ] || { echo "::error::Native filesystem policy requires macOS SDK 27 or later (found $sdk_version)"; exit 1; }
+            export SDKROOT="$sdkroot"
+            printf 'macos_sdk_version=%s\n' "$sdk_version" >> "$GITHUB_OUTPUT"
+            set -- --features strands-box-cli/native-filesystem-policy
+          fi
+          cargo build --release --locked \
+            --target "$TARGET" \
+            -p strands-box-cli -p strands-box -p strands-box-containment \
+            --bin box --bin strands-box-sock-alias --bin strands-box-contain-trampoline "$@"
+
+      - name: Build Linux against glibc 2.34
+        if: endsWith(matrix.target.triple, '-unknown-linux-gnu')
+        env:
+          TARGET: ${{ matrix.target.triple }}
+          NATIVE_FILESYSTEM_POLICY: ${{ inputs.native_filesystem_policy }}
+        run: |
+          set -euo pipefail
+          set --
+          if [ "${NATIVE_FILESYSTEM_POLICY:-false}" = true ] && [ "$TARGET" = aarch64-unknown-linux-gnu ]; then
+            set -- --features strands-box-cli/native-filesystem-policy
+          fi
+          mkdir -p target
+          docker run --rm \
+            --mount "type=bind,source=$PWD,target=/src,readonly" \
+            --mount "type=bind,source=$PWD/target,target=/target" \
+            --env CARGO_TARGET_DIR=/target \
+            box-linux-release \
+            cargo build --release --locked --target "$TARGET" \
+              -p strands-box-cli -p strands-box -p strands-box-containment \
+              --bin box --bin strands-box-sock-alias --bin strands-box-contain-trampoline "$@"
+
+      - name: Package tarball
+        # Stage Box with its helpers and resources, then tar its contents.
+        env:
+          NEW_TAG: ${{ inputs.tag }}
+          TRIPLE: ${{ matrix.target.triple }}
+          RELEASE_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          asset="box-cli-${NEW_TAG}-${TRIPLE}.tar.gz"
+          stage="stage/package"
+          mkdir -p "$stage" dist
+          cp "target/${TRIPLE}/release/box" "$stage/box"
+          cp "target/${TRIPLE}/release/strands-box-sock-alias" "$stage/strands-box-sock-alias"
+          cp "target/${TRIPLE}/release/strands-box-contain-trampoline" "$stage/strands-box-contain-trampoline"
+          chmod 0755 "$stage"/*
+          mkdir "$stage/resources"
+          cp resources/config.toml "$stage/resources/"
+          cp resources/editing-box-profile.md "$stage/resources/"
+          cp -R resources/packs "$stage/resources/"
+          cp -R resources/plugins "$stage/resources/"
+          cp -R resources/policies "$stage/resources/"
+          cp -R resources/starters "$stage/resources/"
+          # Core and its helpers share one source: a locked public Core commit, or this
+          # repository's crates/, whose commit is then Core's commit.
+          cargo metadata --locked --format-version 1 | jq -e \
+            --arg version "${NEW_TAG#v}" --arg commit "$RELEASE_SHA" --arg target "$TRIPLE" \
+            --arg root "$(pwd -P)" '
+              [.packages[] | select(.name == "strands-box" or .name == "strands-box-containment")] as $core |
+              ($core | map(.source) | unique) as $sources |
+              (if ($core | map(.name) | sort) != ["strands-box", "strands-box-containment"]
+                  or ($sources | length) != 1 then error("Core and helpers must use the same Core source")
+               elif $sources[0] == null then
+                 if all($core[]; .manifest_path | startswith($root + "/crates/")) then $commit
+                 else error("a path Core and its helpers must be under crates/ in this repository") end
+               elif ($sources[0] | test("^git\\+https://github\\.com/strands-agents/box(\\?[^#]+)?#[0-9a-f]{40}$"))
+               then $sources[0] | split("#")[1]
+               else error("Core must be a locked public Core revision") end) as $core_commit |
+              {box_version: $version, box_commit: $commit,
+               core_version: ($core[] | select(.name == "strands-box") | .version),
+               core_commit: $core_commit, target: $target}
+            ' > "$stage/release.json"
+          # Without this, macOS tar adds a ._ file for each extended attribute.
+          COPYFILE_DISABLE=1 tar -C "$stage" -czf "dist/${asset}" .
+          tar -tzf "dist/${asset}"
+
+      - name: Record experimental build features
+        if: inputs.native_filesystem_policy == true
+        env:
+          TARGET: ${{ matrix.target.triple }}
+          NEW_TAG: ${{ inputs.tag }}
+          MACOS_SDK_VERSION: ${{ steps.build_box.outputs.macos_sdk_version }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          target = os.environ["TARGET"]
+          archive = Path("dist") / f"box-cli-{os.environ['NEW_TAG']}-{target}.tar.gz"
+          record = json.loads(Path("stage/package/release.json").read_text())
+          features = ["strands-box-cli/native-filesystem-policy"] if target in (
+              "aarch64-apple-darwin", "aarch64-unknown-linux-gnu") else []
+          record.update(cargo_features=features, archive=archive.name,
+                        archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+                        archive_stage="unsigned_build", runtime_qualified=False)
+          if target == "aarch64-apple-darwin":
+              record["macos_sdk_version"] = os.environ["MACOS_SDK_VERSION"]
+          Path("dist/native-filesystem-policy.json").write_text(json.dumps(record, indent=2) + "\n")
+          PY
+
+      - name: Assert the packaged binary reports the stamped version
+        # Each leg stamps its own crates, so each leg checks its packaged binary.
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          out=$(stage/package/box --version)
+          echo "box --version: $out"
+          if ! grep -Eq "(^| )${VERSION}( |$)" <<<"$out"; then
+            echo "::error::box --version ('$out') does not report $VERSION"
+            exit 1
+          fi
+
+      - name: Check and run the Linux package
+        if: endsWith(matrix.target.triple, '-unknown-linux-gnu')
+        env:
+          NEW_TAG: ${{ inputs.tag }}
+          TRIPLE: ${{ matrix.target.triple }}
+          BOX_TEST_INSTALLATION_ID: ${{ vars.BOX_TEST_INSTALLATION_ID }}
+        run: |
+          set -euo pipefail
+          # This named profile permits user namespaces for the disposable test container.
+          cat > "$RUNNER_TEMP/box-package-smoke.apparmor" <<'EOF'
+          abi <abi/4.0>,
+          profile box-package-smoke flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r "$RUNNER_TEMP/box-package-smoke.apparmor"
+          docker run --rm \
+            --mount "type=bind,source=$PWD,target=/src,readonly" \
+            box-linux-release \
+            python3 scripts/check-linux-package.py stage/package --target "$TRIPLE"
+          python3 -c 'import json, os; print("installation_id = " + json.dumps(os.environ.get("BOX_TEST_INSTALLATION_ID", "")))' \
+            > "$RUNNER_TEMP/box-smoke-installation.toml"
+          # Namespace setup needs a fresh proc mount, without Docker's masked system paths.
+          docker run --rm --cap-drop ALL --user 1000:1000 \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=box-package-smoke \
+            --security-opt systempaths=unconfined \
+            --env HOME=/home/box-test \
+            --mount "type=bind,source=$RUNNER_TEMP/box-smoke-installation.toml,target=/home/box-test/.strands/box/installation.toml,readonly" \
+            --mount "type=bind,source=$PWD,target=/src,readonly" \
+            box-linux-release \
+            python3 scripts/smoke-linux-package-cli.py \
+              "dist/box-cli-${NEW_TAG}-${TRIPLE}.tar.gz"
+
+      - name: Upload experimental build features
+        if: inputs.native_filesystem_policy == true
+        uses: actions/upload-artifact@v7
+        with:
+          name: cli-native-filesystem-policy-${{ matrix.target.triple }}
+          path: dist/native-filesystem-policy.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: cli-${{ inputs.tag }}-${{ matrix.target.triple }}
+          path: dist/box-cli-${{ inputs.tag }}-${{ matrix.target.triple }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # ── Sign, notarize, and check the macOS package ────────────────────────
+  # Runs only when the caller asks for signing, from main of a strands-agents repository.
+  sign-macos:
+    name: Sign and notarize the macOS package
+    needs: build
+    if: >-
+      github.repository_owner == 'strands-agents' && github.ref == 'refs/heads/main' &&
+      inputs.sign == true
+    cache-mode: none
+    runs-on: macos-latest
+    timeout-minutes: 90
+    environment: macos-signing
+    outputs:
+      team_id: ${{ vars.CD_SIGNER_TEAM_ID }}
+      cli_profile_name: ${{ vars.CD_SIGNER_PROFILE_NAME }}
+      package_sha256: ${{ steps.package.outputs.sha256 }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CD_SIGNER_ENDPOINT: ${{ vars.CD_SIGNER_ENDPOINT }}
+      CD_SIGNER_BUCKET: ${{ vars.CD_SIGNER_BUCKET }}
+      CD_SIGNER_BUCKET_ACCESS_ROLE: ${{ vars.CD_SIGNER_BUCKET_ACCESS_ROLE }}
+      CD_SIGNER_TEAM_ID: ${{ vars.CD_SIGNER_TEAM_ID }}
+      CD_SIGNER_PROFILE_NAME: ${{ vars.CD_SIGNER_PROFILE_NAME }}
+      NOTARY_CREDENTIAL_SECRET: ${{ vars.NOTARY_CREDENTIAL_SECRET }}
+    steps:
+      # The caller checks the source too, but this workflow signs, so it refuses an unmerged
+      # commit itself before it gets any credentials.
+      - name: Refuse a commit outside main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          case "$SOURCE_SHA" in
+            ''|*[!0-9a-f]*) echo "::error::sha must be a full commit SHA"; exit 1 ;;
+          esac
+          if [ "${#SOURCE_SHA}" -ne 40 ]; then
+            echo "::error::sha must be a full commit SHA"
+            exit 1
+          fi
+          # identical or behind: the commit is main's head or in main's history.
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$SOURCE_SHA" --jq .status)
+          case "$status" in
+            identical|behind) ;;
+            *) echo "::error::$SOURCE_SHA is not in the history of main ($status)"; exit 1 ;;
+          esac
+
+      - name: Checkout trusted workflow tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download this run's macOS build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cli-${{ inputs.tag }}-aarch64-apple-darwin
+          path: unsigned
+
+      - name: Download the native build record
+        if: inputs.native_filesystem_policy == true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cli-native-filesystem-policy-aarch64-apple-darwin
+          path: unsigned-features
+
+      - name: Check native signing configuration
+        if: inputs.native_filesystem_policy == true
+        run: |
+          test -n "$CD_SIGNER_PROFILE_NAME" || {
+            echo "::error::Set CD_SIGNER_PROFILE_NAME to a distribution profile authorized for the shared Box native filesystem policy."
+            exit 1
+          }
+
+      - name: Install signing tools
+        run: |
+          brew install gnu-tar
+          python3 -m venv "$RUNNER_TEMP/signing-venv"
+          "$RUNNER_TEMP/signing-venv/bin/pip" install boto3==1.42.61 requests==2.32.5
+
+      - name: Obtain temporary signing credentials
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
+        with:
+          role-to-assume: ${{ vars.CD_SIGNER_CALLER_ROLE }}
+          aws-region: ${{ vars.CD_SIGNER_REGION }}
+          role-session-name: box-release-${{ github.run_id }}
+          role-duration-seconds: 3600
+
+      - name: Sign and notarize the executables
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.sha }}
+          NEW_TAG: ${{ inputs.tag }}
+          NATIVE_FILESYSTEM_POLICY: ${{ inputs.native_filesystem_policy }}
+        run: |
+          set -euo pipefail
+          set --
+          if [ "$NATIVE_FILESYSTEM_POLICY" = true ]; then
+            set -- --native-filesystem-policy --build-metadata unsigned-features/native-filesystem-policy.json
+          fi
+          "$RUNNER_TEMP/signing-venv/bin/python" scripts/macos-release-cli.py sign \
+            --input "unsigned/box-cli-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
+            --output "signed/box-cli-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
+            --work "$RUNNER_TEMP/signing" --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --notary-secret "$NOTARY_CREDENTIAL_SECRET" "$@"
+
+      - name: Record the signed package's hash
+        id: package
+        env:
+          NEW_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          sha256=$(shasum -a 256 "signed/box-cli-${NEW_TAG}-aarch64-apple-darwin.tar.gz" | cut -d ' ' -f 1)
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Retain signing evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-macos-signing-evidence
+          path: ${{ runner.temp }}/signing/**/*.json
+          if-no-files-found: warn
+
+      - name: Retain the native signing receipt
+        if: inputs.native_filesystem_policy == true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-macos-native-receipt
+          path: ${{ runner.temp }}/signing/receipt.json
+          if-no-files-found: error
+
+      # The name does not match box-*, so inspect's build download leaves it out.
+      - name: Upload the signed package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-macos-signed-package
+          path: signed/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  verify-macos:
+    name: Check the signed macOS package
+    needs: sign-macos
+    if: github.repository_owner == 'strands-agents' && github.ref == 'refs/heads/main'
+    cache-mode: none
+    runs-on: ${{ inputs.native_filesystem_policy && 'xcode-27' || 'macos-latest' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CD_SIGNER_TEAM_ID: ${{ needs.sign-macos.outputs.team_id }}
+      CD_SIGNER_PROFILE_NAME: ${{ needs.sign-macos.outputs.cli_profile_name }}
+    steps:
+      - name: Checkout trusted verification source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check the native macOS host
+        if: inputs.native_filesystem_policy == true
+        run: |
+          set -euo pipefail
+          os_version=$(sw_vers -productVersion)
+          sdk_version=$(xcrun --sdk macosx --show-sdk-version)
+          python3 - "$os_version" "$sdk_version" <<'PYTHON'
+          import re
+          import sys
+          for name, value in zip(("macOS", "macOS SDK"), sys.argv[1:]):
+              if not re.fullmatch(r"[0-9]+(?:[.][0-9]+)*", value) or int(value.split(".")[0]) < 27:
+                  raise SystemExit(f"Native package verification requires {name} 27 or later; found {value!r}")
+          PYTHON
+
+      - name: Set up Python for native package checks
+        if: inputs.native_filesystem_policy == true
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Download the signed package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cli-macos-signed-package
+          path: signed
+
+      - name: Download the native signing receipt
+        if: inputs.native_filesystem_policy == true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cli-macos-native-receipt
+          path: native-receipt
+
+      - name: Download the unsigned native macOS control
+        if: inputs.native_filesystem_policy == true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cli-${{ inputs.tag }}-aarch64-apple-darwin
+          path: unsigned-control
+
+      # The probe is the engine suite's PROBE profile. Creating a profile from the claude starter
+      # reads the shipped packs. Neither step needs an agent or a model key.
+      - name: Verify the package and run a box with it
+        env:
+          VERSION: ${{ inputs.version }}
+          NEW_TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ inputs.sha }}
+          NATIVE_FILESYSTEM_POLICY: ${{ inputs.native_filesystem_policy }}
+          BOX_TEST_INSTALLATION_ID: ${{ vars.BOX_TEST_INSTALLATION_ID }}
+        run: |
+          set -euo pipefail
+          # macOS reads a folder named box that holds resources/ as a bundle, and then stops box.
+          package="$RUNNER_TEMP/box-package"
+          mkdir "$package"
+          tar -C "$package" -xzf "signed/box-cli-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+          set --
+          if [ "$NATIVE_FILESYSTEM_POLICY" = true ]; then
+            set -- --native-filesystem-policy --receipt native-receipt/receipt.json \
+              --archive "signed/box-cli-${NEW_TAG}-aarch64-apple-darwin.tar.gz" --source-sha "$SOURCE_SHA"
+          fi
+          python3 scripts/macos-release-cli.py verify --package "$package" \
+            --evidence "$RUNNER_TEMP/package-verification" "$@"
+          "$package/box" --version | grep -F "$VERSION"
+          home="$RUNNER_TEMP/home"
+          mkdir -p "$home/.strands/box/profiles" "$home/project"
+          python3 -c 'import json, os; print("installation_id = " + json.dumps(os.environ.get("BOX_TEST_INSTALLATION_ID", "")))' \
+            > "$home/.strands/box/installation.toml"
+          cp -R test-corpus/profiles/probe "$home/.strands/box/profiles/probe"
+          cd "$home/project"
+          env -i HOME="$home" PATH=/usr/bin:/bin \
+            "$package/box" profile create claude --with bedrock --policy open < /dev/null
+          test -f "$home/.strands/box/profiles/claude/profile.toml"
+          env -i HOME="$home" PATH=/usr/bin:/bin \
+            "$package/box" run probe -- -c 'echo signed > proof.txt' < /dev/null
+          test "$(cat proof.txt)" = signed
+
+      - name: Check native filesystem policy in the signed package
+        if: inputs.native_filesystem_policy == true
+        env:
+          NEW_TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          unsigned_package="$RUNNER_TEMP/unsigned-package"
+          mkdir "$unsigned_package"
+          tar -C "$unsigned_package" -xzf "unsigned-control/box-cli-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+          python=$(command -v python3)
+          installed=$("$python" scripts/install-native-macos-package.py \
+            --archive "signed/box-cli-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
+            --package "$RUNNER_TEMP/box-package" --receipt native-receipt/receipt.json \
+            --source-sha "$SOURCE_SHA" --evidence "$RUNNER_TEMP/package-verification/install")
+          "$python" scripts/check-native-macos-package.py \
+            --package "$installed" --unsigned-package "$unsigned_package" \
+            --evidence "$RUNNER_TEMP/package-verification/native"
+
+      - name: Retain package verification
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-macos-package-verification
+          path: ${{ runner.temp }}/package-verification/
+          if-no-files-found: warn
+
+  # ── Collect the CLI archives that a release publishes ─────────────────
+  # The caller publishes only from this bundle, so the bytes on the run page are the bytes
+  # attached to the release.
+  bundle:
+    name: Bundle the CLI release archives
+    needs: [build, sign-macos, verify-macos]
+    # Without signing, bundle the unsigned build. With signing, only the signed, checked package.
+    if: >-
+      always() && needs.build.result == 'success' &&
+      (inputs.sign != true ||
+       (needs.sign-macos.result == 'success' && needs.verify-macos.result == 'success'))
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      signed: ${{ needs.verify-macos.result == 'success' }}
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: cli-${{ inputs.tag }}-*
+          path: assets
+
+      # The signed archive has the unsigned one's name, so it gets a folder of its own.
+      - name: Download the signed macOS package
+        if: needs.verify-macos.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cli-macos-signed-package
+          path: signed
+
+      - name: Collect the CLI tarballs
+        # Every target lands in built/. Only qualified architectures enter release/.
+        env:
+          NEW_TAG: ${{ inputs.tag }}
+          SIGNED: ${{ needs.verify-macos.result == 'success' }}
+          SIGNED_SHA256: ${{ needs.sign-macos.outputs.package_sha256 }}
+          PUBLISH_LINUX_X86: ${{ inputs.publish_linux_x86 }}
+        run: |
+          set -euo pipefail
+          mkdir -p built release
+          find assets -type f -name '*.tar.gz' -exec cp {} built/ \;
+          darwin="built/box-cli-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+          if [ ! -f "$darwin" ]; then
+            echo "::error::missing the macOS tarball $darwin"
+            exit 1
+          fi
+          linux="built/box-cli-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
+          if [ ! -f "$linux" ]; then
+            echo "::error::missing the ARM64 Linux tarball $linux"
+            exit 1
+          fi
+          # A signed run bundles the archive that sign-macos made, checked by its hash.
+          if [ "$SIGNED" = "true" ]; then
+            cp "signed/box-cli-${NEW_TAG}-aarch64-apple-darwin.tar.gz" "$darwin"
+            actual=$(sha256sum "$darwin" | cut -d ' ' -f 1)
+            if [ "$actual" != "$SIGNED_SHA256" ]; then
+              echo "::error::$darwin is not the archive that sign-macos signed"
+              exit 1
+            fi
+          fi
+          linux_x86="built/box-cli-${NEW_TAG}-x86_64-unknown-linux-gnu.tar.gz"
+          if [ ! -f "$linux_x86" ]; then
+            echo "::error::missing the x86_64 Linux tarball $linux_x86"
+            exit 1
+          fi
+          cp "$darwin" "$linux" release/
+          if [ "$PUBLISH_LINUX_X86" = "true" ]; then
+            cp "$linux_x86" release/
+          fi
+          echo "Built tarballs:"
+          ls -la built
+          echo
+          echo "Bundled tarballs:"
+          ls -la release
+
+      - name: Assert the expected tarballs, each carrying box
+        env:
+          NEW_TAG: ${{ inputs.tag }}
+          PUBLISH_LINUX_X86: ${{ inputs.publish_linux_x86 }}
+        run: |
+          set -euo pipefail
+          expected=(
+            "box-cli-${NEW_TAG}-x86_64-unknown-linux-gnu.tar.gz"
+            "box-cli-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
+            "box-cli-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+          )
+          for asset in "${expected[@]}"; do
+            if [ ! -f "built/$asset" ]; then
+              echo "::error::missing expected asset built/$asset"
+              exit 1
+            fi
+            # Files in the tarball, with the leading ./ and the dir entry stripped.
+            names=$(tar -tzf "built/$asset" | sed 's#^\./##' | grep -v '^$' | sort | tr '\n' ' ')
+            echo "$asset: $names"
+            case " $names " in
+              *" box "*) ;;
+              *) echo "::error::$asset does not contain box (got: $names)"; exit 1;;
+            esac
+          done
+          count=$(find built -maxdepth 1 -name '*.tar.gz' | wc -l | tr -d ' ')
+          if [ "$count" != "${#expected[@]}" ]; then
+            echo "::error::expected ${#expected[@]} built tarballs, found $count"
+            exit 1
+          fi
+          bundled=$(cd release && printf '%s\n' * | sort)
+          bundle_assets=(
+            "box-cli-${NEW_TAG}-aarch64-apple-darwin.tar.gz"
+            "box-cli-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
+          )
+          if [ "$PUBLISH_LINUX_X86" = "true" ]; then
+            bundle_assets+=("box-cli-${NEW_TAG}-x86_64-unknown-linux-gnu.tar.gz")
+          fi
+          expected_bundle=$(printf '%s\n' "${bundle_assets[@]}" | sort)
+          if [ "$bundled" != "$expected_bundle" ]; then
+            echo "::error::the CLI bundle has an unexpected asset set: $bundled"
+            exit 1
+          fi
+
+      - name: Upload the CLI release bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: cli-release-bundle
+          path: release/*
+          if-no-files-found: error
+          retention-days: 30

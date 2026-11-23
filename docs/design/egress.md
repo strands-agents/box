@@ -173,7 +173,12 @@ file is not judged.
 
 A request the gateway refuses gets a 403 with the header `x-strands-box-egress: refused`, and a body
 that says why. A `net:connect` refusal of a `CONNECT` arrives before the `200`, so the client never
-starts TLS. A policy refusal of a request to an HTTP MCP server gets a JSON-RPC error body.
+starts TLS. A policy refusal of a request to an HTTP MCP server gets a JSON-RPC error body. A
+request inside a `CONNECT` that the gateway can't read gets a 400 with the same header.
+
+A request the gateway doesn't refuse but can't complete gets a 502 with the header
+`x-strands-box-egress: failed`, and a body that says why. The header says that the gateway wrote
+the response. It doesn't say whether the request reached the server.
 
 ### Cloud instance metadata
 
@@ -183,6 +188,25 @@ before the request leaves, but a name that resolves to one reaches policy. A pol
 needs two `forbid` rules on `net:connect`: one for the metadata hostnames `metadata.google.internal`
 and `metadata.azure.internal`, and one for the metadata addresses `169.254.*`, `fd00:ec2::254`,
 Azure WireServer `168.63.129.16`, Alibaba Cloud `100.100.100.200`, and the IPv6 link-local range.
+
+### A service on the operator's machine
+
+Inside a box, `localhost` is the box's own loopback, and `NO_PROXY` keeps it local. The reserved
+name `host.box.internal` is the surrounding OS's loopback; it isn't in `NO_PROXY`, so it reaches the
+gateway. The gateway decides `net:connect` on the name, maps it to `127.0.0.1` with no DNS lookup,
+decides the address (`ip4 = "127.0.0.1"`), and dials it from its own process. So a loopback `ip4`
+forbid also refuses the name, and a backend on the name still wins over the map. Shell `curl` and
+Monty `fetch()` don't refuse the name, so policy decides their requests too. See
+[`host.box.internal` names the surrounding OS's
+loopback](decisions.md#host-box-internal-names-the-surrounding-oss-loopback).
+
+Only `http://` works in practice: on `https://` the gateway checks the local service's
+certificate for `host.box.internal` against its trusted roots, which a local service seldom passes.
+Under a containerized Box, the name is the container's loopback.
+
+The gateway also refuses, before policy, a dial to its own listening address in any local spelling,
+because it would connect to itself. See [the gateway never dials its own
+listener](decisions.md#the-gateway-never-dials-its-own-listener).
 
 ## How responses reach the workload
 
@@ -269,7 +293,7 @@ forward each request. The route specifies which credential to add and grants no 
 |---|---|---|
 | An environment variable | `env://NAME` | Reads `NAME` from the environment of `box run` once, at startup, and swaps it in for a placeholder |
 | An AWS profile | `aws://PROFILE` | Signs each request with SigV4, resolving the named profile through the AWS SDK |
-| The AWS default chain | `aws://` (no profile) | Signs each request with SigV4, from the AWS SDK default credential provider chain (the host's ambient identity), and warns on every signed request |
+| The AWS default chain | `aws://` (no profile) | Signs each request with SigV4, from the AWS SDK default credential provider chain (the host's ambient identity), with a [warning](../user/egress.md#credential-sources) |
 
 ### The placeholder swap
 
@@ -305,7 +329,9 @@ A placeholder sent anywhere else authenticates nothing. The gateway forwards it 
 destination with no route. The random value reveals no real credential to the receiving server.
 
 The gateway adds a secret only over TLS. It refuses a plain HTTP request to a bound destination
-before it adds any credential. See [credentials require TLS](decisions.md#a-secret-rides-only-tls).
+before it adds any credential, except to `host.box.internal` when every matching route names it
+exactly, with a port that no `[[agent.ingress]]` entry uses, and no backend. See [credentials
+require TLS](decisions.md#a-secret-rides-only-tls).
 
 `secret.placement` selects a header, HTTP basic auth, or a query parameter for the secret. See
 [placement keys](../user/egress.md#placement), [the operator selects the credential
@@ -323,7 +349,7 @@ request, and the gateway replaces the signature.
 
 Both forms resolve through the AWS SDK: `aws://PROFILE` resolves only the named profile (never the
 ambient env keys or instance metadata, and a missing profile is refused), and a bare `aws://`
-resolves the default chain, the host's ambient identity, which the box warns about on every request.
+resolves the default chain, the host's ambient identity, with a [warning](../user/egress.md#credential-sources).
 The decision
 [Both aws:// forms resolve through the AWS SDK and share one risk](decisions.md#a-bare-aws-resolves-the-default-credential-chain)
 states both forms and the writable-`~/.aws` cost.

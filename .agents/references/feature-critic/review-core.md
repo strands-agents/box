@@ -1,6 +1,8 @@
 # feature-critic: Core area
 
-Paths: every path in this repository.
+Paths: each crate under `crates/` outside `crates/cli/`, `test-integ/`, `test-native-filesystem/`,
+`test-common/`, `test-workload/`, and `examples/`. The [CLI area](review-cli.md) covers
+`crates/cli/`.
 
 Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds the checks for Box Core.
 

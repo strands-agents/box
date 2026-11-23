@@ -1,0 +1,342 @@
+# Codex in a box, tested with codex 0.170.0 on macOS.
+[pack]
+name = "@box/codex"
+version = 1
+kind = "agent"
+extend = ["@box/base"]
+
+[run]
+command = [
+    "${{ inputs.codex.path }}",
+    # Exactly one value after this -c holds, because codex.host takes only these values.
+    "-c",
+    { value = 'model_provider="amazon-bedrock"', when = { variable = "inputs.codex.host", equals = "amazon-bedrock" } },
+    { value = 'model_provider="amazon-bedrock-runtime"', when = { variable = "inputs.codex.host", equals = "amazon-bedrock-runtime" } },
+    { value = 'model_provider="openai-api"', when = { variable = "inputs.codex.host", equals = "openai" } },
+    # The region exists only with a Bedrock pack, so only a Bedrock provider names it.
+    { value = "-c", when = { variable = "inputs.codex.host", equals = "amazon-bedrock" } },
+    { value = 'model_providers.amazon-bedrock.aws.region="${{ inputs.bedrock.region }}"', when = { variable = "inputs.codex.host", equals = "amazon-bedrock" } },
+    { value = "-c", when = { variable = "inputs.codex.host", equals = "amazon-bedrock-runtime" } },
+    { value = 'model_providers.amazon-bedrock-runtime.aws.region="${{ inputs.bedrock.region }}"', when = { variable = "inputs.codex.host", equals = "amazon-bedrock-runtime" } },
+    # Codex's built-in openai provider reads no key from the environment and asks for a login,
+    # and a config cannot change how it signs in. This provider sends OPENAI_API_KEY, the stand-in
+    # that @box/openai swaps for your key.
+    { value = "-c", when = { variable = "inputs.codex.host", equals = "openai" } },
+    { value = 'model_providers.openai-api={name="OpenAI",base_url="https://api.openai.com/v1",env_key="OPENAI_API_KEY",wire_api="responses"}', when = { variable = "inputs.codex.host", equals = "openai" } },
+    "-c",
+    'sandbox_mode="danger-full-access"',
+    "-c",
+    "check_for_update_on_startup=false",
+    { value = "-c", when = { variable = "inputs.agent.skip-permissions", equals = "true" } },
+    { value = 'approval_policy="never"', when = { variable = "inputs.agent.skip-permissions", equals = "true" } },
+    # What the box does, and the profile to change (docs/design/cli/decisions.md#an-agent-pack-tells-its-agent-about-the-box).
+    # Codex reads the value as TOML, so the text is a literal string and holds no '''.
+    "-c",
+    """developer_instructions='''# You run in a box
+
+You run inside a Strands Box, started by the `box` command. The box checks each program start,
+network connection, and file that its shell reads or writes against the user's policy, and refuses
+what the policy does not allow. Your own file tools reach only the files that the user's box
+profile grants. The user's box profile sets that policy and those grants. Your own sandbox is off
+(`sandbox_mode` is `danger-full-access`), because the box is the sandbox: full access in your
+settings does not mean that the box allows an action.
+
+Before you use a file tool on a path outside the project, other than your own settings folder
+and `$TMPDIR`, use the shell first, so that the box's policy decides and records it.
+
+## What the box allows
+
+- The project folder (your working directory), to read and write.
+- The programs and toolchains that the profile names, such as git, node, npm, or cargo. Other
+  programs on the machine may not start.
+- The model API and the hosts that the profile's routes list. With the profile's `open` policy,
+  every host. With `project`, only the model and the toolchains' package hosts.
+- Your own settings folder (`CODEX_HOME`). Other folders in the user's home are refused unless the
+  profile adds them.
+
+API keys and tokens in your environment, such as `AWS_BEARER_TOKEN_BEDROCK` or `GITHUB_TOKEN`, are
+stand-ins. The box swaps in the real value on each request to the host the key is for. Do not
+report a stand-in as a wrong or fake key.
+
+## Programs you install
+
+The box runs only the tools that the profile names, and it reads that list when it starts. A
+program that you install during the run is not on the list, so it does not run, even when the
+install succeeds. It fails with `command not found` or `no tool runs`.
+
+- Do not install a command-line program globally, with `npm i -g`, `pip install --user`,
+  `cargo install`, `go install`, or `nvm install`. Such an install often fails too, because the
+  box refuses writes to the folders those commands use.
+- Run a package's command through a package runner that the profile names: `npx`, `pnpx`,
+  `bunx`, or `uvx`. For example, `npx tsx report.ts` runs tsx without an install. To pin a
+  Node.js package, first add it to the project with `npm i -D tsx`, then run `npx tsx`.
+- After `uv tool install`, run the command through uv: `uv tool run greet`.
+- When no runner fits, tell the user what to add for the next run (see below).
+
+## When the box refuses
+
+A refusal looks like an ordinary error: `Permission denied`, `Operation not permitted`, a program
+that does not start, or a connection that fails or returns 403.
+
+The box has no DNS. A lookup of a network host fails, with an error such as `ENOTFOUND`,
+`EAI_AGAIN`, or `Could not resolve host`, so the failure is not a DNS fault. Programs reach network
+hosts through the box's proxy. On macOS, a tool that the profile lets connect directly is the
+exception.
+
+- Do not tell the user that a file or program does not exist when the box can have refused it.
+  Say that the box probably refused it, and name the path, program, or host.
+- Do not work around a refusal: do not copy files to other places, reach a refused file with
+  another tool, try other hosts, or turn off checks. Stop and ask the user.
+- The user can see each refusal in the box banner below you: press Ctrl+] to expand it.
+
+## Your shell
+
+Your shell runs under a policy and is not a full bash. When a shell command gives an unexpected or
+empty result, try a simpler, portable form and name files by explicit paths.
+
+`rg` runs only when the profile lists `@box/rg` and ripgrep is installed on the user's machine.
+When `rg` is not found or is refused, search with `grep -rn` instead.
+
+## How the user changes what the box allows
+
+You cannot change the policy. The box refuses writes to the user's box files. Tell the user the
+exact change, as a snippet for their `profile.toml`. With the box banner on, a change to a policy
+file takes effect in this session: the banner says UPDATE READY, and the user presses Ctrl+Alt+R.
+Without the banner, and for a change to the profile's startup settings (its packs, tools, folders,
+or egress routes), the user starts a new run.
+
+- Reach one more host:
+
+  ```toml
+  [egress.docs]
+  destinations = ["docs.rs"]
+  ```
+
+  A route takes effect in a new run. To reach the host in this session, the user adds these two
+  permits to a policy file that `policies` lists, and presses Ctrl+Alt+R:
+
+  ```text
+  @id("docs_connect")
+  permit (principal, action == Box::Action::"net:connect", resource)
+  when { context.input.host == "docs.rs" && context.input.port == 443 };
+
+  @id("docs_request")
+  permit (principal, action == Box::Action::"http:request", resource)
+  when { context.input.host == "docs.rs" };
+  ```
+
+- Send a token from the user's shell to one host (they export `GITHUB_TOKEN` before `box run`):
+
+  ```toml
+  [egress.github]
+  destinations = ["api.github.com"]
+  secret.ref = "env://GITHUB_TOKEN"
+  ```
+
+- Add a toolchain: add its pack, such as `"@box/cargo"`, to the `packs` list.
+- Add one program that no pack adds, such as `jq`: a `[tool.jq]` table with its `command`, and a
+  `shell:spawn` permit for it in a policy file that `policies` lists. Point the user to the "To
+  write a tool with an explicit `command`" part of the box profile docs.
+- Use a folder outside the project: add it to `[agent.filesystem]` `read` (and `write`), and add
+  `fs:read` (and `fs:write`) permit rules for it in a policy file that `policies` lists. Point the
+  user to the "Give the agent another directory" section of the box profile docs.
+
+`box profile show <profile name>`, or `box profile show <profile file>` for a profile that a path
+named, prints what a run gets, so the user can check the change before the next run.
+
+This run's box profile is the folder ${{ profile }}, and its file is ${{ profile.file }}.'''""",
+    "-c",
+    'otel.trace_exporter={otlp-http={endpoint="${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}",protocol="json"}}',
+    "-c",
+    'otel.exporter="none"',
+    "-c",
+    'otel.metrics_exporter="none"',
+    "-c",
+    "otel.log_user_prompt=false",
+    { slot = "agent-args" },
+]
+
+[inputs.codex.host]
+description = "The model provider that Codex uses."
+type = "string"
+values = ["amazon-bedrock", "amazon-bedrock-runtime", "openai"]
+default = "amazon-bedrock"
+
+[inputs.codex.path]
+description = "The Codex program."
+type = "program"
+program = "codex"
+search = [
+    { env = "PATH" },
+]
+
+# Select the host source folder; Codex itself keeps its private home in storage.
+[inputs.codex.home]
+description = "The host Codex configuration folder."
+from = "env:CODEX_HOME"
+default = "${{ home }}/.codex"
+
+[inputs.agent.skip-permissions]
+description = "Turn off approval prompts unless your organization requires them. Without prompts, Codex refuses a command it would ask about, such as a forced rm. The box still allows or refuses each action."
+type = "bool"
+default = false
+
+# A profile can stop these copies when it supplies its own skills.
+[inputs.codex.import-skills]
+description = "Copy and update your Codex skills and ~/.agents/skills in the box."
+type = "bool"
+default = true
+
+[inputs.codex.import-mcp]
+description = "Import your MCP servers from your Codex configuration?"
+type = "bool"
+default = false
+warning = """Includes servers you add later.
+Local servers run in the box with keys from their settings and your environment.
+A server variable that names a library folder or runtime options can load code.
+If it points where the agent can write, the agent's code runs with the server's keys.
+Remote servers' hosts become reachable.
+Copied settings can expose keys to the agent, even for servers Box skips."""
+
+[inputs.codex.import-hooks]
+description = "Run the command hooks in your Codex folder's hooks.json that each run one shell script, such as a formatter after an edit."
+type = "bool"
+default = false
+warning = """Choosing true lets the agent read each script that an imported hook runs, and runs each script with the agent's own policy.
+A hook is a convenience, not a guardrail: the agent can change its own settings during a run.
+Write a rule that must hold as Box policy."""
+
+# Your MCP servers. box declares each one the box can run, and lists each one it skips.
+[[mcp-servers]]
+file = "${{ inputs.codex.home }}/config.toml"
+kind = "toml"
+target = "home/config.toml"
+target-key = "mcp_servers"
+key = ["mcp_servers"]
+env-var-locations = { bearer_token_env_var = "bearer-variable", env_http_headers = "header-variables", env_vars = "variable-names" }
+when = { variable = "inputs.codex.import-mcp", equals = "true" }
+
+# ~/.strands/box/storage/<profile>/default/agent/, shared by every project the profile runs in. Codex keeps
+# its settings here, and its sessions by date, each with the folder it started in.
+[storage]
+directories = ["home", "tmp"]
+
+# Preferences and MCP settings share this file, so fill missing preferences and preserve saved choices.
+[[storage.files]]
+source = "${{ inputs.codex.home }}/config.toml"
+target = "home/config.toml"
+kind = "toml"
+optional = true
+fill = true
+keep = [
+    ["model"],
+    ["model_verbosity"],
+    ["model_reasoning_effort"],
+    ["personality"],
+    ["tui", "animations"],
+    ["tui", "show_tooltips"],
+    ["tui", "theme"],
+    ["tui", "keymap"],
+    ["tui", "presets"],
+    ["projects", "${{ workspace }}", "trust_level"],
+    ["agents"],
+    ["features", "memories"],
+    ["memories"],
+]
+
+[[storage.files]]
+source = "${{ inputs.codex.home }}/agents"
+target = "home/agents"
+optional = true
+sync = true
+
+# The hooks Codex runs from hooks.json. Each run writes them again from your file: with
+# import-hooks, each `command` hook that runs one shell script, and without it, none
+# (docs/design/cli/decisions.md#imported-hooks-are-rebuilt-on-each-run).
+# - `key`: hooks.json holds `hooks`, then each event, then each matcher group, then the group's
+#   `hooks`, then each hook. A group keeps its `matcher`.
+# - `set`: Codex runs a hook's command string in the box's shell. The shell refuses to start a
+#   script by its path or with `bash`, and reads one with `.`, and that read is a policy decision
+#   that the generated permit allows.
+# - `drop`: `commandWindows` is the command for Windows, and Codex also reads it as
+#   `command_windows`.
+# - Codex keeps its trust in a hook by the path of hooks.json, in config.toml beside it, so the
+#   file stays in the box's CODEX_HOME and changes only when your hooks change.
+# - No row reads the `[hooks]` table or `[features] hooks` of config.toml.
+[[storage.hooks]]
+source = "${{ inputs.codex.home }}/hooks.json"
+target = "home/hooks.json"
+kind = "json"
+when = { variable = "inputs.codex.import-hooks", equals = "true" }
+key = ["hooks", "*", "*", "hooks", "*"]
+keep-above = ["matcher"]
+only = { key = ["type"], equals = "command" }
+command = ["command"]
+keep = [["type"], ["timeout"], ["statusMessage"], ["additionalContextLimit"], ["async"]]
+drop = [["commandWindows"], ["command_windows"]]
+
+[[storage.hooks.set]]
+key = ["command"]
+value = ". ${{ script }}"
+
+# Your own instructions, copied into storage on the profile's first run and brought up to date
+# with the host on each run after it. Codex reads them from CODEX_HOME. A box's edit stays until
+# the host's file changes.
+[[storage.files]]
+source = "${{ inputs.codex.home }}/AGENTS.md"
+target = "home/AGENTS.md"
+optional = true
+sync = true
+
+# Codex searches recursively; separate folders keep matching skill names from both host roots.
+[[storage.files]]
+source = "${{ inputs.codex.home }}/skills"
+target = "home/skills/codex"
+optional = true
+sync = true
+when = { variable = "inputs.codex.import-skills", equals = "true" }
+
+[[storage.files]]
+source = "${{ home }}/.agents/skills"
+target = "home/skills/agents"
+optional = true
+sync = true
+when = { variable = "inputs.codex.import-skills", equals = "true" }
+
+[[storage.files]]
+source = "${{ inputs.codex.home }}/themes"
+target = "home/themes"
+optional = true
+sync = true
+
+# Your command rules, and the commands you approved. A matching prompt rule asks in the box too.
+# No sync: Codex adds the commands you approve in the box to this copy, and a host copy would
+# replace them.
+[[storage.files]]
+source = "${{ inputs.codex.home }}/rules"
+target = "home/rules"
+optional = true
+
+[env]
+CODEX_HOME = "${{ storage.home }}"
+TMPDIR = "${{ storage.tmp }}"
+
+# Codex reads its requirements and legacy managed settings on both macOS and Linux.
+# Device-managed preferences on macOS are not granted
+# (docs/design/cli/decisions.md#an-organizations-agent-policy-applies-in-the-box).
+[filesystem]
+# Codex 0.171 runs its model's tool calls through codex-code-mode-host, installed beside codex.
+read = [
+    "${{ inputs.codex.path }}",
+    { path = "${{ root }}/codex-code-mode-host", optional = true },
+]
+read_file = [
+    { path = "/etc/codex/requirements.toml", optional = true },
+    { path = "/etc/codex/managed_config.toml", optional = true },
+]
+# macOS needs metadata to report a dangling policy link as absent instead of denied.
+metadata = [{ path = "/etc/codex", optional = true, when = "macos" }]
+exec = [
+    "${{ inputs.codex.path }}",
+    { path = "${{ root }}/codex-code-mode-host", optional = true },
+]

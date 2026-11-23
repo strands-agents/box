@@ -1,4 +1,4 @@
-# Policy
+# Policy language
 
 A policy is the `policy.dw` file of `permit` and `forbid` rules that decides each request the
 workload makes through the box's trusted process (the part of Box that runs outside the box and
@@ -424,6 +424,35 @@ policy denied this operation on 'example.com:443' [default-deny]: No permit poli
 
 A `[egress.<name>]` table with no matching permit leaves the host unreachable. A permit with no
 binding sends the request with a placeholder in place of the secret, which the provider rejects.
+
+### Reach a service on your machine
+
+The agent reaches `http://host.box.internal:4259`, a service on your machine's loopback, and no other
+port there ([a service on your machine](egress.md#a-service-on-your-machine)):
+
+```text
+@id("local_llm_connect")
+permit (principal, action == Box::Action::"net:connect", resource)
+when { context.input.host == "host.box.internal" && context.input.port == 4259 };
+
+@id("local_llm_request")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "host.box.internal" && context.input.port == 4259 };
+```
+
+The gateway decides `net:connect` on the name, then on the address it dials, `ip4 = "127.0.0.1"`.
+So a forbid on loopback addresses also refuses the name. To keep it, exclude the name:
+
+```text
+@id("no_loopback")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when {
+  context.input has ip4 && context.input.ip4 like "127.*" &&
+  context.input.host != "host.box.internal"
+};
+```
+
+A permit on the name doesn't admit `127.0.0.1:4259`, and a wildcard host permit includes the name.
 
 ## History persistence and process crashes
 

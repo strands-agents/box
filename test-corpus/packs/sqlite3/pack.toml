@@ -1,0 +1,18 @@
+# sqlite3, as the operator's PATH finds it: Apple's /usr/bin build, whose libraries all lie in
+# /usr/lib. Homebrew's keg-only build needs libreadline under the Homebrew prefix, which no grant
+# here covers; a default Homebrew install never shadows /usr/bin/sqlite3.
+# The corpus installs this into ~/.strands/box/packs/, so it is an operator pack rather than a
+# shipped one and `box profile create` never offers it.
+[pack]
+name = "sqlite3"
+version = 1
+kind = "tool"
+
+[inputs.sqlite3.path]
+description = "The sqlite3 program."
+type = "program"
+program = "sqlite3"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.sqlite3.path }}"]

@@ -1,0 +1,6 @@
+# A policy starter. `box profile create` copies its policy.dw into a new profile.
+[policy]
+name = "@box/scoped"
+label = "Scoped"
+description = "The agent can run any command, and reaches only what your packs and profile allow, such as the model and package registries."
+project = "write"

@@ -281,6 +281,28 @@ fn open_upstream(
     correlation: &RequestId,
 ) -> std::result::Result<TcpStream, OpenUpstreamError> {
     for address in pinned.pinned_addrs() {
+        // A deny-only floor beneath policy, not a destination list: a dial to the gateway's own
+        // listener connects the gateway to itself, so the request meets the gateway in place of a
+        // service and holds a second connection slot. Decided before policy, so no permit can open
+        // it (docs/design/decisions.md#the-gateway-never-dials-its-own-listener).
+        if state.is_own_listener(address) {
+            let reason = format!(
+                "{}:{} dials {address}, the gateway's own listener; refused so the gateway does \
+                 not connect to itself",
+                connect.host, connect.port
+            );
+            emit_connect_decision(
+                state,
+                connect,
+                AuditDecision::Deny,
+                &reason,
+                correlation.clone(),
+            );
+            return Err(OpenUpstreamError::Denied(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                reason,
+            )));
+        }
         // Each pinned address is its own authorization: the address authorized is the address
         // dialed, so a fallback cannot ride the first address's permit.
         let attempt = EffectAttempt::Connect {
@@ -655,6 +677,7 @@ mod tests {
             emitter: Box::new(StubEmitter::new()),
             effect_interceptor: policy,
             reply_copies: Arc::new(super::super::body::CopyBudget::for_limit(1024)),
+            listening: None,
         }
     }
 
@@ -716,6 +739,46 @@ mod tests {
         assert_eq!(permitted.accepted(), permitted_before + 1);
         assert_eq!(refused.accepted(), refused_before);
         drop(upstream);
+    }
+
+    /// A dial to the gateway's own listener, bound to one address or to every address, is refused
+    /// before policy sees the address, and no socket opens.
+    #[test]
+    fn own_listener_refused() {
+        let own = Recorder::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+        own.assert_live();
+        let before = own.accepted();
+        let port = own.addr.port();
+        let unspecified = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+        let mapped = IpAddr::V6(Ipv4Addr::LOCALHOST.to_ipv6_mapped());
+        let cases = [
+            (own.addr, own.addr.ip()),
+            (own.addr, mapped),
+            (own.addr, IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+            (own.addr, IpAddr::V6(Ipv4Addr::UNSPECIFIED.to_ipv6_mapped())),
+            (unspecified, own.addr.ip()),
+            (unspecified, mapped),
+        ];
+        for (listening, dialed) in cases {
+            let policy = AddressPolicy::permit_all();
+            let mut shared = state(policy.clone());
+            shared.listening = Some(listening);
+            let pinned = PinnedDestination::from_ips(port, vec![dialed]);
+            assert!(
+                matches!(
+                    open_upstream(
+                        &shared,
+                        &connect_to("host.box.internal", port),
+                        &pinned,
+                        &RequestId::new("test"),
+                    ),
+                    Err(OpenUpstreamError::Denied(_))
+                ),
+                "listening on {listening}, dialing {dialed}"
+            );
+            assert!(policy.seen().is_empty(), "policy never sees the address");
+        }
+        assert_eq!(own.accepted(), before, "the gateway never dials itself");
     }
 
     #[test]
@@ -906,6 +969,7 @@ mod tests {
             emitter: Box::new(StubEmitter::new()),
             effect_interceptor: policy,
             reply_copies: Arc::new(super::super::body::CopyBudget::for_limit(1024)),
+            listening: None,
         }
     }
 
