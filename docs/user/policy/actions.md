@@ -138,7 +138,8 @@ A rule on `path` has caveats for repeated slashes and `%2F`.
 
 **`websocket:connect`**, once per WebSocket, on its handshake, in place of `http:request`. Its fields
 are those of `http:request` without `body_bytes`, because a handshake has no body. The reply's
-`status` is on `output`, and it is 101 when the WebSocket opened.
+`status` is on `output`. It is 101 when the server answered 101, even if the gateway then refused
+that reply because it didn't switch to WebSocket.
 
 A permit on `http:request` doesn't admit a WebSocket. A permit on `websocket:connect` admits the whole
 WebSocket, because the gateway asks policy nothing after the `101`. A `forbid` on `http:request`
