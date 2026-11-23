@@ -86,7 +86,8 @@ on Linux.
 
 ## Upgrade or choose a version
 
-To install another release, run the installer again with its number in `BOX_VERSION`:
+To upgrade to the latest release, run the install command again. To install another release, run
+the installer again with its number in `BOX_VERSION`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | BOX_VERSION=0.3.1 sh
