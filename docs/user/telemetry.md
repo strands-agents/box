@@ -321,11 +321,16 @@ A control-plane record states one change to the authority this box holds. The sc
 
 | Key | Value |
 |---|---|
-| `strands.box.control.operation` | `policy_installed`, `policy_refused`, `schema_installed`, `discovery_complete`, `box_started`, `box_stopped`, or `secret_fetched` |
+| `strands.box.control.operation` | `policy_installed`, `policy_refused`, `schema_installed`, `discovery_complete`, `box_started`, `workload_started`, `box_stopped`, or `secret_fetched` |
 | `strands.box.control.outcome` | `ok`, or `refused` |
 | `strands.box.control.subject` | what the operation was about |
 | `strands.box.control.reason` | why a refusal happened |
 | `strands.box.control.detail` | further text the operation carries |
+
+A `workload_started` record states that the box finished its setup and launched the workload. The box
+writes `box_started` before it installs the policy and builds the sandbox, and `workload_started` after
+the workload runs and its network relays serve. The subject is the box's name. A run that fails before
+its workload starts has no `workload_started` record.
 
 A `secret_fetched` record states one read of a secret through a
 [declared secret source](config.md#secret-sourcescheme), when the box starts. The subject is the
@@ -377,6 +382,7 @@ Example output:
 ```text
 box_started ok
 policy_installed ok
+workload_started ok
 discovery_complete ok
 box_stopped ok
 ```

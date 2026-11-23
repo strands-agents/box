@@ -782,6 +782,40 @@ fn the_control_plane_is_recorded_beside_the_decisions() {
     );
 }
 
+/// **A run records that its workload started once the box's setup is done.**
+///
+/// The record falls after `box_started`, which the box writes before it builds the sandbox, and
+/// before `box_stopped`, so a reader can time the box's setup from the two.
+#[test]
+fn a_run_records_its_workload_start_between_its_start_and_stop() {
+    needs_a_box!("a_run_records_its_workload_start_between_its_start_and_stop");
+    let configured = Request::with_policy("telemetry-workload", READ_ONE_FILE).expect();
+    assert!(configured.bash("zsh -c 'true'").status.success());
+
+    let path = default_records(&configured.root());
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} must hold the records: {error}", path.display()));
+    let control = control_records(&text);
+    let position = |name: &str| {
+        control
+            .iter()
+            .rposition(|(operation, ..)| operation == name)
+            .unwrap_or_else(|| panic!("{name} missing from the records: {control:?}"))
+    };
+
+    let started = position("box_started");
+    let workload = position("workload_started");
+    let stopped = position("box_stopped");
+    assert!(
+        started < workload && workload < stopped,
+        "the workload starts after the box and before its stop: {control:?}"
+    );
+    assert_eq!(
+        control[workload].1, "ok",
+        "a launched workload is recorded as ok: {control:?}"
+    );
+}
+
 /// **A run that fails before its workload starts records its stop, and records it as refused.**
 ///
 /// `execute` is the one teardown point, and this is what pins it: an unresolvable workload fails in
@@ -828,6 +862,14 @@ fn a_run_that_fails_before_its_workload_still_records_its_stop() {
     assert_eq!(
         stopped[0].1, "ok",
         "the creating run succeeded: {control:?}"
+    );
+    let workloads = control
+        .iter()
+        .filter(|(operation, ..)| operation == "workload_started")
+        .count();
+    assert_eq!(
+        workloads, 1,
+        "only the creating run launched a workload: {control:?}"
     );
     // The whole point of the record: a reader must be able to tell this run died.
     assert_eq!(

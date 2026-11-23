@@ -820,6 +820,8 @@ pub enum ControlOperation {
     DiscoveryComplete,
     /// This run took the box.
     BoxStarted,
+    /// The box finished its setup and launched the workload.
+    WorkloadStarted,
     /// This run is giving the box up.
     BoxStopped,
     /// The box read one secret of a configuration entry through a declared secret source.
@@ -836,6 +838,7 @@ impl ControlOperation {
             Self::SchemaInstalled => "schema_installed",
             Self::DiscoveryComplete => "discovery_complete",
             Self::BoxStarted => "box_started",
+            Self::WorkloadStarted => "workload_started",
             Self::BoxStopped => "box_stopped",
             Self::SecretFetched => "secret_fetched",
         }

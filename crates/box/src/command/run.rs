@@ -448,6 +448,7 @@ async fn hosted(
     write_tool_call_disclosures(&locked.record, std::io::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;
     eprintln!("strands-box: starting workload");
+    let control = Arc::clone(&collector);
     let hosted = HostedBox::open(
         &locked.root,
         &locked.record,
@@ -522,6 +523,11 @@ async fn hosted(
     )?;
     eprintln!("{}", boundary.disclosure());
     let contained = Contained::spawn(boundary, &locked.root, hosted, terminal, signals).await?;
+    // `spawn` returns once the workload runs and its relays serve, so the box's setup is done.
+    control.control(telemetry::ControlRecord::completed(
+        telemetry::ControlOperation::WorkloadStarted,
+        locked.root.name(),
+    ));
     contained.wait().await
 }
 
