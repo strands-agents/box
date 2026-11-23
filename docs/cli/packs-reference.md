@@ -283,6 +283,7 @@ optional = true
 | `optional` | `true` copies nothing when your machine does not have the source. A row with `set` then writes a new file that holds only the values it sets. Without it, a missing source stops the run. |
 | `when` | Copy only when the condition holds, as in [`when`](profiles-reference.md#when). |
 | `sync` | `true` brings the copy up to date with your file on each run. Without it, the copy is made once. Not on a row with `kind`, `keep`, `set`, or `fill`. |
+| `exclude` | Names that a folder copy leaves out, such as `["mcp.json"]`. Each is one file or folder name, with no `/` and no `*`, `?`, or `[`: a name is matched whole, not as a pattern, and without regard to case. The copy leaves out every entry of that name at any depth, on the first copy and on each `sync`. An `exclude` added to a row whose copy is already in storage does not delete what it names from the box: each `box run` and `box profile show` name the file it kept until you delete it in storage. Only on a row with `sync = true`, and not on a row with `kind`, `keep`, `set`, or `fill`. A source that is one file stops the run. |
 | `kind` | `"json"` or `"toml"`. Required with `keep`, `set`, or `fill`, and refused without them. |
 | `keep` | The values to copy, as a list of key lists. Without it, the whole file is copied. See [Copy only part of a settings file](#copy-only-part-of-a-settings-file). |
 | `fill` | `true` adds each `keep` value that the copy lacks, on every run. See [Add missing values on every run](#add-missing-values-on-every-run). |
@@ -305,7 +306,19 @@ optional = true
   nothing from a path that a [plugin](plugins.md) keeps on your machine, a shipped pack's files
   included.
 - **Links.** `box profile show` lists each link in a copied folder that it follows and each entry
-  it leaves out.
+  it leaves out, including each one that `exclude` names. `box run` prints each entry it leaves out.
+- **A file that changes during the copy.** A first copy reaches storage only when none of its
+  files changed while `box` copied them, so a database and its journal come from one moment. When
+  one changes, `box` tries again, three times in all. When it keeps changing, the run stops before
+  the box starts, and storage gets no copy:
+
+  ```text
+  box: error: cannot copy /Users/you/.claude/skills into storage: /Users/you/.claude/skills/review/SKILL.md changed each time box copied it (3 tries); stop the program that writes it, then start the run again
+  ```
+
+  Quit the program that writes the file, such as the agent on your machine, then run again. A
+  `sync` update does not make this check, so a file written during an update can come in part
+  written, and the next update brings it up to date.
 
 [Copies](../design/cli/profile-language.md#copies) has the full steps, including `sync`.
 

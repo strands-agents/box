@@ -91,6 +91,7 @@ fixes keeps them in a README, linked here.
 - [`@box/bedrock`](../../resources/packs/bedrock/README.md): Amazon Bedrock
 - `@box/bedrock-mantle`: Amazon Bedrock's OpenAI-compatible endpoint, for Codex
 - `@box/anthropic`: the Anthropic API
+- [`@box/claude-subscription`](../../resources/packs/claude-subscription/README.md): a claude.ai subscription, for Claude Code
 - `@box/openai`: the OpenAI API, for Codex
 
 **Tools**

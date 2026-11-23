@@ -79,6 +79,27 @@ pub enum Error {
         reason: String,
     },
 
+    /// A host file of a `[[storage.files]]` copy changed, or went, while `box` copied it.
+    #[error("cannot copy {path} into storage: the file changed while box copied it")]
+    Changed {
+        /// The host file.
+        path: PathBuf,
+    },
+
+    /// A host file of a first `[[storage.files]]` copy changed on every try.
+    #[error(
+        "cannot copy {path} into storage: {file} changed each time box copied it ({tries} \
+         tries); stop the program that writes it, then start the run again"
+    )]
+    Unsettled {
+        /// The row's source.
+        path: PathBuf,
+        /// The host file that changed last.
+        file: PathBuf,
+        /// How many times `box` tried.
+        tries: u32,
+    },
+
     /// A `[[storage.files.set]]` row cannot rewrite the copy in storage.
     #[error("`{at}`: {reason}")]
     Set {

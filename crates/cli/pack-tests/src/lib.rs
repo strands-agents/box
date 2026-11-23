@@ -6,6 +6,7 @@ mod support;
 mod bedrock;
 mod cargo;
 mod claude;
+mod claude_subscription;
 mod codex;
 mod git;
 mod kiro;
