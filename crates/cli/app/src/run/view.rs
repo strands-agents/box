@@ -171,7 +171,7 @@ impl Panel {
     /// right, as a copy target, since the table cuts reasons and keeps only the latest rows. A
     /// command that does not fit whole is left out.
     fn history(&mut self, banner: &Banner) {
-        if banner.history.is_empty() || self.buffer.area.height < 3 || banner.entries().is_empty() {
+        if banner.history.is_empty() || self.buffer.area.height < 3 {
             return;
         }
         let command = if banner.activity == ActivityView::AllOperations {
@@ -934,10 +934,5 @@ mod tests {
         assert_eq!(tiny.files.len(), 2);
         assert!(banner.view(120, true).files.is_empty());
         assert!(!text(&banner.view(120, true)).contains("box runs history"));
-
-        let mut empty = sample(0);
-        empty.history = "box runs history b-0123".into();
-        assert!(!text(&empty.view(120, false)).contains("box runs history"));
-        assert_eq!(empty.view(120, false).files.len(), 2);
     }
 }
