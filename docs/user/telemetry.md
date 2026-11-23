@@ -218,6 +218,12 @@ log record's `event_name` field is `strands.box.policy.decision`, and the scope 
 `strands.box.policy.verdict` holds `deny` or `permit`. `strands.box.policy.cause` holds one of six
 values: `permitted`, `forbidden`, `no_match`, `policy_pending`, `internal_fault`, and `enforcement`.
 
+In [log-only mode](policy.md#log-only-mode), a denial that Box let through keeps `verdict = deny` and
+the policy's own cause and rules, and also carries `strands.box.policy.enforced = false`. The run's
+first such denial also carries `strands.box.policy.first_flip = true`, because later decisions can
+differ from what an enforcing run would decide. A verdict Box applied carries neither key, so
+`verdict == "deny"` finds every would-deny, and `enforced` separates them from real blocks.
+
 A record whose cause is `internal_fault` also carries the key `error.type`, with the value
 `strands.box.policy.evaluation_error`.
 
@@ -326,6 +332,7 @@ A control-plane record states one change to the authority this box holds. The sc
 | `strands.box.control.subject` | what the operation was about |
 | `strands.box.control.reason` | why a refusal happened |
 | `strands.box.control.detail` | further text the operation carries |
+| `strands.box.control.enforcement` | on `policy_installed`, how the policy's verdicts apply: `enforce` or `log_only` |
 
 A `secret_fetched` record states one read of a secret through a
 [declared secret source](config.md#secret-sourcescheme), when the box starts. The subject is the

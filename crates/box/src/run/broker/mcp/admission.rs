@@ -193,6 +193,16 @@ pub(super) fn admit_tool_call(
                         refusal: request_refusal(&refined, target.method()),
                     });
                 }
+                // In log-only mode the coarse gate's denial did not stop the per-tool gate, so the
+                // first denial log-only mode let through decides the record.
+                Decision::Allow { .. } if decision.would_deny().is_some() => {
+                    return Ok(McpRequestAdmission::Allowed(
+                        coarse,
+                        request_id,
+                        tool_response,
+                        tool_call,
+                    ));
+                }
                 Decision::Allow { rule, .. } if rule.as_str() != policy::RuleId::DEFAULT_DENY => {
                     return Ok(McpRequestAdmission::Allowed(
                         EffectiveDecision::from_policy(
@@ -1111,6 +1121,42 @@ mod tests {
             call(&policy, other).is_ok(),
             "a non-matching argument still rides the coarse allow"
         );
+    }
+
+    /// **In log-only mode the coarse gate's denial does not stop the per-tool gate, and it is what
+    /// the record keeps.** A coarse `forbid` with a per-tool `permit` lets the call through, and the
+    /// record names the coarse rule, unenforced, not the later per-tool permit.
+    #[test]
+    fn a_log_only_coarse_forbid_is_recorded_over_the_later_tool_permit() {
+        let policy = tool_policy(
+            r#"@id("coarse-forbid")
+               forbid(principal, action == Box::Action::"mcp:call", resource);
+               @id("tool")
+               permit(principal, action == issues_mcp::Action::"SearchIssues", resource);"#,
+        )
+        .log_only();
+        let McpRequestAdmission::Allowed(decision, ..) = admit_tool_call(
+            &policy,
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "issues-mcp",
+            SEARCH,
+            &crate::run::telemetry::DecisionRecorder::discarding(),
+        )
+        .expect("valid tool call") else {
+            panic!("log-only mode lets the call through");
+        };
+        assert_eq!(decision.parts().0, r#"Box::Action::"mcp:call""#);
+        assert_eq!(
+            decision.parts().3,
+            crate::run::telemetry::EffectiveVerdict::Deny
+        );
+        assert_eq!(decision.cause().as_str(), "forbidden");
+        assert!(!decision.enforced(), "the call went ahead");
+        let [attribution] = decision.attribution() else {
+            panic!("one determining policy");
+        };
+        assert_eq!(attribution.annotation_id.as_deref(), Some("coarse-forbid"));
     }
 
     #[test]

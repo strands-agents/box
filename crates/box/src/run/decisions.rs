@@ -103,6 +103,12 @@ pub struct PolicyDecision {
     pub cause: String,
     /// The reason for a refusal.
     pub reason: Option<String>,
+    /// Whether Box applied the decision; `false` for a denial log-only mode let through, which the
+    /// workload went ahead with.
+    pub enforced: bool,
+    /// Whether this is the run's first denial that was not enforced. Later decisions can differ
+    /// from what an enforcing run would decide.
+    pub first_flip: bool,
 }
 
 impl PolicyDecision {
@@ -116,6 +122,8 @@ impl PolicyDecision {
             rule: record.rule().to_string(),
             cause: record.cause().as_str().to_string(),
             reason: record.reason().map(str::to_string),
+            enforced: record.enforced(),
+            first_flip: record.is_first_flip(),
         }
     }
 }

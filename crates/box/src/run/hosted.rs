@@ -49,7 +49,12 @@ use crate::run::lock::{BoxLive, Lock};
 use crate::run::secret_sources::RouteSecrets;
 use crate::run::telemetry;
 
-type RunningPolicy = (Arc<PolicyEngine>, Arc<telemetry::Collector>);
+/// The running engine, its collector, and how its verdicts apply, which a reload keeps.
+type RunningPolicy = (
+    Arc<PolicyEngine>,
+    Arc<telemetry::Collector>,
+    crate::record::config::Enforcement,
+);
 
 static RUNNING_POLICY: Mutex<Option<RunningPolicy>> = Mutex::new(None);
 
@@ -57,14 +62,15 @@ pub(crate) fn reload(sources: &[policy::Policy]) -> Result<(), BoxError> {
     let running = RUNNING_POLICY
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (policy, collector) = running.as_ref().ok_or(DaemonError::NotRunning)?;
+    let (policy, collector, enforcement) = running.as_ref().ok_or(DaemonError::NotRunning)?;
     let result = policy.reload(sources).map_err(BoxError::from);
     let subject = telemetry::policy_subject(sources);
     collector.control(match &result {
         Ok(()) => telemetry::ControlRecord::completed(
             telemetry::ControlOperation::PolicyInstalled,
             &subject,
-        ),
+        )
+        .enforcing(enforcement.as_str()),
         Err(error) => telemetry::ControlRecord::refused(
             telemetry::ControlOperation::PolicyRefused,
             &subject,
@@ -739,22 +745,30 @@ impl HostedBox {
             .map(|monitor| monitor.registration())
     }
 
+    /// Open this box's one policy engine, applying its verdicts as `enforcement` says from the
+    /// first decision on.
     pub(crate) fn prepare_policy(
         root: &BoxRoot,
         operator: &policy::Operator,
         sources: Vec<policy::Policy>,
         grammars: policy::ToolGrammars,
+        enforcement: crate::record::config::Enforcement,
     ) -> Result<PolicyEngine, BoxError> {
         let database_path = root.dogwood_database();
         let database = root.open_dogwood_database()?;
-        Ok(PolicyEngine::open_staged_file_with_grammars(
+        let engine = PolicyEngine::open_staged_file_with_grammars(
             operator,
             sources,
             grammars,
             database,
             database_path,
         )?
-        .observed_by(Arc::new(telemetry::PolicyDecisionObserver)))
+        .observed_by(Arc::new(telemetry::PolicyDecisionObserver));
+        Ok(if enforcement.is_log_only() {
+            engine.log_only()
+        } else {
+            engine
+        })
     }
 
     /// `policy`, bound to every `[tool.<name>]` in `record` at the program file `commands` opened
@@ -1118,7 +1132,8 @@ impl HostedBox {
         let published = PublishedRecord(root.clone());
         *RUNNING_POLICY
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some((policy, Arc::clone(&collector)));
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some((policy, Arc::clone(&collector), record.enforcement));
         Ok(Self {
             discovery: Some(discovery),
             broker: Some(broker),
@@ -1156,6 +1171,7 @@ impl HostedBox {
             &policy::Operator::unanchored(),
             sources,
             policy::ToolGrammars::default(),
+            crate::record::config::Enforcement::Enforce,
         )
         .map(Arc::new)
     }
@@ -1400,6 +1416,7 @@ mod tests {
     /// A record declaring every server named, so each gets an alias.
     fn record_with_mcp(root: &BoxRoot, mcp: Vec<crate::record::config::mcp::McpServer>) -> Record {
         Record {
+            enforcement: Default::default(),
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
@@ -1482,6 +1499,7 @@ mod tests {
                 text: text.to_string(),
             }],
             grammars,
+            crate::record::config::Enforcement::Enforce,
         )
         .expect("the policy opens");
         HostedBox::bind_tool_grammars(engine, record, commands, search_path)
@@ -2213,6 +2231,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             &policy::Operator::unanchored(),
             sources,
             policy::ToolGrammars::default(),
+            crate::record::config::Enforcement::Enforce,
         )
         .map(Arc::new)
         .expect("the staged authority opens");
@@ -2610,6 +2629,7 @@ when temporal {
             &policy::Operator::unanchored(),
             Vec::new(),
             policy::ToolGrammars::default(),
+            crate::record::config::Enforcement::Enforce,
         )
         .map(Arc::new)
         .expect("an empty authority opens");
@@ -3612,6 +3632,7 @@ while :; do :; done"#
         };
         let agent = spec(&["/bin/sh"]);
         Record {
+            enforcement: Default::default(),
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,

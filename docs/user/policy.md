@@ -454,6 +454,59 @@ when {
 
 A permit on the name doesn't admit `127.0.0.1:4259`, and a wildcard host permit includes the name.
 
+## Log-only mode
+
+Log-only mode trials a policy without enforcing it. Box decides every action as usual, but a denial
+from a `forbid`, or from no `permit` matching, doesn't block: the action goes ahead and Box records
+what the policy would have denied. Use it to see what a new or generated policy would block on real
+work before you enforce it.
+
+Turn it on with the table form of the `policy` key in `box.toml`:
+
+```toml
+[policy]
+source      = "policy.dw"
+enforcement = "log_only"      # "enforce" is the default
+```
+
+Each would-deny keeps `verdict = deny`, its cause, and its rules in the decision record, and adds
+`strands.box.policy.enforced = false`. The run's first one also carries
+`strands.box.policy.first_flip = true`. The `policy_installed` record states the mode on every run,
+so a clean log-only run can't be mistaken for an enforcing one. See [a decision](telemetry.md#a-decision).
+
+To list what a trial would have denied, filter the decision records on `enforced = false`. This
+prints each would-deny's action, resource, and the rule that decided it:
+
+```sh
+jq -r 'select(.resourceLogs) | .resourceLogs[].scopeLogs[]
+  | select(.scope.name == "strands-box.policy") | .logRecords[]
+  | .attributes | map({(.key): (.value.stringValue // .value.boolValue)}) | add
+  | select(.["strands.box.policy.enforced"] == false)
+  | "\(.["strands.box.policy.action"]) \(.["strands.box.policy.resource"]) \(.["strands.box.policy.rule"])"' \
+  <box_dir>/private/telemetry/records.jsonl
+```
+
+A line such as `fs:write ~/agent-home/link.txt no-secret-read` is an action that ran in the trial
+and that the rule `no-secret-read` would block once you enforce the policy.
+
+Some denials still block in log-only mode, so a missing or broken policy doesn't fail open:
+
+- a policy that isn't installed yet (`policy_pending`);
+- a rule that fails to evaluate (`internal_fault`);
+- an MCP tool whose rule can never validate;
+- the reachable-paths floor, the sandbox, and credential isolation, which aren't policy.
+
+An action log-only mode lets through really happens, so history records its real outcome. A later
+rule that depends on it, such as "allow `git push` only after `npm test` passed", sees what actually
+ran. After the first would-deny, a run can take a path an enforcing run wouldn't, so decisions after
+`first_flip` are an approximation.
+
+**The policy protects nothing during a trial.** On the Shell and Monty path the policy is the only
+thing between the workload and your home directory, credential files, and cloud metadata. The egress
+gateway attaches each bound credential to a request the policy would deny. Box prints this on stderr
+at startup. Run trials only where that's acceptable, such as a disposable VM or a host with no
+credentials you care about.
+
 ## History persistence and process crashes
 
 Box batches policy-history writes by default. Accepted events affect decisions during

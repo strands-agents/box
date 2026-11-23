@@ -78,7 +78,7 @@ The file carries fourteen keys. `name` and `box_dir` are required.
 |---|---|---|
 | `name` | string | Which box this is. One path component of letters, digits, `.`, `_`, or `-`, at most 32 bytes. |
 | `box_dir` | string | Where the box keeps its private state. Required, and absolute. |
-| `policy` | string | The Dogwood policy, relative to this file's directory unless absolute. Absent means no authored policy, and absent policy denies. |
+| `policy` | string or table | The Dogwood policy, relative to this file's directory unless absolute. Absent means no authored policy, and absent policy denies. The table form, `[policy]`, takes `source` (the file, required) and `enforcement`: `enforce` (the default) or `log_only`. In log-only mode the startup disclosure begins with `strands-box: the policy runs in log-only mode: each denial is recorded with enforced = false and the action goes ahead.` See [log-only mode](policy.md#log-only-mode). |
 | `[agent]` | table | The one process the box runs. |
 | `[tool.<name>]` | tables | One process each, which the agent selects by invocation. The label takes the same characters as `name`. |
 | `[egress.<name>]` | tables | Which secret attaches to which outbound destination. |
