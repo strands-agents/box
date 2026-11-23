@@ -11,7 +11,7 @@ what `aws` lets the box do, and saves your answer in the profile, even when it's
 
 | Value | What the box does |
 | --- | --- |
-| `aws` (the default) | Signs each request with your default AWS identity, outside the box ([which credentials](../../../docs/cli/profiles-reference.md#aws-credentials)). Box Core prints a warning for each request it signs this way. The route is `[egress.bedrock]`. |
+| `aws` (the default) | Signs each request with your default AWS identity, outside the box ([which credentials](../../../docs/cli/profiles-reference.md#aws-credentials)). Box Core prints a [warning](../../../docs/user/egress.md#credential-sources) about it. The route is `[egress.bedrock]`. |
 | `api-key` | Adds the Bedrock API key in `AWS_BEARER_TOKEN_BEDROCK` to each request. The agent only sees a stand-in. The route is `[egress.bedrock-api-key]`, so a profile that changes the route's keys, such as `destinations` or `secret.ref`, writes them under that name. Keys under `[egress.bedrock]` don't apply with `api-key`. |
 
 The agent never sees your AWS credentials or your key.

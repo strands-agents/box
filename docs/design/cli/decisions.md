@@ -1226,7 +1226,7 @@ entry with no secret.
 SDK default credential chain, so the box carries the host's ambient identity from the environment, a
 static-keys profile, a web identity, the container endpoint, or instance metadata. The "Next" list
 that `box profile create` prints names an `[egress.<name>]` route that signs this way, and Box Core
-warns on each request for any site that uses the bare form. `box` adds no refusal over `~/.aws`.
+warns once at startup for any site that uses the bare form. `box` adds no refusal over `~/.aws`.
 
 A bare `aws://` reads the same AWS configuration, and runs the same `credential_process` in Box
 Core's trusted process, as the `aws://<profile>` form that `box` already accepts. So a bare route
@@ -1238,7 +1238,7 @@ stays refused. A policy rule does not enter into it: Box Core enforces `[agent.f
 and this floor in the OS, below policy.
 
 **Rejected.** Refuse the bare form, and make the operator write `aws://<profile>`. A named profile
-is a narrower identity, but Box Core supports and discloses the bare form and warns on each request,
+is a narrower identity, but Box Core supports and discloses the bare form and warns once at startup,
 so refusing it blocks an operator whose host identity is an instance role, a container endpoint, or
 a web identity, which no profile file holds.
 
@@ -1257,8 +1257,8 @@ can be wider than a named profile and which the operator cannot narrow in the pr
 floor stops a box from writing the default credential paths, but not a config file that
 `AWS_CONFIG_FILE` or `AWS_SHARED_CREDENTIALS_FILE` moves elsewhere, nor a store the operator names
 exactly; keeping those out of a write grant is the invoker's. A route that an operator adds by
-editing `profile.toml`, or that a pack adds after create, is disclosed only by Box Core's warning on
-each signed request, not by the create "Next" list. The shipped Bedrock packs sign with a bare
+editing `profile.toml`, or that a pack adds after create, is disclosed only by Box Core's startup
+warning, not by the create "Next" list. The shipped Bedrock packs sign with a bare
 route by default, so on a cloud machine a Bedrock profile signs as the machine's own role unless the
 operator picks a key.
 

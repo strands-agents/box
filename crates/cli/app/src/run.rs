@@ -2483,9 +2483,14 @@ impl Launch {
     }
 
     fn reuse_instruction(&self) -> String {
+        format!("box: to reuse this box run: {}", self.reuse_command())
+    }
+
+    /// The command that runs this profile in this box again.
+    fn reuse_command(&self) -> String {
         let argument = &self.policy.argument;
         let id = self.name();
-        let command = if banner::clean(argument) != *argument
+        if banner::clean(argument) != *argument
             || argument.contains('\\')
             || self.profile.to_str().is_none()
         {
@@ -2500,8 +2505,7 @@ impl Launch {
                 "box run '{}' --box-id {id}",
                 argument.replace('\'', "'\\''")
             )
-        };
-        format!("box: to reuse this box run: {command}")
+        }
     }
 
     fn report(&self) {

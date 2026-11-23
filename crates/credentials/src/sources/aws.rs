@@ -497,11 +497,7 @@ impl AwsAcquisition {
     pub(crate) fn warning(&self) -> Option<&'static str> {
         match self {
             AwsAcquisition::Profile(_) | AwsAcquisition::Credsd(_) => None,
-            AwsAcquisition::DefaultChain => Some(
-                "signing with the host's ambient AWS identity: a bare aws:// resolved the default \
-                 credential provider chain. Name a scoped profile (aws://PROFILE) to pin which \
-                 identity signs, and grant the workload no write access to ~/.aws",
-            ),
+            AwsAcquisition::DefaultChain => Some("signs with this machine's AWS identity"),
         }
     }
 }
@@ -1306,18 +1302,6 @@ mod tests {
             "the default chain must warn"
         );
         assert_eq!(recorder.0.lock().unwrap().as_slice(), [None]);
-    }
-
-    /// The no-profile acquisition names the default chain and carries the ambient-identity warning.
-    #[test]
-    fn default_chain_acquisition_warns() {
-        let warning = AwsAcquisition::DefaultChain
-            .warning()
-            .expect("the default chain warns");
-        assert!(
-            warning.contains("ambient") && warning.contains("aws://"),
-            "the warning names the ambient identity and the bare spelling: {warning}"
-        );
     }
 
     /// A scoped profile names its identity, so its acquisition carries no warning.

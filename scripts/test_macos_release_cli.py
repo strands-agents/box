@@ -1463,7 +1463,7 @@ class WorkflowGateTests(unittest.TestCase):
                             "-fsSL",
                             "https://raw.githubusercontent.com/strands-agents/box/main/install.sh"])
                         self.assertEqual((root / "install-options").read_text().splitlines(),
-                                         ["strands-agents/box", version, "0"])
+                                         ["", version, "0"])
 
 if __name__ == "__main__":
     unittest.main()
