@@ -196,17 +196,15 @@ fn detail_lines(session: &Session, width: usize) -> Vec<String> {
     lines
 }
 
-/// Blank rows that `section_lines` adds around the title, tabs and details at this budget.
+/// The detail rows that the blank rows between the title, tabs and details take at this budget.
+/// The blank row above the title stays in every layout, so the title never moves between
+/// questions.
 fn section_padding(budget: usize) -> usize {
-    if budget >= 7 {
-        4
-    } else {
-        usize::from(budget >= 6)
-    }
+    if budget >= 7 { 2 } else { 0 }
 }
 
-/// The header of a guided question. `compact` drops the blank padding rows to leave more room for
-/// the choices.
+/// The header of a guided question. `compact` drops the blank rows below the title, to leave more
+/// room for the choices.
 fn section_lines(
     session: &Session,
     width: usize,
@@ -215,6 +213,8 @@ fn section_lines(
     compact: bool,
 ) -> Vec<String> {
     let padded = !compact;
+    let top = budget >= 7;
+    let bottom = budget >= 6;
     let budget = if compact {
         budget.saturating_sub(section_padding(budget))
     } else {
@@ -255,7 +255,7 @@ fn section_lines(
         "Create a new profile".to_string()
     };
     let mut lines = Vec::new();
-    if padded && budget >= 7 {
+    if top {
         lines.push(String::new());
     }
     lines.push(fit_line(&format!("  {title}"), width));
@@ -273,18 +273,18 @@ fn section_lines(
             width,
         ));
     }
-    if padded && budget >= 7 {
+    if padded && top {
         lines.push(String::new());
     }
     lines.push(tabs);
-    if padded && budget >= 7 {
+    if padded && top {
         lines.push(String::new());
     }
     let details = detail_lines(session, width);
     let room = budget.saturating_sub(lines.len()).max(1);
     let first = scroll.min(details.len().saturating_sub(room));
     lines.extend(details.into_iter().skip(first).take(room));
-    if padded && budget >= 6 {
+    if padded && bottom {
         lines.push(String::new());
     }
     lines
@@ -932,10 +932,10 @@ fn select_choice(
             let compact = level > 0;
             let density = if level >= 2 { level } else { 0 };
             let header = terminal.session.as_ref().map_or(0, |session| {
-                2 + if section_budget >= 7 && !compact {
-                    3
-                } else {
-                    0
+                2 + match (section_budget >= 7, compact) {
+                    (false, _) => 0,
+                    (true, true) => 1,
+                    (true, false) => 3,
                 } + usize::from(session.run.is_some() && session.stage != REVIEW)
             });
             let room = if compact {
@@ -1819,7 +1819,10 @@ mod tests {
         let padded = section_lines(&session, 80, 16, 0, false);
         let compact = section_lines(&session, 80, 16, 0, true);
         assert!(compact.len() < padded.len());
-        assert!(compact.iter().all(|line| !line.is_empty()), "{compact:?}");
+        // The title stays on the same row in both layouts.
+        let title = |lines: &[String]| lines.iter().position(|line| line.contains("Create a new"));
+        assert_eq!(title(&compact), title(&padded));
+        assert_eq!(title(&compact), Some(1));
     }
 
     #[test]
