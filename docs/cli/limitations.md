@@ -79,7 +79,7 @@ after a run:
 | File | What runs it |
 | --- | --- |
 | `.git/hooks/*`, and `.git/config` (`core.hooksPath`, `core.fsmonitor`, aliases) | `git`. Even `git status` runs `core.fsmonitor`, and `git status` doesn't list either file. |
-| The agent's project settings, such as Claude Code's `.claude/settings.json` and `.mcp.json` | Your agent, outside the box. Once you trust the project, most agents run their hooks and MCP servers without asking, and some run them in any folder when you start the agent without its interface. For Claude Code, they also set the next box run's permissions. |
+| The agent's project settings, such as Claude Code's `.claude/settings.json` and `.mcp.json` | Your agent, the next time you run it in the project outside the box. For Claude Code, they also set the next box run's permissions. |
 | `package.json` scripts, `.npmrc` | `npm install`, `npm test`, and the like. |
 | `Makefile`, `build.rs`, `.cargo/config.toml`, other build files | `make`, `cargo build`, and other build tools. |
 | `.envrc` | `direnv`, as soon as you `cd` into the project. |
@@ -102,7 +102,8 @@ After a run, and before you run anything in the project:
 2. Run `git status --ignored` and `git diff`, and read each change. `--ignored` matters: a file
    your `.gitignore` hides, such as `.envrc` or `.claude/settings.local.json`, shows up only with
    it.
-3. Open each file from the table that changed or is new, even when its diff looks harmless.
+3. Open each file from the table, and each file your agent's pack README names, that changed or is
+   new, even when its diff looks harmless.
 
 If you don't trust the work, clone the project into a new folder and run `box run claude` there
 instead. When you've read the changes (step 1 first), bring back the ones you want as a patch:

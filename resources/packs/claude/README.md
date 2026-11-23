@@ -338,10 +338,9 @@ back on, remove
   [Scoped](../../policies/scoped/README.md) allows. A condition that
   lists commands must also name each setup command; `box runs history <box-id> --deny --action
   shell:exec` lists the ones a run refused.
-- The agent can write `.claude/settings.json`, `.claude/settings.local.json`, and `.mcp.json`. In a
-  trusted project, Claude Code on your machine runs their hooks without asking, and starts the
-  `.mcp.json` servers that `enableAllProjectMcpServers` or `enabledMcpjsonServers` turns on.
-  `claude -p` runs their hooks and servers in any folder. [Read them after a run](../../../docs/cli/limitations.md#the-agent-can-plant-code-that-runs-outside-the-box-later).
+- The agent in the box can change `.claude/settings.json`, `.claude/settings.local.json`, and
+  `.mcp.json` in your project, and Claude Code uses them the next time you run it there.
+  For more info, check [the limitations section](../../../docs/cli/limitations.md#the-agent-can-plant-code-that-runs-outside-the-box-later).
 
 ## Troubleshooting
 

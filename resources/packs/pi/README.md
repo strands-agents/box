@@ -110,8 +110,9 @@ pi's bash tool has no default timeout. The model can pass an optional `timeout` 
   and its commands then fail in the box. `box` doesn't bring your extensions in.
 - pi has no hooks that run a shell command. What a hook does in other agents, an extension does in
   pi, and your extensions stay outside the box.
-- The agent can write `.pi/extensions/` and `.pi/mcp.json`. In a trusted project, pi on your machine
-  runs them without asking. [Read them after a run](../../../docs/cli/limitations.md#the-agent-can-plant-code-that-runs-outside-the-box-later).
+- The agent in the box can change `.pi/extensions/` and `.pi/mcp.json` in your project, and pi uses
+  them the next time you run it there.
+  For more info, check [the limitations section](../../../docs/cli/limitations.md#the-agent-can-plant-code-that-runs-outside-the-box-later).
 
 ## Troubleshooting
 
