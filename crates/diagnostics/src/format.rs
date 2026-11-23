@@ -146,6 +146,8 @@ pub fn text(source: Source, kind: Kind, text: fmt::Arguments<'_>) -> String {
 pub(crate) fn render(source: Source, kind: Kind, text: fmt::Arguments<'_>) -> String {
     let text = text.to_string();
     let text = text.strip_suffix('\n').unwrap_or(&text);
+    // A coded message names the source its registry row gives, whichever crate prints it.
+    let source = kind.code().map_or(source, Code::source);
     let mut line = format!("{source}: {}", kind.severity());
     if let Some(code) = kind.code() {
         line.push('[');

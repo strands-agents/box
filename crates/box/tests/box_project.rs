@@ -550,7 +550,7 @@ fn a_run_on_a_running_box_is_refused_before_it_touches_an_alias() {
     );
 }
 
-/// A load-time finding that does not refuse the policy reaches stderr as `strands-box: warning[P0102]:`
+/// A load-time finding that does not refuse the policy reaches stderr as `policy: warning[P0102]:`
 /// with the `program_path` hint, before the workload starts, and changes nothing else.
 #[test]
 fn a_load_time_warning_reaches_stderr_with_the_program_path_hint() {
@@ -582,7 +582,7 @@ fn a_load_time_warning_reaches_stderr_with_the_program_path_hint() {
     let reported = String::from_utf8_lossy(&warned.stderr);
     let warning = reported
         .lines()
-        .find(|line| line.starts_with("strands-box: warning[P0102]:"))
+        .find(|line| line.starts_with("policy: warning[P0102]:"))
         .unwrap_or_else(|| panic!("the warning must reach stderr: {reported}"));
     assert!(
         warning.contains("\"/usr/bin/git\"") && warning.contains("program_path"),
@@ -593,7 +593,7 @@ fn a_load_time_warning_reaches_stderr_with_the_program_path_hint() {
         .unwrap_or_else(|| panic!("the warned run must still reach its workload: {reported}"));
     assert!(
         reported
-            .find("strands-box: warning[P0102]:")
+            .find("policy: warning[P0102]:")
             .unwrap_or(usize::MAX)
             < started,
         "the warning must precede the workload start: {reported}"

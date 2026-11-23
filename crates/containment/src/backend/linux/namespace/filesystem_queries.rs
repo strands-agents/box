@@ -88,7 +88,7 @@ pub(super) fn supervise(reaper: libc::pid_t, proc: OwnedFd, control: UnixStream)
     let (listener, native) = match registration {
         Ok(listener) => listener,
         Err(error) => {
-            diagnostics::diag!(B0902, "filesystem query supervisor failed: {error}");
+            diagnostics::diag!(H0502, "filesystem query supervisor failed: {error}");
             if error.kind() == io::ErrorKind::UnexpectedEof {
                 let code = wait_for_reaper(reaper);
                 return if code == 0 { 125 } else { code };
@@ -99,7 +99,7 @@ pub(super) fn supervise(reaper: libc::pid_t, proc: OwnedFd, control: UnixStream)
     match serve(reaper, &proc, &listener, native.then_some(&control)) {
         Ok(status) => status,
         Err(error) => {
-            diagnostics::diag!(B0902, "filesystem query supervisor failed: {error}");
+            diagnostics::diag!(H0502, "filesystem query supervisor failed: {error}");
             // The caller exits immediately; the reaper's parent-death signal terminates the namespace.
             125
         }

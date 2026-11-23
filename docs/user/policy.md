@@ -541,7 +541,7 @@ with the line and column in the file, and often a hint in parentheses, such as
 When the box suspects a rule is inert but cannot prove it, it prints a warning and starts:
 
 ```text
-strands-box: warning[<code>]: <finding>
+policy: warning[<code>]: <finding>
 ```
 
 ### The rule does not parse
@@ -978,7 +978,7 @@ policy writes a cap as a permit: rule @id("write_budget") (rule 2) carries a tem
 startup:
 
 ```text
-strands-box: warning[P0103]: rule @id("write_budget") (rule 2) carries a temporal clause beside rule @id("project_writes") (rule 1), which also permits that action; the budget is inert for every request the other rule admits, so write a cap as a forbid
+policy: warning[P0103]: rule @id("write_budget") (rule 2) carries a temporal clause beside rule @id("project_writes") (rule 1), which also permits that action; the budget is inert for every request the other rule admits, so write a cap as a forbid
 ```
 
 **Loads**, with no warning, when the temporal `permit` is the only permit for its action, or when

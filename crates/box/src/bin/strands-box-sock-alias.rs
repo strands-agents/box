@@ -797,6 +797,8 @@ async fn forward(
                         out.flush().await?;
                     }
                     Stream::Stderr => {
+                        // The command's own stderr bytes, relayed as they are; not a Box message.
+                        #[allow(clippy::disallowed_methods)]
                         let mut err = tokio::io::stderr();
                         err.write_all(&bytes).await?;
                         err.flush().await?;

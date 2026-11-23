@@ -108,7 +108,7 @@ fn start_connector(connector: Connector) {
         });
     if let Err(error) = spawned {
         diagnostics::diag!(
-            B0901,
+            H0501,
             "namespace reaper could not start the inbound connector: {error}"
         );
     }

@@ -4,4 +4,5 @@
 allow-print-in-tests = true
 disallowed-methods = [
     { path = "std::io::stderr", reason = "write a message with diagnostics::diag!, or pass diagnostics::stderr() to a writer that does" },
+    { path = "tokio::io::stderr", reason = "write a message with diagnostics::diag!" },
 ]

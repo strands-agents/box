@@ -32,8 +32,13 @@ A message has one of five sources:
 - `strands-box-sock-alias`: the alias that every interpreter and MCP program in the box runs.
 - `strands-box-contain-trampoline`: the helper that applies a sandbox and then starts its program.
 
-The last two run inside the box and write to the agent's own stderr, so the agent reads their
-messages. The codes for those messages start with `H`.
+The alias runs inside the box and writes to the agent's own stderr, so the agent reads its
+messages. The trampoline and the sandbox supervisors it starts write before or beside the agent's
+program.
+
+Each code always names the same source, whichever part of Box prints it, and the first letter of
+the code tells you which: `P` is `policy`, `T` is `telemetry`, `B` is `strands-box`, and `H` is the
+alias or the trampoline. A line whose code and source do not match was not written by Box.
 
 A message has one of three severities:
 
@@ -210,15 +215,6 @@ These apply only when native filesystem policy is on. See
 | `B0803` | warning | A native filesystem request was denied because deciding it failed. | Read the reason in the text. See [macOS](native-filesystem-policy.md#macos). |
 | `B0804` | note | Native filesystem enforcement is ready. | No action. |
 
-<a id="b09"></a>
-
-## B09: Sandbox supervisors
-
-| Code | Severity | Meaning | What to do |
-|---|---|---|---|
-| `B0901` | error | The namespace reaper failed, so it stopped the sandbox. | Report it as a bug with the full stderr of the run. |
-| `B0902` | error | The filesystem query supervisor failed. | Report it as a bug with the full stderr of the run. |
-
 <a id="b10"></a>
 
 ## B10: Shutdown
@@ -292,3 +288,14 @@ The alias prints these on the agent's stderr when the box refuses a call.
 |---|---|---|---|
 | `H0401` | error | Applying a sandbox failed before its program started. | Read the stage in the text. See [check sandbox startup](linux-requirements.md#check-sandbox-startup) on Linux, and [check sandbox startup and the workload](macos-requirements.md#check-sandbox-startup-and-the-workload) on macOS. |
 | `H0402` | warning | A sandbox's configuration carries a limit the operator should know. | When a path is both writable and executable, remove the write, because the workload can replace a program it runs. See [what is refused](config.md#what-is-refused). |
+
+<a id="h05"></a>
+
+## H05: Sandbox supervisors
+
+The trampoline starts these on Linux, so their messages name it as their source.
+
+| Code | Severity | Meaning | What to do |
+|---|---|---|---|
+| `H0501` | error | The namespace reaper failed, so it stopped the sandbox. | Report it as a bug with the full stderr of the run. |
+| `H0502` | error | The filesystem query supervisor failed. | Report it as a bug with the full stderr of the run. |

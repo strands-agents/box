@@ -271,7 +271,7 @@ fn failed_non_dumpable_refuses_launch() {
 fn a_reaper_that_remains_dumpable_terminates_its_namespace() {
     in_namespace_reaper_expecting_exit(
         127,
-        "strands-box: error[B0901]: namespace reaper could not refuse process-memory access",
+        "strands-box-contain-trampoline: error[H0501]: namespace reaper could not refuse process-memory access",
         || {
             refuse_syscall(libc::SYS_prctl, Some((0, libc::PR_SET_DUMPABLE as u64)));
             protect_reaper_memory(None);
@@ -657,7 +657,7 @@ fn a_descriptor_that_survives_cleanup_terminates_the_namespace_reaper() {
     use std::os::fd::AsRawFd as _;
     in_namespace_reaper_expecting_exit(
         127,
-        "strands-box: error[B0901]: namespace reaper could not close descriptors",
+        "strands-box-contain-trampoline: error[H0501]: namespace reaper could not close descriptors",
         || {
             let victim = std::fs::File::open("/dev/null").unwrap();
             refuse_syscall(libc::SYS_close, Some((0, victim.as_raw_fd() as u64)));
@@ -670,7 +670,7 @@ fn a_descriptor_that_survives_cleanup_terminates_the_namespace_reaper() {
 fn a_reaper_that_cannot_clear_capabilities_terminates_its_namespace() {
     in_namespace_reaper_expecting_exit(
         127,
-        "strands-box: error[B0901]: namespace reaper could not drop its own authority",
+        "strands-box-contain-trampoline: error[H0501]: namespace reaper could not drop its own authority",
         || {
             refuse_syscall(libc::SYS_capset, None);
             drop_reaper_authority(None);
@@ -682,7 +682,7 @@ fn a_reaper_that_cannot_clear_capabilities_terminates_its_namespace() {
 fn a_reaper_that_cannot_lock_privileges_terminates_its_namespace() {
     in_namespace_reaper_expecting_exit(
         127,
-        "strands-box: error[B0901]: namespace reaper could not drop its own authority",
+        "strands-box-contain-trampoline: error[H0501]: namespace reaper could not drop its own authority",
         || {
             refuse_syscall(libc::SYS_prctl, Some((0, libc::PR_SET_NO_NEW_PRIVS as u64)));
             drop_reaper_authority(None);

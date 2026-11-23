@@ -52,7 +52,7 @@ fn message(line: &str) -> Option<Message<'_>> {
     let severity = Severity::ALL
         .into_iter()
         .find(|known| known.as_str() == word)?;
-    if code.is_some_and(|code| code.severity() != severity) {
+    if code.is_some_and(|code| code.severity() != severity || code.source() != source) {
         return None;
     }
     Some(Message {
@@ -95,6 +95,7 @@ mod tests {
             "strands-box: warn: an old severity",
             "strands-box: error[Z0001]: an unknown code",
             "strands-box: error[P0201]: a code with another severity",
+            "strands-box: warning[P0201]: a code under another source",
             "policy: warning[P0201]",
             "an MCP server's own output",
             "",
