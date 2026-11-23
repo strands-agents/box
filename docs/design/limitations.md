@@ -103,9 +103,7 @@ Box does not provide the following protections:
   while staying inside its grants. See [children inherit the boundary](decisions.md#children-inherit-the-boundary).
 - The hosting platform must isolate tenants on a shared machine. See [non-goals](tenets.md#non-goals).
 - Box relies on the kernel to enforce the sandbox. An exploit that defeats the kernel defeats the box. The same tenets exclude kernel exploits.
-- Ingress does not authenticate or authorize a caller, and no policy decision covers one. On
-  macOS, a local process can also connect to the agent's `workload_port` directly, and so can
-  other machines when the agent listens on `0.0.0.0`. See [ingress](ingress.md#who-can-reach-the-agent).
+- Ingress does not authenticate callers. See [who can reach the agent](ingress.md#who-can-reach-the-agent).
 - Box decides the requests it forwards to a remote MCP server. It can't contain the server or
   control what it does with an allowed request.
 - Strands Shell, Monty, the gateway, and Dogwood run outside every sandbox. Their defects have

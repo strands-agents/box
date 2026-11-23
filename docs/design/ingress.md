@@ -13,7 +13,7 @@ can also reach the agent's port without the relay.
 |---|---|
 | Accepts | A TCP connection on each `listen` address. |
 | Relays | The caller's bytes to the agent's `workload_port`, and the agent's bytes back, until both sides close. |
-| Does not | Authenticate or authorize a caller, end TLS, read or change the bytes, or log a caller's identity. |
+| Does not | Authenticate or authorize a caller, end TLS, read or change the bytes, log a caller's identity, or pass on a caller's address. |
 | Changes | Nothing about what the agent can reach. The agent stays in its sandbox, and policy still decides everything it does. |
 
 ## What the host must provide
@@ -22,14 +22,23 @@ Box and the host share the work. Box carries bytes to the agent. The host decide
 
 | Box does | The host must do |
 |---|---|
-| Binds each `listen` address before the agent starts, and refuses a setting it cannot honour. | Make `listen` reachable only by callers it trusts: an authenticating front such as AgentCore Runtime, a reverse proxy that checks identity, a firewall, or a loopback address. |
+| Binds each `listen` address before the agent starts, and refuses a setting it cannot honour. | Make `listen` reachable only by callers it trusts: an authenticating front such as AgentCore Runtime, a reverse proxy that checks identity, a firewall, or a loopback address on a host where it trusts every local user. |
 | Relays each caller to the agent's port, up to a limit that Box sets from its open-file limit. A further caller waits until one closes. | Rate-limit and authorize callers, if the agent needs it. |
 | Keeps the agent in its sandbox while it serves callers. | Expect Box to admit every caller that reaches `listen`. Box does not refuse one. |
 | On macOS, lets the agent listen only on its `workload_port`s. | On macOS, accept that local processes can reach the agent directly, or not run an agent server there. See [Who can reach the agent](#who-can-reach-the-agent). |
 
 A `listen` of `0.0.0.0` accepts a caller from any address that can reach the host on that port.
-Use it only when something in front of the host authenticates callers. Otherwise, use
-`127.0.0.1`.
+Use it only when something in front of the host authenticates callers.
+
+A `listen` of `127.0.0.1` keeps out other machines, but it admits every local process of every
+user, a page in a local browser within the browser's rules, and on Linux a tool or local MCP server
+with `network.contain_egress = false`. So a loopback `listen` is an access control only on a host
+with one trusted user.
+
+The agent's server sees each caller's connection come from `127.0.0.1`. Box sends no PROXY header
+and no forwarded address. So the server must not trust a caller because of its address. The bytes
+pass unchanged, so an HTTP server can check the `Host` and `Origin` headers. That check is the
+defence against DNS rebinding when `listen` is a loopback address.
 
 ## How a caller reaches the agent
 
@@ -70,10 +79,14 @@ not who connects to it, so the relay is the supported way in but not the only on
 | Who | Linux | macOS, agent listens on `127.0.0.1` | macOS, agent listens on `0.0.0.0` |
 |---|---|---|---|
 | A caller that reaches `listen` | Yes, through the relay | Yes, through the relay | Yes, through the relay |
-| A local process, any user | No | **Yes, directly** | **Yes, directly** |
-| Another machine on the network | No | No | **Yes, directly** |
-| A web page in a local browser | No | Yes, within the browser's rules | Yes |
-| A tool or local MCP server with `network.contain_egress = false` | No | Yes | Yes |
+| A local process, any user | Not directly | **Yes, directly** | **Yes, directly** |
+| Another machine on the network | Not directly | No | **Yes, directly** |
+| A web page in a local browser | Not directly | Yes, within the browser's rules | Yes |
+| A tool or local MCP server with `network.contain_egress = false` | Not directly | Yes | Yes |
+
+The table shows reach that does not pass through the relay. Each row also reaches the agent through
+the relay when it can reach `listen`. With a loopback `listen`, every row except another machine
+can do so, on Linux too.
 
 ```mermaid
 flowchart LR
@@ -102,16 +115,8 @@ through the platform. Box runs on Linux there, so the relay is the only way into
 for MCP, or 9000 for A2A. Each other server that the agent runs needs its own entry, on a port that
 the runtime routes callers to.
 
-On any other host, the host carries that duty: put an authenticating front before `listen`, or keep
-`listen` on a loopback address.
-
-## What may change
-
-- An authentication option for callers.
-- A policy action that decides each caller, such as `net:ingress`. Today a caller has no identity
-  for policy to decide on.
-- Ingress to a server that a tool runs, `[tool.<name>.ingress]`. Today Box refuses `ingress` on a
-  `[tool.<name>]` and on an `[mcp.<name>]`.
+On any other host, the host carries that duty: put an authenticating front before `listen`. Keep
+`listen` on a loopback address only when the host has one trusted user.
 
 ## See also
 
@@ -120,3 +125,4 @@ On any other host, the host carries that duty: put an authenticating front befor
   platform own.
 - [Limits of Box's protection](./limitations.md): residual risk.
 - [Platform differences](./platform-differences.md): other Linux and macOS differences.
+- [The ingress relay design](../../team/designs/0003-ingress-relay.md): planned extensions.
