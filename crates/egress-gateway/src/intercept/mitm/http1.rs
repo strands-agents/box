@@ -261,7 +261,12 @@ where
     let framing = explicit_body_framing(&headers)?;
     validate_transfer_coding_version(req.version, framing)?;
     // RFC 7230 §3.3.3 rule 6: no framing means no body.
-    let body = collect(body, max_body).await?;
+    let body = collect(body, max_body).await.map_err(|error| match error {
+        ProxyError::ResponseLimit(_) => {
+            ProxyError::Intercept(format!("request body length exceeds limit {max_body}"))
+        }
+        error => error,
+    })?;
     strip_hop_by_hop_headers(&mut headers)?;
     if framing.is_some() {
         headers.set("Content-Length", body.len().to_string());

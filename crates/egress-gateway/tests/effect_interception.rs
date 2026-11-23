@@ -621,33 +621,47 @@ fn request_outcome_sink_failure_on_an_empty_reply_hides_the_interceptor_error() 
     assert!(!response.contains("test outcome sink failed"), "{response}");
 }
 
-/// A request in the tunnel that the gateway can't parse is the workload's own fault: it gets the
+/// A request in the tunnel that the gateway can't read is the workload's own fault: it gets the
 /// gateway's own 400, which says why, and reaches no upstream.
 #[test]
-fn a_malformed_request_in_the_tunnel_gets_a_400() {
-    let host = "malformed.test";
-    let upstream = TlsUpstream::start(host);
-    let handle = MitmInterceptor::start(
-        config_for(host, &upstream),
-        no_injection(),
-        Arc::new(RecordingInterceptor::allowing(Arc::default())),
-    )
-    .unwrap();
+fn an_unreadable_request_in_the_tunnel_gets_a_400() {
+    for (headers, body, reason) in [
+        (
+            &[("Connection", "not a token")][..],
+            &b""[..],
+            "malformed Connection header",
+        ),
+        (
+            &[][..],
+            &[b'x'; 64][..],
+            "request body length exceeds limit 16",
+        ),
+    ] {
+        let host = "unreadable.test";
+        let upstream = TlsUpstream::start(host);
+        let config = MitmConfig {
+            response_limits: egress_gateway::ResponseLimits { max_body_bytes: 16 },
+            ..config_for(host, &upstream)
+        };
+        let handle = MitmInterceptor::start(
+            config,
+            no_injection(),
+            Arc::new(RecordingInterceptor::allowing(Arc::default())),
+        )
+        .unwrap();
 
-    let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
-    client.send_request("GET", "/", &[("Connection", "not a token")], b"");
-    let response = client.read_response();
-    assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
-    assert_eq!(
-        harness::header_value(&response, PROXY_ORIGIN_HEADER),
-        Some("refused"),
-        "{response}"
-    );
-    assert!(
-        response.contains("malformed Connection header"),
-        "{response}"
-    );
-    assert_eq!(upstream.request_count(), 0, "nothing reaches the upstream");
+        let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+        client.send_request("POST", "/", headers, body);
+        let response = client.read_response();
+        assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
+        assert_eq!(
+            harness::header_value(&response, PROXY_ORIGIN_HEADER),
+            Some("refused"),
+            "{response}"
+        );
+        assert!(response.contains(reason), "{response}");
+        assert_eq!(upstream.request_count(), 0, "nothing reaches the upstream");
+    }
 }
 
 /// An upstream that closes without a reply: the request outcome records the delivered bytes with

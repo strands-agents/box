@@ -385,8 +385,9 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 | `response blocked by egress control` | The server sent a compressed response to a credentialed request. |
 
 A request inside a `CONNECT` that the gateway can't read gets an HTTP 400 with the same header. The
-body says why, such as `response limit exceeded: body length exceeds limit 16777216` for a body over
-the request limit, or `intercept error: malformed Connection header`. Nothing reaches the server.
+body says why, such as `intercept error: request body length exceeds limit 16777216` for a body
+over the request limit, or `intercept error: malformed Connection header`. Nothing reaches the
+server.
 
 A request the gateway doesn't refuse but can't complete gets an HTTP 502 with the header
 `x-strands-box-egress: failed`. The body says why, for example:
