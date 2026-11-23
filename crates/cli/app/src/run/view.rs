@@ -171,7 +171,7 @@ impl Panel {
     /// right, as a copy target, since the table cuts reasons and keeps only the latest rows. A
     /// command that does not fit whole is left out.
     fn history(&mut self, banner: &Banner) {
-        if banner.history.is_empty() || self.buffer.area.height < 3 {
+        if banner.history.is_empty() || self.buffer.area.height < 3 || banner.entries().is_empty() {
             return;
         }
         let command = if banner.activity == ActivityView::AllOperations {
@@ -198,24 +198,18 @@ impl Panel {
         let table = section_areas(self.buffer.area)[1].x.saturating_sub(1);
         let start = table.min(self.buffer.area.width - 2 - display_width(&text) as u16);
         let command_start = start + display_width(&label) as u16;
-        // The terminal's own foreground, so the line reads on a light or a dark background.
+        // The same quiet color as the file paths and the table's column names.
         self.buffer.set_string(
             start,
             row,
             &label,
-            if copied {
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Reset)
-            },
+            Style::default().fg(if copied { ACCENT } else { MUTED }),
         );
         self.buffer.set_string(
             command_start,
             row,
             format!("{command} "),
-            Style::default()
-                .fg(Color::Reset)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(MUTED),
         );
         self.files
             .push((Rect::new(command_start, row, width as u16, 1), command));
@@ -915,12 +909,8 @@ mod tests {
             let label = row.chars().position(|c| c == 'F').unwrap() as u16;
             assert_eq!(label, table, "{row}");
             let (area, _) = panel.files.last().unwrap();
-            assert_eq!(panel.buffer[(area.x, area.y)].fg, Color::Reset);
-            assert!(
-                panel.buffer[(area.x, area.y)]
-                    .modifier
-                    .contains(Modifier::BOLD)
-            );
+            assert_eq!(panel.buffer[(area.x, area.y)].fg, MUTED);
+            assert!(panel.buffer[(area.x, area.y)].modifier.is_empty());
             let (area, target) = panel.files.last().unwrap();
             assert_eq!(target, command);
             assert_eq!(area.y, BANNER_ROWS - 2);
@@ -944,5 +934,10 @@ mod tests {
         assert_eq!(tiny.files.len(), 2);
         assert!(banner.view(120, true).files.is_empty());
         assert!(!text(&banner.view(120, true)).contains("box runs history"));
+
+        let mut empty = sample(0);
+        empty.history = "box runs history b-0123".into();
+        assert!(!text(&empty.view(120, false)).contains("box runs history"));
+        assert_eq!(empty.view(120, false).files.len(), 2);
     }
 }
