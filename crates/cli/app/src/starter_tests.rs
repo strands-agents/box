@@ -2009,10 +2009,8 @@ fn a_terminal_still_asks_a_detected_question_with_the_detected_choice_as_its_def
         .expect("a choice that detection did not pick");
     assert_eq!(answered.packs, ["@box/agent", "@box/local"]);
     assert!(
-        lines.contains(
-            &"Provider | This machine | env.USE_CLOUD in ~/.agent/settings.json".to_string()
-        ),
-        "{lines:?}"
+        lines.iter().all(|line| !line.starts_with("Provider")),
+        "an answer that the operator changed is not reported as detected: {lines:?}"
     );
 }
 

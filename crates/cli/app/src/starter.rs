@@ -1354,10 +1354,16 @@ pub(crate) fn answer(
             answers[index] = Some(choice);
             if let Some(terminal) = terminal.as_deref_mut() {
                 refuse(&mut asked)?;
-                let choice = ask_question(question, terminal, Some(choice))?;
+                let detected = choice;
+                let choice = ask_question(question, terminal, Some(detected))?;
                 answers[index] = Some(choice);
-                if let Some((_, line)) = lines.last_mut() {
-                    line.answer = Some(question.choices[choice].label.clone());
+                if reviewing {
+                    if let Some((_, line)) = lines.last_mut() {
+                        line.answer = Some(question.choices[choice].label.clone());
+                    }
+                } else if choice != detected {
+                    // The operator's answer did not come from the settings, so no line says it did.
+                    lines.pop();
                 }
             }
             continue;

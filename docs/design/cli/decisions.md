@@ -1909,8 +1909,9 @@ folder, so an entry there that is not a profile goes too.
 
 A starter first answers what the agent's host settings decide ([detection](detection.md)). `box`
 then asks only when stdin and stderr are terminals. At a terminal it still asks each question that
-detection answered, with the detected choice as the preset, because detection sees only some
-choices: it reads no key, so it never picks the Anthropic or OpenAI API. With no
+detection answered, with the detected choice as the preset, because detection reads no key, so a
+choice whose only sign is a key, such as the Anthropic API or a Claude subscription, has no
+`detect`. With no
 terminal, `box profile reset` and `box profile clean` refuse unless the operator gives
 `--no-ask`, and a starter takes defaults or stops with the flag that answers
 ([starters](starters.md#without-a-terminal)). The policy question has no default there, so it

@@ -201,8 +201,7 @@ For a new profile, the step resolves each `--with` entry as a starter first, thr
    list, so `--with node` works beside a starter. An entry
    that matches choices in two questions is an error that names them.
 2. **Detection.** The step reads the starter's host sources and answers each question and input
-   that they decide ([detection](detection.md)). At a terminal, a detected question is still asked,
-   with the detected choice as its preset.
+   that they decide ([detection](detection.md)).
 3. **Prompts.** The step asks each question that has no answer and whose `when` holds, in file
    order. A `--with` entry that answers a question whose `when` does not hold is an error, so a
    profile never gets half a choice. A question with one choice takes that choice and shows no

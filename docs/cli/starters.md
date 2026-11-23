@@ -389,7 +389,7 @@ as in `box profile create claude-east --with claude`. Each agent's README in
 [Packs](README.md#packs) says what its starter asks, and any step the agent needs on your machine
 first.
 
-### Skip questions the agent's settings already answer
+### Start from the agent's settings
 
 Before it asks anything, the starter reads the agent's settings. At a terminal, it still asks each
 question that they decide, such as the provider, with the found choice selected, so Enter keeps it
