@@ -79,7 +79,10 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `box/tests/box_lifecycle.rs::create_refuses_a_policy_the_engine_cannot_load` and
   `validation_accepts_and_refuses_exactly_what_open_does`.
 - Do not reintroduce `PolicyConfig`, `ContainmentScope`, `containment_config`, `PolicyMode`, or
-  `Remediation` without an entry in [`decisions.md`](../../docs/design/decisions.md). Add a public
+  `Remediation` without an entry in [`decisions.md`](../../docs/design/decisions.md). The one mode
+  the engine has is log-only, `PolicyEngine::log_only`, which
+  [log-only mode turns only a recorded policy denial into an allow](../../docs/design/decisions.md#log-only-mode-turns-only-a-recorded-policy-denial-into-an-allow)
+  decides; it is a consuming setter, not a mode type. Add a public
   extension point only after
   [an external consumer is named](../../docs/design/decisions.md#the-policy-crate-exposes-one-facade).
 
@@ -102,10 +105,21 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Keep `decide` infallible, and preserve its verdict contract.
 - Preserve the startup refusal: `open` never returns an authority on empty or partial history.
 - Deny a poisoned scope lock as `DenyReason::InternalFault`. Never call `into_inner()`.
-- Grant only on `Decision::Allow`, and only with empty `diagnostics().errors()`.
+- Grant only on `Decision::Allow`, and only with empty `diagnostics().errors()`. In log-only mode an
+  `Allow` can carry `would_deny`: grant it like any other `Allow`, and record it as the unenforced
+  denial it was.
 - Never discard a `record` error.
 - Treat `EffectivePolicy::policy_id` as diagnostic, not as an attested digest.
-- An adapter may narrow a verdict and must never manufacture `Allow`.
+- An adapter may narrow a verdict and must never manufacture `Allow`. Only the engine, in log-only
+  mode, returns `Allow` for a policy denial, and only for a recorded `Forbidden` or `NoMatch`
+  (`Decision::unenforced_when`). `PolicyPending`, `InternalFault`, a degraded tool, and a denial
+  without a request id still deny, so a missing or broken policy does not fail open. The request id
+  is what lets the caller record the outcome as it happened; a degraded tool returns none, which is
+  what holds it. The flip is in the authority, before `refine_tool_call` drops the pending response
+  of a denied call, so a let-through tool call records its `::response`. The observer sees the
+  same `Allow` the caller gets; read `would_deny()` before treating an `Allow` whose rule is
+  `<default-deny>` as a ride on the coarse grant. `tests/log_only_mode.rs` and
+  `policy.rs::a_degraded_tool_still_denies_in_log_only_mode` pin both halves.
 - Absent policy is deny-by-default.
 - Leave containment, credentials, and network enforcement to their owners.
 
