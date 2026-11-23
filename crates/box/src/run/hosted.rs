@@ -1053,7 +1053,7 @@ impl HostedBox {
                 Arc::clone(&policy),
                 Arc::clone(&recorder),
                 root.name(),
-                &crate::record::layout::operator_home_directory()?,
+                &crate::record::layout::reported_operator_home()?,
                 coordinator_fatal_sender.clone(),
                 #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
                 entry_guard,

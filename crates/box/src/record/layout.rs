@@ -3337,6 +3337,13 @@ pub(crate) fn operator_home_directory() -> Result<PathBuf, BoxError> {
         .ok_or(LayoutError::NoOperatorHome.into())
 }
 
+/// The operator's home as every enforcement point reports a path under it: canonical when it
+/// resolves, and as stated otherwise.
+pub(crate) fn reported_operator_home() -> Result<PathBuf, BoxError> {
+    let home = operator_home_directory()?;
+    Ok(home.canonicalize().unwrap_or(home))
+}
+
 /// Canonicalize the deepest ancestor that exists and re-attach the rest.
 pub(crate) fn resolved_to_its_deepest_existing_ancestor(path: &Path) -> PathBuf {
     let mut absent: Vec<std::ffi::OsString> = Vec::new();
@@ -3529,6 +3536,27 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reported_operator_home_is_canonical_when_home_is_a_link() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let real = directory.path().join("real");
+        std::fs::create_dir(&real).expect("the home");
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("the link");
+        let reported = crate::test_support::with_operator_home(&link, || {
+            reported_operator_home().expect("the home is set")
+        });
+        assert_eq!(reported, real.canonicalize().expect("canonical"));
+        let missing = directory.path().join("missing");
+        let reported = crate::test_support::with_operator_home(&missing, || {
+            reported_operator_home().expect("the home is set")
+        });
+        assert_eq!(
+            reported, missing,
+            "a home that does not resolve is kept as stated"
+        );
+    }
 
     fn valid_record(layout: &BoxRoot) -> String {
         valid_record_at(

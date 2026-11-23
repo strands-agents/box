@@ -1482,12 +1482,12 @@ pub(crate) fn read_checked_policy(
     ))
 }
 
-/// The operator a policy loads for, anchored at the operator's own home, with the roots of
-/// `locations` as written, and those roots.
+/// The operator a policy loads for, anchored at the home every enforcement point reports paths
+/// under, with the roots of `locations` as written, and those roots.
 pub(crate) fn policy_operator(
     locations: &Locations,
 ) -> Result<(policy::Operator, LocationRoots), BoxError> {
-    let home = crate::record::layout::operator_home_directory()?;
+    let home = crate::record::layout::reported_operator_home()?;
     let operator = locations.operator(&home)?;
     let roots = operator.locations().clone();
     Ok((operator, roots))

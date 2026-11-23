@@ -1049,6 +1049,77 @@ fn a_home_stated_through_a_link_matches_a_home_relative_root() {
     assert_eq!(recorded_locations(&history), [project.clone(), project]);
 }
 
+/// With the home stated through a link, a Shell-style resolver and a native-style resolver that both
+/// report under the canonical home agree on a location; one reporting under the home as stated
+/// would spell the path absolute and miss it.
+#[test]
+fn adapters_reporting_under_the_canonical_home_agree_when_the_home_is_a_link() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let real = directory.path().join("real-home");
+    std::fs::create_dir_all(real.join("work")).expect("the home");
+    let link = directory.path().join("home");
+    std::os::unix::fs::symlink(&real, &link).expect("the link");
+    let canonical = real.canonicalize().expect("canonical");
+    let target = canonical.join("work/file");
+
+    let as_stated = PathResolver::over([canonical.clone()])
+        .expect("the root is absolute")
+        .reporting_under(&link)
+        .approve_host(&target)
+        .expect("the path resolves");
+    assert_eq!(
+        approved_text(&as_stated),
+        target.display().to_string(),
+        "a path is not under the home as stated, so it is reported absolute"
+    );
+
+    for (label, home) in [("canonical", canonical.clone()), ("stated", link.clone())] {
+        let declared = Operator::unanchored()
+            .anchored_at(&home)
+            .with_locations([("project".to_string(), vec![PathBuf::from("~/work")])])
+            .expect("the locations resolve");
+        let engine = open(&declared, PROJECT_WRITE, &directory.path().join(label));
+        let shell = PathResolver::over([canonical.clone()])
+            .expect("the root is absolute")
+            .reporting_under(&canonical)
+            .approve_host(&target)
+            .expect("the path resolves");
+        let native = PathResolver::over([canonical.clone()])
+            .expect("the root is absolute")
+            .reporting_under(&canonical)
+            .approve_virtual(&target)
+            .expect("the path resolves");
+        for approved in [&shell, &native] {
+            assert_eq!(approved_text(approved), "~/work/file", "{label}");
+            let (decision, _) = engine.decide(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                &Request::Fs {
+                    path: approved,
+                    operation: FsOperation::WriteContent,
+                },
+            );
+            assert!(decision.is_allow(), "{label}: {decision:?}");
+        }
+        let (decision, _) = engine.decide(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            &Request::Fs {
+                path: &as_stated,
+                operation: FsOperation::WriteContent,
+            },
+        );
+        assert!(
+            !decision.is_allow(),
+            "{label}: the stated-home spelling misses the location"
+        );
+    }
+}
+
+fn approved_text(approved: &ApprovedPath) -> String {
+    approved.reported().into_owned()
+}
+
 /// Assert that `with_locations` refuses `root` as the `project` location, naming it.
 fn assert_root_refused(root: &Path) {
     let Err(error) = Operator::unanchored()
