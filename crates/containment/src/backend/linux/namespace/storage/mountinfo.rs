@@ -18,7 +18,7 @@ pub(crate) struct MountRecord {
     pub(crate) parent_id: u64,
     pub(crate) device_major: u32,
     pub(crate) device_minor: u32,
-    pub(crate) root: PathBuf,
+    pub(crate) root: OsString,
     pub(crate) mount_point: PathBuf,
     pub(crate) mount_options: Vec<u8>,
     pub(crate) shared: Option<u64>,
@@ -242,7 +242,7 @@ fn parse_record(line: &[u8]) -> Result<MountRecord, &'static str> {
     let device_minor = number(minor)
         .and_then(|n| u32::try_from(n).ok())
         .ok_or("invalid device minor")?;
-    let root = decoded_path(fields[3])?;
+    let root = OsString::from_vec(decode(fields[3])?);
     let mount_point = decoded_path(fields[4])?;
     let mut shared = None;
     let mut master = None;
@@ -382,6 +382,78 @@ mod tests {
                 assert_eq!(record.source, source);
                 assert_eq!(record.super_options, b"rw,user_id=0");
             }
+        }
+    }
+
+    #[test]
+    fn namespace_root_labels_do_not_hide_storage_in_either_row_order() {
+        let base = "1 0 8:1 / / rw - ext4 /dev/root rw\n";
+        let storage = "22 1 0:47 / /mnt/data rw - fuse mountpoint-s3 rw\n";
+        for root in ["net:[4026532715]", "mnt:[4026532716]", "user:[4026532717]"] {
+            let namespace = format!("23 1 0:4 {root} /run/netns/pinned rw - nsfs nsfs rw\n");
+            for rows in [
+                format!("{base}{namespace}{storage}"),
+                format!("{storage}{namespace}{base}"),
+            ] {
+                let table = MountTable::parse(rows.as_bytes()).expect("valid namespace root label");
+                assert_eq!(table.records[&23].root, root);
+                assert_eq!(
+                    table.classify(Path::new("/run/netns/pinned"), 23),
+                    SourceObservation::Pending(PendingReason::NonStorageFilesystem)
+                );
+                assert!(
+                    !table
+                        .has_storage_at(Path::new("/run/netns/pinned"))
+                        .unwrap()
+                );
+                assert!(matches!(
+                    table.classify(Path::new("/mnt/data"), 22),
+                    SourceObservation::Candidate(_)
+                ));
+                assert!(table.has_storage_at(Path::new("/mnt/data")).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn a_namespace_mount_covering_storage_keeps_storage_hidden() {
+        let base = "1 0 8:1 / / rw - ext4 /dev/root rw\n";
+        let storage = "22 1 0:47 / /mnt/data rw - fuse mountpoint-s3 rw\n";
+        let cover = "23 22 0:4 net:[4026532715] /mnt/data rw - nsfs nsfs rw\n";
+        for rows in [
+            format!("{base}{storage}{cover}"),
+            format!("{cover}{storage}{base}"),
+        ] {
+            let table = MountTable::parse(rows.as_bytes()).expect("valid namespace overmount");
+            assert_eq!(
+                table.classify(Path::new("/mnt/data"), 23),
+                SourceObservation::Pending(PendingReason::NonStorageFilesystem)
+            );
+            assert!(!table.has_storage_at(Path::new("/mnt/data")).unwrap());
+        }
+    }
+
+    #[test]
+    fn root_display_bytes_are_decoded_without_relaxing_mountpoint_validation() {
+        let table = MountTable::parse(
+            b"23 1 0:4 label\\040a\\011b\\012c\\134040\xff /run/netns/pinned rw - nsfs nsfs rw\n",
+        )
+        .expect("filesystem-specific root display bytes");
+        assert_eq!(
+            table.records[&23].root.as_bytes(),
+            b"label a\tb\nc\\040\xff"
+        );
+        assert_eq!(
+            table.records[&23].mount_point,
+            Path::new("/run/netns/pinned")
+        );
+        for row in [
+            b"23 1 0:4 net:[4026532715] run/netns/pinned rw - nsfs nsfs rw\n".as_slice(),
+            b"23 1 0:4 label\\777 /run/netns/pinned rw - nsfs nsfs rw\n",
+            b"23 1 0:4 label\\04 /run/netns/pinned rw - nsfs nsfs rw\n",
+            b"23 1 0:4 label\0 /run/netns/pinned rw - nsfs nsfs rw\n",
+        ] {
+            assert!(MountTable::parse(row).is_err(), "malformed row: {row:?}");
         }
     }
 
@@ -560,7 +632,7 @@ mod tests {
         let SourceObservation::Candidate(record) = table.classify(root, 10) else {
             panic!("decoded exact path")
         };
-        assert_eq!(record.root, Path::new("/root a"));
+        assert_eq!(record.root, "/root a");
         assert_eq!(record.source, "source name");
         assert_eq!((record.shared, record.master), (Some(6), Some(8)));
     }
