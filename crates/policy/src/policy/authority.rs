@@ -72,6 +72,8 @@ struct LiveAuthority {
     /// cannot ride the coarse `mcp:call` permit with its argument constraint unenforced. Empty
     /// until `finish_mcp_discovery` degrades, and empty again once a complete bundle installs.
     degraded_tools: BTreeSet<(String, String)>,
+    /// Whether an authored policy is installed; with none, log-only mode lets nothing through.
+    installed_policy: bool,
 }
 
 pub(super) struct Authority {
@@ -80,8 +82,6 @@ pub(super) struct Authority {
     warnings: Vec<PolicyWarning>,
     /// Whether a policy denial is recorded and let through instead of enforced.
     log_only: bool,
-    /// Whether an authored policy is installed; with none, log-only mode lets nothing through.
-    installed_policy: std::sync::atomic::AtomicBool,
 }
 
 impl Authority {
@@ -115,10 +115,10 @@ impl Authority {
                 readiness: Readiness::Ready,
                 pending_tools: BTreeSet::new(),
                 degraded_tools: BTreeSet::new(),
+                installed_policy: !sources.is_empty(),
             }),
             warnings,
             log_only: false,
-            installed_policy: std::sync::atomic::AtomicBool::new(!sources.is_empty()),
         })
     }
 
@@ -227,10 +227,10 @@ impl Authority {
                 readiness,
                 pending_tools,
                 degraded_tools: BTreeSet::new(),
+                installed_policy: !sources.is_empty(),
             }),
             warnings,
             log_only: false,
-            installed_policy: std::sync::atomic::AtomicBool::new(!sources.is_empty()),
         })
     }
 
@@ -285,9 +285,8 @@ impl Authority {
         live.readiness = Readiness::Ready;
         live.pending_tools = BTreeSet::new();
         live.degraded_tools.clear();
+        live.installed_policy = !sources.is_empty();
         drop(live);
-        self.installed_policy
-            .store(!sources.is_empty(), std::sync::atomic::Ordering::SeqCst);
         *proposal_guard = Some(proposed);
         Ok(())
     }
@@ -473,23 +472,17 @@ impl Authority {
         principal: &Principal,
         request: ActionRequest<'_>,
     ) -> (Decision, Option<RequestId>) {
-        let (decision, request_id) = self.decide_as_authored(governed, principal, request);
-        (
-            decision.unenforced_when(self.lets_denials_through(), request_id.is_some()),
-            request_id,
-        )
+        self.decide_as_authored(governed, principal, request)
     }
 
-    /// Whether log-only mode applies: it is on, and an authored policy is installed, so an absent
-    /// policy still denies by default.
-    fn lets_denials_through(&self) -> bool {
-        self.log_only
-            && self
-                .installed_policy
-                .load(std::sync::atomic::Ordering::SeqCst)
+    /// Whether log-only mode applies to `live`: it is on, and an authored policy is installed, so
+    /// an absent policy still denies by default.
+    fn lets_denials_through(&self, live: &LiveAuthority) -> bool {
+        self.log_only && live.installed_policy
     }
 
-    /// Decides through a ready live authority and denies every other state.
+    /// Decides through a ready live authority and denies every other state, under one hold of the
+    /// live lock, so a reload cannot change whether log-only mode applies mid-decision.
     fn decide_as_authored(
         &self,
         governed: &GovernedBox,
@@ -522,10 +515,15 @@ impl Authority {
                         {
                             return (Decision::policy_pending(), None);
                         }
-                        live.engine.decide(governed, principal, request)
                     }
-                    Readiness::Ready => live.engine.decide(governed, principal, request),
+                    Readiness::Ready => {}
                 }
+                let (decision, request_id) = live.engine.decide(governed, principal, request);
+                (
+                    decision
+                        .unenforced_when(self.lets_denials_through(&live), request_id.is_some()),
+                    request_id,
+                )
             }
             Err(_) => (Decision::internal_fault(), None),
         }
@@ -654,7 +652,7 @@ impl Authority {
             },
             // An explicit `forbid`, an internal fault, or an allow — enforce as decided, unless
             // log-only mode lets a recorded `forbid` through.
-            other => other.unenforced_when(self.lets_denials_through(), pending.is_some()),
+            other => other.unenforced_when(self.lets_denials_through(&live), pending.is_some()),
         };
         // Only a call that goes on to the server owes a response.
         let pending = pending.filter(|_| decision.is_allow());
@@ -694,10 +692,10 @@ impl Authority {
                 readiness: Readiness::Ready,
                 pending_tools: BTreeSet::new(),
                 degraded_tools: BTreeSet::new(),
+                installed_policy: !sources.is_empty(),
             }),
             warnings: Vec::new(),
             log_only: false,
-            installed_policy: std::sync::atomic::AtomicBool::new(!sources.is_empty()),
         })
     }
 
@@ -723,10 +721,10 @@ impl Authority {
                 readiness: Readiness::Ready,
                 pending_tools: BTreeSet::new(),
                 degraded_tools: BTreeSet::new(),
+                installed_policy: !sources.is_empty(),
             }),
             warnings: Vec::new(),
             log_only: false,
-            installed_policy: std::sync::atomic::AtomicBool::new(!sources.is_empty()),
         })
     }
 

@@ -112,8 +112,9 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Treat `EffectivePolicy::policy_id` as diagnostic, not as an attested digest.
 - An adapter may narrow a verdict and must never manufacture `Allow`. Only the engine, in log-only
   mode, returns `Allow` for a policy denial, and only for a recorded `Forbidden` or `NoMatch`
-  (`Decision::unenforced_when`). An engine with no authored policy (`Authority::installed_policy`,
-  set at open and on each reload), `PolicyPending`, `InternalFault`, a degraded tool, and a denial
+  (`Decision::unenforced_when`). An engine with no authored policy (`LiveAuthority::installed_policy`,
+  set under the live lock at open and on each reload, and read under the same hold as the decision,
+  so a reload cannot slip a flip between the two), `PolicyPending`, `InternalFault`, a degraded tool, and a denial
   without a request id still deny, so a missing or broken policy does not fail open. The request id
   is what lets the caller record the outcome as it happened; a degraded tool returns none, which is
   what holds it. The flip is in the authority, before `refine_tool_call` drops the pending response
