@@ -171,6 +171,54 @@ pub fn metadata_at(directory: &OwnedFd, name: impl AsRef<OsStr>) -> std::io::Res
     Ok(unsafe { metadata.assume_init() })
 }
 
+/// The names in `directory`, other than `.` and `..`, or none when it holds over `limit`.
+pub fn list_at(directory: &OwnedFd, limit: usize) -> std::io::Result<Option<Vec<String>>> {
+    let copy = directory.try_clone()?;
+    let fd = std::os::fd::IntoRawFd::into_raw_fd(copy);
+    // SAFETY: `fd` is an open descriptor that `fdopendir` takes ownership of.
+    let stream = unsafe { libc::fdopendir(fd) };
+    if stream.is_null() {
+        let error = std::io::Error::last_os_error();
+        // SAFETY: `fdopendir` failed, so `fd` is still ours to close.
+        unsafe { libc::close(fd) };
+        return Err(error);
+    }
+    // SAFETY: `stream` is a valid directory stream.
+    unsafe { libc::rewinddir(stream) };
+    let mut names = Vec::new();
+    let result = loop {
+        // SAFETY: `stream` is a valid directory stream until `closedir` below.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break Ok(Some(names));
+        }
+        // SAFETY: `readdir` returned a valid entry whose name is a C string.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        let name = name.to_string_lossy().into_owned();
+        if name == "." || name == ".." {
+            continue;
+        }
+        if names.len() == limit {
+            break Ok(None);
+        }
+        names.push(name);
+    };
+    // SAFETY: `stream` is valid and closed once.
+    unsafe { libc::closedir(stream) };
+    names_sorted(result)
+}
+
+fn names_sorted(
+    result: std::io::Result<Option<Vec<String>>>,
+) -> std::io::Result<Option<Vec<String>>> {
+    result.map(|names| {
+        names.map(|mut names| {
+            names.sort();
+            names
+        })
+    })
+}
+
 /// Open `name` in `directory` with `flags`, never through a link.
 pub fn open_at(
     directory: &OwnedFd,

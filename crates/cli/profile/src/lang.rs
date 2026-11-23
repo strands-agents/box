@@ -242,6 +242,7 @@ pub const DECLARATION_KEYS: &[&str] = &[
     "values",
     "program",
     "search",
+    "installation",
     "warning",
 ];
 
@@ -253,6 +254,8 @@ pub const PASSED_OVER: &str = "; passed over ";
 pub(crate) struct Search {
     program: String,
     folders: Vec<Folder>,
+    /// The layouts that can resolve a candidate to the program it runs.
+    installation: Vec<crate::install_layout::Layout>,
 }
 
 /// One entry of an input's `search`.
@@ -260,9 +263,8 @@ pub(crate) struct Search {
 enum Folder {
     /// A folder, with placeholders and `*`.
     Path(String),
-    /// Each folder in a host variable, such as `PATH`, each followed by the relative paths of
-    /// `join` under it.
-    Env { variable: String, join: Vec<String> },
+    /// Each folder in a host variable, such as `PATH`.
+    Env(String),
 }
 
 impl std::fmt::Display for Search {
@@ -272,10 +274,7 @@ impl std::fmt::Display for Search {
             .iter()
             .map(|folder| match folder {
                 Folder::Path(path) => path.clone(),
-                Folder::Env { variable, join } => std::iter::once(format!("${variable}"))
-                    .chain(join.iter().map(|join| format!("${variable}/{join}")))
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                Folder::Env(variable) => format!("${variable}"),
             })
             .collect();
         write!(formatter, "{} in {}", self.program, folders.join(", "))
@@ -2718,38 +2717,23 @@ fn search_of(table: &toml::Table, owner: &str) -> Result<Option<Search>, String>
     };
     let not_folders = || format!("`{owner} search` is a list of folders");
     let folders = match table.get("search") {
-        None => vec![Folder::Env {
-            variable: "PATH".to_string(),
-            join: Vec::new(),
-        }],
+        None => vec![Folder::Env("PATH".to_string())],
         Some(toml::Value::Array(items)) => items
             .iter()
             .map(|item| match item {
                 toml::Value::String(path) => Ok(Folder::Path(path.clone())),
-                toml::Value::Table(entry) => match (entry.get("env"), entry.get("join")) {
-                    (Some(toml::Value::String(variable)), join)
-                        if entry.len() == 1 + usize::from(join.is_some())
+                toml::Value::Table(entry) => match entry.get("env") {
+                    Some(toml::Value::String(variable))
+                        if entry.len() == 1
                             && !variable.is_empty()
                             && !variable.contains(['=', '\0'])
                             && !has_placeholder(variable) =>
                     {
-                        let join = match join {
-                            None => Vec::new(),
-                            Some(join) => join_paths(join).ok_or_else(|| {
-                                format!(
-                                    "`{owner} search` entry {item}: `join` is a list of relative \
-                                     paths with no placeholder and no `*`, such as [\"../lib\"]"
-                                )
-                            })?,
-                        };
-                        Ok(Folder::Env {
-                            variable: variable.clone(),
-                            join,
-                        })
+                        Ok(Folder::Env(variable.clone()))
                     }
                     _ => Err(format!(
-                        "`{owner} search` entry {item} takes `env`, the name of a host variable \
-                         that holds folders, such as {{ env = \"PATH\" }}, and an optional `join`"
+                        "`{owner} search` entry {item} takes only `env`, the name of a host \
+                         variable that holds folders, such as {{ env = \"PATH\" }}"
                     )),
                 },
                 _ => Err(not_folders()),
@@ -2757,35 +2741,59 @@ fn search_of(table: &toml::Table, owner: &str) -> Result<Option<Search>, String>
             .collect::<Result<_, _>>()?,
         Some(_) => return Err(not_folders()),
     };
+    let installation = installation_of(table, owner)?;
     match program {
-        Some(program) => Ok(Some(Search { program, folders })),
+        Some(program) => Ok(Some(Search {
+            program,
+            folders,
+            installation,
+        })),
         None if table.contains_key("search") => Err(format!("`{owner} search` needs `program`")),
+        None if table.contains_key("installation") => {
+            Err(format!("`{owner} installation` needs `program`"))
+        }
         None => Ok(None),
     }
 }
 
-/// The paths of a `join` list, when it is a non-empty list of relative paths with no placeholder,
-/// no `*`, and no empty component.
-fn join_paths(join: &toml::Value) -> Option<Vec<String>> {
-    let paths = join
-        .as_array()?
+/// The `installation` of a program input: the layouts that resolve which file is the program.
+fn installation_of(
+    table: &toml::Table,
+    owner: &str,
+) -> Result<Vec<crate::install_layout::Layout>, String> {
+    let names: Vec<&str> = crate::install_layout::PROGRAM_LAYOUTS
         .iter()
-        .map(|path| {
-            path.as_str()
-                .filter(|path| is_relative_join(path))
-                .map(str::to_string)
-        })
-        .collect::<Option<Vec<_>>>()?;
-    (!paths.is_empty()).then_some(paths)
-}
-
-/// Whether `join` is a relative path with no placeholder, no `*`, and no empty component.
-fn is_relative_join(join: &str) -> bool {
-    !join.is_empty()
-        && !join.starts_with('/')
-        && !join.contains(['\0', '*'])
-        && !has_placeholder(join)
-        && join.split('/').all(|part| !part.is_empty())
+        .map(|layout| layout.name())
+        .collect();
+    let refusal = || {
+        format!(
+            "`{owner} installation` is a list of the layouts that resolve a program: {}",
+            names.join(", ")
+        )
+    };
+    let Some(value) = table.get("installation") else {
+        return Ok(Vec::new());
+    };
+    let items = value
+        .as_array()
+        .filter(|items| !items.is_empty())
+        .ok_or_else(refusal)?;
+    let mut layouts = Vec::new();
+    for item in items {
+        let layout = item
+            .as_str()
+            .and_then(crate::install_layout::Layout::named)
+            .filter(|layout| crate::install_layout::PROGRAM_LAYOUTS.contains(layout))
+            .ok_or_else(refusal)?;
+        if layouts.contains(&layout) {
+            return Err(format!(
+                "`{owner} installation` names {:?} twice",
+                layout.name()
+            ));
+        }
+        layouts.push(layout);
+    }
+    Ok(layouts)
 }
 
 /// Whether a pack is a tool pack: its `[pack] kind` is `"tool"`.
@@ -4057,6 +4065,8 @@ struct Resolver<'a, S> {
     active: Vec<String>,
     read: Vec<Input>,
     programs: Vec<HostProgram>,
+    /// The files that chose a program input's program, such as an npm `package.json`.
+    program_sources: Vec<HostProgram>,
     absent: bool,
     routing: bool,
     /// The URL field that the value being filled reaches, whose input needs a bound.
@@ -4178,6 +4188,7 @@ pub(crate) fn expand(
         active: Vec::new(),
         read: Vec::new(),
         programs: Vec::new(),
+        program_sources: Vec::new(),
         absent: false,
         routing: false,
         url_reach: None,
@@ -4608,6 +4619,20 @@ impl<S: Sources> Resolver<'_, S> {
                      profile's `[options]` to a program outside it",
                     program.name,
                     program.value,
+                    grant.display()
+                ));
+            }
+        }
+        for source in &self.program_sources {
+            if let Some(grant) = grants
+                .iter()
+                .find(|grant| lies_under(Path::new(&source.value), grant))
+            {
+                return Err(format!(
+                    "`{}` is chosen through {}, which lies under the write grant {}, so the \
+                     workload could change which program runs. Remove the grant",
+                    source.name,
+                    source.value,
                     grant.display()
                 ));
             }
@@ -6228,7 +6253,7 @@ impl<S: Sources> Resolver<'_, S> {
                 if marker.is_empty() {
                     candidate.is_dir()
                 } else {
-                    self.candidate(&candidate.join(marker)).is_ok()
+                    self.candidate(&candidate.join(marker), None).is_ok()
                 }
             })
             .and_then(|candidate| canonical(&candidate));
@@ -6391,9 +6416,11 @@ impl<S: Sources> Resolver<'_, S> {
         )?;
         if declaration.kind == "program" {
             self.check_program(name, &value)?;
-            if !declaration.searches.is_empty() && source != "search" {
+            if let Some((_, search)) = declaration.searches.first()
+                && source != "search"
+            {
                 value = self
-                    .candidate(Path::new(&value))
+                    .candidate(Path::new(&value), Some((name, search)))
                     .map_err(|why| format!("`inputs.{name}` = {value:?} is {why}"))?;
             }
             for path in std::iter::once(&value).chain((written != value).then_some(&written)) {
@@ -6506,27 +6533,10 @@ impl<S: Sources> Resolver<'_, S> {
                 if !tried.insert(candidate.clone()) {
                     continue;
                 }
-                match self.candidate(&candidate) {
+                match self.candidate(&candidate, Some((name, search))) {
                     Ok(real) => {
                         let written = utf8(&candidate).map_err(|error| error.to_string())?;
-                        match crate::program::platform(Path::new(&real)) {
-                            Some((os, arch))
-                                if !crate::program::runs_on(
-                                    (os, arch),
-                                    (self.inputs.os, self.inputs.arch),
-                                ) =>
-                            {
-                                let built =
-                                    arch.map_or(os.to_string(), |arch| format!("{os} on {arch}"));
-                                passed.push(format!(
-                                    "{} (a program for {built}, and this host is {} on {})",
-                                    candidate.display(),
-                                    self.inputs.os,
-                                    self.inputs.arch
-                                ));
-                            }
-                            _ => return Ok((real, written)),
-                        }
+                        return Ok((real, written));
                     }
                     Err(why) => passed.push(format!("{} ({why})", candidate.display())),
                 }
@@ -6549,13 +6559,13 @@ impl<S: Sources> Resolver<'_, S> {
     /// The folders that one `search` entry names, in the order `search` tries them.
     fn folders(&mut self, folder: &Folder, at: &str) -> Result<Vec<PathBuf>, String> {
         match folder {
-            Folder::Env { variable, join } => {
+            Folder::Env(variable) => {
                 if let Some(holder) = self.credentials.holder(variable) {
                     return Err(format!(
                         "`{at}` would give the workload the host's `{variable}`, which {holder}"
                     ));
                 }
-                let folders: Vec<PathBuf> = self
+                Ok(self
                     .sources
                     .env(variable)
                     .map(|value| {
@@ -6563,15 +6573,7 @@ impl<S: Sources> Resolver<'_, S> {
                             .filter(|path| path.is_absolute())
                             .collect()
                     })
-                    .unwrap_or_default();
-                Ok(folders
-                    .into_iter()
-                    .flat_map(|folder| {
-                        let joined: Vec<PathBuf> =
-                            join.iter().map(|join| folder.join(join)).collect();
-                        std::iter::once(folder).chain(joined)
-                    })
-                    .collect())
+                    .unwrap_or_default())
             }
             Folder::Path(text) => {
                 let globbing = std::mem::replace(&mut self.globbing, true);
@@ -6589,17 +6591,86 @@ impl<S: Sources> Resolver<'_, S> {
     }
 
     /// The real file of `candidate`, or why the box cannot run it.
-    fn candidate(&self, candidate: &Path) -> Result<String, String> {
+    fn candidate(
+        &mut self,
+        candidate: &Path,
+        resolving: Option<(&str, &Search)>,
+    ) -> Result<String, String> {
         use crate::program::{self, Refused};
-        let checked =
-            program::check(candidate, &self.writable()).map_err(|refused| match refused {
-                Refused::Planted { what, .. } => format!("in {what}, which a box can write"),
-                Refused::Dangling => "a link to nothing".to_string(),
-                Refused::NotExecutable => "not an executable file".to_string(),
-            })?;
+        let refusal = |refused| match refused {
+            Refused::Planted { what, .. } => format!("in {what}, which a box can write"),
+            Refused::Dangling => "a link to nothing".to_string(),
+            Refused::NotExecutable => "not an executable file".to_string(),
+        };
+        let checked = program::check(candidate, &self.writable()).map_err(refusal)?;
+        if let Some((input, search)) = resolving
+            && search
+                .installation
+                .contains(&crate::install_layout::Layout::Npm)
+        {
+            if let Some(manager) = crate::install_layout::unsupported_launcher(&checked.real) {
+                return Err(format!(
+                    "a launcher of {manager}, which box does not resolve to its program"
+                ));
+            }
+            if program::runs_node(&checked.real) {
+                let platform =
+                    crate::install_layout::Platform::host(self.inputs.os, self.inputs.arch);
+                if let Some(resolved) = crate::install_layout::resolve_program(
+                    candidate,
+                    &checked.real,
+                    &search.program,
+                    &platform,
+                )? {
+                    return self.resolved(input, resolved);
+                }
+            }
+        }
         if program::runs_node(&checked.real) {
             return Err("a node script, which the box cannot start".into());
         }
+        utf8(&checked.real).map_err(|error| error.to_string())
+    }
+
+    /// The program an npm launcher resolved to, after the same checks as a found program, and
+    /// with each file that chose it recorded for the run's write-grant check.
+    fn resolved(
+        &mut self,
+        input: &str,
+        resolved: crate::install_layout::Resolved,
+    ) -> Result<String, String> {
+        let writable = self.writable();
+        for source in &resolved.sources {
+            if let Some(what) = writable.root(source) {
+                return Err(format!(
+                    "chosen through {}, which lies in {what}, which a box can write",
+                    source.display()
+                ));
+            }
+        }
+        let checked = crate::program::check(&resolved.program, &writable).map_err(|_| {
+            format!(
+                "resolved to {}, which the box cannot run",
+                resolved.program.display()
+            )
+        })?;
+        let metadata = std::fs::metadata(&checked.real)
+            .map_err(|error| format!("{}: {error}", checked.real.display()))?;
+        if (
+            std::os::unix::fs::MetadataExt::dev(&metadata),
+            std::os::unix::fs::MetadataExt::ino(&metadata),
+        ) != resolved.identity
+        {
+            return Err(format!(
+                "resolved to {}, which changed while box read it",
+                resolved.program.display()
+            ));
+        }
+        self.program_sources
+            .extend(resolved.sources.iter().map(|source| HostProgram {
+                name: format!("inputs.{input}"),
+                value: source.display().to_string(),
+            }));
         utf8(&checked.real).map_err(|error| error.to_string())
     }
 

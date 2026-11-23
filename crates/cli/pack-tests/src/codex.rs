@@ -1251,175 +1251,81 @@ fn a_codex_run_with_imported_hooks_writes_one_command_string_and_permits_its_scr
     assert!(!policy.contains("hook_script_"), "{policy}");
 }
 
-/// An npm install of Codex under `prefix`: the node launcher in `bin`, and the program in the
-/// platform package of each of `platforms`, as `(package, triple)`.
-fn npm_codex(prefix: &Path, platforms: &[(&str, &str)]) -> PathBuf {
-    let package = prefix.join("lib/node_modules/@openai/codex");
-    write(
-        &package.join("bin/codex.js"),
-        "#!/usr/bin/env node\nconsole.log('codex-cli 0.171.0')\n",
-    );
-    executable(&package.join("bin/codex.js"));
-    strands_box_cli_profile::fixtures::link(
-        "../lib/node_modules/@openai/codex/bin/codex.js",
-        &prefix.join("bin/codex"),
-    );
-    for (platform, triple) in platforms {
-        let bin = package.join(format!(
-            "node_modules/@openai/codex-{platform}/vendor/{triple}/bin"
-        ));
-        binary(&bin.join("codex"));
-        binary(&bin.join("codex-code-mode-host"));
-    }
-    package
-}
-
-const ARM64_MAC: (&str, &str) = ("darwin-arm64", "aarch64-apple-darwin");
-const X64_MAC: (&str, &str) = ("darwin-x64", "x86_64-apple-darwin");
-const ARM64_LINUX: (&str, &str) = ("linux-arm64", "aarch64-unknown-linux-musl");
-const X64_LINUX: (&str, &str) = ("linux-x64", "x86_64-unknown-linux-musl");
-
-/// Give each program of `platforms` under `package` the executable header of its platform.
-fn platform_headers(package: &Path, platforms: &[(&str, &str)]) {
-    for &platform in platforms {
-        let program = platform_program(package, platform);
-        let header: Vec<u8> = match platform.1 {
-            "aarch64-apple-darwin" => [0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 0x01].to_vec(),
-            "x86_64-apple-darwin" => [0xcf, 0xfa, 0xed, 0xfe, 0x07, 0, 0, 0x01].to_vec(),
-            triple => {
-                let machine: u16 = if triple.starts_with("aarch64") {
-                    183
-                } else {
-                    62
-                };
-                let mut elf = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0];
-                elf.resize(18, 0);
-                elf.extend(machine.to_le_bytes());
-                elf
-            }
-        };
-        std::fs::write(&program, header).expect("a header");
-    }
-}
-
-/// The program of the platform package `platform` of the npm install at `package`.
-fn platform_program(package: &Path, (platform, triple): (&str, &str)) -> PathBuf {
-    resolved(&package.join(format!(
-        "node_modules/@openai/codex-{platform}/vendor/{triple}/bin/codex"
-    )))
-}
-
-/// The `[agent.filesystem] key` paths of `generated` that lie under `folder`.
-fn granted_under(generated: &Trialed, key: &str, folder: &Path) -> Vec<String> {
-    let config: toml::Value = toml::from_str(generated.box_toml()).expect("box.toml parses");
-    string_list(config["agent"]["filesystem"].get(key))
-        .into_iter()
-        .filter(|path| Path::new(path).starts_with(folder))
-        .collect()
-}
-
-#[test]
-fn an_npm_installed_codex_runs_the_program_in_its_platform_package() {
+/// A host with Codex installed only by `npm i -g @openai/codex` under `~/.npm-global`, for
+/// `platforms`, with that prefix first on `PATH`; the programs, and the search path.
+fn npm_host(platforms: &[&str]) -> (FakeHost, Vec<PathBuf>, String) {
     let host = FakeHost::new();
     host.uninstall_codex();
     let prefix = host.home().join(".npm-global");
-    let package = resolved(&npm_codex(&prefix, &[ARM64_MAC]));
+    let programs = strands_box_cli_profile::fixtures::npm_codex(&prefix, platforms)
+        .iter()
+        .map(|program| resolved(program))
+        .collect();
+    let search_path = format!("{}:{}", prefix.join("bin").display(), host.search_path());
+    (host, programs, search_path)
+}
+
+#[test]
+fn an_npm_installed_codex_runs_the_program_of_its_platform_package_and_reaches_nothing_else() {
+    let (host, programs, search_path) = npm_host(&["darwin-arm64", "linux-x64"]);
     let generated = codex(&host)
-        .search_path(format!(
-            "{}:{}",
-            prefix.join("bin").display(),
-            host.search_path()
-        ))
+        .os("macos")
+        .arch("aarch64")
+        .search_path(search_path)
         .generate()
         .expect("a configuration");
-    let program = platform_program(&package, ARM64_MAC);
-    assert_eq!(agent_command(&generated)[0], program.display().to_string());
-    let expected = vec![
-        program.display().to_string(),
-        program
-            .with_file_name("codex-code-mode-host")
-            .display()
-            .to_string(),
-    ];
+    let program = programs[0].display().to_string();
+    assert_eq!(agent_command(&generated)[0], program);
+    let config: toml::Value = toml::from_str(generated.box_toml()).expect("box.toml parses");
+    let filesystem = &config["agent"]["filesystem"];
+    let installation = resolved(&host.home().join(".npm-global/lib/node_modules"));
+    let under = |key: &str| -> Vec<String> {
+        string_list(filesystem.get(key))
+            .into_iter()
+            .filter(|path| Path::new(path).starts_with(&installation))
+            .collect()
+    };
+    let host_program = programs[0]
+        .with_file_name("codex-code-mode-host")
+        .display()
+        .to_string();
     for key in ["read", "exec"] {
-        assert_eq!(granted_under(&generated, key, &package), expected, "{key}");
-    }
-    for key in ["write", "read_file", "list", "metadata"] {
-        assert!(granted_under(&generated, key, &package).is_empty(), "{key}");
-    }
-}
-
-#[test]
-fn an_npm_installed_codex_takes_the_platform_package_of_this_host() {
-    for (os, arch, platforms, expected) in [
-        ("linux", "x86_64", vec![ARM64_MAC, X64_LINUX], X64_LINUX),
-        ("linux", "x86_64", vec![ARM64_LINUX, X64_LINUX], X64_LINUX),
-        ("macos", "aarch64", vec![X64_MAC], X64_MAC),
-    ] {
-        let host = FakeHost::new();
-        host.uninstall_codex();
-        let prefix = host.home().join(".npm-global");
-        let package = resolved(&npm_codex(&prefix, &platforms));
-        platform_headers(&package, &platforms);
-        let generated = codex(&host)
-            .os(os)
-            .arch(arch)
-            .search_path(format!(
-                "{}:{}",
-                prefix.join("bin").display(),
-                host.search_path()
-            ))
-            .generate()
-            .expect("a configuration");
         assert_eq!(
-            agent_command(&generated)[0],
-            platform_program(&package, expected).display().to_string(),
-            "{os} on {arch}"
+            under(key),
+            vec![program.clone(), host_program.clone()],
+            "{key}"
         );
     }
-}
-
-#[test]
-fn an_npm_installed_codex_for_another_platform_only_is_passed_over() {
-    let host = FakeHost::new();
-    host.uninstall_codex();
-    let prefix = host.home().join(".npm-global");
-    let package = resolved(&npm_codex(&prefix, &[X64_MAC]));
-    platform_headers(&package, &[X64_MAC]);
-    let error = codex(&host)
-        .os("linux")
-        .arch("x86_64")
-        .search_path(format!(
-            "{}:{}",
-            prefix.join("bin").display(),
-            host.search_path()
-        ))
-        .generate()
-        .expect_err("no program for this host");
-    no_agent(&error, "codex");
+    for key in ["write", "write_file", "read_file", "list", "metadata"] {
+        assert!(under(key).is_empty(), "{key}: {:?}", under(key));
+    }
+    let env = config["agent"]["env"].as_table().expect("an agent env");
     assert!(
-        error
-            .to_string()
-            .contains("(a program for macos on x86_64, and this host is linux on x86_64)"),
-        "{error}"
+        env.keys().all(|name| !name.starts_with("CODEX_MANAGED")),
+        "the launcher's variables are not set: {env:?}"
     );
 }
 
 #[test]
 fn the_codex_on_the_first_path_folder_wins_whether_npm_or_native() {
-    let host = FakeHost::new();
-    let prefix = host.home().join(".npm-global");
-    let package = resolved(&npm_codex(&prefix, &[ARM64_MAC]));
-    let npm = prefix.join("bin").display().to_string();
-    let native = resolved(&host.codex_install());
+    let (host, programs, _) = npm_host(&["darwin-arm64"]);
+    let native = host.home().join("native/bin");
+    binary(&native.join("codex"));
+    let npm = host.home().join(".npm-global/bin").display().to_string();
+    let native_dir = native.display().to_string();
     for (search_path, expected) in [
         (
-            format!("{npm}:{}", host.search_path()),
-            platform_program(&package, ARM64_MAC),
+            format!("{npm}:{native_dir}:/usr/bin:/bin"),
+            programs[0].clone(),
         ),
-        (format!("{}:{npm}", host.search_path()), native),
+        (
+            format!("{native_dir}:{npm}:/usr/bin:/bin"),
+            resolved(&native.join("codex")),
+        ),
     ] {
         let generated = codex(&host)
+            .os("macos")
+            .arch("aarch64")
             .search_path(search_path.clone())
             .generate()
             .expect("a configuration");
@@ -1432,26 +1338,97 @@ fn the_codex_on_the_first_path_folder_wins_whether_npm_or_native() {
 }
 
 #[test]
-fn an_npm_launcher_without_its_platform_package_is_passed_over_at_create() {
-    let host = FakeHost::new();
-    host.uninstall_codex();
-    let prefix = host.home().join(".npm-global");
-    npm_codex(&prefix, &[]);
-    let npm = prefix.join("bin").display().to_string();
-    let search_path = format!("{npm}:{npm}:{}", host.search_path());
+fn an_option_that_names_the_npm_launcher_runs_its_program() {
+    let (host, programs, _) = npm_host(&["darwin-arm64"]);
+    let launcher = host.home().join(".npm-global/bin/codex");
+    let generated = codex(&host)
+        .os("macos")
+        .arch("aarch64")
+        .option("codex.path", launcher.display().to_string())
+        .generate()
+        .expect("a configuration");
+    assert_eq!(
+        agent_command(&generated)[0],
+        programs[0].display().to_string()
+    );
+}
+
+#[test]
+fn an_npm_install_without_a_package_for_this_host_is_refused_with_its_reason() {
+    let (host, _, search_path) = npm_host(&["linux-x64"]);
     let error = codex(&host)
+        .os("macos")
+        .arch("aarch64")
         .search_path(search_path.clone())
         .generate()
-        .expect_err("no program");
+        .expect_err("no platform package for this host");
     no_agent(&error, "codex");
-    assert_eq!(
+    assert!(
+        error.to_string().contains(
+            "npm installed @openai/codex without a platform package for darwin arm64 \
+             (found @openai/codex-linux-x64)"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_write_grant_over_a_file_that_chose_the_program_is_refused() {
+    let (host, _, search_path) = npm_host(&["darwin-arm64"]);
+    binary(&host.home().join("tools/planter"));
+    operator_pack(
+        &host,
+        "planter",
+        "kind = \"tool\"\n[inputs.planter.path]\ntype = \"program\"\nprogram = \"planter\"\n\
+         search = [{ env = \"PATH\" }]\n[run]\ncommand = [\"${{ inputs.planter.path }}\"]\n\
+         [filesystem]\nwrite_file = [\"${{ home }}/.npm-global/lib/node_modules/@openai/codex/package.json\"]\n",
+    );
+    let error = codex(&host)
+        .with("planter")
+        .os("macos")
+        .arch("aarch64")
+        .search_path(format!(
+            "{search_path}:{}",
+            host.home().join("tools").display()
+        ))
+        .generate()
+        .expect_err("a write grant over the launcher package");
+    assert!(
+        error.to_string().contains("is chosen through")
+            && error
+                .to_string()
+                .contains("package.json, which lies under the write grant"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_pnpm_launcher_is_refused_with_its_manager() {
+    let host = FakeHost::new();
+    host.uninstall_codex();
+    let pnpm = host.home().join("Library/pnpm");
+    script(
+        &pnpm.join("codex"),
+        "basedir=$(dirname \"$0\")\nexec node \"$basedir/global/5/.pnpm/node_modules/@openai/codex/bin/codex.js\" \"$@\"",
+    );
+    let error = codex(&host)
+        .search_path(format!("{}:{}", pnpm.display(), host.search_path()))
+        .generate()
+        .expect_err("a pnpm launcher");
+    no_agent(&error, "codex");
+    assert!(
         error
             .to_string()
-            .matches("codex (a node script, which the box cannot start)")
-            .count(),
-        1,
-        "a folder that PATH names twice is passed over once: {error}"
+            .contains("(a launcher of pnpm, which box does not resolve to its program)"),
+        "{error}"
     );
+}
+
+#[test]
+fn an_npm_launcher_without_its_platform_package_is_passed_over_once_at_create() {
+    let (host, _, _) = npm_host(&[]);
+    let npm = host.home().join(".npm-global/bin").display().to_string();
+    let search_path = format!("{npm}:{npm}:{}", host.search_path());
     let created = host
         .profile()
         .with("codex")
@@ -1465,10 +1442,12 @@ fn an_npm_launcher_without_its_platform_package_is_passed_over_at_create() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(
-        guided.contains(
-            "Codex is not on this host as a program the box can run: `agent.command.0`: no \
-             `codex` that the box can run"
-        ) && guided.contains("~/.npm-global/bin/codex (a node script, which the box cannot start)"),
+        guided.contains("Codex is not on this host as a program the box can run:"),
+        "{guided}"
+    );
+    assert_eq!(
+        guided.matches("~/.npm-global/bin/codex (").count(),
+        1,
         "{guided}"
     );
 }

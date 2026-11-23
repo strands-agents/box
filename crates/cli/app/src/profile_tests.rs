@@ -13968,52 +13968,35 @@ mod search {
             ),
             (
                 "type = \"program\"\nprogram = \"mine\"\nsearch = [{ path = \"/opt\" }]",
-                "takes `env`",
-            ),
-            (
-                "type = \"program\"\nprogram = \"mine\"\n\
-                 search = [{ env = \"PATH\", join = [\"../lib\"], path = \"/opt\" }]",
-                "takes `env`",
-            ),
-            (
-                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ join = [\"../lib\"] }]",
-                "takes `env`",
-            ),
-            (
-                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = \"../lib\" }]",
-                "`join` is a list of relative paths",
-            ),
-            (
-                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = [\"/opt\"] }]",
-                "`join` is a list of relative paths",
-            ),
-            (
-                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = [\"../${{ home }}\"] }]",
-                "`join` is a list of relative paths",
-            ),
-            (
-                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = [\"../lib//bin\"] }]",
-                "`join` is a list of relative paths",
-            ),
-            (
-                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = [\"\"] }]",
-                "`join` is a list of relative paths",
-            ),
-            (
-                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = [1] }]",
-                "`join` is a list of relative paths",
-            ),
-            (
-                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = [] }]",
-                "`join` is a list of relative paths",
-            ),
-            (
-                "type = \"program\"\nprogram = \"mine\"\nsearch = [{ env = \"PATH\", join = [\"../lib/*/bin\"] }]",
-                "`join` is a list of relative paths",
+                "takes only `env`",
             ),
             (
                 "type = \"program\"\nprogram = \"mine\"\nsearch = [1]",
                 "is a list of folders",
+            ),
+            (
+                "type = \"program\"\ninstallation = [\"npm\"]",
+                "`[inputs.mine.path] installation` needs `program`",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\ninstallation = \"npm\"",
+                "installation` is a list of the layouts that resolve a program: npm",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\ninstallation = []",
+                "installation` is a list of the layouts that resolve a program: npm",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\ninstallation = [\"homebrew\"]",
+                "installation` is a list of the layouts that resolve a program: npm",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\ninstallation = [\"yarn\"]",
+                "installation` is a list of the layouts that resolve a program: npm",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\ninstallation = [\"npm\", \"npm\"]",
+                "names \"npm\" twice",
             ),
         ] {
             scene.share(

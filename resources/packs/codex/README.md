@@ -224,10 +224,19 @@ Codex's default shell tool does not kill a command at a timeout. After 10 second
 
 ### Codex isn't found
 
-`npm install -g @openai/codex` puts a Node.js script on your `PATH` and Codex's own program in the
-npm package's folder. `box` runs that program. When the npm package has no program for your
-platform, the box stops with `a node script, which the box cannot start`. Install the npm package
-again, or install Codex's own program from its release page.
+`box` runs Codex's own program from an npm global install (`npm i -g @openai/codex`), under the
+default prefix, a custom prefix, nvm, or fnm. It does not run the Node.js launcher, so Codex
+reports its install method from the program's path: an npm install under `/opt/homebrew` reads
+as Homebrew in Codex's update messages. Bundled voice and its resources are not available in a box.
+
+| Installed with | In a box |
+| --- | --- |
+| npm (`npm i -g`) | Runs the program of the platform package for this machine. |
+| pnpm, Volta, Yarn Classic, Bun | Refused: `a launcher of <manager>, which box does not resolve to its program`. |
+| Codex's own program from its release page | Runs. |
+
+If the box says `npm installed @openai/codex without a platform package for ...`, install the npm
+package again.
 
 If Codex lives somewhere `box` doesn't look, set `codex.path` under `[options]`, as
 [The agent isn't found](../../../docs/cli/troubleshooting.md#the-agent-isnt-found) shows for
