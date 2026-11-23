@@ -1330,11 +1330,11 @@ fn renameat2_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
 }
 
 fn setresuid_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
-    exact_three_argument_rule(0)
+    unchanged_identity_rules()
 }
 
 fn setresgid_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
-    exact_three_argument_rule(u32::MAX as u64)
+    unchanged_identity_rules()
 }
 
 fn setpgid_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
@@ -1349,14 +1349,26 @@ fn setpgid_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
         .collect()
 }
 
-fn exact_three_argument_rule(value: u64) -> Result<Vec<SeccompRule>, ContainmentError> {
-    let conditions = (0..3)
-        .map(|index| {
-            SeccompCondition::new(index, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, value)
-                .map_err(filter_error)
+/// One rule for each way to name the workload's own id, `0` in its user namespace, or `-1` for
+/// "leave it", in each of the real, effective, and saved positions.
+fn unchanged_identity_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
+    const LEAVE: u64 = u32::MAX as u64;
+    (0..8u8)
+        .map(|combination| {
+            let conditions = (0..3u8)
+                .map(|index| {
+                    let value = if combination & (1 << index) == 0 {
+                        0
+                    } else {
+                        LEAVE
+                    };
+                    SeccompCondition::new(index, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, value)
+                        .map_err(filter_error)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            SeccompRule::new(conditions).map_err(filter_error)
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(vec![SeccompRule::new(conditions).map_err(filter_error)?])
+        .collect()
 }
 
 fn compile_filter(
@@ -1468,8 +1480,9 @@ mod tests {
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
         assert_eq!(rules.len(), 125 + 20 * x86_entries);
         assert!(rules.contains_key(&libc::SYS_seccomp));
-        assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
-        assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
+        // `0` or `-1` in each of three positions.
+        assert_eq!(rules[&libc::SYS_setresuid].len(), 8);
+        assert_eq!(rules[&libc::SYS_setresgid].len(), 8);
         // No flags, or RENAME_NOREPLACE; RENAME_EXCHANGE and RENAME_WHITEOUT match neither.
         assert_eq!(rules[&libc::SYS_renameat2].len(), 2);
         assert!(

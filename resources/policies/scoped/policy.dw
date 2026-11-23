@@ -1,0 +1,28 @@
+// Let the box's shell run each command the agent gives it. Each file a command touches is still
+// its own decision. To allow only some commands, add a condition that names them before the `;`:
+//
+// when { ["cd", "pwd", "ls", "cat", "grep", "head", "tail", "wc"].contains(context.input.program) };
+@id("shell_commands")
+permit (principal, action == Box::Action::"shell:exec", resource);
+
+// Let programs read and write /dev/null, which they redirect output to all the time.
+@id("dev_null")
+permit (principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource)
+when { context.input.path == "/dev/null" };
+
+// No network rule: the agent reaches its project and what your packs and profile allow,
+// such as the model and package registries. To let it reach one more host, add a route to
+// profile.toml:
+//
+// [egress.docs]
+// destinations = ["docs.example.com"]
+//
+// Or add rules here, such as:
+//
+// @id("docs_connect")
+// permit (principal, action == Box::Action::"net:connect", resource)
+// when { context.input.host == "docs.example.com" && context.input.port == 443 };
+//
+// @id("docs_request")
+// permit (principal, action == Box::Action::"http:request", resource)
+// when { context.input.host == "docs.example.com" };

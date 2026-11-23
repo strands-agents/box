@@ -51,6 +51,8 @@ const SECRET_VARIABLE: &str = "STRANDS_BOX_E2E_TOKEN";
 struct RecordingUpstream {
     port: u16,
     seen: Arc<Mutex<Vec<String>>>,
+    /// The upstream's self-signed certificate, which no built-in root vouches for.
+    certificate_pem: String,
 }
 
 impl RecordingUpstream {
@@ -65,6 +67,7 @@ impl RecordingUpstream {
             .with_single_cert(vec![certificate.cert.der().clone()], key)
             .expect("server TLS config");
 
+        let certificate_pem = certificate.cert.pem();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
         let port = listener.local_addr().expect("upstream addr").port();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -82,7 +85,11 @@ impl RecordingUpstream {
             }
         });
 
-        Self { port, seen }
+        Self {
+            port,
+            seen,
+            certificate_pem,
+        }
     }
 
     /// Every `Authorization` value this upstream has received.
@@ -1772,12 +1779,10 @@ fn an_unknown_config_field_is_refused_at_configure() {
 /// A configured destination is reachable through the boundary, and the boundary — not
 /// the workload — decides what is attached.
 ///
-/// The wire-level swap (phantom out, `Real_Secret` upstream) is proven at the proxy layer
-/// in `egress-proxy`'s `interception_e2e.rs::opaque_swap_reaches_upstream_with_real_secret`,
-/// which can supply `upstream_ca_pems` for a fixture upstream. `strands-box` deliberately
-/// does **not** expose that knob — an operator cannot make the box trust an arbitrary
-/// upstream CA — so this layer asserts what only it can: the config-declared destination
-/// is admitted, the request is governed end to end, and the secret never enters the box.
+/// The upstream's certificate is self-signed and the box process names no host trust for it, so
+/// this layer asserts what holds without it: the config-declared destination is admitted, the
+/// request is governed end to end, and the secret never enters the box.
+/// `a_root_the_host_trusts_reaches_the_upstream` proves the swap through a trusted upstream.
 #[test]
 fn a_configured_destination_is_admitted_through_the_boundary() {
     if !fixture::namespace_launcher_is_usable() {
@@ -1806,8 +1811,7 @@ fn a_configured_destination_is_admitted_through_the_boundary() {
         !out.contains("status=403"),
         "the configured destination must be admitted: stdout={out:?} stderr={stderr:?}"
     );
-    // The upstream leg fails closed because the box will not trust a fixture CA, which is
-    // itself the property worth pinning: there is no operator knob to weaken it.
+    // The upstream leg fails closed, because no root the gateway trusts vouches for the fixture.
     assert!(
         !stderr.contains("HTTPS_PROXY is not set"),
         "the daemon's proxy must be seeded into the workload: {stderr:?}"
@@ -1822,6 +1826,78 @@ fn a_configured_destination_is_admitted_through_the_boundary() {
         !out.contains(REAL_SECRET) && !stderr.contains(REAL_SECRET),
         "the real secret must never appear inside the box: {out:?} / {stderr:?}"
     );
+}
+
+/// **A root the host trusts reaches an upstream the built-in roots refuse.** The box process runs
+/// with `SSL_CERT_FILE` naming the upstream's certificate, as a host behind a TLS-inspecting proxy
+/// names the company root, so the gateway completes the upstream handshake and sends the secret.
+#[test]
+fn a_root_the_host_trusts_reaches_the_upstream() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let upstream = RecordingUpstream::start();
+    let host = "localhost";
+    let request = Request::with_config(
+        "host-trust",
+        &permit_egress_to(host, upstream.port),
+        &target(&format!("{host}:{}", upstream.port)),
+    );
+    let trust = request.operator_home().join("company-trust");
+    std::fs::create_dir_all(&trust).expect("a host trust directory");
+    let roots = trust.join("roots.pem");
+    std::fs::write(&roots, &upstream.certificate_pem).expect("the host trust file");
+    let box_ = request
+        .env(SECRET_VARIABLE, REAL_SECRET)
+        .env("SSL_CERT_FILE", roots.to_str().expect("UTF-8"))
+        .expect();
+
+    let output = probe(
+        &box_,
+        SECRET_VARIABLE,
+        &format!("https://{host}:{}/v1/charge", upstream.port),
+    );
+    let out = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        out.contains("status=200"),
+        "a root the host trusts must reach the upstream: stdout={out:?} stderr={stderr:?}"
+    );
+    assert_eq!(
+        upstream.authorizations(),
+        [format!("Bearer {REAL_SECRET}")],
+        "the upstream receives the real secret"
+    );
+    assert!(
+        stderr.contains("root certificates from this host's trust store"),
+        "the run discloses the host trust: {stderr:?}"
+    );
+    assert!(
+        !out.contains(REAL_SECRET) && !stderr.contains(REAL_SECRET),
+        "the real secret must never appear inside the box: {out:?} / {stderr:?}"
+    );
+}
+
+/// **A writable grant over the host trust the gateway reads stops the box.** Otherwise one run's
+/// workload could add a root that a later run's gateway trusts.
+#[test]
+fn a_writable_grant_over_host_trust_is_refused() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let request = Request::with_config(
+        "host-trust-writable",
+        &permit_egress_to("localhost", 443),
+        "",
+    );
+    // The fixture grants the agent read and write over its home.
+    let roots = request.operator_home().join("agent-home/roots.pem");
+    std::fs::create_dir_all(roots.parent().expect("a parent")).expect("the agent home");
+    std::fs::write(&roots, "").expect("a host trust file");
+    let (box_, output) = request
+        .env("SSL_CERT_FILE", roots.to_str().expect("UTF-8"))
+        .attempt();
+    assert_refused(&box_, &output, &["SSL_CERT_FILE", "agent-home"]);
 }
 
 /// The workload's own environment holds a phantom of the minted form, never the secret.
@@ -2007,6 +2083,120 @@ fn a_credential_binding_does_not_grant_reachability() {
     );
     // And the secret did not leak on the way.
     assert!(!out.contains(REAL_SECRET));
+}
+
+/// A plain-HTTP service on the surrounding OS's loopback that records the `Authorization` header
+/// of each request.
+struct LoopbackService {
+    port: u16,
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl LoopbackService {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback service");
+        let port = listener.local_addr().expect("service addr").port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&head).into_owned();
+                let authorization = head
+                    .lines()
+                    .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+                    .and_then(|line| line.split_once(':'))
+                    .map(|(_, value)| value.trim().to_string())
+                    .unwrap_or_else(|| "<absent>".to_string());
+                recorded.lock().expect("service lock").push(authorization);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+            }
+        });
+        Self { port, seen }
+    }
+
+    fn authorizations(&self) -> Vec<String> {
+        self.seen.lock().expect("service lock").clone()
+    }
+}
+
+/// A workload script that sends one plain `GET` for `http://host.box.internal:<port>/` to the
+/// gateway with Bash's own socket, carrying the phantom, and prints the status line.
+fn plain_get_to_host_loopback(port: u16) -> String {
+    format!(
+        r#"proxy=${{HTTP_PROXY#http://}}; proxy=${{proxy%/}}
+exec 3<>"/dev/tcp/${{proxy%:*}}/${{proxy##*:}}"
+printf 'GET http://host.box.internal:{port}/v1/models HTTP/1.1\r\nHost: host.box.internal:{port}\r\nAuthorization: Bearer %s\r\nConnection: close\r\n\r\n' "${SECRET_VARIABLE}" >&3
+IFS= read -r status <&3; printf 'status=%s\n' "${{status%$'\r'}}""#
+    )
+}
+
+/// `host.box.internal` reaches the operator's loopback only on the port a policy permits, and a
+/// route that names it exactly adds its secret over plain HTTP.
+#[test]
+fn reserved_name_reaches_permitted_port_with_secret() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let permitted = LoopbackService::start();
+    let refused = LoopbackService::start();
+    let box_ = box_with_credentials(
+        "host-loopback",
+        &permit_egress_to("host.box.internal", permitted.port),
+        &format!(
+            "[egress.a]\ndestinations = [\"host.box.internal:{}\", \"host.box.internal:{}\"]\n\
+             secret.ref = \"env://{SECRET_VARIABLE}\"\n",
+            permitted.port, refused.port
+        ),
+    );
+
+    let output = workload(
+        &box_,
+        &format!(
+            "{}\n{}",
+            plain_get_to_host_loopback(permitted.port),
+            plain_get_to_host_loopback(refused.port)
+        ),
+    );
+    assert_ran(&output);
+    assert_eq!(
+        stdout(&output),
+        "status=HTTP/1.1 200 OK\nstatus=HTTP/1.1 403 Forbidden",
+        "the permitted port answers, and another port is refused: {output:?}"
+    );
+    assert_eq!(
+        permitted.authorizations(),
+        vec![format!("Bearer {REAL_SECRET}")],
+        "the service on the operator's loopback receives the real secret"
+    );
+    assert!(
+        refused.authorizations().is_empty(),
+        "a port no permit names is never dialed: {:?}",
+        refused.authorizations()
+    );
+    assert!(
+        !format!("{output:?}").contains(REAL_SECRET),
+        "the real secret never enters the box: {output:?}"
+    );
+}
+
+/// A secret on `host.box.internal` with no port is refused before the box starts, because the
+/// plain request would carry the real secret to whatever process holds the port.
+#[test]
+fn reserved_name_secret_needs_a_port() {
+    let (box_, output) = attempt_configure(
+        "host-loopback-no-port",
+        &permit_egress_to("host.box.internal", 80),
+        &target("host.box.internal"),
+    );
+    assert_refused(&box_, &output, &["host.box.internal", "with no port"]);
 }
 
 #[test]

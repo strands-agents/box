@@ -1,0 +1,349 @@
+# Claude Code in a box.
+[pack]
+name = "@box/claude"
+version = 1
+kind = "agent"
+extend = ["@box/base"]
+
+[run]
+command = [
+    "${{ inputs.claude.path }}",
+    { value = "--dangerously-skip-permissions", when = { variable = "inputs.agent.skip-permissions", equals = "true" } },
+    { value = "--settings", when = { variable = "inputs.agent.skip-permissions", equals = "true" } },
+    { value = '{"skipDangerousModePermissionPrompt":true}', when = { variable = "inputs.agent.skip-permissions", equals = "true" } },
+    # What the box does, and the profile to change (docs/design/cli/decisions.md#an-agent-pack-tells-its-agent-about-the-box).
+    "--append-system-prompt-file",
+    "${{ pack }}/box.md",
+    "--append-system-prompt",
+    "This run's box profile is the folder ${{ profile }}, and its file is ${{ profile.file }}.",
+    { slot = "agent-args" },
+]
+
+[inputs.claude.path]
+description = "The Claude Code program."
+type = "program"
+program = "claude"
+search = [
+    { env = "PATH" },
+    "${{ home }}/.local/bin",
+]
+
+[inputs.claude.host]
+description = "Where Claude Code's model runs."
+type = "string"
+values = ["bedrock", "anthropic"]
+default = "bedrock"
+
+[inputs.agent.skip-permissions]
+description = "Turn off Claude Code's permission prompts, whatever your copied settings say, unless your organization's policy turns that mode off. The box still allows or refuses each action."
+type = "bool"
+default = false
+
+[inputs.claude.import-skills]
+description = "Copy your ~/.claude/skills into the box on the profile's first run."
+type = "bool"
+default = true
+
+[inputs.claude.import-settings]
+description = "Copy the display preferences and the permission settings in your ~/.claude/settings.json into the box on the profile's first run."
+type = "bool"
+default = true
+
+[inputs.claude.import-app-state]
+description = "Bring your finished onboarding, this project's folder trust, and your interface toggles from ~/.claude.json into the box."
+type = "bool"
+default = true
+
+[inputs.claude.import-memory]
+description = "Copy Claude Code's auto memory for this project into the box on the first run in a project."
+type = "bool"
+default = true
+
+[inputs.claude.import-env]
+description = "Pass Claude Code's behavior variables, such as MAX_THINKING_TOKENS, from your shell into the box."
+type = "bool"
+default = true
+
+[inputs.claude.import-hooks]
+description = "Run the command hooks in your ~/.claude/settings.json that each run one shell script, such as a formatter after an edit."
+type = "bool"
+default = false
+warning = """Choosing true lets the agent read each script that an imported hook runs, and runs each script with the agent's own policy.
+A hook is a convenience, not a guardrail: the agent can change its own settings during a run.
+Write a rule that must hold as Box policy."""
+
+[inputs.claude.import-mcp]
+description = "Import your MCP servers from ~/.claude.json?"
+type = "bool"
+default = false
+warning = """Includes servers you add later and servers configured for each project this profile runs in.
+Local servers run in the box with keys from their settings and your environment.
+A server variable that names a library folder or runtime options can load code.
+If it points where the agent can write, the agent's code runs with the server's keys.
+Remote servers' hosts become reachable.
+Copied settings can expose keys to the agent, even for servers Box skips."""
+
+# Your MCP servers. box declares each one the box can run, and lists each one it skips.
+[[mcp-servers]]
+file = "${{ home }}/.claude.json"
+kind = "json"
+target = "config/.claude.json"
+target-key = "mcpServers"
+key = ["mcpServers"]
+env-var-locations = { command = "references", args = "references", env = "references", headers = "header-references" }
+env-var-syntax = "${NAME}"
+when = { variable = "inputs.claude.import-mcp", equals = "true" }
+
+[[mcp-servers]]
+file = "${{ home }}/.claude.json"
+kind = "json"
+target = "config/.claude.json"
+target-key = ["projects", "${{ workspace }}", "mcpServers"]
+key = ["projects", "${{ workspace }}", "mcpServers"]
+env-var-locations = { command = "references", args = "references", env = "references", headers = "header-references" }
+env-var-syntax = "${NAME}"
+when = { variable = "inputs.claude.import-mcp", equals = "true" }
+
+# ~/.strands/box/storage/<profile>/default/agent/, shared by every project the profile runs in. Claude Code
+# keeps its settings here, and its sessions and memory under one projects/ folder for each project.
+[storage]
+directories = ["config", "tmp"]
+
+# Your own instructions, skills, and look, copied into storage on the profile's first run and
+# brought up to date with the host on each run after it. Claude Code reads them from
+# CLAUDE_CONFIG_DIR. A box's edit stays until the host's file changes.
+[[storage.files]]
+source = "${{ home }}/.claude/CLAUDE.md"
+target = "config/CLAUDE.md"
+optional = true
+sync = true
+
+[[storage.files]]
+source = "${{ home }}/.claude/rules"
+target = "config/rules"
+optional = true
+sync = true
+
+[[storage.files]]
+source = "${{ home }}/.claude/skills"
+target = "config/skills"
+optional = true
+sync = true
+when = { variable = "inputs.claude.import-skills", equals = "true" }
+
+[[storage.files]]
+source = "${{ home }}/.claude/commands"
+target = "config/commands"
+optional = true
+sync = true
+
+[[storage.files]]
+source = "${{ home }}/.claude/agents"
+target = "config/agents"
+optional = true
+sync = true
+
+[[storage.files]]
+source = "${{ home }}/.claude/output-styles"
+target = "config/output-styles"
+optional = true
+sync = true
+
+[[storage.files]]
+source = "${{ home }}/.claude/themes"
+target = "config/themes"
+optional = true
+sync = true
+
+[[storage.files]]
+source = "${{ home }}/.claude/keybindings.json"
+target = "config/keybindings.json"
+optional = true
+sync = true
+
+# Your display preferences, Claude Code's behavior variables, your model, and your permission mode
+# and rules. No key that holds a command, a credential, or a folder the box would have to grant.
+[[storage.files]]
+source = "${{ home }}/.claude/settings.json"
+target = "config/settings.json"
+kind = "json"
+optional = true
+when = { variable = "inputs.claude.import-settings", equals = "true" }
+keep = [
+    ["theme"],
+    ["tui"],
+    ["outputStyle"],
+    ["editorMode"],
+    ["verbose"],
+    ["language"],
+    ["spinnerTipsEnabled"],
+    ["spinnerVerbs"],
+    ["preferredNotifChannel"],
+    ["prefersReducedMotion"],
+    ["showTurnDuration"],
+    ["terminalProgressBarEnabled"],
+    ["skipDangerousModePermissionPrompt"],
+    ["permissions", "defaultMode"],
+    ["permissions", "allow"],
+    ["permissions", "deny"],
+    ["permissions", "ask"],
+    ["env", "BASH_DEFAULT_TIMEOUT_MS"],
+    ["env", "BASH_MAX_TIMEOUT_MS"],
+    ["env", "BASH_MAX_OUTPUT_LENGTH"],
+    ["env", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"],
+    ["env", "MAX_THINKING_TOKENS"],
+    ["env", "CLAUDE_CODE_EFFORT_LEVEL"],
+    ["env", "MAX_MCP_OUTPUT_TOKENS"],
+    ["env", "MCP_TIMEOUT"],
+    ["env", "MCP_TOOL_TIMEOUT"],
+    ["env", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE"],
+    ["model"],
+    ["env", "ANTHROPIC_MODEL"],
+    ["env", "ANTHROPIC_DEFAULT_OPUS_MODEL"],
+    ["env", "ANTHROPIC_DEFAULT_SONNET_MODEL"],
+    ["env", "ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+]
+
+# Before each WebFetch, Claude Code asks api.anthropic.com whether the host is safe to fetch. Off
+# Anthropic's API, no route opens that host, so the lookup fails and so does every fetch. The box
+# decides which hosts the agent reaches. On Anthropic's API, the route opens the host and the
+# lookup stays on.
+[[storage.files.set]]
+key = ["skipWebFetchPreflight"]
+value = true
+when = { variable = "inputs.claude.host", equals = "bedrock" }
+
+# The hooks Claude Code runs. Each run writes them again from your settings: with import-hooks,
+# each `command` hook that runs one shell script, and without it, none
+# (docs/design/cli/decisions.md#imported-hooks-are-rebuilt-on-each-run).
+# - `key`: settings.json holds `hooks`, then each event, then each matcher group, then the
+#   group's `hooks`, then each hook. A group keeps its `matcher`.
+# - `set`: with `bash -c ". <script>"`, the box's shell reads the script, and the read is a policy
+#   decision that the generated permit allows. With `bash <script>`, the shell alias reads the
+#   script inside the box, and that needs a file grant.
+# - `drop`: `shell` selects bash or PowerShell. The box's shell runs a bash script, so a hook that
+#   names bash comes in without the field, and a hook that names another shell does not come in.
+# - A hook is a convenience, not a guardrail, because the agent can change these settings during
+#   a run.
+[[storage.hooks]]
+source = "${{ home }}/.claude/settings.json"
+target = "config/settings.json"
+kind = "json"
+when = { variable = "inputs.claude.import-hooks", equals = "true" }
+key = ["hooks", "*", "*", "hooks", "*"]
+keep-above = ["matcher"]
+only = { key = ["type"], equals = "command" }
+command = ["command"]
+args = ["args"]
+keep = [["type"], ["timeout"], ["async"], ["asyncRewake"], ["statusMessage"], ["onFailure"], ["if"]]
+drop = [{ key = ["shell"], equals = "bash" }]
+disable-key = "disableAllHooks"
+
+[[storage.hooks.set]]
+key = ["command"]
+value = "bash"
+
+[[storage.hooks.set]]
+key = ["args"]
+value = ["-c", ". ${{ script }}"]
+
+# Your finished onboarding, this project's folder trust, and your interface toggles. Each run adds
+# a value that the box's .claude.json lacks, and never replaces one. The MCP import fills mcpServers.
+[[storage.files]]
+source = "${{ home }}/.claude.json"
+target = "config/.claude.json"
+kind = "json"
+optional = true
+fill = true
+when = { variable = "inputs.claude.import-app-state", equals = "true" }
+keep = [
+    ["hasCompletedOnboarding"],
+    ["lastOnboardingVersion"],
+    ["projects", "${{ workspace }}", "hasTrustDialogAccepted"],
+    ["copyFullResponse"],
+    ["copyOnSelect"],
+    ["externalEditorContext"],
+    ["leftArrowOpensAgents"],
+    ["prStatusFooterEnabled"],
+    ["defaultToAgentsView"],
+]
+
+# Claude Code's notes for this project, under the folder name it gives the repository root, on the
+# first run in each project. No sync: the box adds to these notes, and a host copy would replace
+# them.
+[[storage.files]]
+source = "${{ home }}/.claude/projects/${{ workspace.dashed }}/memory"
+target = "config/projects/${{ workspace.dashed }}/memory"
+optional = true
+when = { variable = "inputs.claude.import-memory", equals = "true" }
+
+[env]
+CLAUDE_CONFIG_DIR = "${{ storage.config }}"
+CLAUDE_CODE_TMPDIR = "${{ storage.tmp }}"
+TMPDIR = "${{ storage.tmp }}"
+DISABLE_AUTOUPDATER = "1"
+IS_SANDBOX = "1"
+# Claude Code reads this to use Bedrock. Set only when Claude's host is bedrock.
+CLAUDE_CODE_USE_BEDROCK = { value = "1", when = { variable = "inputs.claude.host", equals = "bedrock" } }
+CLAUDE_CODE_ENABLE_TELEMETRY = "1"
+CLAUDE_CODE_ENHANCED_TELEMETRY_BETA = "1"
+CLAUDE_CODE_PROPAGATE_TRACEPARENT = "1"
+OTEL_BLRP_SCHEDULE_DELAY = "1000"
+OTEL_BSP_SCHEDULE_DELAY = "1000"
+OTEL_LOGS_EXPORTER = "otlp"
+OTEL_LOGS_EXPORT_INTERVAL = "1000"
+OTEL_METRICS_EXPORTER = "otlp"
+OTEL_METRICS_EXPORT_INTERVAL = "5000"
+OTEL_METRIC_EXPORT_INTERVAL = "5000"
+OTEL_TRACES_EXPORTER = "otlp"
+OTEL_TRACES_EXPORT_INTERVAL = "1000"
+
+# Your own Claude Code variables that change only how it behaves or which model it asks for, and
+# hold no key or endpoint. Each comes in when the shell that runs box sets it.
+BASH_DEFAULT_TIMEOUT_MS = { from = "env:BASH_DEFAULT_TIMEOUT_MS", when = { variable = "inputs.claude.import-env", equals = "true" } }
+BASH_MAX_TIMEOUT_MS = { from = "env:BASH_MAX_TIMEOUT_MS", when = { variable = "inputs.claude.import-env", equals = "true" } }
+BASH_MAX_OUTPUT_LENGTH = { from = "env:BASH_MAX_OUTPUT_LENGTH", when = { variable = "inputs.claude.import-env", equals = "true" } }
+CLAUDE_CODE_MAX_OUTPUT_TOKENS = { from = "env:CLAUDE_CODE_MAX_OUTPUT_TOKENS", when = { variable = "inputs.claude.import-env", equals = "true" } }
+MAX_THINKING_TOKENS = { from = "env:MAX_THINKING_TOKENS", when = { variable = "inputs.claude.import-env", equals = "true" } }
+CLAUDE_CODE_EFFORT_LEVEL = { from = "env:CLAUDE_CODE_EFFORT_LEVEL", when = { variable = "inputs.claude.import-env", equals = "true" } }
+MAX_MCP_OUTPUT_TOKENS = { from = "env:MAX_MCP_OUTPUT_TOKENS", when = { variable = "inputs.claude.import-env", equals = "true" } }
+MCP_TIMEOUT = { from = "env:MCP_TIMEOUT", when = { variable = "inputs.claude.import-env", equals = "true" } }
+MCP_TOOL_TIMEOUT = { from = "env:MCP_TOOL_TIMEOUT", when = { variable = "inputs.claude.import-env", equals = "true" } }
+CLAUDE_CODE_DISABLE_TERMINAL_TITLE = { from = "env:CLAUDE_CODE_DISABLE_TERMINAL_TITLE", when = { variable = "inputs.claude.import-env", equals = "true" } }
+ANTHROPIC_MODEL = { from = "env:ANTHROPIC_MODEL", when = { variable = "inputs.claude.import-env", equals = "true" } }
+ANTHROPIC_DEFAULT_OPUS_MODEL = { from = "env:ANTHROPIC_DEFAULT_OPUS_MODEL", when = { variable = "inputs.claude.import-env", equals = "true" } }
+ANTHROPIC_DEFAULT_SONNET_MODEL = { from = "env:ANTHROPIC_DEFAULT_SONNET_MODEL", when = { variable = "inputs.claude.import-env", equals = "true" } }
+ANTHROPIC_DEFAULT_HAIKU_MODEL = { from = "env:ANTHROPIC_DEFAULT_HAIKU_MODEL", when = { variable = "inputs.claude.import-env", equals = "true" } }
+
+
+# Your organization's Claude Code policy, read as on your machine: the managed settings folder, each
+# fixed file in it by name so that a file deployed as a link is read where it points, and on macOS
+# the device's managed preferences, which Claude Code reads with plutil
+# (docs/design/cli/decisions.md#an-organizations-agent-policy-applies-in-the-box).
+# - A file in managed-settings.d/ that links out of the folder is not read: only the fixed names
+#   get their own grant.
+# - A per-user managed preference on macOS does not reach the box: no placeholder names the user.
+# - The plutil grant applies on each Mac, with or without a managed preference.
+# - A deployed managed-mcp.json makes Claude Code use only its servers, and the box does not run
+#   them yet.
+[filesystem]
+read = [
+    "${{ inputs.claude.path }}",
+    { path = "/Library/Application Support/ClaudeCode", optional = true, when = "macos" },
+    { path = "/etc/claude-code", optional = true, when = "linux" },
+]
+read_file = [
+    # The guidance that `--append-system-prompt-file` names.
+    "${{ pack }}/box.md",
+    { path = "/Library/Managed Preferences/com.anthropic.claudecode.plist", optional = true, when = "macos" },
+    { path = "/Library/Application Support/ClaudeCode/managed-settings.json", optional = true, when = "macos" },
+    { path = "/Library/Application Support/ClaudeCode/managed-mcp.json", optional = true, when = "macos" },
+    { path = "/Library/Application Support/ClaudeCode/CLAUDE.md", optional = true, when = "macos" },
+    { path = "/etc/claude-code/managed-settings.json", optional = true, when = "linux" },
+    { path = "/etc/claude-code/managed-mcp.json", optional = true, when = "linux" },
+    { path = "/etc/claude-code/CLAUDE.md", optional = true, when = "linux" },
+]
+exec = [
+    "${{ inputs.claude.path }}",
+    { path = "/usr/bin/plutil", optional = true, when = "macos" },
+]

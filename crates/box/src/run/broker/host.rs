@@ -189,7 +189,8 @@ impl BrokerHost {
             )
             .map_err(|source| ShellError::Serve { source })?
             .with_commands(commands)
-            .with_installation(installation),
+            .with_installation(installation)
+            .with_upstream_trust(crate::run::contain::boundary::upstream_trust()),
         );
         // The declared MCP servers, from the same record.
         let declared_mcp = Arc::new(record.mcp.clone());
