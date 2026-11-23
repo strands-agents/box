@@ -2062,7 +2062,7 @@ fn with_fields(
 fn outcome_action_id(outcome: &Outcome<'_>) -> &'static str {
     match outcome {
         Outcome::Connect { .. } => action::NET_CONNECT,
-        Outcome::Http { .. } => action::HTTP_REQUEST,
+        Outcome::Http { websocket, .. } => crate::schema::http_action_id(*websocket),
         Outcome::ShellRun { .. } => action::SHELL_EXEC,
         Outcome::ShellSpawn { .. } => action::SHELL_SPAWN,
         // The response names the SAME coarse action as the request, so a rule joining
@@ -2113,16 +2113,15 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
             path,
             body_bytes,
             intercepted,
-            upgrade,
-        } => vec![
-            (attr::HOST, Value::String((*host).to_string())),
-            (attr::PORT, Value::Int(i64::from(*port))),
-            (attr::METHOD, Value::String((*method).to_string())),
-            (attr::PATH, Value::String((*path).to_string())),
-            (attr::BODY_BYTES, Value::Int(clamp(*body_bytes))),
-            (attr::INTERCEPTED, Value::Bool(*intercepted)),
-            (attr::UPGRADE, Value::String((*upgrade).to_string())),
-        ],
+            websocket,
+        } => http_fields(
+            host,
+            *port,
+            method,
+            path,
+            (!websocket).then(|| clamp(*body_bytes)),
+            *intercepted,
+        ),
         Request::McpCall {
             server,
             method,
@@ -2245,22 +2244,18 @@ fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
             path,
             delivery,
             intercepted,
-            upgrade,
+            websocket,
             ..
-        } => vec![
-            (attr::HOST, Value::String((*host).to_string())),
-            (attr::PORT, Value::Int(i64::from(*port))),
-            (attr::METHOD, Value::String((*method).to_string())),
-            (attr::PATH, Value::String((*path).to_string())),
+        } => http_fields(
+            host,
+            *port,
+            method,
+            path,
             // The DELIVERED count, carried on the schema's `body_bytes`. A budget rule
             // sums this, so it must be what left the box, not what was offered.
-            (
-                attr::BODY_BYTES,
-                Value::Int(clamp(delivery.accepted_bytes())),
-            ),
-            (attr::INTERCEPTED, Value::Bool(*intercepted)),
-            (attr::UPGRADE, Value::String((*upgrade).to_string())),
-        ],
+            (!websocket).then(|| clamp(delivery.accepted_bytes())),
+            *intercepted,
+        ),
         Outcome::ShellRun {
             command,
             program,
@@ -2355,6 +2350,25 @@ fn output_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
         }
         _ => Vec::new(),
     }
+}
+
+fn http_fields(
+    host: &str,
+    port: u16,
+    method: &str,
+    path: &str,
+    body_bytes: Option<i64>,
+    intercepted: bool,
+) -> Vec<(&'static str, Value)> {
+    let mut fields = vec![
+        (attr::HOST, Value::String(host.to_string())),
+        (attr::PORT, Value::Int(i64::from(port))),
+        (attr::METHOD, Value::String(method.to_string())),
+        (attr::PATH, Value::String(path.to_string())),
+    ];
+    fields.extend(body_bytes.map(|bytes| (attr::BODY_BYTES, Value::Int(bytes))));
+    fields.push((attr::INTERCEPTED, Value::Bool(intercepted)));
+    fields
 }
 
 /// Narrow a byte count to Cedar's `Long`, saturating rather than wrapping.
@@ -3247,7 +3261,7 @@ when temporal {
             delivery: crate::Delivery::Completed { bytes },
             status: Some(200),
             intercepted: true,
-            upgrade: "",
+            websocket: false,
         }
     }
 
@@ -3259,7 +3273,7 @@ when temporal {
             path: "/v1",
             body_bytes: 10,
             intercepted: true,
-            upgrade: "",
+            websocket: false,
         }
     }
 
@@ -3334,7 +3348,7 @@ when temporal {
                         delivery: crate::Delivery::Completed { bytes: 10 },
                         status: Some(200),
                         intercepted: true,
-                        upgrade: "",
+                        websocket: false,
                     }
                 )
                 .is_err(),
@@ -3436,7 +3450,7 @@ when temporal {
             delivery: crate::Delivery::Completed { bytes: 150 },
             status: Some(200),
             intercepted: true,
-            upgrade: "",
+            websocket: false,
         };
         let request_id = permitted_http_request(&engine);
         engine

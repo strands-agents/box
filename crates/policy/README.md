@@ -171,7 +171,8 @@ a rule could not read off the action.
 
 Every action accepts `Box::Agent`, so the principal narrows nothing and a rule that leaves it
 unconstrained is the same rule as one naming it. The **action** is what scopes a rule. The egress
-gateway raises `Box::Action::"net:connect"` and `Box::Action::"http:request"`. The shell raises
+gateway raises `Box::Action::"net:connect"`, `Box::Action::"http:request"`, and
+`Box::Action::"websocket:connect"`. The shell raises
 `Box::Action::"shell:exec"` and `Box::Action::"shell:spawn"`. An MCP stream raises
 `Box::Action::"mcp:call"`, and a generated tool refinement raises
 `<normalized-server>::Action::"<tool>"`. Either interpreter raises `fs:*`.
@@ -210,7 +211,7 @@ load refuses an `operation` guard under no action.
 |---|---|---|
 | `Fs` | one `Box::Action` selected by `operation` | `path: &ApprovedPath`, `operation: FsOperation` |
 | `Connect` | `Box::Action::"net:connect"` | `host: &str`, `ip: Option<IpAddr>`, `port: u16` |
-| `Http` | `Box::Action::"http:request"` | `host: &str`, `port: u16`, `method: &str`, `path: &str`, `body_bytes: usize`, `intercepted: bool`, `upgrade: &str` |
+| `Http` | `Box::Action::"http:request"`, or `Box::Action::"websocket:connect"` when `websocket` | `host: &str`, `port: u16`, `method: &str`, `path: &str`, `body_bytes: usize`, `intercepted: bool`, `websocket: bool` |
 | `ShellExec` | `Box::Action::"shell:exec"` | `command`, `program`, `args`, `cwd` |
 | `ShellSpawn` | `Box::Action::"shell:spawn"` | the same, plus `program_path` |
 | `McpCall` | `Box::Action::"mcp:call"`, or `<normalized-server>::Action::"<tool>"` when `tool` and `arguments` are present | `server`, `method`, `tool`, `prompt`, `uri`, `arguments` |
@@ -409,7 +410,7 @@ fn submit(policy: &PolicyEngine, request_id: &RequestId) -> Result<(), PolicyErr
             delivery: Delivery::Completed { bytes: 512 },
             status: Some(200),
             intercepted: true,
-            upgrade: "",
+            websocket: false,
         },
     )
 }
@@ -424,14 +425,15 @@ Other facts in those events remain available until normal history pruning remove
 | Variant | Records |
 |---|---|
 | `Connect` | `host`, `port`, `address`, `connected` |
-| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status`, `intercepted`, `upgrade` |
+| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status`, `intercepted`, `websocket` |
 | `ShellRun` | `command`, `program`, `args`, `cwd`, `status` |
 | `ShellSpawn` | the same, plus `program_path` |
 | `Fs` | `path`, `operation`, `result` |
 
 An admitted HTTP request records one outcome when its exchange ends. Completed, partial,
 or uncertain delivery records `http:request::response`; a definite delivery failure records
-`http:request::error`. Once the request is sent, the gateway waits for the upstream response to
+`http:request::error`. A WebSocket handshake records `websocket:connect::response` or
+`websocket:connect::error` the same way, with no `input.body_bytes`. Once the request is sent, the gateway waits for the upstream response to
 complete, fail, or reach its deadline before recording the outcome. The response event's
 `input.body_bytes` is the recorded count of request bytes known to have reached the operating
 system. Its `output.status` is the received reply status. An exchange that got no reply records

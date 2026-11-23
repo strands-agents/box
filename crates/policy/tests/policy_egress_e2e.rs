@@ -253,7 +253,7 @@ fn request_attempt(port: u16, body_bytes: usize) -> EffectAttempt<'static> {
         path: "/v1/messages",
         body_bytes,
         intercepted: true,
-        upgrade: "",
+        websocket: false,
         mcp: None,
     }
 }
@@ -282,7 +282,7 @@ fn mcp_request_attempt(
         path: "/mcp",
         body_bytes: 64,
         intercepted: false,
-        upgrade: "",
+        websocket: false,
         mcp: Some(McpFrame::ToolCall {
             server,
             tool,
@@ -540,7 +540,7 @@ fn request_to_host(host: &'static str) -> EffectAttempt<'static> {
         path: "/",
         body_bytes: 0,
         intercepted: true,
-        upgrade: "",
+        websocket: false,
         mcp: None,
     }
 }

@@ -170,7 +170,7 @@ The caller cannot select another socket. Tools and local MCP servers have no ali
 | Broker | The trusted process, its own thread | The whole run | Nothing. It routes each request. |
 | Strands Shell | The trusted process | One command | Asks policy for `shell:exec` or `shell:spawn`, and `fs:*` for interpreted file operations |
 | Monty | The trusted process | One script | Asks policy for `fs:*` for file operations |
-| Egress gateway | The trusted process | The whole run | Asks policy for `net:connect`, `http:request`, and `mcp:call` for remote servers |
+| Egress gateway | The trusted process | The whole run | Asks policy for `net:connect`, `http:request`, `websocket:connect`, and `mcp:call` for remote servers |
 | MCP broker | The trusted process, within the broker | The whole run | Asks policy for `shell:spawn` to start a local server, then `mcp:call` for requests |
 | Collector | The trusted process | Opens before the policy engine; drains after shutdown | Records decisions |
 | Trampoline | Outside the sandbox | Until it becomes the contained program | Nothing |

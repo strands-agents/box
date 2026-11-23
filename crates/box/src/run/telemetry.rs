@@ -431,6 +431,7 @@ struct EgressIdentity {
     port: u16,
     method: String,
     path: String,
+    websocket: bool,
 }
 
 impl EgressIdentity {
@@ -444,12 +445,14 @@ impl EgressIdentity {
                 port: *port,
                 method: String::new(),
                 path: String::new(),
+                websocket: false,
             }),
             EgressEffectAttempt::HttpRequest {
                 host,
                 port,
                 method,
                 path,
+                websocket,
                 ..
             } => Some(Self {
                 leg: EgressLeg::Request,
@@ -457,6 +460,7 @@ impl EgressIdentity {
                 port: *port,
                 method: (*method).to_string(),
                 path: (*path).to_string(),
+                websocket: *websocket,
             }),
             _ => None,
         }
@@ -470,6 +474,7 @@ impl EgressIdentity {
             port: decision.port,
             method: decision.method.clone(),
             path: decision.path.clone(),
+            websocket: false,
         }
     }
 
@@ -499,6 +504,7 @@ impl EgressIdentity {
     fn action(&self) -> &'static str {
         match self.leg {
             EgressLeg::Connection => r#"Box::Action::"net:connect""#,
+            EgressLeg::Request if self.websocket => r#"Box::Action::"websocket:connect""#,
             EgressLeg::Request => r#"Box::Action::"http:request""#,
         }
     }
@@ -1084,7 +1090,7 @@ mod tests {
                 path: "/",
                 body_bytes: 0,
                 intercepted: true,
-                upgrade: "",
+                websocket: false,
                 mcp: None,
             })
             .expect("ordinary HTTP is admitted")
@@ -1171,7 +1177,7 @@ mod tests {
                 path: "/v1/messages",
                 body_bytes: 0,
                 intercepted: true,
-                upgrade: "",
+                websocket: false,
                 mcp: None,
             })
             .err()
@@ -1185,9 +1191,31 @@ mod tests {
             reason: refusal.to_string(),
             correlation: RequestId::new("request"),
         });
+        let handshake = interceptor
+            .intercept(&EgressEffectAttempt::HttpRequest {
+                host: "api.example.com",
+                port: 443,
+                method: "GET",
+                path: "/v1/realtime",
+                body_bytes: 0,
+                intercepted: true,
+                websocket: true,
+                mcp: None,
+            })
+            .err()
+            .expect("no permit names websocket:connect");
+        emitter.emit(EgressDecision {
+            host: "api.example.com".to_string(),
+            port: 443,
+            method: "GET".to_string(),
+            path: "/v1/realtime".to_string(),
+            decision: AuditDecision::Deny,
+            reason: handshake.to_string(),
+            correlation: RequestId::new("handshake"),
+        });
 
         let recorded = recorder.recorded();
-        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded.len(), 3);
 
         let (action, resource, rule, verdict, reason) = recorded[0].parts();
         assert_eq!(action, r#"Box::Action::"net:connect""#);
@@ -1216,6 +1244,11 @@ mod tests {
         assert_eq!(verdict, EffectiveVerdict::Deny);
         assert_eq!(reason, Some("no permit matched"));
         assert_eq!(recorded[1].cause(), DecisionCause::NoMatch);
+
+        let (action, resource, _, verdict, _) = recorded[2].parts();
+        assert_eq!(action, r#"Box::Action::"websocket:connect""#);
+        assert_eq!(resource, "api.example.com:443/v1/realtime");
+        assert_eq!(verdict, EffectiveVerdict::Deny);
     }
 
     /// **One exchange's verdict never reaches another exchange's record.** The captured verdict is
@@ -1250,7 +1283,7 @@ mod tests {
             path,
             body_bytes: 0,
             intercepted: true,
-            upgrade: "",
+            websocket: false,
             mcp: None,
         };
         let emitted = |host: &str, port, method: &str, path: &str| EgressDecision {
@@ -1462,7 +1495,7 @@ mod tests {
             path: "/mcp",
             body_bytes: arguments.len(),
             intercepted: false,
-            upgrade: "",
+            websocket: false,
             mcp: Some(McpFrame::ToolCall {
                 server: "demo",
                 tool: "add",

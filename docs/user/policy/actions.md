@@ -1,7 +1,7 @@
 # Policy action reference
 
 A rule names one action. The action decides which `context.input` fields the rule can read. The box
-ships ten actions, and generates one more for each MCP tool it discovers. Each experimental [tool
+ships eleven actions, and generates one more for each MCP tool it discovers. Each experimental [tool
 grammar](../config.md#toolnamegrammar) adds its own `Tool::<name>` actions.
 
 Audience: an operator writing a `policy.dw` who needs the exact action name, its `context.input`
@@ -37,9 +37,9 @@ one family: actions whose names start the same way before the `:`, such as `fs:r
 `fs:write`. Each MCP tool action is a family of its own. A rule that checks `context.input` for
 `fs:read` and `http:request` together refuses to load, so write one rule for each.
 
-## The ten actions
+## The eleven actions
 
-Ten actions in four categories, and one generated action per MCP tool:
+Eleven actions in four categories, and one generated action per MCP tool:
 
 - **[Filesystem](#filesystem)**, raised by Strands Shell (the box's shell) and by Monty (the box's
   Python interpreter).
@@ -53,6 +53,7 @@ Ten actions in four categories, and one generated action per MCP tool:
 - **[Network](#network)**, raised by the egress gateway.
   - `net:connect`: each connection, before TLS.
   - `http:request`: each HTTP request inside the connection, after TLS on an HTTPS connection.
+  - `websocket:connect`: each WebSocket handshake, in place of `http:request`.
 - **[Shell](#shell)**, raised by Strands Shell.
   - `shell:exec`: a command line that runs a program the shell implements, such as `cat` or `grep`.
   - `shell:spawn`: a command line that runs a program of the surrounding OS, such as `git`. The box
@@ -129,15 +130,19 @@ with `expected ipaddr but saw String`.
 | `path` | String | The URL path in canonical form, without the query. |
 | `body_bytes` | Long | The request body length. |
 | `intercepted` | Bool | `true` when the gateway decrypted a TLS exchange, `false` for plain HTTP. |
-| `upgrade` | String | `"websocket"` on a WebSocket handshake, and `""` on every other request. |
 
 A rule on `path` has caveats for repeated slashes and `%2F`.
 [Forbid one URL path on a host](../policy.md#forbid-one-url-path-on-a-host) lists them.
 
-A WebSocket handshake is one `http:request`, and its permit admits the whole WebSocket. The gateway
-asks policy nothing after the `101`. A permit that doesn't read `upgrade` admits a WebSocket to its
-host, so add `context.input.upgrade == ""` to a permit that is for HTTP only. A guard or a budget can
-refuse the next handshake, but it cannot close a WebSocket that is open.
+**`websocket:connect`**, once per WebSocket, on its handshake, in place of `http:request`. Its fields
+are those of `http:request` without `body_bytes`, because a handshake has no body. The reply's
+`status` is on `output`, and it is 101 when the WebSocket opened.
+
+A permit on `http:request` doesn't admit a WebSocket. A permit on `websocket:connect` admits the whole
+WebSocket, because the gateway asks policy nothing after the `101`. A `forbid` on `http:request`
+doesn't stop a handshake, so a guard that must stop all outbound traffic names both actions. A guard
+that reads `context.input` is one rule for each action, because the two are of different families. A
+guard or a budget can refuse the next handshake, but it cannot close a WebSocket that is open.
 
 Cloud metadata and link-local protection is two `forbid` rules on `net:connect`;
 [what Box always enforces](../security.md#what-box-always-enforces) lists them.

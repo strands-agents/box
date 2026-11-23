@@ -85,7 +85,7 @@ fn history_example() -> Result<(), PolicyError> {
                 delivery: Delivery::Completed { bytes: 512 },
                 status: Some(200),
                 intercepted: true,
-                upgrade: "",
+                websocket: false,
             },
         )
     }
@@ -110,7 +110,7 @@ fn history_example() -> Result<(), PolicyError> {
             path: "/v1/items",
             body_bytes: 512,
             intercepted: true,
-            upgrade: "",
+            websocket: false,
         },
     );
     assert!(decision.is_allow());

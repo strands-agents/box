@@ -277,19 +277,14 @@ where
 /// Check the upstream's final response head and return its body without collecting it.
 pub(crate) fn read_response_head<B>(
     response: hyper::Response<B>,
-    accept: Option<&str>,
+    websocket: bool,
 ) -> Result<(ResponseHead, B)> {
     let (mut head, body) = response.into_parts();
     let status = head.status.as_u16();
-    match (status, accept) {
-        (101, Some(accept)) => crate::proxy::websocket::check_101(&head.headers, accept)
-            .map_err(|why| ProxyError::Intercept(why.to_string()))?,
-        (101, None) => {
-            return Err(ProxyError::Intercept(
-                "HTTP protocol upgrades are not supported".to_string(),
-            ));
-        }
-        _ => {}
+    if status == 101 && !websocket {
+        return Err(ProxyError::Intercept(
+            "HTTP protocol upgrades are not supported".to_string(),
+        ));
     }
     let mut headers = HeaderMap::from_pairs(head.headers.iter().map(|(name, value)| {
         (
@@ -377,7 +372,7 @@ pub(super) fn write_request(
     target: &str,
     headers: &HeaderMap,
     body_len: usize,
-    upgrade: bool,
+    websocket: bool,
 ) -> Result<Zeroizing<String>> {
     let nominated = connection_nominated_headers(headers)?;
     // The head buffer is where the attached credential is serialized, so it is wiped on drop. The
@@ -397,7 +392,7 @@ pub(super) fn write_request(
         }
         push_header_line(&mut out, name, value);
     }
-    out.push_str(if upgrade {
+    out.push_str(if websocket {
         "Upgrade: websocket\r\nConnection: Upgrade\r\n"
     } else {
         "Connection: close\r\n"

@@ -21,7 +21,7 @@ use crate::error::{ProxyError, Result};
 use crate::mcp::{
     McpTarget, McpTargetIdentity, canonicalize_mcp_frame, mcp_denial_response, normalize_path,
 };
-use crate::proxy::websocket::{Handshake, Relay};
+use crate::proxy::websocket::Handshake;
 
 /// Check the CONNECT binding of a request read in a TLS tunnel, then run [`run_l7_legs`].
 ///
@@ -174,24 +174,21 @@ async fn run_l7_legs(
         )
     };
 
-    let accept = match handshake {
-        Handshake::None => None,
+    let websocket = match handshake {
+        Handshake::None => false,
         Handshake::Malformed(why) => {
             let refusal = WorkloadResponse::refusal(400, b"malformed WebSocket handshake");
             return Ok(refuse(why, refusal));
         }
-        Handshake::WebSocket { .. } if state.mcp_server_for(&connect.host).is_some() => {
+        Handshake::WebSocket if state.mcp_server_for(&connect.host).is_some() => {
             let refusal = WorkloadResponse::refusal(403, b"WebSocket refused for an MCP server");
             return Ok(refuse(
                 "websocket: handshake to a remote MCP server",
                 refusal,
             ));
         }
-        Handshake::WebSocket { accept } => Some(accept),
+        Handshake::WebSocket => true,
     };
-    if accept.is_some() {
-        req.headers.remove("Sec-WebSocket-Extensions");
-    }
 
     // A secret rides only TLS: refuse on the same canonical target the credential match below sees.
     if !intercepted && state.controls.matches_any(&target.as_destination()) {
@@ -332,7 +329,7 @@ async fn run_l7_legs(
         &fwd_target,
         &req.headers,
         forwarded_body.len(),
-        accept.is_some(),
+        websocket,
     )?;
     let request_attempt = EffectAttempt::HttpRequest {
         host: &connect.host,
@@ -341,7 +338,7 @@ async fn run_l7_legs(
         path: &workload_path,
         body_bytes: forwarded_body.len(),
         intercepted,
-        upgrade: if accept.is_some() { "websocket" } else { "" },
+        websocket,
         mcp: mcp_target.as_ref().map(|(server, target)| {
             let server = *server;
             match &target.identity {
@@ -409,7 +406,7 @@ async fn run_l7_legs(
             &method,
             prepared_request,
             Zeroizing::new(forwarded_body),
-            accept.as_deref(),
+            websocket,
         )
         .await;
     let response = match response {
@@ -418,10 +415,6 @@ async fn run_l7_legs(
             request_permit.record_outcome(outcome).map_err(|error| {
                 ProxyError::Io(format!("recording upstream request outcome: {error}"))
             })?;
-            if let (Some(_), ProxyError::Intercept(reason)) = (&accept, &error) {
-                let refusal = WorkloadResponse::refusal(502, b"WebSocket upgrade response refused");
-                return Ok(refuse(reason, refusal));
-            }
             return Err(error);
         }
     };
@@ -501,18 +494,9 @@ async fn run_l7_legs(
         Ok(permit) => permit,
         Err(error) => return Ok(interceptor_error(&error, None)),
     };
-    let relay = upgraded.map(|upstream| {
+    let relay = upgraded.inspect(|_| {
         head.headers.set("Upgrade", "websocket");
         head.headers.set("Connection", "Upgrade");
-        Relay {
-            upstream,
-            path: workload_path.clone(),
-            scrub: state
-                .controls
-                .matches_any(&target.as_destination())
-                .then(|| target.clone()),
-            correlation: correlation.clone(),
-        }
     });
 
     Ok(WorkloadResponse {
@@ -639,7 +623,7 @@ pub(crate) struct WorkloadResponse {
     /// The upstream's header case. Without it, hyper writes header names in lowercase.
     pub(crate) header_case: hyper::http::Extensions,
     pub(crate) progress: Option<ResponseProgress>,
-    pub(crate) relay: Option<Relay>,
+    pub(crate) relay: Option<hyper::upgrade::Upgraded>,
 }
 
 impl WorkloadResponse {

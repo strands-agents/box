@@ -16,11 +16,10 @@ use policy::{
 const SAMPLE: &str = r#"
 @id("github_read")
 permit (principal, action == Box::Action::"http:request", resource)
-when { context.input.host == "api.github.com" && context.input.method == "GET" &&
-       context.input.upgrade == "" };
+when { context.input.host == "api.github.com" && context.input.method == "GET" };
 @id("none_after_key")
-@description("Nothing leaves after the SSH key is read.")
-forbid (principal, action == Box::Action::"http:request", resource)
+@description("No HTTP request or new WebSocket after the SSH key is read.")
+forbid (principal, action in [Box::Action::"http:request", Box::Action::"websocket:connect"], resource)
 when temporal {
   formerly within 24h (
     Box::Action::"fs:read"::response{ input.path: "~/.ssh/id_ed25519",
@@ -28,9 +27,8 @@ when temporal {
   )
 };
 @id("realtime")
-permit (principal, action == Box::Action::"http:request", resource)
-when { context.input.host == "realtime.example.com" && context.input.path == "/v1/realtime" &&
-       context.input.upgrade == "websocket" };
+permit (principal, action == Box::Action::"websocket:connect", resource)
+when { context.input.host == "realtime.example.com" && context.input.path == "/v1/realtime" };
 "#;
 
 const GITHUB: &str = "api.github.com";
@@ -114,7 +112,7 @@ impl Fixture {
     }
 }
 
-fn handshake<'a>(host: &'a str, path: &'a str, upgrade: &'a str) -> EffectAttempt<'a> {
+fn handshake<'a>(host: &'a str, path: &'a str, websocket: bool) -> EffectAttempt<'a> {
     EffectAttempt::HttpRequest {
         host,
         port: 443,
@@ -123,32 +121,32 @@ fn handshake<'a>(host: &'a str, path: &'a str, upgrade: &'a str) -> EffectAttemp
         body_bytes: 0,
         intercepted: true,
         mcp: None,
-        upgrade,
+        websocket,
     }
 }
 
 #[test]
-fn upgrade_separates_a_handshake_from_an_http_request() {
+fn a_permit_on_http_request_does_not_admit_a_handshake() {
     let fixture = Fixture::open();
-    assert!(fixture.admits(&handshake(GITHUB, "/events", "")));
-    assert!(!fixture.admits(&handshake(GITHUB, "/events", "websocket")));
-    assert!(fixture.admits(&handshake(REALTIME, "/v1/realtime", "websocket")));
-    assert!(!fixture.admits(&handshake(REALTIME, "/v1/realtime", "")));
+    assert!(fixture.admits(&handshake(GITHUB, "/events", false)));
+    assert!(!fixture.admits(&handshake(GITHUB, "/events", true)));
+    assert!(fixture.admits(&handshake(REALTIME, "/v1/realtime", true)));
+    assert!(!fixture.admits(&handshake(REALTIME, "/v1/realtime", false)));
 }
 
 #[test]
 fn the_guard_refuses_the_next_handshake() {
     let fixture = Fixture::open();
     fixture.read_the_key();
-    assert!(!fixture.admits(&handshake(REALTIME, "/v1/realtime", "websocket")));
-    assert!(!fixture.admits(&handshake(GITHUB, "/events", "")));
+    assert!(!fixture.admits(&handshake(REALTIME, "/v1/realtime", true)));
+    assert!(!fixture.admits(&handshake(GITHUB, "/events", false)));
 }
 
 #[test]
-fn a_handshake_records_one_http_request_with_its_upgrade_and_status() {
+fn a_handshake_records_one_websocket_connect_with_its_status() {
     let fixture = Fixture::open();
     fixture.deliver(
-        &handshake(REALTIME, "/v1/realtime", "websocket"),
+        &handshake(REALTIME, "/v1/realtime", true),
         EffectOutcome::Replied {
             accepted_bytes: 0,
             status: 101,
@@ -172,14 +170,18 @@ fn a_handshake_records_one_http_request_with_its_upgrade_and_status() {
         .collect();
     assert_eq!(
         seen,
-        [("http:request", "request"), ("http:request", "response")]
-            .map(|(action, kind)| (action.to_string(), kind.to_string()))
+        [
+            ("websocket:connect", "request"),
+            ("websocket:connect", "response")
+        ]
+        .map(|(action, kind)| (action.to_string(), kind.to_string()))
     );
     for event in &events {
         assert_eq!(
-            field(event, &["input", "upgrade"]),
-            Some(Value::String("websocket".to_string()))
+            field(event, &["input", "path"]),
+            Some(Value::String("/v1/realtime".to_string()))
         );
+        assert_eq!(field(event, &["input", "body_bytes"]), None);
     }
     assert_eq!(
         field(&events[1], &["output", "status"]),

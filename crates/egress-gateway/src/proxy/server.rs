@@ -188,7 +188,7 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
         ..
     } = tunnel;
     let completion = ResponseCompletion::default();
-    let (completion, connect, pending) = (&completion, &connect, &Cell::new(None));
+    let (completion, pending) = (&completion, &Cell::new(None));
     serve(client, completion, |mut request, head| async move {
         let handshake = websocket::classify(&request);
         let upgrade = hyper::upgrade::on(&mut request);
@@ -198,7 +198,7 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
             parsed,
             upstream,
             backend.as_ref(),
-            connect,
+            &connect,
             state,
             correlation,
             completion,
@@ -215,7 +215,7 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
         let workload = upgrade
             .await
             .map_err(|e| ProxyError::Io(format!("WebSocket upgrade: {e}")))?;
-        websocket::run(workload, relay, state, connect).await;
+        websocket::run(workload, relay, state).await;
     }
     Ok(())
 }

@@ -174,8 +174,7 @@ type NetworkRequestInput = {
   path: String,
   body_bytes: Long,
   // Whether the gateway terminated TLS and parsed the exchange.
-  intercepted: Bool,
-  upgrade: String
+  intercepted: Bool
 };
 
 // The reply, on the `output` of an `http:request` response event. `status` is the
@@ -200,6 +199,20 @@ action "http:request" appliesTo {
   principal: Agent,
   resource: Resource,
   context: { input: NetworkRequestInput, output?: NetworkResponseOutput }
+};
+
+type WebSocketConnectInput = {
+  host: String,
+  port: Long,
+  method: String,
+  path: String,
+  intercepted: Bool
+};
+
+action "websocket:connect" appliesTo {
+  principal: Agent,
+  resource: Resource,
+  context: { input: WebSocketConnectInput, output?: NetworkResponseOutput }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -60,7 +60,7 @@ fn request() -> Request<'static> {
         path: "/v1/upload",
         body_bytes: 60,
         intercepted: true,
-        upgrade: "",
+        websocket: false,
     }
 }
 
@@ -73,7 +73,7 @@ fn delivered() -> Outcome<'static> {
         delivery: Delivery::Completed { bytes: 60 },
         status: Some(200),
         intercepted: true,
-        upgrade: "",
+        websocket: false,
     }
 }
 

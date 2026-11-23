@@ -111,7 +111,7 @@ scopes the rule](decisions.md#one-principal-one-resource-and-the-action-scopes-t
 |---|---|
 | Strands Shell | `shell:exec` or `shell:spawn` per command line, and `fs:read`, `fs:write`, `fs:delete`, or `fs:move` per file operation |
 | Monty | `fs:read`, `fs:write`, `fs:delete`, or `fs:move` per `os` call |
-| Egress gateway | `net:connect`, `http:request`, and `mcp:call` with its per-tool action for a remote MCP server |
+| Egress gateway | `net:connect`, `http:request`, `websocket:connect`, and `mcp:call` with its per-tool action for a remote MCP server |
 | MCP broker | `mcp:call` with its per-tool action for a local MCP server |
 
 The Shell asks once per command line, after it has resolved the program, and then once per file

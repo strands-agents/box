@@ -404,7 +404,7 @@ fn requests(engine: &PolicyEngine, path: &str) -> bool {
                 path,
                 body_bytes: 0,
                 intercepted: true,
-                upgrade: "",
+                websocket: false,
             },
         )
         .0

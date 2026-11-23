@@ -119,6 +119,7 @@ pub(crate) mod action {
     pub(crate) const NET_CONNECT: &str = "net:connect";
     /// `http:request` — the L7 HTTP decision; its one `::response` carries the reply's `status`.
     pub(crate) const HTTP_REQUEST: &str = "http:request";
+    pub(crate) const WEBSOCKET_CONNECT: &str = "websocket:connect";
     /// `mcp:call` — one tool call on a connected MCP server.
     pub(crate) const MCP_CALL: &str = "mcp:call";
     /// `shell:exec` — a resolved command line whose program the Shell implements.
@@ -266,6 +267,14 @@ pub(crate) fn fs_action_id(operation: FsOperation) -> &'static str {
     }
 }
 
+pub(crate) fn http_action_id(websocket: bool) -> &'static str {
+    if websocket {
+        action::WEBSOCKET_CONNECT
+    } else {
+        action::HTTP_REQUEST
+    }
+}
+
 /// The `context.*` attribute-name strings used by [`context_for`].
 pub(crate) mod attr {
     /// `context.input.path` — filesystem path (`fs:*`).
@@ -297,7 +306,6 @@ pub(crate) mod attr {
     pub(crate) const BODY_BYTES: &str = "body_bytes";
     /// `context.input.intercepted` — whether HTTP was seen through TLS interception.
     pub(crate) const INTERCEPTED: &str = "intercepted";
-    pub(crate) const UPGRADE: &str = "upgrade";
     /// `context.input.server` — the MCP server a tool call names (`mcp:call`).
     pub(crate) const SERVER: &str = "server";
     /// `context.input.tool` — the tool a `tools/call` names (`mcp:call`).
@@ -449,8 +457,8 @@ fn fixed_action_uid(id: &str) -> Result<EntityUid, PolicyError> {
 }
 
 /// Every action id, in one place, so the cached UIDs cover exactly the closed set
-/// [`action_id`] can return. The nine actions the box raises: five filesystem verbs,
-/// two network decisions, and two shell command decisions. The schema has no group
+/// [`action_id`] can return. The ten actions the box raises: five filesystem verbs,
+/// three network decisions, and two shell command decisions. The schema has no group
 /// actions, so every id here is one a request names directly.
 ///
 /// **There is no response action.** The response leg is `http:request`'s response phase: it
@@ -463,6 +471,7 @@ const ACTION_IDS: &[&str] = &[
     action::FS_OTHER,
     action::NET_CONNECT,
     action::HTTP_REQUEST,
+    action::WEBSOCKET_CONNECT,
     action::SHELL_EXEC,
     action::SHELL_SPAWN,
     action::MCP_CALL,
@@ -474,7 +483,7 @@ pub(crate) fn action_id(req: &Request<'_>) -> &'static str {
     match req {
         Request::Fs { operation, .. } => fs_action_id(*operation),
         Request::Connect { .. } => action::NET_CONNECT,
-        Request::Http { .. } => action::HTTP_REQUEST,
+        Request::Http { websocket, .. } => http_action_id(*websocket),
         Request::ShellExec { .. } => action::SHELL_EXEC,
         // A tool call with arguments uses [`ActionIdentity::McpTool`].
         Request::McpCall { .. } => action::MCP_CALL,
@@ -575,37 +584,38 @@ fn context_for(
             path,
             body_bytes,
             intercepted,
-            upgrade,
-        } => vec![
-            (
-                attr::HOST.to_string(),
-                RestrictedExpression::new_string((*host).to_string()),
-            ),
-            (
-                attr::PORT.to_string(),
-                RestrictedExpression::new_long(i64::from(*port)),
-            ),
-            (
-                attr::METHOD.to_string(),
-                RestrictedExpression::new_string((*method).to_string()),
-            ),
-            (
-                attr::PATH.to_string(),
-                RestrictedExpression::new_string((*path).to_string()),
-            ),
-            (
-                attr::BODY_BYTES.to_string(),
-                RestrictedExpression::new_long(usize_to_cedar_long(*body_bytes)?),
-            ),
-            (
+            websocket,
+        } => {
+            let mut fields = vec![
+                (
+                    attr::HOST.to_string(),
+                    RestrictedExpression::new_string((*host).to_string()),
+                ),
+                (
+                    attr::PORT.to_string(),
+                    RestrictedExpression::new_long(i64::from(*port)),
+                ),
+                (
+                    attr::METHOD.to_string(),
+                    RestrictedExpression::new_string((*method).to_string()),
+                ),
+                (
+                    attr::PATH.to_string(),
+                    RestrictedExpression::new_string((*path).to_string()),
+                ),
+            ];
+            if !websocket {
+                fields.push((
+                    attr::BODY_BYTES.to_string(),
+                    RestrictedExpression::new_long(usize_to_cedar_long(*body_bytes)?),
+                ));
+            }
+            fields.push((
                 attr::INTERCEPTED.to_string(),
                 RestrictedExpression::new_bool(*intercepted),
-            ),
-            (
-                attr::UPGRADE.to_string(),
-                RestrictedExpression::new_string((*upgrade).to_string()),
-            ),
-        ],
+            ));
+            fields
+        }
         Request::McpCall {
             server,
             method,
@@ -826,7 +836,7 @@ mod tests {
                 path: "/",
                 body_bytes: 12,
                 intercepted: true,
-                upgrade: "",
+                websocket: false,
             },
             // Two arguments, so both optional positions are exercised.
             Request::ShellExec {

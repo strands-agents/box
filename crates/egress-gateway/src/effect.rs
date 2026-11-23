@@ -126,8 +126,8 @@ pub enum EffectAttempt<'a> {
         /// The MCP frame this request carries, when its destination is a configured remote MCP
         /// server; `None` otherwise. Present drives the `mcp:call` gate alongside `http:request`.
         mcp: Option<McpFrame<'a>>,
-        /// `websocket` on a WebSocket handshake, and empty on every other request.
-        upgrade: &'a str,
+        /// Whether this is a WebSocket handshake, which `websocket:connect` decides.
+        websocket: bool,
     },
     /// Returning one serialized, governed HTTP response to the workload.
     ResponseRelease {

@@ -690,10 +690,10 @@ path, and do not give a mechanism its own verdict to save a round trip.
 An interceptor must see each request and each response effect, so the gateway always terminates TLS.
 Box does not support opaque tunnelling or splicing. A connection whose plaintext the boundary cannot
 read cannot raise `http:request` and would bypass that authorization. The one stream that the gateway
-copies as raw bytes is a WebSocket, after `http:request` permits its handshake and the gateway checks
-the server's `101`. Policy decides nothing after the `101`. On a host with a credential, the gateway
-still reads each server frame to redact the credential. A decision for each message lost, because it
-cost policy time on every message and no customer asked for a rule on single messages. The cost is
+copies as raw bytes is a WebSocket, after `websocket:connect` permits its handshake and the server
+answers `101`. Policy decides nothing after the `101`, and the gateway reads no frame, so it redacts
+no credential in a message. A decision for each message lost, because it cost policy time on every
+message and no customer asked for a rule on single messages. The cost is
 that a permit on a handshake admits the whole WebSocket, so the box can reach a non-HTTP stream
 inside one. Over `CONNECT`, the box cannot reach a plaintext or non-HTTP upstream in any other way.
 

@@ -59,7 +59,7 @@ impl<'a> Upstream<'a> {
         method: &str,
         head: Zeroizing<String>,
         body: Zeroizing<Vec<u8>>,
-        accept: Option<&str>,
+        websocket: bool,
     ) -> (EffectOutcome, Result<UpstreamResponse>) {
         let Self {
             socket,
@@ -76,7 +76,7 @@ impl<'a> Upstream<'a> {
             let tcp = socket
                 .into_async()
                 .map_err(|e| lost("upstream socket", e))?;
-            let request = (method, head, body, accept);
+            let request = (method, head, body, websocket);
             match tls {
                 None => round_trip(tcp, &writes, request, &status, deadline).await,
                 Some(name) => {
@@ -185,7 +185,7 @@ impl ResponseProgress {
 async fn round_trip<S>(
     upstream: S,
     writes: &WriteCount,
-    (method, head, body, accept): (&str, Zeroizing<String>, Zeroizing<Vec<u8>>, Option<&str>),
+    (method, head, body, websocket): (&str, Zeroizing<String>, Zeroizing<Vec<u8>>, bool),
     status: &Cell<Option<u16>>,
     deadline: Instant,
 ) -> std::result::Result<UpstreamResponse, NoResponse>
@@ -227,7 +227,7 @@ where
     status.set(Some(response.status().as_u16()));
     let upgrade = (response.status() == hyper::StatusCode::SWITCHING_PROTOCOLS)
         .then(|| hyper::upgrade::on(&mut response));
-    let (head, body) = http1::read_response_head(response, accept)
+    let (head, body) = http1::read_response_head(response, websocket)
         .map_err(|error| (io::ErrorKind::InvalidData, error))?;
     let upgraded = match upgrade {
         Some(mut upgrade) => Some(
@@ -539,7 +539,7 @@ mod tests {
                         "POST",
                         Zeroizing::new(std::str::from_utf8(HEAD).unwrap().to_string()),
                         Zeroizing::new(b"ok".to_vec()),
-                        None,
+                        false,
                     ),
                     &status,
                     Instant::now() + std::time::Duration::from_secs(5),

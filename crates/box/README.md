@@ -251,7 +251,7 @@ reply's `output.status`, so a temporal rule can count server errors; a rule cann
 reply's size.
 
 **Four** enforcement points read the same authority, and each sees the actions it can enforce. The
-egress gateway decides `net:connect` and `http:request`. The Strands Shell decides `shell:exec`,
+egress gateway decides `net:connect`, `http:request`, and `websocket:connect`. The Strands Shell decides `shell:exec`,
 `shell:spawn`, and `fs:*`. The Python interpreter decides `fs:*`. The local MCP broker decides
 `mcp:call` and generated tool refinements. All four are adapters over the one `PolicyEngine` the
 trusted `run` process holds for that box, so they share one decision history.

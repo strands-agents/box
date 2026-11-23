@@ -108,8 +108,8 @@ pub enum Outcome<'a> {
         status: Option<u16>,
         /// Whether the gateway decrypted a TLS exchange. `false` for plain HTTP.
         intercepted: bool,
-        /// `websocket` on a WebSocket handshake, and empty on every other request.
-        upgrade: &'a str,
+        /// Whether this is a WebSocket handshake, which `websocket:connect` decides.
+        websocket: bool,
     },
     /// A resolved command line finished (`shell:exec::response`).
     ///

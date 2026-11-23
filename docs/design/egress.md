@@ -164,18 +164,18 @@ starts TLS. A policy refusal of a request to an HTTP MCP server gets a JSON-RPC 
 
 ### WebSocket
 
-A WebSocket handshake inside a `CONNECT` is one `http:request`, with `upgrade` set to
-`"websocket"`. The gateway refuses a handshake that isn't a valid RFC 6455 `GET` with 400, a plain
-HTTP handshake with 403 before any decision, and a handshake to an HTTP MCP server with 403. It
-removes `Sec-WebSocket-Extensions`, adds the credential to the handshake as to any request, and
-refuses a `101` with a wrong `Sec-WebSocket-Accept` or with an extension with 502.
+A WebSocket handshake inside a `CONNECT` is one `websocket:connect`, in place of `http:request`. The
+gateway answers 400 to a handshake that isn't an HTTP/1.1 `GET` with `Connection: upgrade`,
+`Sec-WebSocket-Version: 13`, and no body. It answers 403 to a plain HTTP handshake, before any
+decision, and to a handshake to an HTTP MCP server. It adds the credential to
+the handshake and redacts the credential in the `101`, as for any request.
 
-After the `101`, the gateway copies bytes both ways and asks policy nothing more. On a host with a
-credential, it reads each frame from the server whole, up to the 16 MiB cap, redacts the credential,
-and sends the frame on with its new length. A redacted Ping or Pong goes on with no payload, and a
-redacted Close keeps only its code. A server frame over the cap or one that breaks RFC 6455 ends
-both connections with one refusal record. When one side closes, the gateway closes its write to the
-other side. After 300 seconds with no byte on either leg, it ends both connections.
+After the `101`, the gateway copies bytes both ways, unchanged, on every host, and asks policy
+nothing more. It doesn't read WebSocket frames, so it doesn't redact a credential in a message. A
+server refuses a key in its handshake reply. The gateway assumes that a server that has accepted the
+key doesn't send it back, and a server that copies request headers into a message breaks that. When
+one side closes, the gateway closes its write to the other side. After 300 seconds with no byte on
+either leg, it ends both connections.
 
 ### Cloud instance metadata
 
