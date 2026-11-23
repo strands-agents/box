@@ -1054,6 +1054,21 @@ fn deny_reason(reason: &DenyReason) -> &'static str {
     }
 }
 
+/// The variable an operator sets to add resource attributes to every record.
+const RESOURCE_ATTRIBUTES: &str = "OTEL_RESOURCE_ATTRIBUTES";
+
+/// The operator's resource attributes as text, or a refusal when the value is not UTF-8.
+fn operator_resource_attributes(value: Option<std::ffi::OsString>) -> Result<String, BoxError> {
+    match value {
+        None => Ok(String::new()),
+        Some(value) => value.into_string().map_err(|_| {
+            BoxError::from(telemetry::TelemetryError::Config {
+                reason: format!("{RESOURCE_ATTRIBUTES} is not UTF-8"),
+            })
+        }),
+    }
+}
+
 /// Open this box's collector from its stored record, with each target's secret read through
 /// `secrets`.
 pub(crate) fn open(
@@ -1074,6 +1089,9 @@ pub(crate) fn open(
     if std::env::var_os(FAILURE_REPORT_VARIABLE).is_some_and(|value| !value.is_empty()) {
         request = request.reporting_failures();
     }
+    request = request.with_resource_attributes(operator_resource_attributes(std::env::var_os(
+        RESOURCE_ATTRIBUTES,
+    ))?);
     Ok(Arc::new(telemetry::open(request)?))
 }
 
@@ -2108,5 +2126,18 @@ mod tests {
             reason: reason.to_string(),
             correlation: RequestId::new("remote-tool"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_resource_attribute_value_that_is_not_utf8_refuses() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let refusal = operator_resource_attributes(Some(std::ffi::OsString::from_vec(vec![0xff])))
+            .expect_err("bytes that are not UTF-8 must refuse");
+        assert!(
+            refusal.to_string().contains("OTEL_RESOURCE_ATTRIBUTES"),
+            "{refusal}"
+        );
+        assert_eq!(operator_resource_attributes(None).unwrap(), "");
     }
 }
