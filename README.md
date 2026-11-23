@@ -36,7 +36,7 @@ preview, and it works on Apple silicon Macs with macOS 15 or later and on Linux 
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | BOX_VERSION=0.3.0-preview.1 sh
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | sh
 ```
 
 Then open a new terminal and run `box --version` to check that it worked. For the Linux
