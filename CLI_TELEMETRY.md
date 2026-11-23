@@ -23,7 +23,7 @@ or turn it off through environment variables.
 | Installation ID | A random ID saved in `~/.strands/box/installation.toml`, the same for every run on this machine. |
 | Run ID | A new random ID for each run, even when you reuse a box. |
 | Build | The `box` version and the operating system and processor type it was built for. |
-| Operating system | The version of the operating system you run `box` on, such as `14.5`. It is cut to 64 characters and left out if your system doesn't report one. |
+| Operating system | The version of your operating system, such as `14.5` on macOS or your Linux distribution's release, such as `24.04`. It is left out if your system doesn't report one. |
 | [Profile](docs/cli/profiles.md) | A hash (a fingerprint) of `profile.toml`, the names of packs included with `box` that it uses, and whether it names policy files, uses custom packs, or has MCP servers set up. |
 | Start | Whether the box launched, the kind of error if it didn't, and how long startup took. |
 | Activity | How many times the box permitted or denied each kind of action, such as `fs:write` or `shell:exec`. |
