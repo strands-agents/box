@@ -301,7 +301,8 @@ flowchart LR
    the process sent it, and the request goes out only if `http:request` permits it.
 5. On the response, the gateway replaces each copy of the real secret in the headers and the body
    with `[REDACTED]`. On a credentialed request, it asks the server for an uncompressed response and
-   refuses a compressed one, so that every copy of the secret can be found.
+   refuses a compressed one, so that every copy of the secret can be found. A WebSocket's messages
+   after its `101` pass unchanged, as [WebSocket](#websocket) describes.
 
 A placeholder sent anywhere else authenticates nothing. The gateway forwards it unchanged to a
 destination with no route. The random value reveals no real credential to the receiving server.
