@@ -292,7 +292,19 @@ fn a_helper_python_outside_homebrew_passes_core_validation() {
         filesystem["read"].as_array().unwrap().contains(&python),
         "{filesystem}"
     );
-    assert!(filesystem.get("read_file").is_none(), "{filesystem}");
+    // The helper's Python keeps only its `read`. The one `read_file` is the pack's own `/bin/sh`,
+    // which uv's tool scripts start with, shown at its real file.
+    let shell = std::path::Path::new("/bin")
+        .canonicalize()
+        .unwrap()
+        .join("sh");
+    assert_eq!(
+        filesystem.get("read_file"),
+        Some(&toml::Value::Array(vec![toml::Value::from(
+            shell.display().to_string()
+        )])),
+        "{filesystem}"
+    );
 }
 
 fn wait_for_output(mut child: Child) -> Output {
