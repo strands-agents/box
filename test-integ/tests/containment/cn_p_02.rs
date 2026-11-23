@@ -30,6 +30,9 @@ def probe(name):
         print(label, "ERR", errno, "rc", rc)
 for n in ["kern.hostname", "kern.osrelease", "kern.ostype", "hw.ncpu", "hw.machine", "kern.argmax"]:
     probe(n)
+# The four names torch's cpuinfo library reads by name at start.
+for n in ["hw.physicalcpu_max", "hw.logicalcpu_max", "hw.packages", "hw.cacheconfig"]:
+    probe(n)
 for n in ["kern.boottime", "kern.maxproc", "hw.memsize", "kern.procname"]:
     probe(n)
 # The call the report makes: libc asks by the numeric MIB, not by name.
@@ -43,6 +46,10 @@ t("sysconf_arg_max", lambda: os.sysconf("SC_ARG_MAX") > 0)
         r.assert_ok("sysctl_hw_machine", "rc=0 errno=0");
         r.assert_ok("sysctl_kern_argmax", "rc=0 errno=0");
         r.assert_ok("sysconf_arg_max", "True");
+        r.assert_ok("sysctl_hw_physicalcpu_max", "rc=0 errno=0");
+        r.assert_ok("sysctl_hw_logicalcpu_max", "rc=0 errno=0");
+        r.assert_ok("sysctl_hw_packages", "rc=0 errno=0");
+        r.assert_ok("sysctl_hw_cacheconfig", "rc=0 errno=0");
         // Names the profile does not carry stay refused, so a new operation gets no access.
         r.assert_errno("sysctl_kern_boottime", 1);
         r.assert_errno("sysctl_kern_maxproc", 1);

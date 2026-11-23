@@ -226,6 +226,10 @@ by reading `src/` belongs in `src/` — the README describes the shape.
 - **`sysconf(_SC_ARG_MAX)` reads the `kern.argmax` sysctl.** Under the seven-name profile, Python's
   `os.sysconf('SC_ARG_MAX')` raised `PermissionError: [Errno 1]`, which stops pre-commit on import;
   with `kern.argmax` named it returned `1048576`. The name is a public host limit.
+- **torch's cpuinfo library reads four CPU-topology names.** Under the eight-name profile, torch
+  2.6.0 and 2.7.0 each printed `Error in cpuinfo: sysctlbyname("hw.physicalcpu_max") failed:
+  Operation not permitted` at start, and the same for `hw.logicalcpu_max`, `hw.packages` and
+  `hw.cacheconfig`; 2.7.0 then went on to load its model. CN-P-02 reads all four in a box.
 - **The profile carries no `/`, `/etc`, `/private/tmp`, or `/dev/null` rule of its own.** Each arrives
   as a grant instead, because static text gave every box every harness's needs — a Python box carried
   Bun's `/private/tmp` entry. The measurement that first put that entry in the profile still holds,
