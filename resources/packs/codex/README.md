@@ -16,8 +16,9 @@ box profile create codex-mantle --with codex,bedrock-mantle
 box profile create codex-openai --with codex,openai
 ```
 
-If you run `box profile create codex` without naming a provider, Box uses the provider in
-your Codex folder's `config.toml` when it recognizes it. Otherwise, Mantle is the default. To choose a
+If you run `box profile create codex` without naming a provider, Box asks which one to use, with
+the provider in your Codex folder's `config.toml` selected when it recognizes it. Otherwise, Mantle
+is the default. Without a terminal, Box uses that provider or the default. To choose a
 region, pass `--option bedrock.region=us-west-2`. Without it, the starter checks the selected
 provider's `aws.region` in that file, then `AWS_REGION`.
 The starter also asks how the box signs in to Bedrock ([Sign in](../bedrock/README.md#sign-in)),
