@@ -320,7 +320,6 @@ pub(crate) fn read_response_head<B>(
     ))
 }
 
-/// Whether a `101` reply names `websocket` as its only `Upgrade` protocol.
 fn switches_to_websocket(headers: &hyper::HeaderMap) -> bool {
     let mut upgrades = headers.get_all(hyper::header::UPGRADE).iter();
     matches!(
