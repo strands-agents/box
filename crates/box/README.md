@@ -42,6 +42,15 @@ On Linux ARM64 and x86-64, neither verb requires an environment opt-in. The Rust
 library functions `run` and `generate_policy_schema` follow the same startup behavior.
 Configuration validation and sandbox requirements still apply.
 
+Rust callers can read `strands_box::VERSION` for the linked Box Core package's
+`MAJOR.MINOR.PATCH` version. It excludes prerelease labels and build metadata and does not identify
+the source commit.
+
+`strands_box::GIT_COMMIT` is the linked Core checkout's 40-character lowercase Git commit, or `None`
+when that identifier is unavailable. Source archives without their own Git metadata return `None`,
+even inside another repository. The value identifies checkout `HEAD`; it does not identify
+uncommitted edits.
+
 There are two verbs. The caller that created `box_dir` owns its lifecycle: it holds the path, so it
 stops a box by ending the `run` process and deletes one by removing the directory.
 
