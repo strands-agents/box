@@ -177,6 +177,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_to_the_workload_has_tcp_nodelay_set() {
+        let connection = workload_at(uppercase_server(), 0)
+            .connect()
+            .await
+            .expect("connect");
+        assert!(
+            connection.nodelay().expect("nodelay"),
+            "Nagle's algorithm is off on the connection to the workload"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_caller_reaches_the_workload_and_its_reply_comes_back() {
         let (_ingress, port) = start(workload_at(uppercase_server(), 0));
         assert_eq!(call(port, b"ping").await, b"PING");

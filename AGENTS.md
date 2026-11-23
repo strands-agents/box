@@ -179,6 +179,18 @@ a table when needed. Omit a comment that repeats the name or explains Rust synta
 Put change rationale in the commit message. Put measurements, past defects, rejected alternatives,
 and implementation caveats in the crate's `AGENTS.md`. Cite a decision's stable anchor for its rationale.
 
+### TCP sockets
+
+Set `TCP_NODELAY` on each TCP socket that Box writes to, whether Box connects it, accepts it, or
+receives it as a descriptor. Without the option, Nagle's algorithm can hold a small write until the
+peer acknowledges the write before it. [The gateway guidance](crates/egress-gateway/AGENTS.md) has
+the measurements. Make the call best-effort, and add a test that reads `nodelay()`. A library that
+sets the option on its own sockets, as `reqwest` does by default, needs no call. A socket that
+carries no data, such as a probe or a wakeup connection, also needs no call.
+
+To leave the option off, state the specific reason in a comment at the socket and in the crate's
+`AGENTS.md`. If the crate has no `AGENTS.md`, add one.
+
 ### Upstream Shell
 
 Box builds against Strands Shell at a pinned upstream revision, and holds no copy of its source.
