@@ -10,8 +10,9 @@ lanes or shutdown: forged box records and agent floods suppressing decisions hav
   leaves forged verdicts on nested records. Preserve the typed exhaustive metric walk, including
   metadata, data points, and exemplars. Reserving all `strands.*` deletes real agent SDK fields.
 - Take the relay permit before decoding and enforce resource count on every route. A measured
-  4 MiB payload amplified to about 937 MB after stamping. One concurrent relay also prevents a
-  flood of file writes from starving the SDK's separate decision queue.
+  4 MiB payload amplified to about 937 MB after stamping. One concurrent relay bounds contention
+  from file writes with the SDK's decision worker. Relays do not yield to full box batches:
+  that rejected guard depended on the SDK's private batch size.
 - The SDK owns box-record queues and batching; agent payloads relay separately. Keep one compatible
   `reqwest` version with Shell. Adding a second exporter stack can duplicate TLS dependencies in
   the process holding secrets.
@@ -48,9 +49,10 @@ lanes or shutdown: forged box records and agent floods suppressing decisions hav
   Keep `the_drain_returns_when_the_batch_worker_cannot_answer`.
 - A detached shutdown thread can remain blocked until process exit. Lanes flush sequentially,
   so the overall deadline can cut later lanes. This is best-effort delivery, not durable audit.
-- The loss counter counts failed export batches, not records, queue overflow, or refused agent
-  payloads. Distinguish a failed final export from an unanswered shutdown, and report loss once
-  at drain without changing the workload's exit status.
+- Failed-export counts measure batches. `Backlog` counts records no exporter received, per target:
+  one record missed by two targets counts twice. It includes records still queued when the drain
+  ends. Neither count includes refused agent payloads. Keep that count separate from failed exports
+  and an unanswered shutdown. Report loss once at drain without changing the workload's exit status.
 
 ## Test traps
 
