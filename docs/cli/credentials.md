@@ -119,13 +119,9 @@ request fails with a 403.
 
 ### Where the box finds the daemon
 
-The box connects to the daemon's socket. `CREDSD_SOCKET` in the shell where you run `box run` names
-it, as a full path. Without it, the box uses the socket that credsd's own install sets up:
-
-| System | Socket |
-| --- | --- |
-| macOS | `~/Library/Application Support/credsd/credsd.sock` when it exists, which a user-scoped install sets up. Otherwise `/var/run/credsd/credsd.sock`. |
-| Linux | `/run/credsd/credsd.sock` |
+The box connects to the socket that credsd's own install sets up. If your daemon listens somewhere
+else, set `CREDSD_SOCKET` to its full path in the shell where you run `box run`.
+[The credsd socket](../user/egress.md#the-credsd-socket) lists the default on each system.
 
 ## A password manager or secret store
 
@@ -146,15 +142,7 @@ secret.env = "GH_TOKEN"   # the variable that holds the placeholder in the box
 
 ## Rules for signed routes
 
-An `aws://` or `credsd://` route signs each request, so a few keys don't apply to it:
-
-- It takes no `secret.header`, `secret.prefix`, `secret.placement`, `secret.param`,
-  `secret.inject`, or `secret.phantom_prefix`.
-- Its hosts must be AWS service hosts, because the box signs for the service and region it reads
-  from the host: `<service>.<region>.amazonaws.com` or `.api.aws`, such as
-  `bedrock-runtime.us-west-2.amazonaws.com`, a global host such as `sts.amazonaws.com`, or an API
-  Gateway host. A PrivateLink (`vpce`) or AgentCore gateway host doesn't work.
-- A route that also has `[[egress.<name>.backends]]` can't use either source, because sending the
-  request to a backend changes the host it was signed for.
-
-The full rules are in Box's [`[egress.<name>]` reference](../user/config.md#egressname).
+An `aws://` or `credsd://` route signs each request for the AWS service and region its host names,
+such as `bedrock-runtime.us-west-2.amazonaws.com`. So its hosts must be AWS service hosts, and it
+can't have `[[egress.<name>.backends]]`. It also takes none of the `secret` keys that place a
+token. Box's [credential sources](../user/egress.md#credential-sources) has the full rules.

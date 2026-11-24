@@ -191,12 +191,25 @@ A remote MCP server re-routes the same way: attach `[[mcp.<name>.backends]]` to 
 | `env://NAME` | The variable `NAME` in the environment of `box run` | Once, when the box starts. The agent, each tool, each stdio MCP server, and the Shell get a placeholder in `NAME`. Every destination that names `NAME`, in one route or in several, accepts the same placeholder. |
 | `aws://PROFILE` | The named profile `PROFILE`, resolved through the AWS SDK | On each request. The gateway signs the request with SigV4. |
 | `aws://` (no profile) | The AWS SDK default credential provider chain on the host | On each request. The gateway signs the request with SigV4, under the host's ambient identity. |
-| `credsd://NAME` | The credential `NAME` in the [AWS Credential Daemon](https://github.com/aws/credential-daemon) (credsd), over its socket: `CREDSD_SOCKET`, or the platform default ([where the box finds the daemon](../cli/credentials.md#where-the-box-finds-the-daemon)) | On each request. The gateway signs the request with SigV4, using the credential's AWS session credentials, and never falls back to the host's ambient identity. Before the workload starts, `box run` checks that the daemon answers and lists `NAME`, and stops the box if it doesn't. Needs credsd 0.2.0 or later. |
+| `credsd://NAME` | The credential `NAME` in the [AWS Credential Daemon](https://github.com/aws/credential-daemon) (credsd), over its socket: `CREDSD_SOCKET`, or the [platform default](#the-credsd-socket) | On each request. The gateway signs the request with SigV4, using the credential's AWS session credentials, and never falls back to the host's ambient identity. Before the workload starts, `box run` checks that the daemon answers and lists `NAME`, and stops the box if it doesn't. Needs credsd 0.2.0 or later. |
 | `<scheme>://NAME[#FIELD]`, for a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table declares | The host program that the table names | Experimental. Once, when the box starts: Box runs the program and reads the secret from its stdout. The agent, each tool, each stdio MCP server, and the Shell get a placeholder in the variable that `secret.env` names. You don't set that variable. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |
 
 An `aws://` or `credsd://` route takes no placement, `header`, `prefix`, `param`, `inject`, or
 `phantom_prefix`. The gateway signs each request to the destinations. The service and region come
-from the host, which ends in `.amazonaws.com` or `.api.aws`.
+from the host, which ends in `.amazonaws.com` or `.api.aws`: `<service>.<region>.amazonaws.com`, a
+global `<service>.amazonaws.com` (signed for `us-east-1`), or an API Gateway
+`<id>.execute-api.<region>.amazonaws.com`. Any other shape, such as a PrivateLink (`vpce`) host or an
+AgentCore gateway host, can't be signed, and the gateway refuses the request.
+
+### The credsd socket
+
+A `credsd://` route connects to the socket that `CREDSD_SOCKET` names in the environment of
+`box run`. It must be an absolute path. Without it, the box uses the platform default:
+
+| Platform | Socket |
+| --- | --- |
+| macOS | `~/Library/Application Support/credsd/credsd.sock` when a socket exists there, which a user-scoped credsd install sets up. Otherwise `/var/run/credsd/credsd.sock`. |
+| Linux | `/run/credsd/credsd.sock` |
 
 Both forms resolve through the AWS SDK, so they share one capability. A bare `aws://` resolves the
 default credential provider chain, in order: the `AWS_*` environment variables, the profile files
