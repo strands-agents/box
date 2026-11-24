@@ -112,7 +112,15 @@ pub(super) fn admit_tool_call(
 ) -> io::Result<McpRequestAdmission> {
     let correlation = telemetry::Correlation::from_mcp(frame);
     correlation.during(|| {
-        let Some(target) = McpTarget::of_stdio_request(frame.as_bytes())? else {
+        let target = McpTarget::of_stdio_request(frame.as_bytes()).inspect_err(|refusal| {
+            recorder.record(EffectiveDecision::enforcement_deny(
+                r#"Box::Action::"mcp:call""#,
+                server,
+                "mcp-frame",
+                refusal.to_string(),
+            ));
+        })?;
+        let Some(target) = target else {
             return Ok(McpRequestAdmission::Undecided);
         };
         // Every decided `tools/call` states its own arguments, whichever gate refuses it, so a

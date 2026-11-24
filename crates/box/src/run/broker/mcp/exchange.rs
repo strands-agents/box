@@ -601,6 +601,20 @@ fn parse_client_frame(frame: &str) -> io::Result<Value> {
     Ok(request)
 }
 
+/// Record a client frame the broker refuses before the policy decides, and return the refusal.
+fn refuse_frame(exchange: &Exchange<'_>, refusal: io::Error) -> io::Error {
+    exchange
+        .connection
+        .recorder
+        .record(EffectiveDecision::enforcement_deny(
+            r#"Box::Action::"mcp:call""#,
+            exchange.running.server(),
+            "mcp-frame",
+            refusal.to_string(),
+        ));
+    refusal
+}
+
 async fn handle_client_frame(
     frame: String,
     exchange: &mut Exchange<'_>,
@@ -638,7 +652,8 @@ async fn handle_client_frame(
                 .map_or(frame, |canonical| {
                     String::from_utf8_lossy(&canonical).into_owned()
                 });
-            let request = parse_client_frame(&text)?;
+            let request =
+                parse_client_frame(&text).map_err(|refusal| refuse_frame(exchange, refusal))?;
             // A request that also answers would cross as an undecided method and skip the reply's
             // decision. A modern request with an id meets the same refusal in its own parser.
             if exchange.connection.phase != McpConnectionPhase::PerRequestMetadata
@@ -669,8 +684,9 @@ async fn handle_client_frame(
             }
             let Some(method) = request.get("method").and_then(Value::as_str) else {
                 if exchange.connection.phase == McpConnectionPhase::PerRequestMetadata {
-                    return Err(invalid_data(
-                        "modern MCP clients cannot send JSON-RPC responses",
+                    return Err(refuse_frame(
+                        exchange,
+                        invalid_data("modern MCP clients cannot send JSON-RPC responses"),
                     ));
                 }
                 return handle_client_response(&text, &request, exchange, policy, governed).await;
@@ -688,7 +704,8 @@ async fn handle_client_frame(
                 .await;
             }
             if notification {
-                protocol_2026_07_28::cancel_request(&request, exchange)?;
+                protocol_2026_07_28::cancel_request(&request, exchange)
+                    .map_err(|refusal| refuse_frame(exchange, refusal))?;
             }
             if method == "tools/list" {
                 if exchange.connection.phase != McpConnectionPhase::Active {
@@ -722,7 +739,8 @@ async fn handle_client_response(
         .get("id")
         .filter(|_| request.get("result").is_some() || request.get("error").is_some())
         .map(id_key)
-        .transpose()?
+        .transpose()
+        .map_err(|refusal| refuse_frame(exchange, refusal))?
         .and_then(|key| {
             exchange
                 .connection
@@ -731,8 +749,12 @@ async fn handle_client_response(
                 .map(|method| (key, method))
         });
     let Some((_, method)) = answers else {
-        return Err(invalid_data(
-            "a client-sent JSON-RPC response that answers no request the server sent is refused",
+        return Err(refuse_frame(
+            exchange,
+            invalid_data(
+                "a client-sent JSON-RPC response that answers no request the server sent is \
+                 refused",
+            ),
         ));
     };
     if method == "ping" {
@@ -883,7 +905,8 @@ async fn handle_tools_list(
     policy: &PolicyEngine,
     governed: &GovernedBox,
 ) -> io::Result<ProgramAction> {
-    let (key, id) = require_request_id(request)?;
+    let (key, id) =
+        require_request_id(request).map_err(|refusal| refuse_frame(exchange, refusal))?;
     if exchange.connection.in_flight.contains(&key) {
         return refuse_reused_id(exchange, Some(&id)).await;
     }
@@ -955,7 +978,8 @@ async fn handle_request(
             .await?;
             return Ok(ProgramAction::Continue);
         }
-        let (key, _) = require_request_id(request)?;
+        let (key, _) =
+            require_request_id(request).map_err(|refusal| refuse_frame(exchange, refusal))?;
         if !exchange.connection.in_flight.insert(key.clone()) {
             return refuse_reused_id(exchange, request.get("id")).await;
         }
@@ -966,8 +990,9 @@ async fn handle_request(
 
     if method == "notifications/initialized" && request.get("id").is_none() {
         if exchange.connection.phase != McpConnectionPhase::AwaitingInitialized {
-            return Err(invalid_data(
-                "notifications/initialized arrived before initialize completed",
+            return Err(refuse_frame(
+                exchange,
+                invalid_data("notifications/initialized arrived before initialize completed"),
             ));
         }
         exchange.running.forward(frame).await?;
@@ -975,7 +1000,8 @@ async fn handle_request(
         return Ok(ProgramAction::Continue);
     }
 
-    let request_id = optional_request_id(request)?;
+    let request_id =
+        optional_request_id(request).map_err(|refusal| refuse_frame(exchange, refusal))?;
     if let Some((key, id)) = &request_id
         && exchange.connection.in_flight.contains(key)
     {
@@ -1010,7 +1036,7 @@ async fn handle_request(
             .await?;
             return Ok(ProgramAction::Continue);
         }
-        Err(error) => return Err(error),
+        Err(refusal) => return Err(refuse_frame(exchange, refusal)),
     };
     if method == "tools/call" {
         let tool = target
@@ -2009,6 +2035,113 @@ done"#
                     "{name}: at most one reply reaches the server"
                 );
             }
+        }));
+    }
+
+    #[test]
+    fn each_frame_refused_before_the_policy_decides_records_one_mcp_frame_deny() {
+        let (runtime, local) = local_runtime();
+        runtime.block_on(local.run_until(async {
+            let mut failures = Vec::new();
+            for (name, initialized, frame, refusal) in [
+                (
+                    "not JSON",
+                    true,
+                    r#"{"jsonrpc":"2.0","id":3,"method":"tools/call""#,
+                    "invalid MCP client frame",
+                ),
+                (
+                    "not an object",
+                    true,
+                    r#"[{"jsonrpc":"2.0","id":3,"method":"ping"}]"#,
+                    "must be an object",
+                ),
+                (
+                    "not JSON-RPC 2.0",
+                    true,
+                    r#"{"jsonrpc":"1.0","id":3,"method":"ping"}"#,
+                    "must declare JSON-RPC 2.0",
+                ),
+                (
+                    "unsolicited reply",
+                    true,
+                    r#"{"jsonrpc":"2.0","id":"never-asked","result":{}}"#,
+                    "answers no request the server sent",
+                ),
+                (
+                    "reply with an object id",
+                    true,
+                    r#"{"jsonrpc":"2.0","id":{"key":1},"result":{}}"#,
+                    "must be a string or number",
+                ),
+                (
+                    "request with an object id",
+                    true,
+                    r#"{"jsonrpc":"2.0","id":{"key":1},"method":"tools/call","params":{"name":"Search","arguments":{}}}"#,
+                    "must be a string or number",
+                ),
+                (
+                    "list with no id",
+                    true,
+                    r#"{"jsonrpc":"2.0","method":"tools/list","params":{}}"#,
+                    "has no id",
+                ),
+                (
+                    "initialize with no id",
+                    false,
+                    r#"{"jsonrpc":"2.0","method":"initialize","params":{}}"#,
+                    "has no id",
+                ),
+                (
+                    "initialized twice",
+                    true,
+                    r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+                    "arrived before initialize completed",
+                ),
+                (
+                    "tool call naming no tool",
+                    true,
+                    r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"arguments":{}}}"#,
+                    "naming no item",
+                ),
+                (
+                    "prompt get naming no prompt",
+                    true,
+                    r#"{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{"name":""}}"#,
+                    "naming no item",
+                ),
+            ] {
+                let fixture = fixture(PERMIT_ALL_MCP);
+                let log = tempfile::NamedTempFile::new().expect("frame log");
+                let (mut program, mut output, recorder) =
+                    recorded_exchange(listing_server(log.path(), SEARCH_TOOLS, ":"), &fixture)
+                        .await;
+                if initialized {
+                    initialize(&program, &mut output).await;
+                }
+                let _ = program.input(format!("{frame}\n").into_bytes()).await;
+                let outcome = tokio::time::timeout(TEST_WAIT_TIMEOUT, program.join())
+                    .await
+                    .unwrap_or_else(|_| panic!("{name}: the exchange must stop"));
+                let recorded = recorder
+                    .recorded()
+                    .iter()
+                    .map(|decision| {
+                        let (action, resource, rule, verdict, _) = decision.parts();
+                        format!("{action} {resource} {rule:?} {verdict:?}")
+                    })
+                    .collect::<Vec<_>>();
+                let stopped = outcome
+                    .as_ref()
+                    .is_err_and(|error| error.to_string().contains(refusal));
+                let expected =
+                    [r#"Box::Action::"mcp:call" issues-mcp Enforcement("mcp-frame") Deny"#
+                        .to_string()];
+                if !stopped || recorded != expected || forwarded(log.path(), frame) {
+                    failures.push(format!("{name}: outcome {outcome:?}, recorded {recorded:?}"));
+                }
+            }
+            assert!(failures.is_empty(), "{failures:#?}");
         }));
     }
 
