@@ -419,10 +419,14 @@ fn publication_targets(
     admitted: &[PathBuf],
 ) -> Vec<PublicationTarget> {
     let mut targets = Vec::new();
+    let grants = reach.grants.iter().filter(|grant| {
+        !cfg!(target_os = "linux")
+            || (grant.operation, grant.scope) != (containment::Operation::Metadata, Scope::Root)
+    });
     for root in admitted {
         let mut roots = vec![root.clone()];
         let mut reached = false;
-        for grant in &reach.grants {
+        for grant in grants.clone() {
             if grant.names().iter().any(|name| {
                 name.starts_with(root) || (grant.scope == Scope::Root && root.starts_with(name))
             }) {
@@ -438,7 +442,7 @@ fn publication_targets(
             });
         }
     }
-    for grant in &reach.grants {
+    for grant in grants {
         if !grant.is_link()
             || plan
                 .roots
