@@ -18,9 +18,7 @@ A box with no `[telemetry]` table writes one file inside its own box directory:
 
 That target receives every record except tool calls: each effective denial, each effective permit,
 the box's own control-plane records and MCP routing diagnostics, and the workload's relayed spans,
-log records, and metrics. A relayed payload can be refused while Box writes a full batch of its own
-records to the file; see [Errors and exit codes](#errors-and-exit-codes). The workload cannot reach
-the file.
+log records, and metrics. The workload cannot reach the file.
 
 The file grows for as long as the box is used. Rotate or remove it as the operator's own task.
 
@@ -440,12 +438,6 @@ The line does not cover everything that can be lost. It does not count an agent 
 refuses, a batch that a slow target does not accept before its export deadline while the box runs,
 or a relayed payload still in flight at shutdown. So the absence of this line does not prove that
 nothing was lost.
-
-While Box writes a full batch of its own records to a file target, it refuses an agent payload for
-that target. This keeps the workload's own telemetry from slowing the export of Box records. Like
-any other refused payload, it still gets `200`. An endpoint target (`otlp`, or any vendor kind in
-[Endpoints](#endpoints)) never refuses a payload for this reason, because the payload does not slow
-its export.
 
 Set `STRANDS_BOX_TELEMETRY_DEBUG` to also print each failed export as it happens, with its cause. See
 [Failed sends](#failed-sends).

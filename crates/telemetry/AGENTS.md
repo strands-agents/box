@@ -338,44 +338,12 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   and the SDK's queue overflowed — which reopens exactly the audit-suppression hole that
   [the lane split](../../docs/design/decisions.md#the-agents-lane-and-the-boxs-lane-share-no-queue)
   claims is closed. One permit means the box's worker waits for at most one relay.
-  **A relay yields to a full batch of box records.** One permit still let the workload slow the
-  drain: each relayed line can be several MB and holds the file's lock for its write and `fsync`,
-  while the workload fills the queue with ordinary permitted requests. So `admitted` in `receive.rs`
-  skips a **file** target while its exporter sends a full batch (`FULL_BATCH`, the SDK's default 512), and
-  counts the payload as refused, never as a lost box record. `Backlog::exporting` returns a guard
-  that sets `busy` for a full batch and clears it when the export ends, even when the SDK cuts it.
-  **The yield must not read `unexported`.** That count keeps every record the full queue refused,
-  so the first version, which yielded at 512 unexported records, refused every agent payload for the
-  rest of the run after one overflow. Found by review; `a_lane_that_overflowed_relays_again_once_idle`
-  pins it, and fails on that version. A second file handle for relays was
-  rejected, because two writers can tear a long line.
-  **An OTLP target never yields.** `Wire::Otlp` sends a relay as its own `reqwest` request, and
-  `attempt` takes no lock the SDK worker waits on, so a yield there dropped the agent's telemetry and
-  protected nothing. The first version yielded on every target; found by review.
-  `a_relay_to_a_file_target_yields_while_the_box_exports_a_full_batch` is the pin for the yield, and
-  fails when it is removed; it holds an `Exporting` guard to stand for the SDK worker's full batch.
-  `a_relay_to_an_otlp_target_is_kept_while_the_box_exports_a_full_batch` pins the exemption with a
-  real full batch held at a semaphore-gated sink, and fails when the yield ignores the target kind.
-  `a_lane_that_overflowed_relays_again_once_idle` runs on a current-thread runtime, so no export
-  runs during its burst and the queue is sure to overflow. None of the three depends on timing. A relay already writing when a full batch starts still finishes, and one relay can
-  start in the gap between two full batches, so the box's worker waits for at most one relay per
-  batch. That gap is not measured. `FULL_BATCH` mirrors how the SDK sizes a batch from
-  `OTEL_BLRP_MAX_EXPORT_BATCH_SIZE` and `OTEL_BLRP_MAX_QUEUE_SIZE`, because `BatchConfig` keeps the
-  size private; `a_full_batch_is_the_size_the_sdk_configures` pins the rule. Nothing pins that `busy`
-  clears when the SDK cuts an export at its deadline: that rests on the SDK dropping the export
-  future, which drops the guard.
-  **The guard lives with the file write, not with the export future.** `export_logs` takes the
-  `Exporting` guard and hands an `Arc` of it to each write. The `Wire::File` arm of `attempt` takes a
-  `FileTurn`, one value that holds the owned lock guard and the busy guard, and moves it whole into
-  the `spawn_blocking` task that appends the line; its `file` field drops first, so the file is free
-  before `busy` clears. The write outlives a cut export, because the append is uncancellable, so a
-  guard held by the export future would clear `busy` while the write still held the file, and
-  relays would queue on the lock the yield exists to keep free. **The closure binds `turn` whole**:
-  a closure that named only `turn.file` captures that field alone, under edition 2021's disjoint
-  captures, and leaves the busy guard in the async frame. `a_cut_export_keeps_the_lane_busy_until_its_write_ends`
-  (a full batch's write blocked on a full FIFO, then cut) and
-  `a_file_turn_holds_the_busy_state_as_long_as_the_file` are the pins. Found by review on
-  2026-11-19, reading this PR against #473, which made the append uncancellable.
+  **A relay does not yield to the box's own batches, by a maintainer's review on 2026-11-24.** A
+  yield was tried: a relay to a file target was refused while that target exported a full batch.
+  It was removed, because the workload can still overflow the queue with its own permitted requests,
+  so the count is what makes a loss visible; the bound it added was close to what one permit already
+  gives; and it copied the SDK's private batch size and needed its own guard for a cut export. A
+  lower body limit for relays to a file target is the smaller lever, if one is needed.
   **`a_flood_of_relayed_payloads_loses_no_decision` is the pin**, and it was the property's first one:
   200 concurrent posts land while 200 decisions are submitted, and every decision must reach the file.
   Its scope is the relay path, because the decision count stays inside the queue's own capacity — so it
