@@ -701,6 +701,7 @@ mod tests {
         let program = StandIn::new(PRINTER);
         let route = |name: &str, toml: &str| (name.to_string(), target(toml));
         let record = Record {
+            enforcement: Default::default(),
             version: crate::record::config::RECORD_VERSION,
             experimental_features: crate::record::config::ExperimentalFeatures {
                 secret_sources: true,

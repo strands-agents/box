@@ -133,6 +133,10 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   caller's `tracestate` downstream, which `Correlation::inject_http` does from memory, so only the record
   changed. Six box and telemetry assertions now pin the inverse — a caller sends a `tracestate` and
   the span records none of it.
+  **`not_enforced` and `first_flip` use `debug_assert!` and a no-op, unlike `caused_by`.** A
+  misuse there, marking a permit not enforced or an enforced record a flip, leaves the record as it
+  was, so the record stays true and nothing is mislabelled; a crash would only lose the run's audit.
+  `caused_by` has no correct record to fall back to, so it keeps `assert!`.
   **`caused_by` uses `assert!` rather than `debug_assert!`, deliberately.** A mislabelled security
   decision in an audit record is worse than a crash, so the guard fires in release too. Every call
   site in `box`'s `run/telemetry.rs` pairs a cause with a verdict it admits, so it cannot fire today.

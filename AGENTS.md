@@ -89,6 +89,8 @@ test to make a suite pass.
   See [request isolation](docs/design/decisions.md#no-state-crosses-a-call-boundary).
 - **A workload-named program runs only inside a sandbox.** Never execute it directly from the
   trusted process. A policy permit decides whether it runs; the sandbox bounds what it can do.
+  In [log-only mode](docs/design/decisions.md#log-only-mode-turns-only-a-recorded-policy-denial-into-an-allow)
+  a would-deny also runs, still inside its sandbox, and is recorded as an unenforced denial.
   Every declared stdio MCP server also starts in its own sandbox, after `shell:spawn` permits it,
   or, when a tool grammar binds the server's program, after its grammar action does. Preserve
   `runtime_mcp_start.rs::absent_start_permit_refuses_the_server_and_it_never_runs` and

@@ -27,7 +27,9 @@ the trusted process](policy.md#where-policy-sits). The enforcement point that re
 then sends the effective answer to the collector.
 
 The collector records the effective answer after all checks, as described in [the effective decision
-is the canonical record](decisions.md#the-effective-decision-is-the-canonical-record). Checks
+is the canonical record](decisions.md#the-effective-decision-is-the-canonical-record). In log-only
+mode the record is the policy's denial for an action that went ahead, marked
+`strands.box.policy.enforced = false`. Checks
 beneath policy can refuse an operation that policy permits. For example, the reachable paths check
 refuses access to the box directory even when a broad read permit matches. Recording only the
 engine's verdict would describe a permitted operation that did not happen. These checks run on Box's
