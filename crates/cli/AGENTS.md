@@ -221,7 +221,7 @@ default, an accepted-value set, or a precedence order.
 | What a profile is and decides, where it lives, and how to change one | `docs/cli/profiles.md`, with an example for each change. `docs/cli/profiles-reference.md` is the key reference. |
 | What a pack is, its kinds, and how to write one | `docs/cli/packs.md`. `docs/cli/packs-reference.md` is the key reference. |
 | What a plugin is, how to use one, and how to write one | `docs/cli/plugins.md`. `docs/cli/plugins-reference.md` is the reference for the `plugin.toml` keys and the plugin rules. |
-| Where a route's key comes from: each `secret.ref` source (`env://`, `aws://`, `credsd://`, a plugin's scheme), what the agent gets, and which AWS identity signs | `docs/cli/credentials.md`. The `secret.ref` row stays in `docs/cli/profiles-reference.md`, and Box Core's `docs/user/egress.md` owns the signed-route rules and the credsd socket. |
+| Where a route's key comes from: each `secret.ref` source (`env://`, `aws://`, `credsd://`, a plugin's scheme), what the agent gets, and how to set one up | `docs/cli/credentials.md`. The `secret.ref` row stays in `docs/cli/profiles-reference.md`, and Box Core's `docs/user/egress.md` owns the signed-route rules, the AWS credential chain, and the credsd socket. |
 | The `starter.toml` keys and the policy starter keys (`policy.toml`) | `docs/cli/starters-reference.md` |
 | What a policy checks, where a run's rules come from (rule files, generated rules, Box Core's checks), and how to write a rule | `docs/cli/policies.md`. Box Core's policy guide owns the rule syntax. |
 | How `box` joins a run's policy, and the `@id` of each generated rule | `docs/cli/policies-reference.md` |

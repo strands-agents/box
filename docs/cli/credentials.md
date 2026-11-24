@@ -49,20 +49,11 @@ build their requests as usual, and the box signs them again with your real crede
 ref = "aws://work"   # the AWS profile `work`; `aws://` alone uses your default identity
 ```
 
-`aws://<PROFILE>` signs with that profile's static keys, `credential_process`, assume-role, or web
-identity. `aws://` with no profile name signs with the first credentials that the AWS SDK finds
-outside the box, in this order:
-
-1. The `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` variables in the shell where you run
-   `box run`.
-2. The profile in `~/.aws/config` and `~/.aws/credentials` that `AWS_PROFILE` names, or
-   `default`.
-3. Web identity, such as an EKS service account.
-4. The ECS or EKS container credentials endpoint.
-5. EC2 instance metadata.
-
-So on a cloud machine, `aws://` can sign as the machine's own role. The box prints a
-[warning](../user/egress.md#credential-sources) about it.
+`aws://<PROFILE>` signs as that AWS profile. `aws://` with no profile name signs with the first
+credentials that the AWS SDK finds outside the box, starting with the `AWS_*` variables in the shell
+where you run `box run`. So on a cloud machine, `aws://` can sign as the machine's own role, and the
+box prints a warning about it. Box's [credential sources](../user/egress.md#credential-sources)
+lists the profile forms and the full order.
 
 Neither form signs with an AWS SSO or `aws login` profile. To sign in that way, keep the sign-in in
 [the credentials daemon](#the-credentials-daemon), or export its temporary keys

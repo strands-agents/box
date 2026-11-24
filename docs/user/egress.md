@@ -201,16 +201,6 @@ global `<service>.amazonaws.com` (signed for `us-east-1`), or an API Gateway
 `<id>.execute-api.<region>.amazonaws.com`. Any other shape, such as a PrivateLink (`vpce`) host or an
 AgentCore gateway host, can't be signed, and the gateway refuses the request.
 
-### The credsd socket
-
-A `credsd://` route connects to the socket that `CREDSD_SOCKET` names in the environment of
-`box run`. It must be an absolute path. Without it, the box uses the platform default:
-
-| Platform | Socket |
-| --- | --- |
-| macOS | `~/Library/Application Support/credsd/credsd.sock` when a socket exists there, which a user-scoped credsd install sets up. Otherwise `/var/run/credsd/credsd.sock`. |
-| Linux | `/run/credsd/credsd.sock` |
-
 Both forms resolve through the AWS SDK, so they share one capability. A bare `aws://` resolves the
 default credential provider chain, in order: the `AWS_*` environment variables, the profile files
 (including `credential_process`), web identity, the ECS or EKS container endpoint, then EC2 instance
@@ -255,6 +245,16 @@ deployment that must pin the identity writes `aws://PROFILE` rather than a bare 
 The gateway adds a credential only over HTTPS. A plain `http://` request to a destination a route
 names is refused. The one exception is a service on your own machine, at `host.box.internal`; see
 [a service on your machine](#a-service-on-your-machine).
+
+### The credsd socket
+
+A `credsd://` route connects to the socket that `CREDSD_SOCKET` names in the environment of
+`box run`. It must be an absolute path. Without it, the box uses the platform default:
+
+| Platform | Socket |
+| --- | --- |
+| macOS | `~/Library/Application Support/credsd/credsd.sock` when a socket exists there, which a user-scoped credsd install sets up. Otherwise `/var/run/credsd/credsd.sock`. |
+| Linux | `/run/credsd/credsd.sock` |
 
 ## A service on your machine
 
