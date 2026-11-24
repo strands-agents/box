@@ -555,7 +555,7 @@ impl Contained {
             signals.restore_default = false;
         }
         #[cfg(unix)]
-        let diagnostics = if own_terminal || std::io::stderr().is_terminal() {
+        let diagnostics = if !own_terminal && std::io::stderr().is_terminal() {
             Some(
                 crate::run::diagnostics::Diagnostics::capture()
                     .map_err(|source| SuperviseError::Diagnostics { source })?,

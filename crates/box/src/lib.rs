@@ -33,7 +33,7 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 /// Optional terminal attachment and host initialization for one run.
 #[derive(Default)]
 pub struct RunOptions<'a> {
-    /// The workload's controlling terminal; `None` inherits the process's standard streams.
+    /// The workload's controlling terminal, with Core diagnostics left on the caller's stderr; `None` inherits standard streams.
     pub terminal: Option<std::fs::File>,
     /// Called after hardening and signal registration, before workload setup; an error aborts the run.
     pub on_ready: Option<Box<dyn FnOnce() -> std::io::Result<()> + 'a>>,
