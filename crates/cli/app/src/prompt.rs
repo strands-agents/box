@@ -196,7 +196,38 @@ fn detail_lines(session: &Session, width: usize) -> Vec<String> {
     lines
 }
 
-fn section_lines(session: &Session, width: usize, budget: usize, scroll: usize) -> Vec<String> {
+/// Which blank rows a guided question's header has.
+#[derive(Clone, Copy)]
+struct Blanks {
+    top: bool,
+    middle: bool,
+    bottom: bool,
+}
+
+/// The blank rows at a `base` of header rows, with the top one kept in every layout.
+fn blank_rows(base: usize, compact: bool) -> Blanks {
+    Blanks {
+        top: base >= 7,
+        middle: base >= 7 && !compact,
+        bottom: base >= 6 && !compact,
+    }
+}
+
+/// A guided question's header rows and how many of its detail rows show at once.
+struct Section {
+    lines: Vec<String>,
+    room: usize,
+    cut: bool,
+}
+
+/// The header of a guided question, with at most `budget` rows before its blank bottom row.
+fn section_lines(
+    session: &Session,
+    width: usize,
+    budget: usize,
+    scroll: usize,
+    blanks: Blanks,
+) -> Section {
     let tabs = if width < 48 {
         fit_line(&format!("  [ {} ]", SECTIONS[session.stage]), width)
     } else {
@@ -232,7 +263,7 @@ fn section_lines(session: &Session, width: usize, budget: usize, scroll: usize) 
         "Create a new profile".to_string()
     };
     let mut lines = Vec::new();
-    if budget >= 7 {
+    if blanks.top {
         lines.push(String::new());
     }
     lines.push(fit_line(&format!("  {title}"), width));
@@ -250,21 +281,127 @@ fn section_lines(session: &Session, width: usize, budget: usize, scroll: usize) 
             width,
         ));
     }
-    if budget >= 7 {
+    if blanks.middle {
         lines.push(String::new());
     }
     lines.push(tabs);
-    if budget >= 7 {
+    if blanks.middle {
         lines.push(String::new());
     }
     let details = detail_lines(session, width);
     let room = budget.saturating_sub(lines.len()).max(1);
+    let cut = details.len() > room;
     let first = scroll.min(details.len().saturating_sub(room));
     lines.extend(details.into_iter().skip(first).take(room));
-    if budget >= 6 {
+    if blanks.bottom {
         lines.push(String::new());
     }
-    lines
+    Section { lines, room, cut }
+}
+
+/// The choices of one question, as the menu draws them.
+struct Choices<'a> {
+    labels: &'a [&'a str],
+    descriptions: &'a [&'a str],
+    selected: Option<usize>,
+    default: Option<usize>,
+    typed: &'a str,
+    name_entry: bool,
+}
+
+/// The menu rows for `height` rows and whether some choices are scrolled out of view.
+fn choice_rows(ask: &Choices<'_>, width: usize, height: usize, density: u8) -> (Vec<String>, bool) {
+    if ask.name_entry {
+        if ask.labels.is_empty() {
+            return (Vec::new(), false);
+        }
+        // The name entry rows below the choices take the last 2 rows.
+        return menu_view(
+            ask.labels,
+            ask.descriptions,
+            ask.selected,
+            None,
+            "",
+            width,
+            height.saturating_sub(2),
+            density,
+        );
+    }
+    menu_view(
+        ask.labels,
+        ask.descriptions,
+        ask.selected,
+        ask.default,
+        ask.typed,
+        width,
+        height,
+        density,
+    )
+}
+
+/// The rows of a guided question for a terminal of this size.
+#[derive(Debug)]
+struct Layout {
+    section: Vec<String>,
+    menu: Vec<String>,
+    room: usize,
+    cut: bool,
+}
+
+/// Lay out a guided question in the least dense of four layouts that shows every choice and every
+/// detail row, else the one that shows every choice and the most details.
+fn guided_layout(
+    session: &Session,
+    ask: &Choices<'_>,
+    width: usize,
+    height: usize,
+    scroll: usize,
+) -> Layout {
+    let base = height.saturating_sub(5).min(height * 2 / 3).max(3);
+    let mut candidates = Vec::new();
+    for level in 0..=3u8 {
+        let compact = level > 0;
+        let density = if level >= 2 { level } else { 0 };
+        let blanks = blank_rows(base, compact);
+        let full = choice_rows(ask, width, usize::MAX / 4, density).0.len();
+        let needed = full + 1 + if ask.name_entry { 2 } else { 0 };
+        let spare = height
+            .saturating_sub(1 + needed)
+            .saturating_sub(usize::from(blanks.bottom));
+        // A compact header keeps the detail rows that its dropped blank rows would have had.
+        let floor = base.saturating_sub(2 * usize::from(compact && blank_rows(base, false).middle));
+        let section = section_lines(session, width, spare.max(floor), scroll, blanks);
+        // The densest layout also uses the spare bottom row, rather than hide a choice.
+        let menu_height = height.saturating_sub(section.lines.len() + 1 - usize::from(level == 3));
+        let (menu, hidden) = choice_rows(ask, width, menu_height, density);
+        candidates.push((
+            Layout {
+                section: section.lines,
+                menu,
+                room: section.room,
+                cut: section.cut,
+            },
+            hidden,
+        ));
+    }
+    let index = candidates
+        .iter()
+        .position(|(layout, hidden)| !hidden && !layout.cut)
+        .or_else(|| {
+            // The details scroll anyway, so show the most of them without losing descriptions.
+            (0..3)
+                .filter(|&level| !candidates[level].1)
+                .reduce(|best, level| {
+                    if candidates[level].0.room > candidates[best].0.room {
+                        level
+                    } else {
+                        best
+                    }
+                })
+        })
+        .or_else(|| candidates.iter().position(|(_, hidden)| !hidden))
+        .unwrap_or(3);
+    candidates.swap_remove(index).0
 }
 
 fn key_hint(width: usize, sections: bool, scrollable: bool, choices: bool, back: bool) -> String {
@@ -434,7 +571,14 @@ pub(crate) fn finish(terminal: &mut Terminal<'_>) -> Result<(), Error> {
         .session
         .as_ref()
         .map_or(0, |session| session.drawn.len());
-    clear_menu(terminal, rows).map_err(|source| io_error("write", Path::new("stderr"), source))
+    let write_error = |source| io_error("write", Path::new("stderr"), source);
+    clear_menu(terminal, rows).map_err(write_error)?;
+    if terminal.choice_controls {
+        write!(terminal.output, "\x1b[?25h")
+            .and_then(|()| terminal.output.flush())
+            .map_err(write_error)?;
+    }
+    Ok(())
 }
 
 fn fit_line(text: &str, columns: usize) -> String {
@@ -597,6 +741,7 @@ fn content_lines(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+#[cfg(test)]
 fn menu_lines(
     choices: &[&str],
     descriptions: &[&str],
@@ -606,7 +751,73 @@ fn menu_lines(
     width: usize,
     height: usize,
 ) -> Vec<String> {
-    if height < 5 {
+    menu_view(
+        choices,
+        descriptions,
+        selected,
+        default,
+        typed,
+        width,
+        height,
+        0,
+    )
+    .0
+}
+
+/// The menu rows, and whether some choices are scrolled out of view, at a `density` that is 2 to
+/// drop the blank row after each choice and 3 to also keep only the selected description.
+#[allow(clippy::too_many_arguments)]
+fn menu_view(
+    choices: &[&str],
+    descriptions: &[&str],
+    selected: Option<usize>,
+    default: Option<usize>,
+    typed: &str,
+    width: usize,
+    height: usize,
+    density: u8,
+) -> (Vec<String>, bool) {
+    let build = |budget: usize| -> Vec<Vec<String>> {
+        choices
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let marker = if selected == Some(index) { ">" } else { " " };
+                let suffix = if default == Some(index) {
+                    " (default)"
+                } else {
+                    ""
+                };
+                let mut block = wrap_line(&format!("{marker} {label}{suffix}"), 2, width);
+                if let Some(description) = descriptions
+                    .get(index)
+                    .filter(|text| !text.is_empty() && (density < 3 || selected == Some(index)))
+                {
+                    block.extend(wrap_line(description, 6, width));
+                }
+                if density < 2 {
+                    block.push(String::new());
+                }
+                if block.len() > budget {
+                    block.truncate(budget);
+                    if budget > 1 {
+                        block[budget - 1] = "      …".to_string();
+                    }
+                }
+                block
+            })
+            .collect()
+    };
+    // When every choice fits, the rows kept for the `1-2 of 3` line are not needed.
+    let typed_rows = if choices.is_empty() || !typed.is_empty() {
+        2
+    } else {
+        0
+    };
+    let everything = height.saturating_sub(1 + typed_rows);
+    let mut blocks = build(usize::MAX);
+    let fits = blocks.iter().map(Vec::len).sum::<usize>() <= everything;
+    if height < 5 && !fits {
         let mut lines = Vec::new();
         if !choices.is_empty() {
             let index = selected.unwrap_or(0);
@@ -621,38 +832,19 @@ fn menu_lines(
         if choices.is_empty() || !typed.is_empty() {
             lines.push(format!("  > {typed}"));
         }
-        return lines
+        let lines = lines
             .into_iter()
             .map(|line| fit_line(&line, width))
             .collect();
+        return (lines, choices.len() > 1);
     }
-    let budget = height
-        .saturating_sub(if typed.is_empty() { 2 } else { 4 })
-        .max(1);
-    let blocks: Vec<Vec<String>> = choices
-        .iter()
-        .enumerate()
-        .map(|(index, label)| {
-            let marker = if selected == Some(index) { ">" } else { " " };
-            let suffix = if default == Some(index) {
-                " (default)"
-            } else {
-                ""
-            };
-            let mut block = wrap_line(&format!("{marker} {label}{suffix}"), 2, width);
-            if let Some(description) = descriptions.get(index).filter(|text| !text.is_empty()) {
-                block.extend(wrap_line(description, 6, width));
-            }
-            block.push(String::new());
-            if block.len() > budget {
-                block.truncate(budget);
-                if budget > 1 {
-                    block[budget - 1] = "      …".to_string();
-                }
-            }
-            block
-        })
-        .collect();
+    let budget = if fits {
+        everything
+    } else {
+        let budget = height.saturating_sub(2 + typed_rows).max(1);
+        blocks = build(budget);
+        budget
+    };
     let mut first = selected.unwrap_or(0);
     let mut last = (first + 1).min(blocks.len());
     let mut used = blocks.get(first).map_or(0, Vec::len);
@@ -665,17 +857,19 @@ fn menu_lines(
         last += 1;
     }
     let mut lines: Vec<String> = blocks[first..last].iter().flatten().cloned().collect();
-    if first > 0 || last < blocks.len() {
+    let windowed = first > 0 || last < blocks.len();
+    if windowed {
         lines.push(format!("  {}-{} of {}", first + 1, last, choices.len()));
     }
     if choices.is_empty() || !typed.is_empty() {
         lines.push(format!("  > {typed}"));
         lines.push(String::new());
     }
-    lines
+    let lines = lines
         .into_iter()
         .map(|line| fit_line(&line, width))
-        .collect()
+        .collect();
+    (lines, windowed)
 }
 
 fn clear_menu(terminal: &mut Terminal<'_>, rows: usize) -> io::Result<()> {
@@ -719,6 +913,29 @@ fn entry_cursor(lines: &[String]) -> Option<(usize, usize)> {
 }
 
 fn select(
+    terminal: &mut Terminal<'_>,
+    choices: &[&str],
+    descriptions: &[&str],
+    default: Option<usize>,
+    labeled: bool,
+    name_entry: bool,
+) -> Result<Option<String>, Error> {
+    let result = select_choice(
+        terminal,
+        choices,
+        descriptions,
+        default,
+        labeled,
+        name_entry,
+    );
+    // A guided session shows the cursor again in `finish`, so it stays hidden between questions.
+    if terminal.choice_controls && terminal.session.is_none() {
+        let _ = write!(terminal.output, "\x1b[?25h").and_then(|()| terminal.output.flush());
+    }
+    result
+}
+
+fn select_choice(
     terminal: &mut Terminal<'_>,
     choices: &[&str],
     descriptions: &[&str],
@@ -836,44 +1053,24 @@ fn select(
             choices.is_empty() || !typed.is_empty()
         };
         let mut cursor = None;
-        let section_budget = height.saturating_sub(5).min(height * 2 / 3).max(3);
-        let header = terminal.session.as_ref().map_or(0, |session| {
-            2 + if section_budget >= 7 { 3 } else { 0 }
-                + usize::from(session.run.is_some() && session.stage != REVIEW)
-        });
-        let room = section_budget.saturating_sub(header).max(1);
-        let section = terminal
-            .session
-            .as_ref()
-            .map(|session| section_lines(session, width, section_budget, scroll));
-        let menu_height = section.as_ref().map_or(
-            height.saturating_sub(content_room + usize::from(content.is_some())),
-            |lines| height.saturating_sub(lines.len() + 2),
-        );
-        let mut lines = if name_entry {
-            if choices.is_empty() {
-                Vec::new()
+        let ask = Choices {
+            labels: &labels,
+            descriptions,
+            selected,
+            default: if name_entry {
+                None
             } else {
-                menu_lines(
-                    &labels,
-                    descriptions,
-                    selected,
-                    None,
-                    "",
-                    width,
-                    menu_height.saturating_sub(2),
-                )
-            }
+                default.filter(|_| labeled)
+            },
+            typed: if name_entry { "" } else { text },
+            name_entry,
+        };
+        let (section, mut lines, room, scrollable) = if let Some(session) = &terminal.session {
+            let layout = guided_layout(session, &ask, width, height, scroll);
+            (Some(layout.section), layout.menu, layout.room, layout.cut)
         } else {
-            menu_lines(
-                &labels,
-                descriptions,
-                selected,
-                default.filter(|_| labeled),
-                text,
-                width,
-                menu_height,
-            )
+            let rows = height.saturating_sub(content_room + usize::from(content.is_some()));
+            (None, choice_rows(&ask, width, rows, 0).0, 0, false)
         };
         if name_entry {
             let marker = if selected.is_none() { ">" } else { " " };
@@ -894,7 +1091,6 @@ fn select(
             }
             section.append(&mut lines);
             let feedback = &terminal.session.as_ref().unwrap().feedback;
-            let scrollable = detail_lines(terminal.session.as_ref().unwrap(), width).len() > room;
             let back = terminal.can_go_back || terminal.session.as_ref().unwrap().cursor > 0;
             let hint = if name_entry && !choices.is_empty() {
                 if width >= 72 {
@@ -986,7 +1182,9 @@ fn select(
         }
         terminal.output.flush().map_err(write_error)?;
         let key = key(terminal.input, raw.as_mut());
-        write!(terminal.output, "\x1b8\x1b[?25h").map_err(write_error)?;
+        // Keep the cursor hidden while the next frame is drawn. It is shown again only for typed
+        // entries, or when the prompt ends.
+        write!(terminal.output, "\x1b8\x1b[?25l").map_err(write_error)?;
         let key = key.map_err(|source| io_error("read", Path::new("stdin"), source))?;
         match key {
             Key::Cancel => {
@@ -1523,8 +1721,8 @@ mod tests {
             ..Session::default()
         };
         for width in [24, 40, 80] {
-            let first = section_lines(&session, width, 3, 0);
-            let last = section_lines(&session, width, 3, usize::MAX);
+            let first = section_lines(&session, width, 3, 0, blank_rows(3, false)).lines;
+            let last = section_lines(&session, width, 3, usize::MAX, blank_rows(3, false)).lines;
             assert!(first.iter().any(|line| line.contains("First warning")));
             assert!(last.iter().any(|line| line.contains("Last warning")));
             assert!(
@@ -1661,6 +1859,148 @@ mod tests {
                 assert_eq!(result.unwrap().as_deref(), answer);
             }
         }
+    }
+
+    #[test]
+    fn the_cursor_stays_hidden_while_a_guided_question_redraws() {
+        let mut input = b"\x1b[B\x1b[A\x1b[B\r".as_slice();
+        let mut output = Vec::new();
+        let mut terminal = Terminal::new(&mut input, &mut output);
+        terminal.session = Some(Session::default());
+        let answer = choose(&mut terminal, &["One", "Two", "Three"], Some(0)).unwrap();
+        assert_eq!(answer.as_deref(), Some("2"));
+        let output = String::from_utf8(output).unwrap();
+        assert!(!output.contains("\x1b[?25h"), "{output:?}");
+        assert_eq!(output.matches("\x1b8\x1b[?25l").count(), 4, "{output:?}");
+    }
+
+    const LABELS: [&str; 3] = ["[1] Open", "[2] Scoped", "[3] Locked"];
+    const DESCRIPTIONS: [&str; 3] = [
+        "Any command, any host.",
+        "Only what the packs allow.",
+        "Read the project, change nothing.",
+    ];
+
+    fn question(stage: usize, warnings: usize) -> Session {
+        let mut details = String::from("Which policy should the agent start with?\n\n");
+        for index in 0..warnings {
+            details.push_str(&format!(
+                "! Warning {index} is long enough to take a second row on a narrow terminal.\n"
+            ));
+        }
+        Session {
+            stage,
+            details,
+            ..Session::default()
+        }
+    }
+
+    fn layout(session: &Session, width: usize, height: usize) -> Layout {
+        let ask = Choices {
+            labels: &LABELS,
+            descriptions: &DESCRIPTIONS,
+            selected: Some(0),
+            default: Some(0),
+            typed: "",
+            name_entry: false,
+        };
+        guided_layout(session, &ask, width, height, 0)
+    }
+
+    #[test]
+    fn a_guided_question_shows_every_choice_and_fits_the_terminal() {
+        for width in [60, 80, 120] {
+            for height in 10..=40 {
+                let mut title_rows = Vec::new();
+                for (stage, warnings) in [(POLICY, 0), (SETUP, 4), (REVIEW, 9)] {
+                    let layout = layout(&question(stage, warnings), width, height);
+                    let case = format!("{width}x{height} stage {stage}: {layout:?}");
+                    for label in LABELS {
+                        assert!(
+                            layout.menu.iter().any(|line| line.contains(label)),
+                            "{label} is hidden at {case}"
+                        );
+                    }
+                    assert!(!layout.menu.iter().any(|line| line.contains(" of 3")));
+                    assert!(
+                        layout.section.len() + layout.menu.len() < height,
+                        "the frame and its key hint are taller than the terminal at {case}"
+                    );
+                    title_rows.push(
+                        layout
+                            .section
+                            .iter()
+                            .position(|line| line.contains("Create a new profile")),
+                    );
+                }
+                // The title is on one row for every question, below a blank row when it fits.
+                assert!(
+                    title_rows.iter().all(|row| *row == title_rows[0]),
+                    "{width}x{height}: {title_rows:?}"
+                );
+                assert_eq!(title_rows[0], Some(usize::from(height >= 12)));
+            }
+        }
+    }
+
+    #[test]
+    fn a_guided_question_keeps_its_descriptions_when_the_warnings_overflow_anyway() {
+        let layout = layout(&question(SETUP, 30), 80, 24);
+        assert!(layout.cut);
+        for description in DESCRIPTIONS {
+            assert!(
+                layout.menu.iter().any(|line| line.contains(description)),
+                "{layout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_guided_question_shows_every_warning_when_the_choices_leave_room() {
+        let session = question(SETUP, 8);
+        let tall = layout(&session, 100, 40);
+        assert!(!tall.cut, "{tall:?}");
+        let short = layout(&session, 100, 14);
+        assert!(short.cut, "{short:?}");
+        assert!(short.room < tall.room, "{short:?}");
+    }
+
+    #[test]
+    fn a_guided_question_saves_blank_rows_before_it_hides_choices() {
+        let choices = ["[1] Open", "[2] Scoped", "[3] Locked"];
+        let descriptions = ["Any command.", "Only what packs allow.", "Read only."];
+        let view = |height, density| {
+            menu_view(
+                &choices,
+                &descriptions,
+                Some(0),
+                None,
+                "",
+                80,
+                height,
+                density,
+            )
+        };
+        // Each choice takes 3 rows with its blank row, so 3 choices need 9 rows plus 1 spare row.
+        assert!(view(9, 0).1);
+        let (lines, hidden) = view(10, 0);
+        assert!(!hidden, "{lines:?}");
+        assert!(view(6, 2).1);
+        let (lines, hidden) = view(7, 2);
+        assert!(!hidden, "{lines:?}");
+        // Keeping only the selected description needs 4 rows plus 1 spare row.
+        let (lines, hidden) = view(5, 3);
+        assert!(!hidden, "{lines:?}");
+        assert!(lines.iter().any(|line| line.contains("Any command.")));
+        assert!(!lines.iter().any(|line| line.contains("Read only.")));
+        let session = Session::default();
+        let padded = section_lines(&session, 80, 16, 0, blank_rows(16, false)).lines;
+        let compact = section_lines(&session, 80, 14, 0, blank_rows(16, true)).lines;
+        assert!(compact.len() < padded.len());
+        // The title stays on the same row in both layouts.
+        let title = |lines: &[String]| lines.iter().position(|line| line.contains("Create a new"));
+        assert_eq!(title(&compact), title(&padded));
+        assert_eq!(title(&compact), Some(1));
     }
 
     #[test]
