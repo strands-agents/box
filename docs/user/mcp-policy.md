@@ -150,7 +150,8 @@ arguments with plain names.
 
 An argument can take its type from a definition in the server's `$defs`. A rule reads its fields
 the same way whatever the definition is called, including a name such as `zone-record`, and also
-when the definition is an array of objects. A definition that refers to itself, directly or through
+when the definition is an array of objects. The same holds for a field of `output.structured` that
+takes its type from the server's `$defs`. A definition that refers to itself, directly or through
 other definitions, has a type only down to the field where it repeats. For an argument `group`
 whose definition gives it a `parent` field of the same definition, that field is
 `context.input.group.parent`. A rule that reads a field above it, such as
@@ -276,10 +277,11 @@ Key it on `::response`, and require `output.reply` to be `result`:
   `output.structured` is what the tool answered. It holds the reply's `structuredContent`, keeping
   only the fields the tool's `outputSchema` declares, so a misspelled field fails at load. An
   `outputSchema` that Box can't turn into a policy type, such as one with a field named `if`, a
-  `$ref` it can't resolve, or a `$defs` name that isn't a plain name, declares no
-  `output.structured`, so a rule that reads it fails at load.
-  The server's other tools keep their outputs, unless the problem only appears when the outputs
-  are read together; then no tool on that server declares one.
+  `$ref` it can't resolve, or a name in its own `$defs` that isn't a plain name, declares no
+  `output.structured`, so a rule that reads it fails at load, and that tool's action in
+  `policy generate-schema` has no `structured` field. The server's other tools keep their outputs,
+  unless the problem only appears when the outputs are read together; then no tool on that server
+  declares one.
 - Box records no `output.structured` when the tool declares no `outputSchema`, when the reply isn't
   a `result`, or when a required field doesn't match its declared type. An optional field that
   doesn't match is left out, like an undeclared one. A JSON

@@ -111,10 +111,11 @@ pub fn generate_mcp_schema(server: &str, tools_list: &str) -> Result<String, Mcp
     }
 }
 
-/// `tools_list` without each `outputSchema` that does not generate alone, or without every
-/// `outputSchema` when none fails alone; `None` when no tool declares one.
+/// `tools_list` without each `outputSchema` that does not generate alone beside the server's
+/// `$defs`, or without every `outputSchema` when none fails alone; `None` when no tool declares one.
 fn without_unreadable_outputs(server: &str, tools_list: &str) -> Option<String> {
     let mut response = serde_json::from_str::<serde_json::Value>(tools_list).ok()?;
+    let server_definitions = response.pointer("/result/$defs").cloned();
     let pointer = if response.pointer("/result/tools").is_some() {
         "/result/tools"
     } else {
@@ -131,7 +132,11 @@ fn without_unreadable_outputs(server: &str, tools_list: &str) -> Option<String> 
         {
             continue;
         }
-        let alone = serde_json::json!({ "result": { "tools": [tool.clone()] } }).to_string();
+        let mut alone = serde_json::json!({ "result": { "tools": [tool.clone()] } });
+        if let Some(definitions) = &server_definitions {
+            alone["result"]["$defs"] = definitions.clone();
+        }
+        let alone = alone.to_string();
         if generate_from_tools(server, &alone).is_err()
             && let Some(tool) = tool.as_object_mut()
         {
@@ -1149,6 +1154,17 @@ fn make_definitions_generable_in(response: &mut serde_json::Value) -> Definition
             renamed |=
                 rewrite_definition_references(input, &[&input_scope, &tool_scope, &server_scope]);
         }
+        // The output's own definitions keep their names and shadow the renamed outer ones.
+        let output_scope = DefinitionScope {
+            names: schema_definitions(tool.output.as_deref_mut())
+                .map(|definitions| definitions.keys().cloned().collect())
+                .unwrap_or_default(),
+            renamed: BTreeMap::new(),
+        };
+        if let Some(output) = tool.output.as_deref_mut() {
+            renamed |=
+                rewrite_definition_references(output, &[&output_scope, &tool_scope, &server_scope]);
+        }
         for definitions in tool.definitions_mut() {
             restructured |= give_array_elements_definitions(definitions, &mut names);
             restructured |= make_definition_cycles_opaque(definitions);
@@ -2043,6 +2059,220 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error:?}\n{schema}"));
         assert!(schema.contains("a?: cf::t_Output_k_x_2"), "{schema}");
         assert!(schema.contains("structured?: tOutput"), "{schema}");
+    }
+
+    /// A server whose tool `b` answers with a field `r` that refers to `name` in `definitions`,
+    /// beside the tools in `others`, with `definitions` in the server's or in `b`'s own `$defs`.
+    fn output_referring_tools(
+        name: &str,
+        definitions: serde_json::Value,
+        in_tool: bool,
+        others: &[serde_json::Value],
+    ) -> serde_json::Value {
+        let mut b = serde_json::json!({"name": "b",
+            "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}},
+            "outputSchema": {"type": "object", "properties": {"r": {"$ref": format!("#/$defs/{name}")}}, "required": ["r"]}});
+        let mut tools = others.to_vec();
+        if in_tool {
+            b["$defs"] = definitions;
+            tools.push(b);
+            return serde_json::json!({"result": {"tools": tools}});
+        }
+        tools.push(b);
+        serde_json::json!({"result": {"tools": tools, "$defs": definitions}})
+    }
+
+    const B: &str = r#"cf::Action::"b""#;
+
+    /// Whether a rule on `b` can compare `output.structured.r.<field>` with `value` and not `other`.
+    fn reads_output_field(schema: &Schema, field: &str, value: &str, other: &str) -> bool {
+        let condition = |value: &str| {
+            format!(
+                "context has output && context.output has structured \
+                 && context.output.structured.r.{field} == {value}"
+            )
+        };
+        validates(schema, B, &condition(value)) && !validates(schema, B, &condition(other))
+    }
+
+    /// One definition `name` of an object with a required string field `x`.
+    fn string_field(name: &str) -> serde_json::Value {
+        serde_json::json!({ name: {"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]} })
+    }
+
+    #[test]
+    fn renaming_a_shared_definition_keeps_the_structured_output_of_every_tool() {
+        let tools = serde_json::json!({"result": {
+            "$defs": {"label-text": {"type": "string"}, "Plain": {"type": "integer"}},
+            "tools": [
+                {"name": "list",
+                 "inputSchema": {"type": "object", "properties": {"key": {"$ref": "#/$defs/label-text"}}},
+                 "outputSchema": {"type": "object", "properties": {"value": {"$ref": "#/$defs/label-text"}}}},
+                {"name": "get",
+                 "inputSchema": {"type": "object", "properties": {}},
+                 "outputSchema": {"type": "object", "properties": {"value": {"$ref": "#/$defs/Plain"}}}}
+            ]
+        }});
+        let (generated, schema) = composed(&tools);
+        let lost = [("list", r#""v""#, "1"), ("get", "1", r#""v""#)]
+            .into_iter()
+            .filter(|(tool, value, other)| {
+                let action = format!(r#"cf::Action::"{tool}""#);
+                let condition = |value: &str| {
+                    format!(
+                        "context has output && context.output has structured \
+                         && context.output.structured has value \
+                         && context.output.structured.value == {value}"
+                    )
+                };
+                !(validates(&schema, &action, &condition(value))
+                    && !validates(&schema, &action, &condition(other)))
+            })
+            .map(|(tool, _, _)| tool)
+            .collect::<Vec<_>>();
+        assert!(
+            lost.is_empty(),
+            "these tools lost their output: {lost:?}\n{generated}"
+        );
+    }
+
+    #[test]
+    fn an_output_that_refers_to_a_server_definition_is_judged_with_the_server_definitions() {
+        let tools = serde_json::json!({"result": {
+            "$defs": {"Plain": {"type": "integer"}},
+            "tools": [
+                {"name": "get",
+                 "inputSchema": {"type": "object", "properties": {}},
+                 "outputSchema": {"type": "object", "properties": {"value": {"$ref": "#/$defs/Plain"}}, "required": ["value"]}},
+                {"name": "broken",
+                 "inputSchema": {"type": "object", "properties": {}},
+                 "outputSchema": {"type": "object", "properties": {"if": {"type": "string"}}}}
+            ]
+        }});
+        let (generated, schema) = composed(&tools);
+        let get = r#"cf::Action::"get""#;
+        let condition = |value: &str| {
+            format!(
+                "context has output && context.output has structured \
+                 && context.output.structured.value == {value}"
+            )
+        };
+        assert!(
+            validates(&schema, get, &condition("1"))
+                && !validates(&schema, get, &condition(r#""v""#)),
+            "{generated}"
+        );
+        assert!(
+            !generated.contains("structured?: brokenOutput"),
+            "{generated}"
+        );
+    }
+
+    #[test]
+    fn renaming_a_server_definition_for_another_tool_keeps_the_output_that_refers_to_it() {
+        let a = serde_json::json!({"name": "a", "inputSchema": {"type": "object", "properties": {"p": {"type": "string"}}}});
+        for name in ["aOutput", "aInput"] {
+            let (alone, schema) = composed(&output_referring_tools(
+                name,
+                string_field(name),
+                false,
+                &[],
+            ));
+            assert!(
+                reads_output_field(&schema, "x", r#""v""#, "1"),
+                "{name}\n{alone}"
+            );
+            let (generated, schema) = composed(&output_referring_tools(
+                name,
+                string_field(name),
+                false,
+                std::slice::from_ref(&a),
+            ));
+            assert!(
+                reads_output_field(&schema, "x", r#""v""#, "1"),
+                "the output follows the rename of {name}\n{generated}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_output_that_refers_to_a_renamed_server_or_tool_definition_keeps_its_output() {
+        for (name, in_tool) in [
+            ("String", false),
+            ("datetime", false),
+            ("zone-record", false),
+            ("String", true),
+            ("zone-record", true),
+        ] {
+            let (generated, schema) = composed(&output_referring_tools(
+                name,
+                string_field(name),
+                in_tool,
+                &[],
+            ));
+            assert!(
+                reads_output_field(&schema, "x", r#""v""#, "1"),
+                "{name} in the tool: {in_tool}\n{generated}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_output_definition_shadows_a_renamed_server_definition_of_the_same_name() {
+        let a = serde_json::json!({"name": "a", "inputSchema": {"type": "object", "properties": {"p": {"$ref": "#/$defs/aOutput"}}}});
+        let mut tools = output_referring_tools("aOutput", string_field("aOutput"), false, &[a]);
+        tools["result"]["tools"][1]["outputSchema"]["$defs"] = serde_json::json!(
+            {"aOutput": {"type": "object", "properties": {"y": {"type": "integer"}}, "required": ["y"]}}
+        );
+        let (generated, schema) = composed(&tools);
+        assert!(
+            reads_output_field(&schema, "y", "1", r#""v""#),
+            "{generated}"
+        );
+        assert!(
+            !validates(
+                &schema,
+                B,
+                r#"context has output && context.output has structured && context.output.structured.r.x == "v""#
+            ),
+            "{generated}"
+        );
+        assert!(validates(
+            &schema,
+            r#"cf::Action::"a""#,
+            r#"context.input has p && context.input.p.x == "v""#
+        ));
+    }
+
+    #[test]
+    fn an_output_that_refers_to_a_moved_or_cut_server_definition_keeps_its_output() {
+        let a = serde_json::json!({"name": "a", "inputSchema": {"type": "object", "properties": {"p": {"$ref": "#/$defs/List"}}}});
+        let definitions = serde_json::json!({
+            "List": {"type": "array", "items": {"type": "object", "properties": {"x": {"type": "string"}}}},
+            "Node": {"type": "object", "properties": {"x": {"type": "string"}, "up": {"$ref": "#/$defs/Node"}}, "required": ["x"]}
+        });
+        for (name, condition) in [
+            ("List", "context.output.structured.r.isEmpty()"),
+            ("Node", r#"context.output.structured.r.x == "v""#),
+        ] {
+            let (generated, schema) = composed(&output_referring_tools(
+                name,
+                definitions.clone(),
+                false,
+                std::slice::from_ref(&a),
+            ));
+            let reads = |condition: &str| {
+                validates(
+                    &schema,
+                    B,
+                    &format!("context has output && context.output has structured && {condition}"),
+                )
+            };
+            assert!(
+                reads(condition) && !reads("context.output.structured.r == 1"),
+                "{name}\n{generated}"
+            );
+        }
     }
 
     const TOOLS: &str = r#"
