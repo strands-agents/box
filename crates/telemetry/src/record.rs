@@ -514,7 +514,7 @@ pub struct DecisionRecord {
     /// Whether this is the run's first denial that was not enforced.
     first_flip: bool,
     /// Each rule that would have denied the action in log-only mode, across all its legs and gates.
-    would_flip: Vec<String>,
+    would_deny: Vec<String>,
     unix_nanos: u128,
 }
 
@@ -611,15 +611,15 @@ impl DecisionRecord {
     /// Name each rule that would have denied the action in log-only mode, one per leg or gate it
     /// let through, in the order they were decided.
     #[must_use]
-    pub fn flipped_by(mut self, rules: impl IntoIterator<Item = String>) -> Self {
-        self.would_flip = rules.into_iter().collect();
+    pub fn with_would_deny(mut self, rules: impl IntoIterator<Item = String>) -> Self {
+        self.would_deny = rules.into_iter().collect();
         self
     }
 
     /// Each rule that would have denied the action in log-only mode.
     #[must_use]
-    pub fn would_flip(&self) -> &[String] {
-        &self.would_flip
+    pub fn would_deny(&self) -> &[String] {
+        &self.would_deny
     }
 
     /// Name every policy that determined this decision. The first one governs, so it supplies
@@ -721,8 +721,8 @@ impl DecisionRecord {
         if self.first_flip {
             pairs.push(("strands.box.policy.first_flip", AnyValue::Boolean(true)));
         }
-        if !self.would_flip.is_empty() {
-            pairs.push((WOULD_FLIP, text_list(self.would_flip.iter().cloned())));
+        if !self.would_deny.is_empty() {
+            pairs.push((WOULD_DENY_IDS, text_list(self.would_deny.iter().cloned())));
         }
 
         // The governing rule, under this product's own namespace.
@@ -809,7 +809,7 @@ impl DecisionRecord {
             subject: None,
             enforced: true,
             first_flip: false,
-            would_flip: Vec::new(),
+            would_deny: Vec::new(),
             unix_nanos: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| since.as_nanos()),
@@ -820,7 +820,7 @@ impl DecisionRecord {
 /// The identifiers of every policy that determined one decision.
 const DETERMINING_IDS: &str = "strands.box.policy.determining.ids";
 /// Each rule that would have denied an action log-only mode let through.
-const WOULD_FLIP: &str = "strands.box.policy.log_only.would_flip";
+const WOULD_DENY_IDS: &str = "strands.box.policy.would_deny.ids";
 
 /// The rule that decided, by the identifier the operator authored.
 const RULE: &str = "strands.box.policy.rule";
@@ -1138,12 +1138,12 @@ mod tests {
     fn an_unenforced_denial_lists_every_rule_that_would_have_denied_it() {
         let record = DecisionRecord::deny("Box::Action::\"fs:move\"", "/w/b", "r", "forbid")
             .not_enforced()
-            .flipped_by(["no-read-a".to_string(), "no-move-onto-b".to_string()]);
-        assert_eq!(record.would_flip(), ["no-read-a", "no-move-onto-b"]);
+            .with_would_deny(["no-read-a".to_string(), "no-move-onto-b".to_string()]);
+        assert_eq!(record.would_deny(), ["no-read-a", "no-move-onto-b"]);
         let listed = record
             .attributes()
             .into_iter()
-            .find(|(key, _)| *key == "strands.box.policy.log_only.would_flip")
+            .find(|(key, _)| *key == "strands.box.policy.would_deny.ids")
             .map(|(_, value)| format!("{value:?}"))
             .expect("the list is written");
         assert!(
@@ -1154,7 +1154,7 @@ mod tests {
             DecisionRecord::permit("Box::Action::\"fs:read\"", "/w/a", "r")
                 .attributes()
                 .iter()
-                .all(|(key, _)| *key != "strands.box.policy.log_only.would_flip")
+                .all(|(key, _)| *key != "strands.box.policy.would_deny.ids")
         );
     }
 

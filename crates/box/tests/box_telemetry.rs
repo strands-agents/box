@@ -1139,7 +1139,7 @@ when { context.input.path like "{box_home}/b.txt" };
     assert!(
         record
             .iter()
-            .any(|pair| pair == "strands.box.policy.log_only.would_flip=no-read-a,no-move-onto-b"),
+            .any(|pair| pair == "strands.box.policy.would_deny.ids=no-read-a,no-move-onto-b"),
         "both rules are named: {record:?}"
     );
 }

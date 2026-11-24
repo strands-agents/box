@@ -103,14 +103,24 @@ pub struct PolicyDecision {
     pub cause: String,
     /// The reason for a refusal.
     pub reason: Option<String>,
-    /// Whether Box applied the decision; `false` for a denial log-only mode let through, which the
-    /// workload went ahead with.
-    pub enforced: bool,
-    /// Whether this is the run's first denial that was not enforced. Later decisions can differ
-    /// from what an enforcing run would decide.
-    pub first_flip: bool,
-    /// Each rule that would have denied the action in log-only mode, across all its legs and gates.
-    pub would_flip: Vec<String>,
+    /// Whether Box applied the decision, or log-only mode let a denied action through.
+    pub enforcement: Enforcement,
+    /// Each rule that would have denied the action in log-only mode, across all its steps.
+    pub would_deny: Vec<String>,
+}
+
+/// Whether Box applied one decision as the policy made it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Enforcement {
+    /// Box applied the decision as the policy made it.
+    Applied,
+    /// Log-only mode let through a decision the policy denied.
+    LetThrough {
+        /// Whether this is the run's first decision log-only mode let through, after which a run
+        /// can differ from an enforcing one.
+        first: bool,
+    },
 }
 
 impl PolicyDecision {
@@ -124,9 +134,14 @@ impl PolicyDecision {
             rule: record.rule().to_string(),
             cause: record.cause().as_str().to_string(),
             reason: record.reason().map(str::to_string),
-            enforced: record.enforced(),
-            first_flip: record.is_first_flip(),
-            would_flip: record.would_flip().to_vec(),
+            enforcement: if record.enforced() {
+                Enforcement::Applied
+            } else {
+                Enforcement::LetThrough {
+                    first: record.is_first_flip(),
+                }
+            },
+            would_deny: record.would_deny().to_vec(),
         }
     }
 }

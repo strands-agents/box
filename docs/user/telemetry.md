@@ -221,11 +221,11 @@ values: `permitted`, `forbidden`, `no_match`, `policy_pending`, `internal_fault`
 In [log-only mode](policy.md#log-only-mode), a denial that Box let through keeps `verdict = deny` and
 the policy's own cause and rules, and also carries `strands.box.policy.enforced = false`. The run's
 first such denial also carries `strands.box.policy.first_flip = true`, because later decisions can
-differ from what an enforcing run would decide. `strands.box.policy.log_only.would_flip` lists every
+differ from what an enforcing run would decide. `strands.box.policy.would_deny.ids` lists every
 rule that would have denied the action, across all its steps and gates, in the order decided; a
-missing `permit` appears as `<default-deny>`. A record Box applied carries `would_flip` too when a
-step log-only let through came before what really blocked the action, such as the kernel or a
-floor, so a trial still finds that rule. An applied record never carries `enforced` or
+missing `permit` appears as `<default-deny>`. A record Box applied carries `would_deny.ids` too
+when a step log-only let through came before what really blocked the action, such as the kernel or
+a floor, so a trial still finds that rule. An applied record never carries `enforced` or
 `first_flip`, so `verdict == "deny"` finds every would-deny, and `enforced` separates them from real
 blocks.
 

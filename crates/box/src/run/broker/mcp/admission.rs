@@ -197,7 +197,7 @@ pub(super) fn admit_tool_call(
                 // first denial log-only mode let through decides the record.
                 Decision::Allow { .. } if decision.would_deny().is_some() => {
                     return Ok(McpRequestAdmission::Allowed(
-                        coarse.flipped_by(crate::run::telemetry::would_flip_of([
+                        coarse.with_would_deny(crate::run::telemetry::would_deny_ids([
                             &decision, &refined,
                         ])),
                         request_id,
@@ -1182,7 +1182,7 @@ mod tests {
         .expect("valid tool call") else {
             panic!("log-only mode lets the call through");
         };
-        assert_eq!(decision.would_flip(), ["coarse-forbid", "tool-forbid"]);
+        assert_eq!(decision.would_deny(), ["coarse-forbid", "tool-forbid"]);
     }
 
     #[test]

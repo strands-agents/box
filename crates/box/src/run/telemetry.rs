@@ -55,7 +55,7 @@ pub(crate) struct EffectiveDecision {
     /// Whether Box applied the verdict; `false` for a denial log-only mode let through.
     enforced: bool,
     /// Each rule log-only mode let through across the attempt's legs and gates.
-    would_flip: Vec<String>,
+    would_deny: Vec<String>,
 }
 
 /// What determined an effective decision.
@@ -79,7 +79,7 @@ pub(crate) struct ObservedDecision {
     resource: String,
     decision: Decision,
     /// Each rule log-only mode let through across the attempt, on the observation that decides it.
-    would_flip: Vec<String>,
+    would_deny: Vec<String>,
 }
 
 impl ObservedDecision {
@@ -150,7 +150,7 @@ impl EffectiveDecision {
                 cause: decision_cause(reason),
                 attribution: decision.attribution().to_vec(),
                 enforced: false,
-                would_flip: would_flip_of([decision]),
+                would_deny: would_deny_ids([decision]),
             },
             Decision::Allow { rule, .. } => Self {
                 correlation: telemetry::Correlation::current(),
@@ -163,7 +163,7 @@ impl EffectiveDecision {
                 cause: DecisionCause::Permitted,
                 attribution: decision.attribution().to_vec(),
                 enforced: true,
-                would_flip: Vec::new(),
+                would_deny: Vec::new(),
             },
             Decision::Deny { reason, rule, .. } => Self {
                 correlation: telemetry::Correlation::current(),
@@ -176,7 +176,7 @@ impl EffectiveDecision {
                 cause: decision_cause(reason),
                 attribution: decision.attribution().to_vec(),
                 enforced: true,
-                would_flip: Vec::new(),
+                would_deny: Vec::new(),
             },
         }
     }
@@ -198,7 +198,7 @@ impl EffectiveDecision {
             cause: DecisionCause::Enforcement,
             attribution: Vec::new(),
             enforced: true,
-            would_flip: Vec::new(),
+            would_deny: Vec::new(),
         }
     }
 
@@ -220,7 +220,7 @@ impl EffectiveDecision {
             cause: DecisionCause::Enforcement,
             attribution: Vec::new(),
             enforced: true,
-            would_flip: Vec::new(),
+            would_deny: Vec::new(),
         }
     }
 
@@ -235,10 +235,10 @@ impl EffectiveDecision {
             Some(observed) => Self::from_policy(action, resource, &observed.decision),
             None => Self::enforcement_permit(action, resource, gate),
         };
-        decision.flipped_by(
+        decision.with_would_deny(
             determined
                 .into_iter()
-                .flat_map(|observed| observed.would_flip.clone()),
+                .flat_map(|observed| observed.would_deny.clone()),
         )
     }
 
@@ -254,15 +254,15 @@ impl EffectiveDecision {
             Some(observed) => Self::from_policy(action, resource, &observed.decision),
             None => Self::enforcement_deny(action, resource, gate, reason),
         };
-        decision.flipped_by(
+        decision.with_would_deny(
             determined
                 .into_iter()
-                .flat_map(|observed| observed.would_flip.clone()),
+                .flat_map(|observed| observed.would_deny.clone()),
         )
     }
 
     /// One check of a native filesystem operation the kernel refused overall: the gate's refusal,
-    /// naming in `would_flip` the rule of a check log-only mode let through.
+    /// naming in `would_deny` the rule of a check log-only mode let through.
     pub(crate) fn refused_check(
         action: impl Into<String>,
         resource: impl Into<String>,
@@ -270,15 +270,16 @@ impl EffectiveDecision {
         gate: &'static str,
         reason: impl Into<String>,
     ) -> Self {
-        Self::enforcement_deny(action, resource, gate, reason).flipped_by(would_flip_of([decision]))
+        Self::enforcement_deny(action, resource, gate, reason)
+            .with_would_deny(would_deny_ids([decision]))
     }
 
     /// Name every rule log-only mode let through across the attempt, when there are any; a
     /// decision keeps its own when `rules` names none.
-    pub(crate) fn flipped_by(mut self, rules: impl IntoIterator<Item = String>) -> Self {
+    pub(crate) fn with_would_deny(mut self, rules: impl IntoIterator<Item = String>) -> Self {
         let rules: Vec<String> = rules.into_iter().collect();
         if !rules.is_empty() {
-            self.would_flip = rules;
+            self.would_deny = rules;
         }
         self
     }
@@ -306,7 +307,7 @@ impl EffectiveDecision {
             cause: DecisionCause::Enforcement,
             attribution: Vec::new(),
             enforced: true,
-            would_flip: Vec::new(),
+            would_deny: Vec::new(),
         }
     }
 
@@ -333,10 +334,10 @@ impl EffectiveDecision {
         } else {
             record.not_enforced()
         };
-        let record = if self.would_flip.is_empty() {
+        let record = if self.would_deny.is_empty() {
             record
         } else {
-            record.flipped_by(self.would_flip)
+            record.with_would_deny(self.would_deny)
         };
         record
             .correlated(self.correlation)
@@ -363,8 +364,8 @@ impl EffectiveDecision {
     }
 
     #[cfg(test)]
-    pub(crate) fn would_flip(&self) -> &[String] {
-        &self.would_flip
+    pub(crate) fn would_deny(&self) -> &[String] {
+        &self.would_deny
     }
 
     #[cfg(test)]
@@ -395,7 +396,7 @@ impl DecisionObserver for PolicyDecisionObserver {
                     action: action.to_string(),
                     resource: resource.to_string(),
                     decision: decision.clone(),
-                    would_flip: Vec::new(),
+                    would_deny: Vec::new(),
                 });
             }
         });
@@ -424,9 +425,9 @@ impl ObservationCapture {
     pub(crate) fn last(self) -> Option<ObservedDecision> {
         let observations = self.finish();
         let index = deciding_index(&observations)?;
-        let would_flip = would_flip_of(observations.iter().map(|observed| &observed.decision));
+        let would_deny = would_deny_ids(observations.iter().map(|observed| &observed.decision));
         let mut deciding = observations.into_iter().nth(index)?;
-        deciding.would_flip = would_flip;
+        deciding.would_deny = would_deny;
         Some(deciding)
     }
 
@@ -808,7 +809,7 @@ fn ordinary_egress_decision(
     observations: &[ObservedDecision],
 ) -> EffectiveDecision {
     let determined = deciding(observations);
-    let would_flip = would_flip_of(observations.iter().map(|observed| &observed.decision));
+    let would_deny = would_deny_ids(observations.iter().map(|observed| &observed.decision));
     let decision = match refusal {
         Some(refusal) => EffectiveDecision::gate_deny(
             identity.action(),
@@ -824,7 +825,7 @@ fn ordinary_egress_decision(
             determined,
         ),
     };
-    decision.flipped_by(would_flip)
+    decision.with_would_deny(would_deny)
 }
 
 /// The verdict that decides an attempt over `observations`: the first denial log-only mode let
@@ -835,7 +836,7 @@ fn deciding(observations: &[ObservedDecision]) -> Option<&ObservedDecision> {
 
 /// Each rule that would have denied one of `decisions` and that log-only mode let through, in the
 /// order decided, named as its record names it.
-pub(crate) fn would_flip_of<'a>(decisions: impl IntoIterator<Item = &'a Decision>) -> Vec<String> {
+pub(crate) fn would_deny_ids<'a>(decisions: impl IntoIterator<Item = &'a Decision>) -> Vec<String> {
     let mut rules: Vec<String> = Vec::new();
     for decision in decisions {
         let Decision::Allow {
@@ -877,7 +878,7 @@ fn remote_mcp_decision(
     refusal: Option<String>,
     observations: &[ObservedDecision],
 ) -> EffectiveDecision {
-    remote_mcp_record(frame, refusal, observations).flipped_by(would_flip_of(
+    remote_mcp_record(frame, refusal, observations).with_would_deny(would_deny_ids(
         observations.iter().map(|observed| &observed.decision),
     ))
 }
@@ -1292,7 +1293,7 @@ mod tests {
     }
 
     /// **A native check log-only mode let through, in an operation the kernel refused overall, is
-    /// the gate's refusal that still names the rule in `would_flip`**, so a trial loses no rule and
+    /// the gate's refusal that still names the rule in `would_deny`**, so a trial loses no rule and
     /// no record says a log-only policy blocked something; a real permit is the gate's refusal.
     #[test]
     fn a_refused_native_check_keeps_the_rule_log_only_let_through() {
@@ -1317,7 +1318,7 @@ mod tests {
         );
         assert!(refused.enforced);
         assert_eq!(
-            refused.would_flip,
+            refused.would_deny,
             ["no-connect"],
             "the rule is still named"
         );
@@ -1334,7 +1335,7 @@ mod tests {
     }
 
     /// **A real block after a let-through leg names that leg's rule**, on a record Box applied: it
-    /// carries `would_flip` and no `enforced = false`, so a trial still finds the rule.
+    /// carries `would_deny` and no `enforced = false`, so a trial still finds the rule.
     #[test]
     fn a_real_block_after_a_let_through_leg_still_names_its_rule() {
         let flipped = connect_decision(
@@ -1354,10 +1355,10 @@ mod tests {
             Some(&deciding),
         );
         assert!(blocked.enforced);
-        assert_eq!(blocked.would_flip, ["no-connect"]);
+        assert_eq!(blocked.would_deny, ["no-connect"]);
         let record = blocked.into_record();
         assert!(record.enforced());
-        assert_eq!(record.would_flip(), ["no-connect"]);
+        assert_eq!(record.would_deny(), ["no-connect"]);
     }
 
     /// One `net:connect` decided by an engine over `policy`, in log-only mode when `log_only` holds.
@@ -1427,17 +1428,24 @@ mod tests {
                 (
                     decision.permitted,
                     decision.cause.as_str(),
-                    decision.enforced,
-                    decision.first_flip,
+                    decision.enforcement,
                 )
             })
             .collect();
         assert_eq!(
             shape,
             [
-                (false, "no_match", false, true),
-                (false, "no_match", false, false),
-                (false, "enforcement", true, false),
+                (
+                    false,
+                    "no_match",
+                    crate::Enforcement::LetThrough { first: true }
+                ),
+                (
+                    false,
+                    "no_match",
+                    crate::Enforcement::LetThrough { first: false }
+                ),
+                (false, "enforcement", crate::Enforcement::Applied),
             ]
         );
     }
@@ -1479,14 +1487,14 @@ mod tests {
             PolicyDecisionObserver.observed(r#"Box::Action::"fs:read""#, "/w/a", decision);
         }
         let deciding = capture.last().expect("a verdict was observed");
-        assert_eq!(deciding.would_flip, ["no-connect", "<default-deny>"]);
+        assert_eq!(deciding.would_deny, ["no-connect", "<default-deny>"]);
         let record = EffectiveDecision::gate_permit(
             r#"Box::Action::"fs:read""#,
             "/w/a",
             "shell",
             Some(&deciding),
         );
-        assert_eq!(record.would_flip, ["no-connect", "<default-deny>"]);
+        assert_eq!(record.would_deny, ["no-connect", "<default-deny>"]);
 
         // A later leg's real denial stopped the attempt, so that denial decides the record.
         let denied = connect_decision(
@@ -1984,7 +1992,7 @@ mod tests {
             action: action.to_string(),
             resource: "demo/add".to_string(),
             decision: decision.clone(),
-            would_flip: Vec::new(),
+            would_deny: Vec::new(),
         };
         let effective = remote_mcp_decision(
             &McpFrame::ToolCall {
@@ -2138,7 +2146,7 @@ mod tests {
             action: r#"Box::Action::"fs:read""#.to_string(),
             resource: "~/secret".to_string(),
             decision: decision.clone(),
-            would_flip: Vec::new(),
+            would_deny: Vec::new(),
         };
 
         // A floor denial over a policy permit.
