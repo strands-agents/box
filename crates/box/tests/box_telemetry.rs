@@ -1010,6 +1010,240 @@ fn an_unreachable_target_reports_the_lost_records_once() {
     );
 }
 
+/// One decision record's attributes as `key=value` text, for each record whose resource ends with
+/// `resource`.
+fn decisions_on(text: &str, resource: &str) -> Vec<Vec<String>> {
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let parsed: serde_json::Value =
+            serde_json::from_str(line).expect("one OTLP request per line");
+        for resource_logs in parsed["resourceLogs"].as_array().into_iter().flatten() {
+            for scope in resource_logs["scopeLogs"].as_array().into_iter().flatten() {
+                if scope["scope"]["name"] != "strands-box.policy" {
+                    continue;
+                }
+                for entry in scope["logRecords"].as_array().into_iter().flatten() {
+                    let attributes: Vec<String> = entry["attributes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|attribute| {
+                            let value = &attribute["value"];
+                            let text = value["stringValue"]
+                                .as_str()
+                                .map(str::to_string)
+                                .or_else(|| {
+                                    value["boolValue"].as_bool().map(|flag| flag.to_string())
+                                })
+                                .or_else(|| {
+                                    value["arrayValue"]["values"].as_array().map(|items| {
+                                        items
+                                            .iter()
+                                            .filter_map(|item| item["stringValue"].as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(",")
+                                    })
+                                })
+                                .unwrap_or_default();
+                            format!("{}={text}", attribute["key"].as_str().unwrap_or_default())
+                        })
+                        .collect();
+                    if attributes.iter().any(|pair| {
+                        pair.starts_with("strands.box.policy.resource=") && pair.ends_with(resource)
+                    }) {
+                        found.push(attributes);
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
+/// **In log-only mode a denied read goes ahead, and its record keeps the policy's denial.** The
+/// record says `verdict = deny`, `enforced = false`, and, as the run's first, `first_flip = true`;
+/// the permitted read carries neither; and `policy_installed` states the mode. The same box
+/// enforcing refuses the read, which is the paired control.
+#[test]
+fn a_log_only_box_lets_a_denied_read_through_and_records_it_unenforced() {
+    needs_a_box!("a_log_only_box_lets_a_denied_read_through_and_records_it_unenforced");
+    for (name, command) in [
+        (
+            "shell",
+            r#"zsh -c 'cat "$HOME/allowed.txt"; cat "$HOME/secret.txt"'"#,
+        ),
+        (
+            "monty",
+            r#"python3 -c "from pathlib import Path; print(Path('$HOME/allowed.txt').read_text()); print(Path('$HOME/secret.txt').read_text())""#,
+        ),
+    ] {
+        let trial = Request::with_policy(&format!("log-only-{name}"), READ_ONE_FILE)
+            .log_only()
+            .expect();
+        std::fs::write(trial.box_home().join("allowed.txt"), "public").expect("the allowed file");
+        std::fs::write(trial.box_home().join("secret.txt"), "private-text")
+            .expect("the denied file");
+        let output = trial.bash(command);
+        assert!(output.status.success(), "{name}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("private-text"),
+            "{name}: the denied read went ahead: {output:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("log-only mode"),
+            "{name}: the run states the mode on stderr: {output:?}"
+        );
+
+        let text = std::fs::read_to_string(default_records(&trial.root())).expect("the records");
+        let secret = decisions_on(&text, "secret.txt");
+        assert!(
+            !secret.is_empty(),
+            "{name}: the denied read is recorded: {text}"
+        );
+        for expected in [
+            "strands.box.policy.verdict=deny",
+            "strands.box.policy.cause=no_match",
+            "strands.box.policy.enforced=false",
+            "strands.box.policy.first_flip=true",
+        ] {
+            assert!(
+                secret[0].iter().any(|pair| pair == expected),
+                "{name}: {expected} is missing: {:?}",
+                secret[0]
+            );
+        }
+        let allowed = decisions_on(&text, "allowed.txt");
+        assert!(
+            allowed.iter().flatten().all(|pair| {
+                !pair.starts_with("strands.box.policy.enforced")
+                    && !pair.starts_with("strands.box.policy.first_flip")
+            }),
+            "{name}: an applied verdict carries neither: {allowed:?}"
+        );
+        assert!(
+            text.contains(
+                r#""key":"strands.box.control.enforcement","value":{"stringValue":"log_only"}"#
+            ),
+            "{name}: policy_installed states the mode: {text}"
+        );
+    }
+
+    let enforced = Request::with_policy("log-only-control", READ_ONE_FILE).expect();
+    std::fs::write(enforced.box_home().join("secret.txt"), "private-text")
+        .expect("the denied file");
+    let output = enforced.bash("zsh -c 'cat $HOME/secret.txt || true'");
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("private-text"),
+        "the enforcing box refuses the read: {output:?}"
+    );
+    let text = std::fs::read_to_string(default_records(&enforced.root())).expect("the records");
+    assert!(
+        text.contains(
+            r#""key":"strands.box.control.enforcement","value":{"stringValue":"enforce"}"#
+        ),
+        "an enforcing run states its mode too: {text}"
+    );
+}
+
+/// **In log-only mode a Shell symlink to a read-forbidden file goes ahead, and its record names the
+/// read leg's `forbid`.** The symlink raises three legs, and in log-only mode the denied read leg
+/// does not stop the others, so the first leg let through decides the record, not the last permit.
+#[test]
+fn a_log_only_symlink_records_the_read_leg_that_would_have_denied_it() {
+    needs_a_box!("a_log_only_symlink_records_the_read_leg_that_would_have_denied_it");
+    let policy = r#"
+permit(principal, action == Box::Action::"shell:exec", resource);
+permit(principal, action == Box::Action::"fs:write", resource)
+when { context.input.path like "{box_home}/*" };
+permit(principal, action == Box::Action::"fs:read", resource)
+when { context.input.path like "{box_home}*" };
+@id("no-secret-read")
+forbid(principal, action == Box::Action::"fs:read", resource)
+when { context.input.path like "{box_home}/secret.txt" };
+"#;
+    let trial = Request::with_policy("log-only-symlink", policy)
+        .log_only()
+        .expect();
+    std::fs::write(trial.box_home().join("secret.txt"), "private-text").expect("the denied file");
+    let output = trial.bash(r#"zsh -c 'cd "$HOME" && ln -s secret.txt link.txt'"#);
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        trial.box_home().join("link.txt").is_symlink(),
+        "the symlink went ahead: {output:?}"
+    );
+
+    let text = std::fs::read_to_string(default_records(&trial.root())).expect("the records");
+    let flipped: Vec<_> = decisions_on(&text, "")
+        .into_iter()
+        .filter(|record| {
+            record
+                .iter()
+                .any(|pair| pair == "strands.box.policy.enforced=false")
+        })
+        .collect();
+    let [record] = flipped.as_slice() else {
+        panic!("one unenforced decision: {flipped:#?}");
+    };
+    // The record is the attempt's own, on the link, governed by the read leg's `forbid`.
+    for expected in [
+        "strands.box.policy.action=fs:write",
+        "strands.box.policy.verdict=deny",
+        "strands.box.policy.cause=forbidden",
+        "strands.box.policy.rule=no-secret-read",
+        "strands.box.policy.first_flip=true",
+    ] {
+        assert!(
+            record.iter().any(|pair| pair == expected),
+            "{expected} is missing: {record:?}"
+        );
+    }
+}
+
+/// **In log-only mode a Shell `mv` whose source read and destination are each forbidden goes ahead, and
+/// its one record names both rules**, so one trial finds every rule the move would break.
+#[test]
+fn a_log_only_move_names_every_leg_that_would_have_denied_it() {
+    needs_a_box!("a_log_only_move_names_every_leg_that_would_have_denied_it");
+    let policy = r#"
+permit(principal, action, resource);
+@id("no-read-a")
+forbid(principal, action == Box::Action::"fs:read", resource)
+when { context.input.path like "{box_home}/a.txt" };
+@id("no-move-onto-b")
+forbid(principal, action == Box::Action::"fs:move", resource)
+when { context.input.path like "{box_home}/b.txt" };
+"#;
+    let trial = Request::with_policy("log-only-move", policy)
+        .log_only()
+        .expect();
+    std::fs::write(trial.box_home().join("a.txt"), "moved").expect("the source");
+    let output = trial.bash(r#"zsh -c 'cd "$HOME" && mv a.txt b.txt'"#);
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        trial.box_home().join("b.txt").exists(),
+        "the move went ahead: {output:?}"
+    );
+
+    let text = std::fs::read_to_string(default_records(&trial.root())).expect("the records");
+    let flipped: Vec<_> = decisions_on(&text, "")
+        .into_iter()
+        .filter(|record| {
+            record
+                .iter()
+                .any(|pair| pair == "strands.box.policy.enforced=false")
+        })
+        .collect();
+    let [record] = flipped.as_slice() else {
+        panic!("one unenforced decision: {flipped:#?}");
+    };
+    assert!(
+        record
+            .iter()
+            .any(|pair| pair == "strands.box.policy.would_deny.ids=no-read-a,no-move-onto-b"),
+        "both rules are named: {record:?}"
+    );
+}
+
 /// **A target narrowed to refusals never fills with permits.**
 #[test]
 fn a_policy_denied_target_keeps_only_the_refusals() {

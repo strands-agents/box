@@ -79,7 +79,7 @@ after a run:
 | File | What runs it |
 | --- | --- |
 | `.git/hooks/*`, and `.git/config` (`core.hooksPath`, `core.fsmonitor`, aliases) | `git`. Even `git status` runs `core.fsmonitor`, and `git status` doesn't list either file. |
-| `.claude/settings.json` and `.claude/settings.local.json` (hooks), `.mcp.json` | Claude Code, when you run it outside the box. The permission mode and the allow rules Claude Code uses in the next box run. |
+| The agent's project settings, such as Claude Code's `.claude/settings.json` and `.mcp.json` | Your agent, the next time you run it in the project outside the box. For Claude Code, they also set the next box run's permissions. |
 | `package.json` scripts, `.npmrc` | `npm install`, `npm test`, and the like. |
 | `Makefile`, `build.rs`, `.cargo/config.toml`, other build files | `make`, `cargo build`, and other build tools. |
 | `.envrc` | `direnv`, as soon as you `cd` into the project. |

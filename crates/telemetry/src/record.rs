@@ -509,6 +509,12 @@ pub struct DecisionRecord {
     cause: DecisionCause,
     determining: Vec<DeterminingPolicy>,
     subject: Option<Subject>,
+    /// Whether Box applied this verdict; `false` for a denial log-only mode let through.
+    enforced: bool,
+    /// Whether this is the run's first denial that was not enforced.
+    first_flip: bool,
+    /// Each rule that would have denied the action in log-only mode, across all its legs and gates.
+    would_deny: Vec<String>,
     unix_nanos: u128,
 }
 
@@ -562,6 +568,58 @@ impl DecisionRecord {
         );
         self.cause = cause;
         self
+    }
+
+    /// State that Box did not apply this denial: log-only mode let the action go ahead.
+    ///
+    /// Only a denial can go unenforced, so a permit is left as it is, and a debug build asserts.
+    #[must_use]
+    pub fn not_enforced(mut self) -> Self {
+        debug_assert!(!self.permitted, "only a denial can go unenforced");
+        if !self.permitted {
+            self.enforced = false;
+        }
+        self
+    }
+
+    /// Mark this unenforced denial as the run's first, after which the run can drift from what
+    /// enforcing would have done.
+    ///
+    /// Only an unenforced denial can be a flip, so an enforced record is left as it is, and a debug
+    /// build asserts.
+    #[must_use]
+    pub fn first_flip(mut self) -> Self {
+        debug_assert!(!self.enforced, "only an unenforced denial can be a flip");
+        if !self.enforced {
+            self.first_flip = true;
+        }
+        self
+    }
+
+    /// Whether Box applied this verdict.
+    #[must_use]
+    pub fn enforced(&self) -> bool {
+        self.enforced
+    }
+
+    /// Whether this is the run's first denial that was not enforced.
+    #[must_use]
+    pub fn is_first_flip(&self) -> bool {
+        self.first_flip
+    }
+
+    /// Name each rule that would have denied the action in log-only mode, one per leg or gate it
+    /// let through, in the order they were decided.
+    #[must_use]
+    pub fn with_would_deny(mut self, rules: impl IntoIterator<Item = String>) -> Self {
+        self.would_deny = rules.into_iter().collect();
+        self
+    }
+
+    /// Each rule that would have denied the action in log-only mode.
+    #[must_use]
+    pub fn would_deny(&self) -> &[String] {
+        &self.would_deny
     }
 
     /// Name every policy that determined this decision. The first one governs, so it supplies
@@ -656,6 +714,16 @@ impl DecisionRecord {
         if let Some(reason) = self.reason() {
             pairs.push(("strands.box.policy.reason", reason.to_string().into()));
         }
+        // Only a denial log-only mode let through says so; an applied verdict carries neither.
+        if !self.enforced {
+            pairs.push(("strands.box.policy.enforced", AnyValue::Boolean(false)));
+        }
+        if self.first_flip {
+            pairs.push(("strands.box.policy.first_flip", AnyValue::Boolean(true)));
+        }
+        if !self.would_deny.is_empty() {
+            pairs.push((WOULD_DENY_IDS, text_list(self.would_deny.iter().cloned())));
+        }
 
         // The governing rule, under this product's own namespace.
         let governing = self.governing();
@@ -739,6 +807,9 @@ impl DecisionRecord {
             },
             determining: Vec::new(),
             subject: None,
+            enforced: true,
+            first_flip: false,
+            would_deny: Vec::new(),
             unix_nanos: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| since.as_nanos()),
@@ -748,6 +819,8 @@ impl DecisionRecord {
 
 /// The identifiers of every policy that determined one decision.
 const DETERMINING_IDS: &str = "strands.box.policy.determining.ids";
+/// Each rule that would have denied an action log-only mode let through.
+const WOULD_DENY_IDS: &str = "strands.box.policy.would_deny.ids";
 
 /// The rule that decided, by the identifier the operator authored.
 const RULE: &str = "strands.box.policy.rule";
@@ -926,6 +999,8 @@ pub struct ControlRecord {
     refusal: Option<String>,
     detail: Option<String>,
     unix_nanos: u128,
+    /// How the installed policy's verdicts apply, on a `policy_installed` record.
+    enforcement: Option<&'static str>,
 }
 
 impl ControlRecord {
@@ -953,6 +1028,13 @@ impl ControlRecord {
         self
     }
 
+    /// State how the installed policy's verdicts apply: `enforce` or `log_only`.
+    #[must_use]
+    pub fn enforcing(mut self, enforcement: &'static str) -> Self {
+        self.enforcement = Some(enforcement);
+        self
+    }
+
     /// The signal this record arrives on. Every control-plane record shares one.
     #[must_use]
     pub(crate) fn signal(&self) -> Signal {
@@ -976,6 +1058,9 @@ impl ControlRecord {
         }
         if let Some(detail) = &self.detail {
             pairs.push(("strands.box.control.detail", detail.clone()));
+        }
+        if let Some(enforcement) = self.enforcement {
+            pairs.push(("strands.box.control.enforcement", enforcement.to_string()));
         }
         pairs
     }
@@ -1003,6 +1088,7 @@ impl ControlRecord {
             subject,
             refusal,
             detail,
+            enforcement: None,
             unix_nanos: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| since.as_nanos()),
@@ -1013,6 +1099,79 @@ impl ControlRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Only a denial Box did not apply says so**, and only the run's first says it is the first
+    /// flip; an applied verdict carries neither attribute.
+    #[test]
+    fn an_unenforced_denial_states_it_and_an_applied_verdict_does_not() {
+        let keys = |record: &DecisionRecord| -> Vec<(&'static str, String)> {
+            record
+                .attributes()
+                .into_iter()
+                .filter(|(key, _)| key.ends_with(".enforced") || key.ends_with(".first_flip"))
+                .map(|(key, value)| (key, format!("{value:?}")))
+                .collect()
+        };
+        let applied = DecisionRecord::deny("Box::Action::\"fs:read\"", "/w/a", "r", "no permit");
+        assert!(keys(&applied).is_empty());
+        assert!(
+            keys(&DecisionRecord::permit(
+                "Box::Action::\"fs:read\"",
+                "/w/a",
+                "r"
+            ))
+            .is_empty()
+        );
+
+        let flip = applied.clone().not_enforced().first_flip();
+        assert!(!flip.enforced() && flip.is_first_flip());
+        assert_eq!(
+            keys(&flip),
+            [
+                ("strands.box.policy.enforced", "Boolean(false)".to_string()),
+                ("strands.box.policy.first_flip", "Boolean(true)".to_string()),
+            ]
+        );
+        assert_eq!(keys(&applied.not_enforced()).len(), 1);
+    }
+
+    /// Every rule that would have denied the action is listed, in order, and a record that names
+    /// none carries no such key.
+    #[test]
+    fn an_unenforced_denial_lists_every_rule_that_would_have_denied_it() {
+        let record = DecisionRecord::deny("Box::Action::\"fs:move\"", "/w/b", "r", "forbid")
+            .not_enforced()
+            .with_would_deny(["no-read-a".to_string(), "no-move-onto-b".to_string()]);
+        assert_eq!(record.would_deny(), ["no-read-a", "no-move-onto-b"]);
+        let listed = record
+            .attributes()
+            .into_iter()
+            .find(|(key, _)| *key == "strands.box.policy.would_deny.ids")
+            .map(|(_, value)| format!("{value:?}"))
+            .expect("the list is written");
+        assert!(
+            listed.contains("no-read-a") && listed.contains("no-move-onto-b"),
+            "{listed}"
+        );
+        assert!(
+            DecisionRecord::permit("Box::Action::\"fs:read\"", "/w/a", "r")
+                .attributes()
+                .iter()
+                .all(|(key, _)| *key != "strands.box.policy.would_deny.ids")
+        );
+    }
+
+    /// The `policy_installed` record states how the policy's verdicts apply.
+    #[test]
+    fn a_policy_installed_record_states_its_mode() {
+        let record = ControlRecord::completed(ControlOperation::PolicyInstalled, "policy.dw")
+            .enforcing("log_only");
+        assert!(
+            record
+                .attributes()
+                .contains(&("strands.box.control.enforcement", "log_only".to_string()))
+        );
+    }
 
     #[test]
     fn unmatched_mcp_routes_bound_and_redact_arguments_at_construction() {

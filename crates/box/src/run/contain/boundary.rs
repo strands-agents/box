@@ -2146,6 +2146,7 @@ mod tests {
                 }
             }
             let record = Record {
+                enforcement: Default::default(),
                 version: RECORD_VERSION,
                 experimental_features: Default::default(),
                 file_attributes: false,

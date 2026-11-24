@@ -284,7 +284,8 @@ interpreters are part of the code the operator must trust.
 3. It runs the programs of the declared secret sources to read the secrets of telemetry targets,
    and opens the collector to record the steps that follow. A read that fails here is on stderr
    alone.
-4. It installs the policy. Parsing or validation errors stop startup. Box also
+4. It installs the policy, in log-only mode when the `policy` table says so, and prints one line on
+   stderr naming what a log-only run exposes. Parsing or validation errors stop startup. Box also
    [rejects rules it can prove will never match](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns).
    It warns when it finds a rule that may never match but cannot prove it.
    Box then binds each experimental tool grammar to the program file of each `[tool]` it covers,
