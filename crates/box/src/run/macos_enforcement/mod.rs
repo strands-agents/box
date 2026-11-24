@@ -416,9 +416,10 @@ impl Context {
                             &pending.decision,
                         )
                     } else {
-                        EffectiveDecision::enforcement_deny(
+                        EffectiveDecision::refused_check(
                             pending.action,
                             &pending.path,
+                            &pending.decision,
                             "native-filesystem-policy",
                             &refusal,
                         )

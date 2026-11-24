@@ -40,8 +40,9 @@ construct is not in these sources, it does not exist.
 - **[The fixed vocabulary](#the-fixed-vocabulary)** below — the one principal, the fixed resource,
   every action and its context, and the temporal event shape. The source of truth for the box.
 - **The built-in schema** you author against, read but never edit. Generate it in the workspace
-  with `box policy generate-schema`, which writes `.strands-box/actions.cedarschema` (actions and
-  their context) and `.strands-box/events.dwschema` (what a `when temporal { … }` rule observes).
+  with `strands-box policy generate-schema --config <file> --output-dir <dir>`, which writes
+  `actions.cedarschema` (actions and their context) and `events.dwschema` (what a
+  `when temporal { … }` rule observes) into that directory.
   The generated files also carry each declared MCP server's per-tool actions, which a static copy
   cannot.
 - **The bundled `examples/`** — whole agent policies and single-shape refinements to copy from. See
@@ -84,7 +85,7 @@ The actions are a closed set. A policy names one; it cannot add one. The last co
 | `shell:exec` | `command`, `program`, `arg1?`, `arg2?`, `arg_count: Long`, `cwd`; the exit `status: Long` is on `output`, matched as `::response{ output.status: 0 }` in a temporal predicate (a signal reports 128 plus its number, a permitted binary that cannot start reports 126, a command with no reported status reports -1, and a background `&` command records its status when it ends) |
 | `shell:spawn` | the `shell:exec` fields plus `program_path: String`, and the same `output.status`. The workload can set a `shell:exec` status (a shell function of the same name does it), so a precondition on a host binary's success reads `shell:spawn` and pins `program_path` |
 | `mcp:call` | `server`, `method`, `tool?`, `prompt?`, `uri?` |
-| `<server>::Action::"<tool>"` | per-tool, emitted by `box policy generate-schema` |
+| `<server>::Action::"<tool>"` | per-tool, emitted by `strands-box policy generate-schema` |
 
 **Filesystem `operation` enums** (narrow within an `fs:` action):
 `FsReadOperation` = `read_content`, `read_metadata`, `enumerate`, `read_link`, `change_dir`, `exec`;

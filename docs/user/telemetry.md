@@ -126,7 +126,7 @@ secret.ref = "aws://my-profile"
 | `langfuse` | spans | `secret.ref`, and `destination` for a region or a self-hosted Langfuse |
 | `langsmith` | spans | `secret.ref`, and optionally `project` and `destination` |
 | `cloudwatch_logs` | log records | `region`, `log_group`, `log_stream`, and an `aws://` or `credsd://` `secret.ref` |
-| `cloudwatch_traces` | spans | `region`, and an `aws://` or `credsd://` `secret.ref` |
+| `cloudwatch_traces` | spans | `region`, an `aws://` or `credsd://` `secret.ref`, and optionally `log_group` and `log_stream` together |
 
 A vendor that takes only spans is sent no log or metric batch. That is the one exception to the rule
 that the workload's log records and metrics reach every target.
@@ -217,6 +217,17 @@ log record's `event_name` field is `strands.box.policy.decision`, and the scope 
 
 `strands.box.policy.verdict` holds `deny` or `permit`. `strands.box.policy.cause` holds one of six
 values: `permitted`, `forbidden`, `no_match`, `policy_pending`, `internal_fault`, and `enforcement`.
+
+In [log-only mode](policy.md#log-only-mode), a denial that Box let through keeps `verdict = deny` and
+the policy's own cause and rules, and also carries `strands.box.policy.enforced = false`. The run's
+first such denial also carries `strands.box.policy.first_flip = true`, because later decisions can
+differ from what an enforcing run would decide. `strands.box.policy.would_deny.ids` lists every
+rule that would have denied the action, across all its steps and gates, in the order decided; a
+missing `permit` appears as `<default-deny>`. A record Box applied carries `would_deny.ids` too
+when a step log-only let through came before what really blocked the action, such as the kernel or
+a floor, so a trial still finds that rule. An applied record never carries `enforced` or
+`first_flip`, so `verdict == "deny"` finds every would-deny, and `enforced` separates them from real
+blocks.
 
 A record whose cause is `internal_fault` also carries the key `error.type`, with the value
 `strands.box.policy.evaluation_error`.
@@ -321,11 +332,17 @@ A control-plane record states one change to the authority this box holds. The sc
 
 | Key | Value |
 |---|---|
-| `strands.box.control.operation` | `policy_installed`, `policy_refused`, `schema_installed`, `discovery_complete`, `box_started`, `box_stopped`, or `secret_fetched` |
+| `strands.box.control.operation` | `policy_installed`, `policy_refused`, `schema_installed`, `discovery_complete`, `box_started`, `workload_started`, `box_stopped`, or `secret_fetched` |
 | `strands.box.control.outcome` | `ok`, or `refused` |
 | `strands.box.control.subject` | what the operation was about |
 | `strands.box.control.reason` | why a refusal happened |
 | `strands.box.control.detail` | further text the operation carries |
+| `strands.box.control.enforcement` | on `policy_installed`, how the policy's verdicts apply: `enforce` or `log_only` |
+
+A `workload_started` record states that the box finished its setup and the workload is running inside
+its containment. The box writes `box_started` before it installs the policy and builds the sandbox, and
+`workload_started` once the workload's `exec` succeeds. The subject is the box's name. A run whose
+containment or `exec` fails has no `workload_started` record, and its `box_stopped` is `refused`.
 
 A `secret_fetched` record states one read of a secret through a
 [declared secret source](config.md#secret-sourcescheme), when the box starts. The subject is the
@@ -377,6 +394,7 @@ Example output:
 ```text
 box_started ok
 policy_installed ok
+workload_started ok
 discovery_complete ok
 box_stopped ok
 ```
@@ -409,6 +427,7 @@ message does: Box prefixes every line it prints with `strands-box:`.
 | ``a `<kind>` target sets `<key>` itself, so leave it out`` | A vendor kind names a key it sets. |
 | `` `<key>` does not apply to a `<kind>` target `` | A key belongs to another kind. |
 | ``a `cloudwatch_logs` target needs `log_group` and `log_stream` `` | A CloudWatch Logs target names no group or stream. |
+| ``a `cloudwatch_traces` target names `log_group` and `log_stream` together, or neither`` | A CloudWatch traces target names one of the two without the other. |
 | ``needs `region`, an AWS region such as `us-west-2` `` | A CloudWatch target names no region, or an invalid one. |
 | `` `secret.ref` names no scheme this box reads `` | The reference is a literal value, or its scheme is not `env://`, `secret://`, `aws://`, `credsd://`, or a [declared scheme](config.md#secret-sourcescheme). A declared scheme with nothing after `://` is refused in the same way. |
 | `its destination is neither https nor loopback` | A credential would cross the network in the clear. |
@@ -418,18 +437,26 @@ message does: Box prefixes every line it prints with `strands-box:`.
 Each message names the table it came from.
 
 A target that fails while the box runs loses the record, and Box does not retry. When the run ends,
-Box prints one line on stderr if an export to a configured target failed, or if the final export did
-not finish in time:
+Box prints one line on stderr if any of these happened:
+
+- The telemetry queue was full and refused a record, or a record was still queued when the final
+  export stopped. This count is records, counted once for each target that missed them: a record
+  that two targets missed counts twice.
+- An export to a configured target failed. This count is exports, not records: one export can carry
+  many records.
+- The final export did not finish in time.
 
 ```text
+strands-box: warning: telemetry records were lost: 441 records were dropped before export to the configured targets
 strands-box: warning: telemetry records were lost: 2 exports to the configured targets failed
 ```
 
-The count is exports, not records: one export can carry many records. The run's exit code does not
-change. The line does not cover everything that can be lost: a record that the telemetry queue
-refuses when it is full, an agent payload that Box refuses, a batch that a slow target does not
-accept before its export deadline while the box runs, and a relayed payload still in flight at
-shutdown are not counted. So the absence of this line does not prove that nothing was lost.
+When more than one cause applies, the line names each of them. The run's exit code does not change.
+
+The line does not cover everything that can be lost. It does not count an agent payload that Box
+refuses, a batch that a slow target does not accept before its export deadline while the box runs,
+or a relayed payload still in flight at shutdown. So the absence of this line does not prove that
+nothing was lost.
 
 Set `STRANDS_BOX_TELEMETRY_DEBUG` to also print each failed export as it happens, with its cause. See
 [Failed sends](#failed-sends).

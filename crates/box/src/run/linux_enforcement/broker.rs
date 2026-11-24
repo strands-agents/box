@@ -263,9 +263,10 @@ impl Drop for Audit<'_> {
             let effective = if self.allowed || !decision.is_allow() {
                 EffectiveDecision::from_policy(action(*operation), resource, decision)
             } else {
-                EffectiveDecision::enforcement_deny(
+                EffectiveDecision::refused_check(
                     action(*operation),
                     resource,
+                    decision,
                     "native-filesystem-policy",
                     &self.reason,
                 )

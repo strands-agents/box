@@ -206,6 +206,7 @@ fn record(text: &str) -> Record {
     }
     let tables: Tables = toml::from_str(text).expect("the test tables parse");
     Record {
+        enforcement: Default::default(),
         version: RECORD_VERSION,
         experimental_features: Default::default(),
         file_attributes: false,

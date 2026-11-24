@@ -379,6 +379,40 @@ fn a_forbid_on_a_grammar_action_denies_the_command_that_raises_it() {
     assert_grammar_decision(&box_, "push");
 }
 
+/// **In log-only mode a forbidden grammar action runs, and is recorded as that action's denial,
+/// not enforced.**
+#[test]
+fn a_log_only_box_runs_a_forbidden_grammar_action_and_records_it_unenforced() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let home = support::fixture::short_temporary_home();
+    let box_ = Request::with_config(
+        "grammar-log-only",
+        GIT_WITHOUT_PUSH,
+        &format!("{}{GRAMMAR}{SWITCH_ON}", git_tool(home.path())),
+    )
+    .env("PATH", &tools_first(home.path()))
+    .log_only()
+    .expect();
+    let git = git_program(home.path()).display().to_string();
+
+    let output = in_the_shell(&box_, &format!("{git} push origin"));
+
+    assert!(
+        stdout(&output).contains("|status=0"),
+        "the push ran: {output:?}"
+    );
+    assert_grammar_decision(&box_, "push");
+    let text = std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl"))
+        .expect("the records");
+    assert!(
+        text.contains(r#""key":"strands.box.policy.enforced","value":{"boolValue":false}"#),
+        "the push's denial is recorded unenforced: {text}"
+    );
+}
+
 #[test]
 fn a_permit_on_a_grammar_action_runs_the_command_that_raises_it() {
     if !namespace_launcher_is_usable() {

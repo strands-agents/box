@@ -22,7 +22,8 @@ is involved until you have the answer.
    gh workflow run full-tests.yml -f ref=<branch|sha> -f os=macos-latest -f lint=false -f filter=<substring>
    ```
 
-   - `os` picks a single runner (`macos-latest`, `ubuntu-latest`, or `both`).
+   - `os` picks a single runner (`macos-latest`, `ubuntu-24.04`, or `ubuntu-24.04-arm`), or `both`
+     for all three.
    - `lint=false` skips fmt and clippy.
    - `filter` is a substring of the cargo **test name** (not the test-binary name). It runs only the
      tests whose name matches.

@@ -52,20 +52,27 @@ const _: () = assert!(
 );
 
 /// The one stderr line that reports lost telemetry when the run drains, or `None` when none was lost.
-fn drain_warning(failed_exports: u64, finished: bool) -> Option<String> {
-    let cause = match (failed_exports, finished) {
-        (0, true) => return None,
-        (0, false) => "the final export did not finish in time".to_owned(),
-        (1, true) => "1 export to a configured target failed".to_owned(),
-        (failed, true) => format!("{failed} exports to the configured targets failed"),
-        (1, false) => {
-            "1 export to a configured target failed, and the final export did not finish in time"
-                .to_owned()
-        }
-        (failed, false) => format!(
-            "{failed} exports to the configured targets failed, and the final export did not \
-             finish in time"
-        ),
+fn drain_warning(unexported_records: u64, failed_exports: u64, finished: bool) -> Option<String> {
+    let mut causes = Vec::new();
+    match unexported_records {
+        0 => {}
+        1 => causes.push("1 record was dropped before export to a configured target".to_owned()),
+        records => causes.push(format!(
+            "{records} records were dropped before export to the configured targets"
+        )),
+    }
+    match failed_exports {
+        0 => {}
+        1 => causes.push("1 export to a configured target failed".to_owned()),
+        failed => causes.push(format!("{failed} exports to the configured targets failed")),
+    }
+    if !finished {
+        causes.push("the final export did not finish in time".to_owned());
+    }
+    let cause = match causes.as_slice() {
+        [] => return None,
+        [only] => only.clone(),
+        [first @ .., last] => format!("{}, and {last}", first.join(", ")),
     };
     Some(format!(
         "strands-box: warning: telemetry records were lost: {cause}"
@@ -131,6 +138,33 @@ fn drain_finished(ended: Shutdown, cut: bool) -> bool {
 struct SharedTarget {
     exporter: Arc<TargetExporter>,
     failures: Arc<LaneFailures>,
+    /// The lane's count, so a record the full queue refused shows as one that never arrived here.
+    backlog: Arc<Backlog>,
+}
+
+/// The records one lane handed to its SDK queue, and how many of them reached the exporter.
+#[derive(Debug, Default)]
+struct Backlog {
+    handed: AtomicU64,
+    reached: AtomicU64,
+}
+
+impl Backlog {
+    /// Count one record handed to the lane's queue.
+    fn handed(&self) {
+        self.handed.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Count the records of one batch that reached the exporter.
+    fn reached(&self, records: u64) {
+        self.reached.fetch_add(records, Ordering::SeqCst);
+    }
+
+    /// The records handed to the queue that never reached the exporter, or have not yet.
+    fn unexported(&self) -> u64 {
+        let reached = self.reached.load(Ordering::SeqCst);
+        self.handed.load(Ordering::SeqCst).saturating_sub(reached)
+    }
 }
 
 /// Which shutdown of one lane, if any, an export that failed had started in.
@@ -146,6 +180,8 @@ impl opentelemetry_sdk::logs::LogExporter for SharedTarget {
     async fn export(&self, batch: opentelemetry_sdk::logs::LogBatch<'_>) -> OTelSdkResult {
         // Read at the start, so an export that began before a shutdown never answers for it.
         let started_in = self.failures.shutdown.load(Ordering::SeqCst);
+        self.backlog
+            .reached(u64::try_from(batch.iter().count()).unwrap_or(u64::MAX));
         let exported = self.exporter.export_logs(batch).await;
         if exported.is_err() {
             self.failures.failed_in.store(started_in, Ordering::SeqCst);
@@ -163,6 +199,8 @@ impl opentelemetry_sdk::logs::LogExporter for SharedTarget {
 struct TargetLane {
     accepts: [bool; Signal::SLOTS],
     inner: BatchLogProcessor<Tokio>,
+    /// The records this lane handed to its queue, so a record the full queue refuses is counted.
+    backlog: Arc<Backlog>,
     /// What this lane's exporter records when an export it completed failed.
     failures: Arc<LaneFailures>,
     /// Set when this lane's shutdown did not finish: the SDK cut its final export at
@@ -178,6 +216,7 @@ impl LogProcessor for TargetLane {
         if !self.accepts[signal.slot()] {
             return;
         }
+        self.backlog.handed();
         self.inner.emit(data, instrumentation);
     }
 
@@ -217,6 +256,8 @@ pub struct Collector {
     mcp_logger: SdkLogger,
     /// Batches a target refused, counted by the exporters and never by the receiver.
     dropped: Arc<AtomicU64>,
+    /// Each lane's queued records, so the drain counts the records no exporter received.
+    backlogs: Vec<Arc<Backlog>>,
     /// Agent payloads the receiver refused, which is not a loss of the box's own records.
     #[cfg(test)]
     refused: Arc<AtomicU64>,
@@ -272,6 +313,7 @@ impl Collector {
         let mut logs = SdkLoggerProvider::builder().with_resource(resource(&box_name, &run_id));
         let mut relays = crate::receive::Relays::default();
         let mut accepts = [false; Signal::SLOTS];
+        let mut backlogs = Vec::new();
         for target in config.targets() {
             let exporter = Arc::new(
                 TargetExporter::open(target, Arc::clone(&dropped))?
@@ -304,12 +346,16 @@ impl Collector {
                 continue;
             }
             let failures = Arc::new(LaneFailures::default());
+            let backlog = Arc::new(Backlog::default());
+            backlogs.push(Arc::clone(&backlog));
             logs = logs.with_log_processor(TargetLane {
                 accepts: lane,
+                backlog: Arc::clone(&backlog),
                 inner: BatchLogProcessor::builder(
                     SharedTarget {
                         exporter,
                         failures: Arc::clone(&failures),
+                        backlog: Arc::clone(&backlog),
                     },
                     Tokio,
                 )
@@ -343,6 +389,7 @@ impl Collector {
             control_logger,
             mcp_logger,
             dropped,
+            backlogs,
             #[cfg(test)]
             refused,
             cut,
@@ -536,9 +583,22 @@ impl Collector {
             tokio::task::spawn_blocking(move || shut_down_bounded(logs, DRAIN_DEADLINE)).await;
         let ended = ended.unwrap_or(Shutdown::Unanswered);
         let finished = drain_finished(ended, self.cut.load(Ordering::Relaxed));
-        if let Some(warning) = drain_warning(self.dropped.load(Ordering::Relaxed), finished) {
+        if let Some(warning) = drain_warning(
+            self.unexported(),
+            self.dropped.load(Ordering::Relaxed),
+            finished,
+        ) {
             eprintln!("{warning}");
         }
+    }
+
+    /// The records the lanes accepted that no exporter received: refused by a full queue, or still
+    /// queued when the drain ended.
+    fn unexported(&self) -> u64 {
+        self.backlogs
+            .iter()
+            .map(|backlog| backlog.unexported())
+            .fold(0, u64::saturating_add)
     }
 
     /// How many batches a target refused, which is not a count of records.
@@ -1432,7 +1492,7 @@ mod tests {
     /// A drain that delivered everything prints nothing.
     #[test]
     fn a_complete_drain_reports_no_loss() {
-        assert_eq!(drain_warning(0, true), None);
+        assert_eq!(drain_warning(0, 0, true), None);
     }
 
     /// A failed export or an unfinished drain each produce one loss line that names its cause.
@@ -1452,7 +1512,7 @@ mod tests {
                 "4 exports to the configured targets failed, and the final export did not finish",
             ),
         ] {
-            let warning = drain_warning(failed, finished).expect("a loss is reported");
+            let warning = drain_warning(0, failed, finished).expect("a loss is reported");
             assert!(
                 warning.starts_with("strands-box: warning: telemetry records were lost: "),
                 "{warning}"
@@ -1465,7 +1525,7 @@ mod tests {
     /// An unfinished drain is a loss even when no export had failed, and it is not called one.
     #[test]
     fn an_unfinished_drain_alone_is_a_loss() {
-        let warning = drain_warning(0, false).expect("a loss is reported");
+        let warning = drain_warning(0, 0, false).expect("a loss is reported");
         assert!(
             warning.contains("the final export did not finish in time"),
             "{warning}"
@@ -1513,7 +1573,8 @@ mod tests {
             drain_finished(ended, cut),
             "a failed export is not a drain that did not finish: {ended:?}, cut {cut}"
         );
-        let warning = drain_warning(collector.dropped(), true).expect("a loss is reported");
+        let warning = drain_warning(collector.unexported(), collector.dropped(), true)
+            .expect("a loss is reported");
         assert!(!warning.contains("did not finish"), "{warning}");
     }
 
@@ -1600,8 +1661,12 @@ mod tests {
             !drain_finished(ended, cut),
             "a cut lane is not a finished drain"
         );
-        let warning =
-            drain_warning(collector.dropped(), drain_finished(ended, cut)).expect("a loss");
+        let warning = drain_warning(
+            collector.unexported(),
+            collector.dropped(),
+            drain_finished(ended, cut),
+        )
+        .expect("a loss");
         assert!(warning.contains("failed"), "{warning}");
         assert!(warning.contains("did not finish in time"), "{warning}");
     }
@@ -1645,8 +1710,20 @@ mod tests {
         );
         assert_eq!(collector.dropped(), 0, "no export has failed yet");
         assert!(cut, "the lane reports that its shutdown did not finish");
-        let warning =
-            drain_warning(collector.dropped(), drain_finished(ended, cut)).expect("a loss");
+        assert!(
+            collector.unexported() > 0,
+            "the records the full queue refused are counted"
+        );
+        let warning = drain_warning(
+            collector.unexported(),
+            collector.dropped(),
+            drain_finished(ended, cut),
+        )
+        .expect("a loss");
+        assert!(
+            warning.contains("records were dropped before export"),
+            "{warning}"
+        );
         assert!(warning.contains("did not finish in time"), "{warning}");
         drop(silent);
     }
@@ -2067,5 +2144,238 @@ mod tests {
         let silent = TelemetryConfig::for_box("demo")
             .with_target(Target::new(TargetKind::File, "/tmp/records.jsonl").receiving(Vec::new()));
         assert!(Collector::start(silent).is_err());
+    }
+
+    /// An OTLP sink that answers each request after `delay`, and the count of log records it holds.
+    async fn slow_sink(delay: Duration) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use prost::Message as _;
+
+        let landed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&landed);
+        let router = axum::Router::new()
+            .route(
+                "/v1/logs",
+                axum::routing::post(move |body: axum::body::Bytes| {
+                    let counted = Arc::clone(&counted);
+                    async move {
+                        tokio::time::sleep(delay).await;
+                        let request = ExportLogsServiceRequest::decode(body).unwrap_or_default();
+                        let records: usize = request
+                            .resource_logs
+                            .iter()
+                            .flat_map(|resource| &resource.scope_logs)
+                            .map(|scope| scope.log_records.len())
+                            .sum();
+                        counted.fetch_add(records, Ordering::SeqCst);
+                        axum::http::StatusCode::OK
+                    }
+                }),
+            )
+            .route(
+                "/v1/traces",
+                axum::routing::post(move || async move {
+                    tokio::time::sleep(delay).await;
+                    axum::http::StatusCode::OK
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the sink");
+        let address = format!("http://{}", listener.local_addr().expect("its address"));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (address, landed)
+    }
+
+    /// Wait until `ready` holds, or fail after ten seconds.
+    async fn until(what: &str, ready: impl Fn() -> bool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !ready() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting: {what}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Whether a variable that resizes the SDK's queue or batch is set, so a burst cannot be sized.
+    fn queue_is_resized() -> bool {
+        [
+            "OTEL_BLRP_MAX_QUEUE_SIZE",
+            "OTEL_BLRP_MAX_EXPORT_BATCH_SIZE",
+        ]
+        .into_iter()
+        .any(|variable| {
+            let set = std::env::var_os(variable).is_some();
+            if set {
+                eprintln!("skipping: {variable} is set, so the burst may not fill the queue");
+            }
+            set
+        })
+    }
+
+    /// Record `count` refusals as fast as the caller can, which is how a workload fills the queue.
+    fn burst(collector: &Collector, count: usize) {
+        for index in 0..count {
+            collector.record(DecisionRecord::deny(
+                r#"Box::Action::"fs:read""#,
+                &format!("~/x{index}"),
+                "rule-1",
+                "refused",
+            ));
+        }
+    }
+
+    /// **A record the full queue refuses is counted, and the drain line names the count.**
+    ///
+    /// The sink answers each batch after 300 ms, so one batch is in flight while the burst fills the
+    /// queue behind it. Every record either lands or is counted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_record_the_full_queue_refuses_is_counted_and_reported() {
+        const BURST: usize = 3001;
+        if queue_is_resized() {
+            return;
+        }
+        let (address, landed) = slow_sink(Duration::from_millis(300)).await;
+        let collector = Collector::start(
+            TelemetryConfig::for_box("demo").with_target(Target::new(TargetKind::Otlp, address)),
+        )
+        .expect("open");
+        burst(&collector, BURST);
+        // One batch in flight and a full queue behind it: five full batches.
+        until("what the queue held lands", || {
+            landed.load(Ordering::SeqCst) == 2560
+        })
+        .await;
+        let ended = shut_down_off_the_runtime_thread(&collector).await;
+        let finished = drain_finished(ended, collector.cut.load(Ordering::Relaxed));
+        let landed = landed.load(Ordering::SeqCst);
+        let unexported = collector.unexported();
+
+        assert!(
+            landed < BURST,
+            "the burst must overflow the queue: {landed} landed"
+        );
+        assert_eq!(collector.dropped(), 0, "no export failed");
+        assert!(finished, "the drain finished: {ended:?}");
+        assert_eq!(
+            u64::try_from(landed).expect("fits") + unexported,
+            u64::try_from(BURST).expect("fits"),
+            "every record lands or is counted"
+        );
+        let warning = drain_warning(unexported, collector.dropped(), finished)
+            .expect("a refused record is a loss");
+        assert!(
+            warning.ends_with(&format!(
+                "telemetry records were lost: {unexported} records were dropped before export to the \
+                 configured targets"
+            )),
+            "{warning}"
+        );
+    }
+
+    /// A burst the queue holds loses nothing, so the new count never reports a false loss.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_burst_the_queue_holds_reports_no_loss() {
+        const BURST: usize = 1000;
+        if queue_is_resized() {
+            return;
+        }
+        let (address, landed) = slow_sink(Duration::from_millis(300)).await;
+        let collector = Collector::start(
+            TelemetryConfig::for_box("demo").with_target(Target::new(TargetKind::Otlp, address)),
+        )
+        .expect("open");
+        burst(&collector, BURST);
+        let ended = shut_down_off_the_runtime_thread(&collector).await;
+        let finished = drain_finished(ended, collector.cut.load(Ordering::Relaxed));
+
+        assert_eq!(landed.load(Ordering::SeqCst), BURST, "every record landed");
+        assert_eq!(collector.unexported(), 0);
+        assert_eq!(
+            drain_warning(collector.unexported(), collector.dropped(), finished),
+            None
+        );
+    }
+
+    /// A record dropped before export is named first, beside the other two causes.
+    #[test]
+    fn a_dropped_record_is_named_in_the_loss_line() {
+        for (unexported, failed, finished, cause) in [
+            (
+                1,
+                0,
+                true,
+                "lost: 1 record was dropped before export to a configured target",
+            ),
+            (
+                441,
+                0,
+                true,
+                "lost: 441 records were dropped before export to the configured targets",
+            ),
+            (
+                441,
+                0,
+                false,
+                "lost: 441 records were dropped before export to the configured targets, and the \
+                 final export did not finish in time",
+            ),
+            (
+                2,
+                3,
+                false,
+                "lost: 2 records were dropped before export to the configured targets, 3 exports \
+                 to the configured targets failed, and the final export did not finish in time",
+            ),
+        ] {
+            let warning = drain_warning(unexported, failed, finished).expect("a loss is reported");
+            assert!(warning.ends_with(cause), "{warning}");
+            assert_eq!(warning.lines().count(), 1, "one line: {warning}");
+        }
+    }
+
+    /// **A record two targets missed counts once for each**, which is why the line names the
+    /// configured targets rather than distinct records.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_record_two_targets_missed_counts_once_for_each() {
+        const BURST: u64 = 4000;
+        if queue_is_resized() {
+            return;
+        }
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = |name: &str| {
+            Target::new(
+                TargetKind::File,
+                directory.path().join(name).to_string_lossy().to_string(),
+            )
+        };
+        let collector = Collector::start(
+            TelemetryConfig::for_box("demo")
+                .with_target(target("one.jsonl"))
+                .with_target(target("two.jsonl")),
+        )
+        .expect("open");
+
+        burst(&collector, usize::try_from(BURST).expect("fits"));
+        // A shutdown sent to a full queue is refused, so wait until both lanes have room.
+        let full = u64::try_from(opentelemetry_sdk::logs::OTEL_BLRP_MAX_EXPORT_BATCH_SIZE_DEFAULT)
+            .expect("fits");
+        until("both lanes export their full batches", || {
+            collector
+                .backlogs
+                .iter()
+                .all(|backlog| backlog.unexported() <= BURST - 3 * full)
+        })
+        .await;
+        let ended = shut_down_off_the_runtime_thread(&collector).await;
+        assert_eq!(ended, Shutdown::Completed);
+        let [one, two] = [0, 1].map(|lane| collector.backlogs[lane].unexported());
+        assert!(one > 0, "the burst overflowed the first lane");
+        assert_eq!(one, two, "the same burst overflowed both lanes equally");
+        assert_eq!(collector.unexported(), one + two);
     }
 }
