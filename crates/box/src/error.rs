@@ -786,7 +786,10 @@ pub(crate) enum SuperviseError {
     Native { reason: String },
 
     /// Native filesystem policy failed after the workload started, or did not stop cleanly.
-    #[cfg_attr(not(feature = "native-filesystem-policy"), allow(dead_code))]
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "native-filesystem-policy")),
+        allow(dead_code)
+    )]
     #[error("workload process control failed: {reason}")]
     NativeDuringRun { reason: String },
 
