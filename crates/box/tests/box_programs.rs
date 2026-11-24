@@ -295,6 +295,165 @@ permit(principal, action == Box::Action::"fs:read", resource);
     );
 }
 
+/// A box whose one tool, `probe`, is a link to the host `bash` that also reads `reads`, with `extra`
+/// in its configuration.
+fn stdin_probe_box(
+    name: &str,
+    reads: &[&std::path::Path],
+    extra: &str,
+) -> (Configured, tempfile::TempDir) {
+    let links = fixture::short_temporary_home();
+    let bash = std::path::Path::new("/bin/bash")
+        .canonicalize()
+        .expect("bash exists");
+    std::os::unix::fs::symlink(&bash, links.path().join("probe")).expect("a link to bash");
+    let directory = links.path().display();
+    let reads = std::iter::once(links.path())
+        .chain(reads.iter().copied())
+        .map(|path| format!("{:?}", path.display().to_string()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let policy = format!(
+        r#"
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:spawn", resource)
+when {{ context.input.program == "{directory}/probe" }};
+permit(principal, action == Box::Action::"fs:read", resource);
+"#
+    );
+    let box_ = Request::with_config(
+        name,
+        &policy,
+        &format!(
+            "[tool.probe]\ncommand = [\"{directory}/probe\"]\n\
+             [tool.probe.filesystem]\nread = [{reads}]\n{extra}"
+        ),
+    )
+    .agent_read(&[links.path()])
+    .expect();
+    (box_, links)
+}
+
+/// **A host binary whose alias has no stdin gets `/dev/null`, not an empty pipe.**
+#[test]
+fn a_host_binary_whose_alias_has_no_stdin_gets_dev_null() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    // `perl -p STDIN` tests the descriptor itself; a path under `/dev/fd` is not granted in a box.
+    // A Linux leaf sees only its grants, so the probe is granted the canonical `perl`.
+    let perl = std::path::Path::new("/usr/bin/perl")
+        .canonicalize()
+        .expect("perl exists");
+    let (box_, links) = stdin_probe_box("prog-stdin-null", &[&perl], "");
+    let script = links.path().join("kind.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "exec {} -e 'print((-p STDIN) ? q(pipe) : q(other))'\n",
+            perl.display()
+        ),
+    )
+    .expect("write the stdin kind script");
+    let probe = format!("{}/probe {}", links.path().display(), script.display());
+    for attempt in 0..5 {
+        let output = box_.bash(&format!("zsh -c '{probe}' </dev/null"));
+        assert_workload_launched(&output, "the stdin kind probe");
+        assert_eq!(
+            stdout(&output),
+            "other",
+            "attempt {attempt}: an alias with no stdin must give no pipe: {output:?}"
+        );
+    }
+    let piped = box_.bash(&format!("printf x | zsh -c '{probe}'"));
+    assert_eq!(
+        stdout(&piped),
+        "pipe",
+        "a piped payload must still arrive as a pipe: {piped:?}"
+    );
+}
+
+/// **A host binary reads the stdin piped to the alias**, which is how an exec-form harness hook
+/// gets its event payload: `{"command": "zsh", "args": ["-c", "/path/to/hook"]}`.
+#[test]
+fn a_host_binary_reads_the_stdin_piped_to_the_alias() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let (box_, links) = stdin_probe_box("prog-stdin-binary", &[], "");
+    let directory = links.path().display();
+
+    let output = box_.bash(&format!(
+        r#"printf '{{"hook_event_name":"PreToolUse"}}' | zsh -c '{directory}/probe -c "IFS= read -r X; printf payload=[%s] \"\$X\""'; printf "|status=%s" "$?""#
+    ));
+    assert_workload_launched(&output, "the stdin probe");
+    assert!(
+        stdout(&output).contains(r#"payload=[{"hook_event_name":"PreToolUse"}]|status=0"#),
+        "the host binary must read the payload piped to the alias: {output:?}"
+    );
+}
+
+/// **A host binary that fills its stdout pipe before it reads stdin still gets all its input.**
+#[test]
+fn a_host_binary_that_writes_before_it_reads_gets_all_its_input() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let (box_, links) = stdin_probe_box(
+        "prog-stdin-write-first",
+        &[],
+        "[limits.shell]\nmax_stdin = 262144\nmax_output = 0\ntimeout = 15\n",
+    );
+    let directory = links.path().display();
+
+    let started = Instant::now();
+    let output = box_.bash(&format!(
+        r#"printf '%0200000d' 0 | zsh -c '{directory}/probe -c "printf %0200000d 0; IFS= read -r -d \"\" X; printf \"|read=%s\" \"\${{#X}}\""'; printf "|status=%s" "$?""#
+    ));
+    assert_workload_launched(&output, "the stdin probe that writes first");
+    let text = stdout(&output);
+    assert!(
+        text.ends_with("|read=200000|status=0"),
+        "the binary must read every input byte after it writes: {}",
+        &text[text.len().saturating_sub(200)..]
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "the input must not wait for the output: {:?}",
+        started.elapsed()
+    );
+}
+
+/// **A host binary that reads no stdin is not held by it**, even when the input is more than the
+/// pipe to the binary holds.
+#[test]
+fn a_host_binary_that_reads_no_stdin_is_not_held_by_it() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let (box_, links) = stdin_probe_box(
+        "prog-stdin-unread",
+        &[],
+        "[limits.shell]\nmax_stdin = 262144\n",
+    );
+    let directory = links.path().display();
+
+    let started = Instant::now();
+    let output = box_.bash(&format!(
+        r#"printf '%0200000d' 0 | zsh -c '{directory}/probe -c "printf done"'; printf "|status=%s" "$?""#
+    ));
+    assert_workload_launched(&output, "the stdin probe that reads nothing");
+    assert!(
+        stdout(&output).contains("done|status=0"),
+        "a binary that reads no stdin must still exit normally: {output:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the unread input must not hold the call to its deadline: {:?}",
+        started.elapsed()
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // The CALL level — Unix semantics within one submission
 // ═══════════════════════════════════════════════════════════════════════════════

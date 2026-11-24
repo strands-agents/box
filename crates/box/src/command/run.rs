@@ -459,6 +459,7 @@ async fn hosted(
     write_tool_call_disclosures(&locked.record, ::diagnostics::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;
     ::diagnostics::diag!(B0302, "starting workload");
+    let control = Arc::clone(&collector);
     let hosted = HostedBox::open(
         &locked.root,
         &locked.record,
@@ -537,7 +538,23 @@ async fn hosted(
         &site,
     )?;
     boundary.disclose();
-    let contained = Contained::spawn(boundary, &locked.root, hosted, terminal, signals).await?;
+    // The record waits for the trampoline's `exec` to succeed, so a containment or `exec` failure
+    // after the spawn writes none.
+    let name = locked.root.name().to_string();
+    let contained = Contained::spawn(
+        boundary,
+        &locked.root,
+        hosted,
+        terminal,
+        signals,
+        move || {
+            control.control(telemetry::ControlRecord::completed(
+                telemetry::ControlOperation::WorkloadStarted,
+                &name,
+            ));
+        },
+    )
+    .await?;
     contained.wait().await
 }
 

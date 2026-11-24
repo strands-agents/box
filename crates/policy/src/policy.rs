@@ -348,6 +348,14 @@ impl PolicyEngine {
         self
     }
 
+    /// This engine in log-only mode, for its whole life: a recorded policy denial returns `Allow` with
+    /// [`Decision::would_deny`] set.
+    #[must_use]
+    pub fn log_only(mut self) -> Self {
+        self.authority.set_log_only();
+        self
+    }
+
     /// Strict-validate a candidate source set **without** producing an authority.
     ///
     /// Answers "would `open` accept this text", and nothing else. There is no value to hold, so
@@ -624,10 +632,12 @@ impl PolicyEngine {
     /// The per-tool refinement for one `tools/call`, and the `::response` an allowed call owes.
     ///
     /// Returns `Allow` when the composed schema declares no per-tool action for the tool (it rides
-    /// the coarse grant) or when no rule forbids it; returns `Deny` only on an explicit `forbid` or
-    /// an evaluation fault. `arguments` is the raw `params.arguments`, typed against the composed
-    /// schema by the engine's request gate (`context_for`'s `from_json`). The pending response is
-    /// present only when the call is allowed and its per-tool request was recorded.
+    /// the coarse grant) or when no rule forbids it, and, in log-only mode, for a recorded `forbid`
+    /// with `would_deny` set. Returns `Deny` on an explicit `forbid` when enforcing, an evaluation
+    /// fault, a degraded tool, or a tool whose schema is still pending. `arguments` is the raw
+    /// `params.arguments`, typed against the composed schema by the engine's request gate
+    /// (`context_for`'s `from_json`). The pending response is present only when the call goes ahead
+    /// and its per-tool request was recorded.
     pub fn refine_tool_call(
         &self,
         governed: &GovernedBox,
@@ -1166,6 +1176,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
                 path: "/v1",
                 body_bytes: 10,
                 intercepted: true,
+                websocket: false,
             },
         ]
     }
@@ -1934,5 +1945,64 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
             .reload(&source("permit(principal, action, resource);"))
             .unwrap();
         assert!(read_tool(&engine, "alpha").is_allow());
+    }
+
+    /// **An evaluation fault still denies in log-only mode**, through the whole engine.
+    #[test]
+    fn an_evaluation_fault_still_denies_in_log_only_mode() {
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = PolicyEngine::open(
+            source("permit(principal, action, resource);"),
+            &history.path().join("dogwood.redb"),
+        )
+        .unwrap()
+        .log_only();
+        engine.poison_store_for_test();
+        let (decision, _) = engine.decide(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            &Request::Connect {
+                host: "example.com",
+                ip: None,
+                port: 443,
+            },
+        );
+        assert!(
+            matches!(
+                decision,
+                Decision::Deny {
+                    reason: crate::DenyReason::InternalFault,
+                    ..
+                }
+            ),
+            "{decision:?}"
+        );
+    }
+
+    /// **A degraded tool still denies in log-only mode.** Its rule never validated, so letting it
+    /// through would make a broken policy fail open.
+    #[test]
+    fn a_degraded_tool_still_denies_in_log_only_mode() {
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = PolicyEngine::open_staged(
+            &Operator::unanchored(),
+            source(
+                r#"permit(principal, action, resource);
+                   forbid(principal, action == alpha::Action::"read", resource)
+                   when { context.input.never_declared == "x" };"#,
+            ),
+            &history.path().join("dogwood.redb"),
+        )
+        .unwrap()
+        .log_only();
+        engine
+            .stage_mcp_schema("alpha", mcp_fragment("alpha", "read"))
+            .unwrap();
+        engine.finish_mcp_discovery().unwrap();
+        let decision = read_tool(&engine, "alpha");
+        assert!(
+            !decision.is_allow(),
+            "a degraded tool stays blocked: {decision:?}"
+        );
     }
 }

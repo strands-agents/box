@@ -406,6 +406,21 @@ re-routes to one:
 A 502 with no `x-strands-box-egress` header answers a `CONNECT`, or a plain `http://` request, that
 the gateway couldn't resolve or connect to. Any other 502 without the header comes from the server.
 
+A WebSocket needs `wss://`, so it rides a `CONNECT`. The handshake is decided as
+[`websocket:connect`](policy/actions.md#network), and the gateway adds the credential to it and
+redacts the credential in the `101`, as for any request. After the `101`, the gateway copies bytes
+both ways, unchanged, and asks policy nothing more. It doesn't redact a credential in a WebSocket
+message. The handshake can be refused:
+
+| Response | Cause |
+|---|---|
+| 400 `malformed WebSocket handshake` | The handshake isn't an HTTP/1.1 `GET` with `Connection: upgrade`, `Sec-WebSocket-Version: 13`, one `Sec-WebSocket-Key`, and no body. |
+| 403 `WebSocket requires TLS` | A plain `ws://` handshake, including to a host in `upgrade_http`. |
+| 403 `WebSocket refused for an MCP server` | The handshake went to an HTTP MCP server's host. |
+| 502 | The server's `101` doesn't name `websocket` as its `Upgrade`, or doesn't carry the `Sec-WebSocket-Accept` for the handshake's key. A reply other than `101` that has no `Content-Length` and isn't chunked also gets 502. |
+
+The gateway ends both connections, with no Close frame, when no byte moves for 300 seconds.
+
 Responses arrive progressively, including on credentialed routes. Credential redaction retains a
 short tail until more bytes arrive or the response completes cleanly. Requests and HTTP MCP
 `tools/list` responses retain the default 16 MiB cap. The gateway's 300-second upstream deadline

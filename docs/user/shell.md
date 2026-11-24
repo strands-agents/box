@@ -44,10 +44,16 @@ This limit applies only to input piped into the alias from outside the Shell, su
 event or a program that starts `bash` with input. A pipe inside a command, such as
 `cat big.json | jq .`, is not affected.
 
-Only commands that the Shell runs itself, such as `cat`, `read`, or `jq`, receive the input. A
-program that the Shell starts in its own sandbox gets no input. Text that a command reads from its
-input is still data: when a command runs it, as in `eval "$(cat)"`, or opens a file it names,
-policy decides that command or file.
+Commands that the Shell runs itself, such as `cat`, `read`, or `jq`, receive the input. So does a
+program that the Shell starts in its own sandbox, such as a hook binary run as
+`zsh -c ~/src/project/hooks/pre-tool-use`. The box copies the input to the program while it runs.
+When the command has no input, as when the alias gets a terminal or `/dev/null`, the program
+gets `/dev/null`, so a tool such as `rg` searches its folder rather than an empty input.
+Input that the program does not read is dropped when it exits. The commands after it in the same
+invocation read no input.
+
+Text that a command reads from its input is still data: when a command runs it, as in
+`eval "$(cat)"`, or opens a file it names, policy decides that command or file.
 
 A Lua script that the Shell runs does not read the input piped into the alias: it reads it as empty
 and never waits for it. A pipe inside one command, such as `echo x | lua -e 'print(io.read())'`,

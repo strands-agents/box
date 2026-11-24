@@ -18,6 +18,9 @@ pub struct HostSpawn {
     pub args: Vec<String>,
     /// The directory the program's decision checked.
     pub cwd: PathBuf,
+    /// The read end of a pipe that carries the command's stdin while the spawn runs, or `None`
+    /// for `/dev/null`.
+    pub stdin: Option<std::os::fd::OwnedFd>,
 }
 
 /// The captured result of one host-binary spawn.

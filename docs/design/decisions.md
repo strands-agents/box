@@ -681,8 +681,8 @@ reaches stderr, and `run` exits 0, so the operator sees no failure. Granting `pr
 `/bin/sh` would make it work, but the commands the hook issues would then raise no decision, so an
 authored `forbid` would never see them. Once rewritten, each hook command reaches the mediated Shell
 and raises `shell:exec`, and each file it touches raises its own `fs:*`. The alias forwards a hook's finite stdin to the Shell, so a hook reads its payload with a Shell
-command such as `cat` or `jq`. A program that the Shell starts in its own sandbox still reads no
-stdin. Plugin hooks remain broken because most of them exec a script.
+command such as `cat` or `jq`, or with a program that the Shell starts in its own sandbox. Plugin
+hooks remain broken because most of them exec a script.
 
 <a id="core-writes-stderr-only-through-diag-and-codes-each-kind"></a>
 ### Box Core writes stderr only through `diag!`, and codes each kind of message but internal failures
@@ -714,13 +714,38 @@ restriction. A capability returns `Result<Vec<Mutation>, String>`, containing ed
 never an allow. `egress-gateway` keeps no dependency on `policy` at all. Do not add a second allow
 path, and do not give a mechanism its own verdict to save a round trip.
 
+The one exception is
+[log-only mode](#log-only-mode-turns-only-a-recorded-policy-denial-into-an-allow), where the
+engine itself lets a recorded policy denial go ahead.
+
+<a id="log-only-mode-turns-only-a-recorded-policy-denial-into-an-allow"></a>
+### Log-only mode turns only a recorded policy denial into an allow
+
+`PolicyEngine::log_only` lets an engine return `Allow` for a `forbid` or a missing `permit`, so a
+builder can trial a policy on real work. It does so only for a request that entered history, so
+the outcome is recorded as it happened. The `Allow` carries `would_deny` and the denial's rule, and
+the observer sees that same verdict. An absent policy, a pending one, an evaluation fault, and a
+degraded MCP tool still deny, so a missing or broken policy never fails open.
+
+**Rejected.** Showing the observer the real denial while the caller gets the allow, because every
+record would then reconcile two answers for one request. A new `Decision` variant, which every
+caller would have to handle.
+
+**Cost.** The policy protects nothing while the mode is on. Code that reads an `Allow` must check
+`would_deny` before treating it as a permit the policy gave.
+
 <a id="no-connection-is-opaque-to-the-boundary"></a>
-### The gateway terminates every connection, so no tunnel is opaque
+### The gateway terminates every connection, and copies bytes only for a decided WebSocket
 
 An interceptor must see each request and each response effect, so the gateway always terminates TLS.
-Box no longer supports opaque tunnelling, splicing, or raw byte copying. A connection whose
-plaintext the boundary cannot read cannot raise `http:request` and would bypass that authorization.
-The box cannot reach a plaintext or non-HTTP upstream over `CONNECT`.
+Box does not support opaque tunnelling or splicing. A connection whose plaintext the boundary cannot
+read cannot raise `http:request` and would bypass that authorization. The one stream that the gateway
+copies as raw bytes is a WebSocket, after `websocket:connect` permits its handshake and the server
+answers `101`. Policy decides nothing after the `101`, and the gateway reads no frame, so it redacts
+no credential in a message. A decision for each message lost, because it cost policy time on every
+message and no customer asked for a rule on single messages. The cost is
+that a permit on a handshake admits the whole WebSocket, so the box can reach a non-HTTP stream
+inside one. Over `CONNECT`, the box cannot reach a plaintext or non-HTTP upstream in any other way.
 
 <a id="the-ssrf-and-metadata-floor-is-compiled-beneath-policy"></a>
 ### Cloud-metadata protection is policy, and the gateway holds no destination list
@@ -1092,6 +1117,8 @@ human-review mechanism must fail closed: a timeout, a backend error, an explicit
 missing backend all resolve to deny. A backend may resolve only an approval the engine already
 emitted. It must never turn a deny into an allow. Until then, gate a risky action with a `forbid`
 and a second run.
+[Log-only mode](#log-only-mode-turns-only-a-recorded-policy-denial-into-an-allow) is not an
+approval: it is set for the engine's whole life and never pauses for a person.
 
 <a id="mcp-authorization-is-two-gates"></a>
 ### An MCP tool call passes two gates, and the second is not default-deny

@@ -452,12 +452,16 @@ pub(crate) struct Contained {
 impl Contained {
     /// Spawn the workload in its own process group, holding the foreground
     /// terminal so job control and Ctrl-C behave as they would outside the box.
+    ///
+    /// `launched` runs once the workload's `exec` succeeded inside its containment. A containment
+    /// or `exec` failure never calls it.
     pub(crate) async fn spawn(
         boundary: Boundary,
         layout: &BoxRoot,
         hosted: crate::run::hosted::HostedBox,
         terminal: Option<std::fs::File>,
         signals: Option<Signals>,
+        launched: impl FnOnce() + Send + 'static,
     ) -> Result<Self, BoxError> {
         Self::spawn_with(
             boundary,
@@ -467,6 +471,7 @@ impl Contained {
             true,
             terminal,
             signals,
+            launched,
         )
         .await
     }
@@ -506,6 +511,7 @@ impl Contained {
     }
 
     /// The one spawn body. `stdio` supplies stdin and stdout; stderr is always inherited.
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_with(
         boundary: Boundary,
         layout: &BoxRoot,
@@ -514,6 +520,7 @@ impl Contained {
         claim_terminal: bool,
         terminal: Option<std::fs::File>,
         signals: Option<Signals>,
+        launched: impl FnOnce() + Send + 'static,
     ) -> Result<Self, BoxError> {
         // The relay's control socket must exist before the trampoline is spawned,
         // because the trampoline sends its listening descriptor over it during
@@ -588,7 +595,7 @@ impl Contained {
             }
             None => (stdio(), stdio(), stderr),
         };
-        let (mut group, trampoline) = spawn_registered(
+        let (mut group, mut trampoline) = spawn_registered(
             &boundary,
             layout,
             |command| {
@@ -688,6 +695,18 @@ impl Contained {
                 .into());
             }
         };
+
+        // The one reader of the setup status, started once per spawn.
+        #[cfg(unix)]
+        if let Err(error) = trampoline.watch_launch(launched) {
+            let _ = group.stop().await;
+            if let Some(mut terminal) = terminal {
+                let _ = terminal.restore();
+            }
+            return Err(error.into());
+        }
+        #[cfg(not(unix))]
+        drop(launched);
 
         Ok(Self {
             group,
@@ -796,7 +815,7 @@ struct LaunchedLeaf {
 impl LeafBox {
     /// Build the trampoline, spawn the contained child in its own process group, and — on Linux —
     /// start the netns relays held for the child's lifetime. `stdin`/`stdout`/`stderr` are the
-    /// child's stdio: the buffered run pipes stdout/stderr and nulls stdin; the streaming spawn
+    /// child's stdio: the buffered run pipes stdout/stderr, and pipes stdin or nulls it; the streaming spawn
     /// pipes stdin/stdout for the JSON-RPC session and nulls stderr.
     async fn launch_contained(
         boundary: &Boundary,
@@ -879,6 +898,7 @@ impl LeafBox {
     pub(crate) async fn run(
         boundary: Boundary,
         layout: &BoxRoot,
+        stdin: Option<std::os::fd::OwnedFd>,
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
             all(target_os = "linux", feature = "native-filesystem-policy")
@@ -886,7 +906,8 @@ impl LeafBox {
         registration: Option<crate::run::native_enforcement::Registration>,
     ) -> Result<CapturedLeaf, BoxError> {
         // Captured, so the bytes come back to the Shell and leave through its own streams. stdin is
-        // null: a leaf binary reads no stdin, and one that blocked would hold the Call to its deadline.
+        // the read end of the pipe the Shell feeds, or null when the command has none.
+        let child_stdin = stdin.map_or_else(Stdio::null, Stdio::from);
         let LaunchedLeaf {
             mut group,
             mut trampoline,
@@ -895,7 +916,7 @@ impl LeafBox {
         } = Self::launch_contained(
             &boundary,
             layout,
-            Stdio::null(),
+            child_stdin,
             Stdio::piped(),
             Stdio::piped(),
             #[cfg(any(
@@ -905,7 +926,6 @@ impl LeafBox {
             registration,
         )
         .await?;
-
         // The boundary keeps all launch inputs alive until the child exits.
         trampoline.close_setup_writer();
         let output = group.wait_with_output().await;

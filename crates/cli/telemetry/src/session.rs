@@ -32,6 +32,8 @@ struct Observation {
     interval: DecisionInterval,
     next: Instant,
     launch: LaunchOutcome,
+    /// Whether Core recorded that the workload started, which ends startup.
+    workload_started: bool,
     core_outcome: Option<CoreOutcome>,
 }
 
@@ -39,12 +41,27 @@ impl Session {
     /// Capture and send events through one background worker.
     pub fn delivering(invocation: Invocation, outcome: LaunchOutcome) -> Option<Self> {
         let endpoint = configured_endpoint()?;
-        Some(Self::start_with(invocation, outcome, move || {
-            let delivery = Delivery::new(endpoint, REQUEST_TIMEOUT)?;
+        Some(Self::deliver_to(
+            invocation,
+            outcome,
+            endpoint,
+            REQUEST_TIMEOUT,
+        ))
+    }
+
+    fn deliver_to(
+        invocation: Invocation,
+        outcome: LaunchOutcome,
+        endpoint: String,
+        timeout: Duration,
+    ) -> Self {
+        let user_agent = invocation.user_agent();
+        Self::start_with(invocation, outcome, move || {
+            let delivery = Delivery::new(endpoint, timeout, &user_agent)?;
             Some(move |events: Vec<Event>, deadline: Option<Instant>| {
                 delivery.send_all(&events, deadline);
             })
-        }))
+        })
     }
 
     /// Start capture with a callback that bounds its own work.
@@ -171,7 +188,7 @@ fn capture(
                 if let Some(observation) = observation.as_mut() {
                     let polling = observation.tick(Instant::now());
                     let mut events = Vec::new();
-                    if !run_sent && matches!(observation.launch, LaunchOutcome::Confirmed(_)) {
+                    if !run_sent && observation.workload_started {
                         run_sent = true;
                         events.push(invocation.run_event(observation.launch));
                     }
@@ -195,14 +212,21 @@ impl Observation {
             interval: DecisionInterval::new(started, catalog),
             next: started + POLLING_INTERVAL,
             launch: LaunchOutcome::Unknown,
+            workload_started: false,
             core_outcome: None,
         }
     }
 
     fn read(&mut self) {
         self.journal.read(|record| match record {
-            Record::BoxStarted(started_at) => {
+            Record::BoxStarted => {
                 if matches!(self.launch, LaunchOutcome::Unknown) {
+                    self.launch = LaunchOutcome::Confirmed(None);
+                }
+            }
+            Record::WorkloadStarted(started_at) => {
+                if !self.workload_started {
+                    self.workload_started = true;
                     self.launch = LaunchOutcome::Confirmed(started_at);
                 }
             }
@@ -250,6 +274,7 @@ mod tests {
     struct Service {
         endpoint: String,
         events: Receiver<Value>,
+        user_agents: Receiver<String>,
         stop: Arc<AtomicBool>,
         finished: Receiver<()>,
     }
@@ -260,6 +285,7 @@ mod tests {
             listener.set_nonblocking(true).unwrap();
             let endpoint = format!("http://{}/box/ping", listener.local_addr().unwrap());
             let (emit, events) = mpsc::channel();
+            let (agent, user_agents) = mpsc::channel();
             let (done, finished) = mpsc::channel();
             let stop = Arc::new(AtomicBool::new(false));
             let stopping = stop.clone();
@@ -268,7 +294,8 @@ mod tests {
                 while !stopping.load(Ordering::SeqCst) && Instant::now() < deadline {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
-                            if let Some(body) = read_event(&mut stream) {
+                            if let Some((body, user_agent)) = read_event(&mut stream) {
+                                let _ = agent.send(user_agent.unwrap_or_default());
                                 match body {
                                     Value::Array(events) => events.into_iter().for_each(|event| {
                                         let _ = emit.send(event);
@@ -294,19 +321,14 @@ mod tests {
             Self {
                 endpoint,
                 events,
+                user_agents,
                 stop,
                 finished,
             }
         }
 
         fn session(&self, outcome: LaunchOutcome, timeout: Duration) -> Session {
-            let endpoint = self.endpoint.clone();
-            Session::start_with(invocation(), outcome, move || {
-                let delivery = Delivery::new(endpoint, timeout)?;
-                Some(move |events: Vec<Event>, deadline: Option<Instant>| {
-                    delivery.send_all(&events, deadline);
-                })
-            })
+            Session::deliver_to(invocation(), outcome, self.endpoint.clone(), timeout)
         }
 
         fn event(&self) -> Value {
@@ -321,13 +343,14 @@ mod tests {
         }
     }
 
-    fn read_event(stream: &mut TcpStream) -> Option<Value> {
+    fn read_event(stream: &mut TcpStream) -> Option<(Value, Option<String>)> {
         stream.set_nonblocking(false).ok()?;
         stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         reader.read_line(&mut line).ok()?;
         let mut length = None;
+        let mut user_agent = None;
         loop {
             line.clear();
             if reader.read_line(&mut line).ok()? == 0 {
@@ -340,11 +363,14 @@ mod tests {
             if name.eq_ignore_ascii_case("content-length") {
                 length = value.trim().parse::<usize>().ok();
             }
+            if name.eq_ignore_ascii_case("user-agent") {
+                user_agent = Some(value.trim().to_owned());
+            }
         }
         let length = length.filter(|length| *length <= 32 * 1024)?;
         let mut body = vec![0; length];
         reader.read_exact(&mut body).ok()?;
-        serde_json::from_slice(&body).ok()
+        Some((serde_json::from_slice(&body).ok()?, user_agent))
     }
 
     fn invocation() -> Invocation {
@@ -642,7 +668,8 @@ mod tests {
     }
 
     fn append_start(path: &Path) {
-        append_control(path, "box_started", "ok", Some("1700000001234567890"));
+        append_control(path, "box_started", "ok", Some("1700000000000000000"));
+        append_control(path, "workload_started", "ok", Some("1700000001234567890"));
     }
 
     fn append_control(path: &Path, operation: &str, outcome: &str, timestamp: Option<&str>) {
@@ -761,8 +788,8 @@ mod tests {
             let path = directory.path().join("records.jsonl");
             let (mut session, events) = capture(LaunchOutcome::Unknown);
             let journal = Journal::start(&path).unwrap();
-            append_control(&path, "box_started", "ok", timestamp);
-            append_control(&path, "box_started", "ok", Some("1700000009876543210"));
+            append_control(&path, "workload_started", "ok", timestamp);
+            append_control(&path, "workload_started", "ok", Some("1700000009876543210"));
             session.observe(journal, catalog());
             session.finish(Instant::now(), ExitOutcome::Zero);
             let run = events.try_recv().unwrap();
@@ -862,12 +889,35 @@ mod tests {
     }
 
     #[test]
+    fn a_box_whose_workload_never_starts_sends_its_run_at_completion_without_latency() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("records.jsonl");
+        let (mut session, events) = capture(LaunchOutcome::Unknown);
+        session.observe(Journal::start(&path).unwrap(), catalog());
+        append_control(&path, "box_started", "ok", Some("1700000001234567890"));
+        assert!(
+            events.recv_timeout(Duration::from_millis(2500)).is_err(),
+            "startup is not over until the workload starts"
+        );
+        append_control(&path, "box_stopped", "refused", None);
+        session.finish(Instant::now(), ExitOutcome::Nonzero);
+        let event = events.try_recv().unwrap();
+        assert_eq!(
+            event["data"],
+            json!({"box_launched":true,"failure_reason":null,"startup_latency_ms":null})
+        );
+        assert_empty_polling(&events);
+        assert_shutdown(&events, &event, "nonzero", Some("refused"));
+    }
+
+    #[test]
     fn startup_without_a_usable_timestamp_still_precedes_shutdown() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("records.jsonl");
         let (mut session, events) = capture(LaunchOutcome::Unknown);
         session.observe(Journal::start(&path).unwrap(), catalog());
         append_control(&path, "box_started", "ok", None);
+        append_control(&path, "workload_started", "ok", None);
         session.finish(Instant::now(), ExitOutcome::Zero);
         let event = events.try_recv().unwrap();
         assert_eq!(
@@ -914,6 +964,34 @@ mod tests {
             assert_eq!(run[key], shutdown[key], "{key}");
         }
         assert!(service.events.try_recv().is_err());
+    }
+
+    #[test]
+    fn every_request_names_box_and_the_version_in_the_payload() {
+        let service = Service::start(Duration::ZERO);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("records.jsonl");
+        append(&path);
+        let journal = Journal::start(&path).unwrap();
+        let mut session = service.session(LaunchOutcome::Unknown, Duration::from_secs(1));
+        session.observe(journal, catalog());
+        append_start(&path);
+        append_control(&path, "box_stopped", "ok", None);
+        session.finish(Instant::now(), ExitOutcome::Zero);
+        let events: Vec<Value> = (0..3).map(|_| service.event()).collect();
+        let mut names: Vec<_> = events
+            .iter()
+            .map(|e| e["event"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["polling/1", "run/1", "shutdown/1"]);
+        let version = events[0]["context"]["box_version"].as_str().unwrap();
+        assert_eq!(version, "1.2.3");
+        let agents: Vec<String> = service.user_agents.try_iter().collect();
+        assert!(!agents.is_empty());
+        for agent in agents {
+            assert_eq!(agent, format!("box/{version}"));
+        }
     }
 
     #[test]
