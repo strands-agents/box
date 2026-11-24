@@ -18,8 +18,19 @@ installation = ["npm", "homebrew"]
 hosts = ["registry.npmjs.org"]
 
 [env]
-npm_config_cache = "${{ workspace }}/.npm"
+# npm's cache is in the tool's own storage, outside the project, so the agent cannot change a
+# package that a later install unpacks. Every project of the profile shares it, as ~/.npm is
+# shared outside the box.
+npm_config_cache = "${{ storage.cache }}"
 npm_config_update_notifier = "false"
 npm_config_audit = "false"
 npm_config_fund = "false"
 npm_config_script_shell = "/bin/bash"
+
+# The tool's own storage: the agent gets no grant to it.
+[storage]
+directories = ["cache"]
+
+[filesystem]
+read = ["${{ storage.cache }}"]
+write = ["${{ storage.cache }}"]

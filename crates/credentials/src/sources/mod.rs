@@ -13,6 +13,7 @@ mod credsd;
 mod env;
 mod file;
 mod op;
+mod vm_generation;
 
 /// Shared test support for the few source tests that mutate the process environment, which is
 /// global to the test binary.

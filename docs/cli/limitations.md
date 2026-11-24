@@ -79,7 +79,7 @@ after a run:
 | File | What runs it |
 | --- | --- |
 | `.git/hooks/*`, and `.git/config` (`core.hooksPath`, `core.fsmonitor`, aliases) | `git`. Even `git status` runs `core.fsmonitor`, and `git status` doesn't list either file. |
-| `.claude/settings.json` and `.claude/settings.local.json` (hooks), `.mcp.json` | Claude Code, when you run it outside the box. The permission mode and the allow rules Claude Code uses in the next box run. |
+| The agent's project settings, such as Claude Code's `.claude/settings.json` and `.mcp.json` | Your agent, the next time you run it in the project outside the box. For Claude Code, they also set the next box run's permissions. |
 | `package.json` scripts, `.npmrc` | `npm install`, `npm test`, and the like. |
 | `Makefile`, `build.rs`, `.cargo/config.toml`, other build files | `make`, `cargo build`, and other build tools. |
 | `.envrc` | `direnv`, as soon as you `cd` into the project. |
@@ -212,8 +212,9 @@ So give a profile only the tools it needs. Each tool is one pack, such as `@box/
 
 The agent keeps its own files outside your project, but the tools still use folders in it. A tool
 pack keeps its cache in the project's `.cache/<tool>` folder ([Tools](profiles-reference.md#tools)),
-and a pack that writes another folder names it in its README, such as cargo's `.cargo` and
-`target` and node's and npm's `.npm`. Add `/.cache` and those folders to the project's `.gitignore`. That
+unless its README says it keeps the cache in its own storage, and a pack that writes another folder
+names it in its README, such as cargo's `target` and node's `.npm`. Add `/.cache` and those folders
+to the project's `.gitignore`. That
 hides them from plain `git status`, which is why step 2 of the
 [check after a run](#the-agent-can-plant-code-that-runs-outside-the-box-later) uses `--ignored`.
 

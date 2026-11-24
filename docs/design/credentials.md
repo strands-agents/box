@@ -137,7 +137,7 @@ The vault rejects empty secrets, whitespace-only secrets, and secrets containing
 when it reads them. Every source must pass this check. See [an unusable secret value is
 unrepresentable](./decisions.md#an-unusable-secret-value-is-unrepresentable).
 
-A `credsd://CREDENTIAL` route reads one credsd credential, by name, over the daemon's Unix socket,
+A `credsd://NAME` route reads one credsd credential, by name, over the daemon's Unix socket,
 and `secret.type` says what kind it is. The type is fixed when the configuration loads, before Box contacts
 the daemon, because the two kinds open different routes. An `aws` route is a signed route, and it
 fetches session credentials on each request, as `aws://` does. A `token` route is an opaque route,
@@ -301,7 +301,9 @@ reads that profile's static keys, `credential_process`, assume-role, or web iden
 ambient `AWS_*` keys or instance metadata, and a missing profile is refused rather than falling
 through to the ambient identity. The worker owns a current-thread runtime and a refresh
 cache keyed by profile: it serves a cached credential while valid, resolves again near expiry, and
-on a failed refresh serves a still-valid cached one rather than dropping it. Each resolve is bounded
+on a failed refresh serves a still-valid cached one rather than dropping it. When the host was
+restored from a snapshot or cloned since a resolve, the cache drops that credential and resolves
+again, because the old one belongs to the identity of the machine that took the snapshot. Each resolve is bounded
 by a timeout, so a stuck `credential_process` helper cannot wedge the worker. The identity each form
 signs with, the SSO exclusion, and the writable-`~/.aws` cost are stated in
 [the decision](./decisions.md#a-bare-aws-resolves-the-default-credential-chain); the operator view is

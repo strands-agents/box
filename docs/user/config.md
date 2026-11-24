@@ -78,7 +78,7 @@ The file carries fourteen keys. `name` and `box_dir` are required.
 |---|---|---|
 | `name` | string | Which box this is. One path component of letters, digits, `.`, `_`, or `-`, at most 32 bytes. |
 | `box_dir` | string | Where the box keeps its private state. Required, and absolute. |
-| `policy` | string | The Dogwood policy, relative to this file's directory unless absolute. Absent means no authored policy, and absent policy denies. |
+| `policy` | string or table | The Dogwood policy, relative to this file's directory unless absolute. Absent means no authored policy, and absent policy denies. The table form, `[policy]`, takes `source` (the file, required) and `enforcement`: `enforce` (the default) or `log_only`. See [log-only mode](policy.md#log-only-mode). |
 | `[agent]` | table | The one process the box runs. |
 | `[tool.<name>]` | tables | One process each, which the agent selects by invocation. The label takes the same characters as `name`. |
 | `[egress.<name>]` | tables | Which secret attaches to which outbound destination. |
@@ -1057,7 +1057,7 @@ requests out. The current reference for this table is
 |---|---|---|
 | `destinations` | string array | A host, `host:port`, a path prefix or `/*` suffix, or a `*.` wildcard. A pattern that matches every host is refused, and two entries may not overlap. |
 | `protocol` | string | `http`, the default and the only accepted value. |
-| `secret.ref` | string | `env://NAME` for a variable on the operator's side, `aws://PROFILE` to SigV4-sign as a named profile (resolved through the AWS SDK), a bare `aws://` to sign with the AWS SDK default credential provider chain (the host's ambient identity), `credsd://CREDENTIAL` for a credential that the credsd daemon serves, or a reference in a scheme that a [`[secret-source.<scheme>]`](#secret-sourcescheme) table declares, such as `op://Personal/GitHub/token`. Required. A literal value, or any other scheme, is refused. |
+| `secret.ref` | string | `env://NAME` for a variable on the operator's side, `aws://PROFILE` to SigV4-sign as a named profile (resolved through the AWS SDK), a bare `aws://` to sign with the AWS SDK default credential provider chain (the host's ambient identity), `credsd://NAME` for a credential that the credsd daemon serves, or a reference in a scheme that a [`[secret-source.<scheme>]`](#secret-sourcescheme) table declares, such as `op://Personal/GitHub/token`. Required. A literal value, or any other scheme, is refused. |
 | `secret.type` | string | For a `credsd://` reference only: `aws`, which signs each request with SigV4, or `token`, which attaches the credential's access token at the placement below, behind a placeholder. Without the key the route signs as `aws`, and the box warns when it starts. Refused with any other scheme. See [Credential sources](egress.md#credential-sources). |
 | `secret.env` | string | Experimental: needs `secret-sources = true` in [`[experimental-features]`](#experimental-features). The variable that holds the placeholder in the workload. Required with a reference in a declared scheme. Optional with `env://NAME`, where it must equal `NAME`, and with a credsd token. Refused with `aws://` and a credsd AWS route. |
 | `secret.placement` | string | `header` (default), `basic_auth`, or `query_param`. |
@@ -1384,13 +1384,13 @@ started reads with `jq`.
 | `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, `metrics`, or `mcp_tool_calls`. `trace` names the agent's own spans and the box's control-plane records. `logs` includes unmatched MCP routing diagnostics. `mcp_tool_calls` names each MCP tool call's arguments and output in clear text, and how it ended. **Absent means every signal except `mcp_tool_calls`**, which a target receives only when it names it. An empty list is refused, and so is a repeated word. |
 | `accepts` | string array | For `otlp`: which OTLP payloads the endpoint takes, from `traces`, `logs`, and `metrics`. Absent means all three. The box sends no batch of a payload the list leaves out. |
 | `headers` | table | For `otlp`: fixed headers sent on every request. A header that carries a credential or a signature is refused here. |
-| `secret.ref` | string | `env://NAME`, `secret://NAME`, `aws://PROFILE`, `credsd://CREDENTIAL`, or a reference in a [declared scheme](#secret-sourcescheme). `aws://` and `credsd://` sign each request with SigV4. A literal value is refused. The box attaches this secret itself, so the target takes no `secret.env`. |
+| `secret.ref` | string | `env://NAME`, `secret://NAME`, `aws://PROFILE`, `credsd://NAME`, or a reference in a [declared scheme](#secret-sourcescheme). `aws://` and `credsd://` sign each request with SigV4. A literal value is refused. The box attaches this secret itself, so the target takes no `secret.env`. |
 | `secret.placement` | string | For `otlp`: `header` (default) or `basic_auth`. `basic_auth` sends a `user:password` secret as `Authorization: Basic`. |
 | `secret.header` | string | For `otlp`: the header the secret lands in. Defaults to `Authorization`. |
 | `secret.prefix` | string | For `otlp`: text before the secret in the header. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |
 | `project` | string | For `langsmith`: the project the spans go to. |
 | `region` | string | For a CloudWatch kind: the AWS region, such as `us-west-2`. Required. |
-| `log_group`, `log_stream` | string | For `cloudwatch_logs`: where the log records go. Both are required. |
+| `log_group`, `log_stream` | string | For `cloudwatch_logs`: where the log records go. Both are required. For `cloudwatch_traces`: the log group and stream the spans go to. Write both or neither. Absent, CloudWatch puts the spans in its default `aws/spans` log group. |
 
 A vendor kind sets the vendor's path, headers, payloads, and credential placement itself. Write
 only what is yours:
@@ -1424,7 +1424,7 @@ secret.ref = "aws://my-profile"
 | `langfuse` | spans, to `<destination>/api/public/otel`, with `x-langfuse-ingestion-version: 4` | Basic auth, from a `public-key:secret-key` secret |
 | `langsmith` | spans, to `<destination>/otel`, with `Langsmith-Project` when `project` is set | `x-api-key` |
 | `cloudwatch_logs` | log records, to `https://logs.<region>.amazonaws.com`, with `x-aws-log-group` and `x-aws-log-stream` | SigV4 for `logs`, from `aws://` or `credsd://` |
-| `cloudwatch_traces` | spans, to `https://xray.<region>.amazonaws.com` | SigV4 for `xray`, from `aws://` or `credsd://` |
+| `cloudwatch_traces` | spans, to `https://xray.<region>.amazonaws.com`, with `x-aws-log-group` and `x-aws-log-stream` when `log_group` and `log_stream` are set | SigV4 for `xray`, from `aws://` or `credsd://` |
 
 A `langfuse` or `langsmith` target also takes a reference in a
 [declared scheme](#secret-sourcescheme), such as
