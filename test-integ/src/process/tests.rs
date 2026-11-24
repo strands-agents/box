@@ -225,6 +225,9 @@ fn descendant_fixture(root: &Path, ready: bool) -> (BoxFixture, SeparateWorkload
 # Outlive the readiness test's 10 s ready timeout, so SIGTERM finds the workload alive.
 workload = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
 def stop(signum, frame):
+    if workload.poll() is not None:
+        pathlib.Path("shutdown.complete").write_text("workload had already exited")
+        sys.exit(0)
     os.killpg(workload.pid, signal.SIGTERM)
     workload.wait(timeout=2)
     pathlib.Path("shutdown.complete").write_text("workload reaped")
@@ -263,9 +266,10 @@ fn assert_shutdown_reaped_workload(root: &Path) {
         .status()
         .unwrap()
         .success();
+    let shutdown = std::fs::read_to_string(root.join("shutdown.complete")).ok();
     assert!(
-        root.join("shutdown.complete").exists() && !alive,
-        "shutdown must let the supervisor reap its separate workload; workload_alive={alive}"
+        shutdown.as_deref() == Some("workload reaped") && !alive,
+        "shutdown must let the supervisor reap its separate workload; shutdown={shutdown:?} workload_alive={alive}"
     );
     assert_child_reaped(root);
 }
