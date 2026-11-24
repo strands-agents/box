@@ -1345,6 +1345,104 @@ fn already_mounted_storage_is_ready_for_repeated_tools_and_local_server_first_re
     isolated(|| first_read_box(true, FirstReadSource::Before));
 }
 
+#[test]
+#[ignore = "requires BOX_STORAGE_TEST_FUSE and native Linux user/mount/FUSE support"]
+fn metadata_only_storage_starts_without_exposing_contents() {
+    isolated(|| {
+        mount_tmpfs(Path::new("/mnt"));
+        let _mount = PrivateMount;
+        for root in ROOTS {
+            std::fs::create_dir(root).unwrap();
+            mount_tmpfs(Path::new(root));
+            populate(Path::new(root), b"WRONG UNDERLAY BYTES");
+        }
+        std::fs::create_dir(OUTPUT).unwrap();
+        let home = tempfile::Builder::new()
+            .prefix("bmd")
+            .tempdir_in("/var/tmp")
+            .unwrap();
+        let backing = home.path().join("backing");
+        populate(&backing, CONTENTS[0]);
+        let mut source = start_fuse(&backing, Path::new(ROOTS[0]), CONTENTS[0]);
+        let quote = |path: &Path| toml::Value::String(path.display().to_string()).to_string();
+        let root = Path::new(ROOTS[0]);
+        std::fs::write(root.join("public"), CONTENTS[0]).unwrap();
+        assert_eq!(std::fs::read(root.join("public")).unwrap(), CONTENTS[0]);
+        let created = root.join("writable/created");
+        std::fs::write(&created, b"source write control").unwrap();
+        assert_eq!(std::fs::read(&created).unwrap(), b"source write control");
+        std::fs::rename(&created, root.join("writable/source-write-control")).unwrap();
+        assert!(!created.exists());
+        let metadata_root = format!("metadata = [{}]\n", quote(root));
+        let metadata_child = format!("metadata = [{}]\n", quote(&root.join("secret")));
+        let read = format!(
+            "read = [{}]\ndeny = [{}]\n",
+            quote(root),
+            quote(&root.join("secret"))
+        );
+        for (name, grants, readable) in [
+            ("none", String::new(), false),
+            ("metadata-root", metadata_root.clone(), false),
+            ("metadata-child", metadata_child, false),
+            ("read", read.clone(), true),
+            ("metadata-and-read", format!("{metadata_root}{read}"), true),
+        ] {
+            let state = tempfile::Builder::new()
+                .prefix(name)
+                .tempdir_in(home.path())
+                .unwrap();
+            std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mode = if readable {
+                "first-read-native"
+            } else {
+                "first-read-pending"
+            };
+            let config = home.path().join("box.toml");
+            std::fs::write(
+                &config,
+                format!(
+                    "name = \"metadata-storage\"\nbox_dir = {}\n\
+                     [experimental-features]\nlinux-storage-mounts = true\n\
+                     [agent]\ncommand = [{}, \"{mode}\", {}, {}]\nworkspace = {}\n\
+                     [agent.filesystem]\nmounts = [{}, {}]\n{grants}",
+                    quote(state.path()),
+                    quote(Path::new(env!("CARGO_BIN_EXE_box-storage-probe"))),
+                    quote(root),
+                    quote(Path::new(ROOTS[1])),
+                    quote(Path::new(OUTPUT)),
+                    quote(root),
+                    quote(Path::new(ROOTS[1])),
+                ),
+            )
+            .unwrap();
+            let mut workload = Process::start(
+                Command::new(env!("CARGO_BIN_EXE_strands-box"))
+                    .args(["run", "--config"])
+                    .arg(&config)
+                    .env("HOME", home.path())
+                    .current_dir(OUTPUT),
+            );
+            workload.finish();
+            let receipt = tail(&mut workload.stdout);
+            assert!(
+                receipt.contains(if readable {
+                    "native-first-read-passed"
+                } else {
+                    "pending-first-read-passed"
+                }),
+                "{name}: {receipt}"
+            );
+            source.require_running("after metadata storage checks");
+            assert_eq!(std::fs::read(root.join("public")).unwrap(), CONTENTS[0]);
+            assert_eq!(
+                std::fs::read(root.join("secret/token")).unwrap(),
+                b"DENIED SOURCE BYTES"
+            );
+            assert!(!root.join("writable/created").exists());
+        }
+    });
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FirstReadSource {
     Before,
