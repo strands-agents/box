@@ -277,7 +277,8 @@ Key it on `::response`, and require `output.reply` to be `result`:
   `output.structured` is what the tool answered. It holds the reply's `structuredContent`, keeping
   only the fields the tool's `outputSchema` declares, so a misspelled field fails at load. An
   `outputSchema` that Box can't turn into a policy type, such as one with a field named `if`, a
-  `$ref` it can't resolve, or a name in its own `$defs` that isn't a plain name, declares no
+  `$ref` it can't resolve, or a name in its own `$defs` that the generator can't use, such as one with a hyphen or a
+  reserved name like `String`, declares no
   `output.structured`, so a rule that reads it fails at load, and that tool's action in
   `policy generate-schema` has no `structured` field. The server's other tools keep their outputs,
   unless the problem only appears when the outputs are read together; then no tool on that server

@@ -203,10 +203,15 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `<server>::Unknown::"x"` or the field itself, validates. A rule that reads a field inside it
   validates only behind `has` tests. The request gate refuses an ordinary object, a string, a
   number, a boolean, `null`, or a list at the cut field as `InternalFault`.
-  Renamed definitions and array elements change only generated type names. `outputSchema` `$defs`
-  stay as the server wrote them, so a server that generated before without dropping an output
-  generates the same schema. A reference in an output to a renamed server or tool definition
-  follows the rename, unless the output's own `$defs` declare that name, which still shadows it.
+  Renamed definitions and array elements change only generated type names. An output's own
+  `$defs` keep their names and are not moved or cut, so a server that generated before without
+  dropping an output generates the same schema. A reference to a renamed server or tool
+  definition follows the rename wherever it appears in an output, including inside the output's
+  own `$defs`, unless those `$defs` declare that name, which still shadows it. A reference is
+  rewritten only where the generator reads a schema: the values of `properties` and `$defs` and of
+  the keywords in `SCHEMA_KEYWORDS`, the same descent as the argument rename. A reference-shaped
+  object in a `default`, `const`, `examples` or `enum` value or under `allOf` keeps the server's
+  name, while the names a rename avoids are still collected from every `$ref`.
   `without_unreadable_outputs` judges each output alone beside the server's `$defs`, as the pass
   fixes them, so an output that refers to a server definition is not dropped for another tool's
   problem. An output whose `$defs` name is not an identifier, or is an array of objects, is dropped
@@ -225,6 +230,10 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `::an_output_definition_shadows_a_renamed_server_definition_of_the_same_name`,
   `::renaming_a_shared_definition_keeps_the_structured_output_of_every_tool`,
   `::an_output_that_refers_to_a_server_definition_is_judged_with_the_server_definitions`,
+  `::an_output_that_refers_to_a_renamed_server_or_tool_definition_keeps_its_output`,
+  `::an_output_that_refers_to_a_moved_or_cut_server_definition_keeps_its_output`,
+  `::a_renamed_definition_name_in_a_data_value_or_an_ignored_keyword_stays_as_the_server_wrote_it`,
+  `::a_reference_below_each_keyword_the_parser_reads_follows_a_rename_and_the_data_beside_it_does_not`,
   `::a_definition_list_that_would_nest_too_deep_is_left_unchanged`,
   `::a_reference_the_parser_does_not_follow_into_a_common_type_stays_typed`,
   `::a_generated_type_cannot_collide_with_the_server_action_type`, and
