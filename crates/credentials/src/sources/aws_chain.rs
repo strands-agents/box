@@ -29,6 +29,10 @@ type ProfileKey = Option<String>;
 /// How long before expiry a resolve is retried, so a request never signs with an expired token.
 const EXPIRY_BUFFER: Duration = Duration::from_secs(5 * 60);
 
+/// How far the wall clock may run ahead of the monotonic clock before the cache treats the host as
+/// restored from a snapshot.
+const CLOCK_JUMP_TOLERANCE: Duration = Duration::from_secs(2);
+
 /// How long a caller waits for the worker before the resolve is a hard error.
 const CALLER_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -41,26 +45,64 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 // The refresh cache
 // ===================================================================================================
 
-/// Holds the resolved credentials and their expiry, and refreshes near expiry.
-///
-/// `resolve` resolves the chain, and `now` is injectable so the refresh logic tests with a fake
-/// clock. The cached credential is wiped on drop.
-struct RefreshCache<R, N> {
-    resolve: R,
-    now: N,
-    cached: HashMap<ProfileKey, (Zeroizing<AwsSessionCredentials>, Expiry)>,
+/// A reading of the wall clock and of a monotonic clock that stops while the host is suspended.
+#[derive(Clone, Copy, Debug)]
+struct Moment {
+    wall: SystemTime,
+    monotonic: Duration,
 }
 
-impl<R, N> RefreshCache<R, N>
+impl Moment {
+    /// The current moment, with `monotonic` measured from the first reading in this process.
+    fn now() -> Self {
+        static START: OnceLock<Instant> = OnceLock::new();
+        let start = *START.get_or_init(Instant::now);
+        Self {
+            wall: SystemTime::now(),
+            monotonic: start.elapsed(),
+        }
+    }
+}
+
+/// The host state a credential was resolved in.
+#[derive(Clone, Copy, Debug)]
+struct Resolution {
+    at: Moment,
+    generation: Option<u32>,
+}
+
+/// A cached credential, its expiry, and the host state it was resolved in.
+struct Cached {
+    credentials: Zeroizing<AwsSessionCredentials>,
+    expiry: Expiry,
+    resolution: Resolution,
+}
+
+/// Holds the resolved credentials and their expiry, and refreshes near expiry or after a restore.
+///
+/// `resolve` resolves the chain, `now` reads the clocks, and `generation` reads the virtual machine
+/// generation counter. All three are injectable so the refresh logic tests offline. The cached
+/// credential is wiped on drop.
+struct RefreshCache<R, N, G> {
+    resolve: R,
+    now: N,
+    generation: G,
+    cached: HashMap<ProfileKey, Cached>,
+}
+
+impl<R, N, G> RefreshCache<R, N, G>
 where
     R: FnMut(Option<&str>) -> Result<Resolved>,
-    N: Fn() -> SystemTime,
+    N: Fn() -> Moment,
+    G: Fn() -> Option<u32>,
 {
-    /// A cache that resolves through `resolve` and reads the clock through `now`.
-    fn new(resolve: R, now: N) -> Self {
+    /// A cache that resolves through `resolve`, reads the clocks through `now`, and reads the
+    /// generation counter through `generation`.
+    fn new(resolve: R, now: N, generation: G) -> Self {
         Self {
             resolve,
             now,
+            generation,
             cached: HashMap::new(),
         }
     }
@@ -68,26 +110,39 @@ where
     /// Serve the cached credentials for `profile` while valid, and refresh inside the expiry buffer.
     /// A failed refresh, or a fresh resolve that is already expired, falls back to a still-valid
     /// cached credential; with none, a failed refresh returns the hard error and an expired fresh
-    /// resolve is served as-is. Each `profile` key has its own slot.
+    /// resolve is served as-is. A credential resolved before the host was restored is dropped, so it
+    /// is never a fallback. Each `profile` key has its own slot.
     fn provide(&mut self, profile: Option<&str>) -> Result<AwsSessionCredentials> {
         let key: ProfileKey = profile.map(str::to_string);
-        if let Some((credentials, expiry)) = self.cached.get(&key)
-            && !should_refresh((self.now)(), *expiry)
-        {
-            return Ok((**credentials).clone());
+        let resolution = Resolution {
+            at: (self.now)(),
+            generation: (self.generation)(),
+        };
+        if let Some(cached) = self.cached.get(&key) {
+            if restored_since(cached.resolution, resolution) {
+                self.cached.remove(&key);
+            } else if !should_refresh(resolution.at.wall, cached.expiry, cached.resolution) {
+                return Ok((*cached.credentials).clone());
+            }
         }
         match (self.resolve)(profile) {
             // A resolve can take real time (a `credential_process` helper, an STS round trip), so
             // read the clock again rather than reusing the pre-resolve instant. A freshly resolved
             // credential that is already expired must not displace a still-valid cached one.
-            Ok((credentials, expiry)) if still_valid((self.now)(), expiry) => {
-                self.cached
-                    .insert(key, (Zeroizing::new(credentials.clone()), expiry));
+            Ok((credentials, expiry)) if still_valid((self.now)().wall, expiry) => {
+                self.cached.insert(
+                    key,
+                    Cached {
+                        credentials: Zeroizing::new(credentials.clone()),
+                        expiry,
+                        resolution,
+                    },
+                );
                 Ok(credentials)
             }
             Ok((credentials, _expired)) => match self.cached.get(&key) {
-                Some((cached, expiry)) if still_valid((self.now)(), *expiry) => {
-                    Ok((**cached).clone())
+                Some(cached) if still_valid((self.now)().wall, cached.expiry) => {
+                    Ok((*cached.credentials).clone())
                 }
                 // No valid cache to prefer: serve the resolved credential and let the upstream
                 // reject it, rather than inventing a failure from a successful resolve.
@@ -96,8 +151,8 @@ where
             // On a failed refresh, serve the cached credential only if it is still valid *now* — one
             // that expired while the refresh ran is no longer a safe fallback.
             Err(error) => match self.cached.get(&key) {
-                Some((credentials, expiry)) if still_valid((self.now)(), *expiry) => {
-                    Ok((**credentials).clone())
+                Some(cached) if still_valid((self.now)().wall, cached.expiry) => {
+                    Ok((*cached.credentials).clone())
                 }
                 _ => Err(error),
             },
@@ -113,9 +168,26 @@ fn still_valid(now: SystemTime, expiry: Expiry) -> bool {
     }
 }
 
-/// Whether a resolve is due at `now`: a credential inside its expiry buffer or expired, or any
-/// non-expiring credential (which re-resolves every call so a rotated one is not pinned).
-fn should_refresh(now: SystemTime, expiry: Expiry) -> bool {
+/// Whether the host was restored from a snapshot or cloned between `then` and `now`: the generation
+/// counter changed or, with no counter, the wall clock ran ahead of the monotonic clock.
+fn restored_since(then: Resolution, now: Resolution) -> bool {
+    if then.generation.is_some() || now.generation.is_some() {
+        return then.generation != now.generation;
+    }
+    let Ok(wall) = now.at.wall.duration_since(then.at.wall) else {
+        return false;
+    };
+    let monotonic = now.at.monotonic.saturating_sub(then.at.monotonic);
+    wall.saturating_sub(monotonic) > CLOCK_JUMP_TOLERANCE
+}
+
+/// Whether a resolve is due at `now`: a credential resolved at a later wall time than `now`, a
+/// credential inside its expiry buffer or expired, or any non-expiring credential (which re-resolves
+/// every call so a rotated one is not pinned).
+fn should_refresh(now: SystemTime, expiry: Expiry, resolution: Resolution) -> bool {
+    if now < resolution.at.wall {
+        return true;
+    }
     match expiry {
         None => true,
         Some(expiry) => now
@@ -230,7 +302,7 @@ fn worker(receiver: Receiver<Request>, setup: SetupFn) {
             }
         }
         Ok(resolve) => {
-            let mut cache = RefreshCache::new(resolve, SystemTime::now);
+            let mut cache = RefreshCache::new(resolve, Moment::now, super::vm_generation::current);
             for request in receiver {
                 // Skip a resolve for a caller that already timed out, so a slow or failing chain
                 // does not run work for callers that have left and stack behind them.
@@ -246,7 +318,8 @@ fn worker(receiver: Receiver<Request>, setup: SetupFn) {
 }
 
 /// Build the runtime, the shared HTTP client, and the region once, and return a closure that
-/// rebuilds the chain on each resolve. See the crate AGENTS.md for why the chain is rebuilt.
+/// rebuilds the chain on each resolve. See the crate AGENTS.md for why the chain is rebuilt and why
+/// the client keeps no idle connection.
 fn real_setup() -> Result<ResolveFn> {
     use aws_smithy_http_client::{Builder, tls};
 
@@ -259,6 +332,7 @@ fn real_setup() -> Result<ResolveFn> {
             ))
         })?;
     let http_client = Builder::new()
+        .pool_max_idle_per_host(0)
         .tls_provider(tls::Provider::Rustls(
             tls::rustls_provider::CryptoMode::Ring,
         ))
@@ -422,6 +496,14 @@ mod tests {
         }
     }
 
+    /// A moment where the monotonic clock has run as long as the wall clock since the epoch.
+    fn at(wall: SystemTime) -> Moment {
+        Moment {
+            wall,
+            monotonic: wall.duration_since(SystemTime::UNIX_EPOCH).unwrap(),
+        }
+    }
+
     // --- RefreshCache (fake clock, fake resolve; no SDK, no network) ---------
 
     /// While the cached credentials are valid and outside the buffer, `provide` serves the cache
@@ -437,7 +519,8 @@ mod tests {
                 calls.set(calls.get() + 1);
                 Ok((creds("AKIA1"), expiry))
             },
-            || clock.get(),
+            || at(clock.get()),
+            || None,
         );
 
         assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
@@ -459,7 +542,8 @@ mod tests {
                 let id = format!("AKIA{}", calls.get());
                 Ok((creds(&id), Some(clock.get() + Duration::from_secs(3600))))
             },
-            || clock.get(),
+            || at(clock.get()),
+            || None,
         );
 
         assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
@@ -487,7 +571,8 @@ mod tests {
                 // No expiry, as a rotated static/session key in `~/.aws/credentials` carries.
                 Ok((creds(&id), None))
             },
-            || clock.get(),
+            || at(clock.get()),
+            || None,
         );
 
         assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
@@ -514,7 +599,8 @@ mod tests {
                 calls.set(calls.get() + 1);
                 Ok((creds(profile.unwrap_or("bare")), expiry))
             },
-            || clock.get(),
+            || at(clock.get()),
+            || None,
         );
 
         assert_eq!(cache.provide(None).unwrap().access_key_id, "bare");
@@ -542,7 +628,8 @@ mod tests {
                     Err(CredentialError::KeystoreAccess("metadata blip".to_string()))
                 }
             },
-            || clock.get(),
+            || at(clock.get()),
+            || None,
         );
 
         assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
@@ -572,7 +659,8 @@ mod tests {
                     Err(CredentialError::KeystoreAccess("chain down".to_string()))
                 }
             },
-            || clock.get(),
+            || at(clock.get()),
+            || None,
         );
 
         assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
@@ -607,7 +695,8 @@ mod tests {
                     ))
                 }
             },
-            || clock.get(),
+            || at(clock.get()),
+            || None,
         );
 
         assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
@@ -638,7 +727,8 @@ mod tests {
                     Ok((creds("STALE"), Some(base - Duration::from_secs(1))))
                 }
             },
-            || clock.get(),
+            || at(clock.get()),
+            || None,
         );
 
         assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
@@ -661,13 +751,217 @@ mod tests {
         let clock = Cell::new(base);
         let mut cache = RefreshCache::new(
             |_profile| Ok((creds("EXPIRED"), Some(base - Duration::from_secs(1)))),
-            || clock.get(),
+            || at(clock.get()),
+            || None,
         );
         assert_eq!(
             cache.provide(None).unwrap().access_key_id,
             "EXPIRED",
             "an expired fresh resolve with no cache is served, not turned into an error"
         );
+    }
+
+    type TestCache<'a> = RefreshCache<
+        Box<dyn FnMut(Option<&str>) -> Result<Resolved> + 'a>,
+        Box<dyn Fn() -> Moment + 'a>,
+        Box<dyn Fn() -> Option<u32> + 'a>,
+    >;
+
+    /// A cache whose resolve returns `AKIA<n>` on call `n`, valid for one hour from the fake clock.
+    fn counting_cache<'a>(
+        calls: &'a Cell<u32>,
+        clock: &'a Cell<Moment>,
+        generation: &'a Cell<Option<u32>>,
+    ) -> TestCache<'a> {
+        RefreshCache::new(
+            Box::new(move |_profile| {
+                calls.set(calls.get() + 1);
+                let id = format!("AKIA{}", calls.get());
+                Ok((
+                    creds(&id),
+                    Some(clock.get().wall + Duration::from_secs(3600)),
+                ))
+            }),
+            Box::new(move || clock.get()),
+            Box::new(move || generation.get()),
+        )
+    }
+
+    /// `moment` with the wall clock moved `wall` ahead and the monotonic clock `monotonic` ahead.
+    fn advanced(moment: Moment, wall: Duration, monotonic: Duration) -> Moment {
+        Moment {
+            wall: moment.wall + wall,
+            monotonic: moment.monotonic + monotonic,
+        }
+    }
+
+    #[test]
+    fn cache_serves_the_cached_credential_while_the_generation_is_unchanged() {
+        let base = at(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000));
+        let (calls, clock, generation) = (Cell::new(0), Cell::new(base), Cell::new(Some(1)));
+        let mut cache = counting_cache(&calls, &clock, &generation);
+
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
+        // With a counter, a clock jump alone is not a restore.
+        clock.set(advanced(base, Duration::from_secs(600), Duration::ZERO));
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn cache_resolves_once_again_when_the_generation_changes() {
+        let base = at(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000));
+        let (calls, clock, generation) = (Cell::new(0), Cell::new(base), Cell::new(Some(1)));
+        let mut cache = counting_cache(&calls, &clock, &generation);
+
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
+        generation.set(Some(2));
+        assert_eq!(
+            cache.provide(None).unwrap().access_key_id,
+            "AKIA2",
+            "a credential resolved before the restore is not served after it"
+        );
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA2");
+        assert_eq!(
+            calls.get(),
+            2,
+            "the restore causes one resolve, not one per request"
+        );
+    }
+
+    #[test]
+    fn cache_does_not_fall_back_to_a_credential_resolved_before_a_restore() {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let calls = Cell::new(0u32);
+        let generation = Cell::new(Some(1));
+        let mut cache = RefreshCache::new(
+            |_profile| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    Ok((creds("AKIA1"), Some(base + Duration::from_secs(3600))))
+                } else {
+                    Err(CredentialError::KeystoreAccess("metadata down".to_string()))
+                }
+            },
+            || at(base),
+            || generation.get(),
+        );
+
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
+        generation.set(Some(2));
+        let error = cache.provide(None).unwrap_err();
+        assert!(!error.is_soft(), "the dropped credential is not a fallback");
+    }
+
+    #[test]
+    fn cache_resolves_again_when_the_wall_clock_jumps_ahead_of_the_monotonic_clock() {
+        let base = at(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000));
+        let (calls, clock, generation) = (Cell::new(0), Cell::new(base), Cell::new(None));
+        let mut cache = counting_cache(&calls, &clock, &generation);
+
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
+        let restored = advanced(
+            base,
+            Duration::from_secs(10) + CLOCK_JUMP_TOLERANCE + Duration::from_millis(1),
+            Duration::from_secs(10),
+        );
+        clock.set(restored);
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA2");
+        clock.set(advanced(
+            restored,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        ));
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA2");
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn cache_serves_the_cached_credential_within_the_clock_jump_tolerance() {
+        let base = at(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000));
+        let (calls, clock, generation) = (Cell::new(0), Cell::new(base), Cell::new(None));
+        let mut cache = counting_cache(&calls, &clock, &generation);
+
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
+        clock.set(advanced(
+            base,
+            Duration::from_secs(10) + CLOCK_JUMP_TOLERANCE,
+            Duration::from_secs(10),
+        ));
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn cache_resolves_once_for_slow_traffic_outside_the_expiry_buffer() {
+        let base = at(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000));
+        let (calls, clock, generation) = (Cell::new(0), Cell::new(base), Cell::new(Some(1)));
+        let mut cache = counting_cache(&calls, &clock, &generation);
+
+        for minutes in [0, 10, 20, 30, 40, 50] {
+            let elapsed = Duration::from_secs(minutes * 60);
+            clock.set(advanced(base, elapsed, elapsed));
+            assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
+        }
+        assert_eq!(
+            calls.get(),
+            1,
+            "one request every ten minutes is served from the cache"
+        );
+    }
+
+    #[test]
+    fn cache_keeps_the_cached_credential_as_a_fallback_when_the_wall_clock_moves_back() {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let calls = Cell::new(0u32);
+        let clock = Cell::new(at(base));
+        let mut cache = RefreshCache::new(
+            |_profile| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    Ok((creds("AKIA1"), Some(base + Duration::from_secs(3600))))
+                } else {
+                    Err(CredentialError::KeystoreAccess("metadata blip".to_string()))
+                }
+            },
+            || clock.get(),
+            || None,
+        );
+
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
+        clock.set(Moment {
+            wall: base - Duration::from_secs(1),
+            monotonic: clock.get().monotonic + Duration::from_secs(1),
+        });
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
+        assert_eq!(calls.get(), 2, "the resolve was attempted");
+    }
+
+    #[test]
+    fn the_host_moment_measures_the_monotonic_clock_within_this_process() {
+        let first = Moment::now();
+        let second = Moment::now();
+        assert!(second.monotonic >= first.monotonic);
+        let since_epoch = second.wall.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        assert!(
+            second.monotonic < since_epoch / 2,
+            "the monotonic reading is not derived from the wall clock"
+        );
+    }
+
+    #[test]
+    fn cache_resolves_again_when_the_wall_clock_moves_back() {
+        let base = at(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000));
+        let (calls, clock, generation) = (Cell::new(0), Cell::new(base), Cell::new(None));
+        let mut cache = counting_cache(&calls, &clock, &generation);
+
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
+        clock.set(Moment {
+            wall: base.wall - Duration::from_secs(1),
+            monotonic: base.monotonic + Duration::from_secs(1),
+        });
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA2");
+        assert_eq!(calls.get(), 2);
     }
 
     // --- SdkChainProvider (worker + channel; fake resolver, no SDK) ----------

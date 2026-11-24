@@ -290,7 +290,9 @@ reads that profile's static keys, `credential_process`, assume-role, or web iden
 ambient `AWS_*` keys or instance metadata, and a missing profile is refused rather than falling
 through to the ambient identity. The worker owns a current-thread runtime and a refresh
 cache keyed by profile: it serves a cached credential while valid, resolves again near expiry, and
-on a failed refresh serves a still-valid cached one rather than dropping it. Each resolve is bounded
+on a failed refresh serves a still-valid cached one rather than dropping it. When the host was
+restored from a snapshot or cloned since a resolve, the cache drops that credential and resolves
+again, because the old one belongs to the identity of the machine that took the snapshot. Each resolve is bounded
 by a timeout, so a stuck `credential_process` helper cannot wedge the worker. The identity each form
 signs with, the SSO exclusion, and the writable-`~/.aws` cost are stated in
 [the decision](./decisions.md#a-bare-aws-resolves-the-default-credential-chain); the operator view is
