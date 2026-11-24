@@ -1252,8 +1252,8 @@ that changes between the check and the copy, stops the run. A copy keeps each fi
 
 A `[[storage.hooks]]` row makes the hooks of a JSON copy in storage a per-run view of the hooks in
 a host file ([decisions.md](decisions.md#imported-hooks-are-rebuilt-on-each-run)). The pack states
-where the file holds its hooks and what an imported hook looks like. `box` knows no harness's
-layout ([decisions.md](decisions.md#box-knows-no-provider)). This is the row of `@box/claude`:
+where the file holds its hooks and what an imported hook looks like. The hook reader knows no
+harness's layout ([decisions.md](decisions.md#box-knows-no-provider)). This is the row of `@box/claude`:
 
 ```toml
 [[storage.hooks]]

@@ -31,7 +31,7 @@ use crate::render::tool_rules;
 use crate::resources;
 use crate::starter::{Menu, Starter, columns, short_name};
 use crate::storage_edit;
-use crate::storage_files::State;
+use crate::storage_files::{Copy, State, edit_in_storage};
 use crate::storage_sync::{
     self, Copied, SYNC_LOCK_WAIT, copy_files, copy_state, is_link, is_real_path, remove_link,
 };
@@ -513,7 +513,7 @@ pub struct Launch {
     journal: PathBuf,
     not_copied: Vec<(String, String)>,
     synced: Vec<String>,
-    different_settings: Vec<String>,
+    codex_model_warning: Option<String>,
     mcp_unstarted: Vec<(String, String)>,
     mcp_servers: Vec<(String, String, String)>,
     mcp_imports: Vec<String>,
@@ -1231,11 +1231,9 @@ impl Launcher {
                 self.claim_name(name, file)?;
             }
             prepare_tool_scratch(&resolved, &instance.directory)?;
-            let Copied {
-                not_copied,
-                synced,
-                different_settings,
-            } = copy_files(&compiled.storage, &instance.directory, home, base)?;
+            let Copied { not_copied, synced } =
+                copy_files(&compiled.storage, &instance.directory, home, base)?;
+            let codex_model_warning = codex_model_warning(&resolved, &compiled.storage, home);
             let hooks = apply_hooks(&compiled.storage, &hooks, home)?;
             let mut mcp_imports = Vec::new();
             for config in &resolved.servers.configs {
@@ -1302,7 +1300,7 @@ impl Launcher {
                 skipped: resolved.tools.skipped,
                 not_copied,
                 synced,
-                different_settings,
+                codex_model_warning,
                 mcp_unstarted: compiled.unstarted,
                 mcp_servers: resolved.servers.detected_lines(home),
                 mcp_imports,
@@ -1333,6 +1331,47 @@ fn unchecked_options(variable: &str, server: &str, file: &str) -> String {
          and box reads no option. A file or a folder that an option names with no path in \
          front is loaded from the workspace, where the agent can write, with the server's keys"
     )
+}
+
+fn codex_model_warning(resolved: &Resolved, storage: &Storage, home: &Path) -> Option<String> {
+    let target = Path::new(resolved.agent.env.get("CODEX_HOME")?).join("config.toml");
+    let file = storage.files.iter().find(|file| {
+        file.target == target
+            && file
+                .edit
+                .as_ref()
+                .is_some_and(|edit| edit.fill && edit.kind == crate::mcp::Format::Toml)
+    })?;
+    let State::Fill { text, .. } = copy_state(file, storage).ok()? else {
+        return None;
+    };
+    let model = |text: &str| {
+        toml::from_str::<toml::Value>(text)
+            .ok()?
+            .get("model")?
+            .as_str()
+            .map(str::to_owned)
+    };
+    let imported = model(&text)?;
+    let copy = Copy {
+        target: &file.target,
+        relative: &file.relative,
+        at: &file.at,
+        create: false,
+        limit: None,
+    };
+    let mut different = false;
+    edit_in_storage(&copy, true, |text| {
+        different = text.and_then(model).is_some_and(|saved| saved != imported);
+        Ok(None)
+    })
+    .ok()?;
+    different.then(|| {
+        format!(
+            "Codex's saved model differs from `model` in {}. Keeping the saved model.",
+            tilde(home, &file.source)
+        )
+    })
 }
 
 /// The line `box run` prints when the profile `name`, in the file `path`, gives less than read
@@ -2498,11 +2537,6 @@ impl Launch {
     /// `BOX_HOME` moves the box home, the command sets it too, so it also works in a shell that
     /// does not have it. A box home that a shell word cannot hold as typed is left out.
     pub(crate) fn history_command(&self, deny: bool) -> String {
-        let deny = if deny { " --deny" } else { "" };
-        self.box_command(&format!("runs history {}{deny}", self.name))
-    }
-
-    fn box_command(&self, arguments: &str) -> String {
         let box_home = self
             .box_home
             .as_deref()
@@ -2519,7 +2553,8 @@ impl Launch {
                 }
             })
             .unwrap_or_default();
-        format!("{box_home}box {arguments}")
+        let deny = if deny { " --deny" } else { "" };
+        format!("{box_home}box runs history {}{deny}", self.name)
     }
 
     /// The command that runs this profile in this box again.
@@ -2654,14 +2689,17 @@ impl Launch {
     }
 
     fn run_inner(&self, args: &[OsString]) -> Result<ExitCode, Error> {
-        if !self.different_settings.is_empty() {
-            for notice in &self.different_settings {
-                eprintln!("box: warning: {}", banner::clean(notice));
-            }
-            let reset = self.box_command(&format!("profile reset {}", self.profile_name));
+        if let Some(notice) = &self.codex_model_warning {
+            eprintln!("box: warning: {}", banner::clean(notice));
+            let box_home = if self.box_home.is_some() {
+                " with the same `BOX_HOME`"
+            } else {
+                ""
+            };
             eprintln!(
-                "box: change the saved settings in the agent, or run `{reset}` to import again. \
-                 Reset deletes the agent's settings, sessions, and memory."
+                "box: use `/model` in Codex to change it, or exit Codex and run `box profile reset \
+                 {}`{box_home} to import again. Reset deletes the agent's settings, sessions, and memory.",
+                self.profile_name
             );
         }
         let result = if terminal::attached() {
@@ -2726,6 +2764,53 @@ fn answer_yes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_codex_pack_warns_only_when_both_files_have_different_models() {
+        let host = crate::test_support::FakeHost::new();
+        host.profile()
+            .with("codex")
+            .with("bedrock-mantle")
+            .create()
+            .expect("profile")
+            .write(false)
+            .expect("write");
+        let source = host.home().join(".codex/config.toml");
+        std::fs::create_dir_all(source.parent().expect("parent")).expect("directory");
+        let warning = || {
+            host.launcher()
+                .prepare("codex", &host.project(), None)
+                .expect("launch")
+                .codex_model_warning
+        };
+        assert!(warning().is_none());
+        std::fs::write(&source, "model = 'saved'\n").expect("source");
+        assert!(warning().is_none());
+        std::fs::write(&source, "model = 'changed'\n").expect("source");
+        assert_eq!(
+            warning().as_deref(),
+            Some(
+                "Codex's saved model differs from `model` in ~/.codex/config.toml. \
+                 Keeping the saved model."
+            )
+        );
+        std::fs::write(&source, "personality = 'friendly'\n").expect("no model");
+        assert!(warning().is_none());
+
+        let saved = host
+            .launcher()
+            .storage_folder("codex")
+            .join("default/agent/home/config.toml");
+        std::fs::write(&source, "model = 'changed'\n").expect("source model");
+        std::fs::write(&saved, "model = 42\n").expect("non-string saved model");
+        assert!(warning().is_none());
+
+        let outside = host.home().join("outside.toml");
+        std::fs::write(&outside, "model = 'private'\n").expect("outside model");
+        std::fs::remove_file(&saved).expect("remove saved settings");
+        std::os::unix::fs::symlink(&outside, &saved).expect("linked saved settings");
+        assert!(warning().is_none());
+    }
 
     #[test]
     fn operator_packs_come_from_the_box_home() {

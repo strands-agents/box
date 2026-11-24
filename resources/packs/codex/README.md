@@ -86,8 +86,8 @@ A choice saved in the box stays, even if you change the host setting. If neither
 Codex uses its own default. Other settings, except `mcp_servers`, and your sessions stay outside
 the box.
 
-When one of these saved settings differs from your Codex folder's `config.toml`, Box names it
-in a startup warning.
+When the saved model differs from `model` in your Codex folder's `config.toml`, Box warns at startup
+and keeps the saved model.
 To change the saved model, use Codex's `/model`. To import these settings again, exit the agent and
 run `box profile reset <profile>`, then start a new run. Reset also deletes that profile's
 agent sessions and memory ([Reset](../../../docs/cli/cli.md#box-profile-reset)).

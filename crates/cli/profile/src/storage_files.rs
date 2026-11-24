@@ -813,29 +813,22 @@ pub(crate) fn rewrite(file: &StorageFile) -> Result<(), Error> {
     .map(|_| ())
 }
 
-/// Fill missing kept settings through the same walk as [`rewrite`], returning a refusal or the differing keys.
-pub(crate) fn fill(
-    file: &StorageFile,
-    kept: &str,
-) -> Result<(Option<String>, Vec<crate::storage_edit::KeyPath>), Error> {
+/// Add to the copy of a row with `fill` each `keep` value of `kept` that it lacks, through the
+/// same walk as [`rewrite`]. A copy that is a link, not a file, or a file with another hard link is
+/// left alone, and the reason is returned.
+pub(crate) fn fill(file: &StorageFile, kept: &str) -> Result<Option<String>, Error> {
     let Some(edit) = file.edit.as_ref().filter(|edit| edit.fill) else {
-        return Ok((None, Vec::new()));
+        return Ok(None);
     };
     let in_storage = format!("{} in storage", file.relative);
-    let mut different = Vec::new();
-    let refused = edit_copy(file, true, |text| {
-        different = edit.differences(text, kept).map_err(|failure| {
-            let (at, reason) = failure_text(file, edit, &in_storage, failure);
-            Error::Set { at, reason }
-        })?;
+    edit_copy(file, true, |text| {
         edit.fill(text, kept)
             .map(|filled| filled.map(|(text, _)| text))
             .map_err(|failure| {
                 let (at, reason) = failure_text(file, edit, &in_storage, failure);
                 Error::Set { at, reason }
             })
-    })?;
-    Ok((refused, different))
+    })
 }
 
 /// Replace the copy of `file` with what `change` makes of its text, when `change` returns a text.
@@ -1913,7 +1906,7 @@ mod tests {
         let State::Fill { text, .. } = state(&file, &fixture.refusals()).expect("a state") else {
             panic!("a fill");
         };
-        let why = fill(&file, &text).expect("a fill").0.expect("left alone");
+        let why = fill(&file, &text).expect("a fill").expect("left alone");
         assert!(why.contains("hard link"), "{why}");
         assert_eq!(
             std::fs::read_to_string(&file.target).expect("read"),
@@ -1929,7 +1922,7 @@ mod tests {
 
         std::fs::remove_file(&file.target).expect("remove");
         symlink(&secret, &file.target).expect("a link");
-        let why = fill(&file, &text).expect("a fill").0.expect("left alone");
+        let why = fill(&file, &text).expect("a fill").expect("left alone");
         assert!(why.contains("is a link"), "{why}");
         assert_eq!(
             std::fs::read_to_string(&secret).expect("read"),

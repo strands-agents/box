@@ -94,41 +94,6 @@ impl Edit {
         Ok(Some((copied.text(), added)))
     }
 
-    /// The kept settings present in both files with different values.
-    pub(crate) fn differences(&self, copy: &str, host: &str) -> Result<Vec<KeyPath>, Failure> {
-        let keep = self.keep.as_deref().unwrap_or_default();
-        let failure =
-            |message: String| Failure::Parse(message.lines().next().unwrap_or_default().to_owned());
-        match self.kind {
-            Format::Json => {
-                let copied = self.kind.parse(copy).map_err(failure)?;
-                let host = self.kind.parse(host).map_err(failure)?;
-                Ok(differing_keys(
-                    keep,
-                    &copied,
-                    &host,
-                    |value, key| value.get(key),
-                    PartialEq::eq,
-                ))
-            }
-            Format::Toml => {
-                let parse = |text| {
-                    toml::from_str::<toml::Value>(text)
-                        .map_err(|error| failure(format!("not TOML: {error}")))
-                };
-                let copied = parse(copy)?;
-                let host = parse(host)?;
-                Ok(differing_keys(
-                    keep,
-                    &copied,
-                    &host,
-                    |value, key| value.get(key),
-                    same_toml,
-                ))
-            }
-        }
-    }
-
     /// `copy` with each `set` row applied, or `None` when it already holds each value.
     pub(crate) fn rewrite(&self, copy: &str) -> Result<Option<String>, Failure> {
         let mut document = Document::parse(self.kind, copy)?;
@@ -149,46 +114,6 @@ impl Edit {
         let mut document = Document::parse(self.kind, empty)?;
         document.set(&self.set)?;
         Ok(Some(document.text()))
-    }
-}
-
-fn differing_keys<'a, T>(
-    keep: &[KeyPath],
-    copy: &'a T,
-    host: &'a T,
-    get: impl Fn(&'a T, &str) -> Option<&'a T>,
-    same: impl Fn(&T, &T) -> bool,
-) -> Vec<KeyPath> {
-    keep.iter()
-        .filter(|path| {
-            let at = |value| path.iter().try_fold(value, |value, key| get(value, key));
-            at(copy)
-                .zip(at(host))
-                .is_some_and(|(saved, imported)| !same(saved, imported))
-        })
-        .cloned()
-        .collect()
-}
-
-fn same_toml(left: &toml::Value, right: &toml::Value) -> bool {
-    match (left, right) {
-        (toml::Value::Float(left), toml::Value::Float(right)) => {
-            left == right || (left.is_nan() && right.is_nan())
-        }
-        (toml::Value::Array(left), toml::Value::Array(right)) => {
-            left.len() == right.len()
-                && left
-                    .iter()
-                    .zip(right)
-                    .all(|(left, right)| same_toml(left, right))
-        }
-        (toml::Value::Table(left), toml::Value::Table(right)) => {
-            left.len() == right.len()
-                && left
-                    .iter()
-                    .all(|(key, value)| right.get(key).is_some_and(|other| same_toml(value, other)))
-        }
-        _ => left == right,
     }
 }
 
@@ -1094,72 +1019,6 @@ mod tests {
         Edit {
             fill: true,
             ..edit(Format::Json, Some(keep), &[])
-        }
-    }
-
-    #[test]
-    fn differences_compare_only_shared_kept_values_without_layout_or_comments() {
-        for (kind, copy, host) in [
-            (
-                Format::Json,
-                r#"{"model":"saved","nested":{"a":1},"same":[true,2],"local":true,"secret":"saved"}"#,
-                r#"{"model":"imported","nested":{"a":2},"same":[true,2],"missing":true,"secret":"host"}"#,
-            ),
-            (
-                Format::Toml,
-                "model = 'saved' # choice\nnested = { a = 1 }\nsame = [true, 2]\nlocal = true\nsecret = 'saved'\n",
-                "model = \"imported\"\nsame = [ true, 2 ] # layout\nmissing = true\nsecret = 'host'\n[nested]\na = 2\n",
-            ),
-        ] {
-            let edit = filling(&[&["model"], &["nested"], &["same"], &["local"], &["missing"]]);
-            let edit = Edit { kind, ..edit };
-            assert_eq!(
-                edit.differences(copy, host).expect("differences"),
-                vec![path(&["model"]), path(&["nested"])]
-            );
-            assert!(
-                edit.differences(copy, copy)
-                    .expect("same values")
-                    .is_empty()
-            );
-        }
-    }
-
-    #[test]
-    fn toml_differences_preserve_nonfinite_values() {
-        let edit = Edit {
-            kind: Format::Toml,
-            ..filling(&[&["limit"], &["nested"]])
-        };
-        for (copy, host, different) in [
-            ("limit = inf", "limit = -inf", vec![path(&["limit"])]),
-            ("limit = inf", "limit = nan", vec![path(&["limit"])]),
-            ("limit = nan", "limit = nan", vec![]),
-            (
-                "nested = { values = [inf, nan] }",
-                "[nested]\nvalues = [+inf, +nan]",
-                vec![],
-            ),
-            (
-                "nested = { values = [inf, nan] }",
-                "[nested]\nvalues = [-inf, nan]",
-                vec![path(&["nested"])],
-            ),
-            (
-                "nested = { values = [nan] }",
-                "nested = { values = [nan, nan] }",
-                vec![path(&["nested"])],
-            ),
-            (
-                "nested = { limit = nan }",
-                "nested = { limit = nan, enabled = true }",
-                vec![path(&["nested"])],
-            ),
-        ] {
-            assert_eq!(
-                edit.differences(copy, host).expect("differences"),
-                different
-            );
         }
     }
 

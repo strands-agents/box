@@ -32,7 +32,7 @@ pull request that changes what an entry says fixes that entry.
   - [Every pack is trusted like the operator's own profile](#every-profile-in-the-chain-is-trusted)
   - [A collection adds names under its own scope, and never replaces a name that another place gives](#a-collection-adds-scoped-names)
   - [Only a profile lists a plugin, and only the profile names a reference that a plugin reads](#only-a-profile-lists-a-plugin)
-  - [`box` knows no provider and no agent, so the packs say what the report and the search need](#box-knows-no-provider)
+  - [Packs own provider and agent configuration](#box-knows-no-provider)
   - [A pack states its kind, and `box` checks the kind against the pack](#a-pack-states-its-kind)
   - [`extend` builds a pack on another, and `include` loads a tool pack beside it](#extend-and-include)
   - [Each kind of file that `box` reads holds one kind of thing, so a pack holds no starter](#one-kind-per-file)
@@ -561,10 +561,12 @@ a tool could then run a host program outside the box, and pick the secret that i
 profile, with `secret.env`. A project cannot bring its own provider. Another copy of a plugin's program needs `PATH`, or a profile in `~/.strands/box/profiles/`. A profile file that runs by its path still names which vault item goes to which host, as it names an `env://` variable. It sets a plugin input only to a value that the plugin lists, and it cannot use a plugin that finds its program beside the profile file.
 
 <a id="box-knows-no-provider"></a>
-### `box` knows no provider and no agent, so the packs say what the report and the search need
+### Packs own provider and agent configuration
 
-The code of `box` names no provider pack, no agent, no plugin, no input, and no route that
-`resources/` holds. A new or changed provider, agent, or plugin then needs no change to `box`. The
+The code of `box` reads provider, agent, and plugin declarations from packs without naming their
+inputs or routes. The sole exception is the Codex saved-model diagnostic: it checks that agent's
+declared config import so a preserved model has an actionable warning, without adding a pack
+option. All other provider, agent, and plugin changes belong in packs. The
 "Next" steps of `box profile create` come from the resolved profile's routes. Each `env://`
 variable gets one step, with the hosts of each route that reads it. Each route with an `aws://`
 `secret.ref` gets one, and so does each route with a reference in a declared scheme, which asks
@@ -1696,8 +1698,8 @@ select, a field that the row does not name, and a script in a place a box can wr
 refused and listed by `box run`, with the reason.
 
 The pack states the layout: where the file holds its hooks, which fields a hook keeps, the form of
-the imported command, and the host's off switch. The code of `box` holds the checks and no
-harness's layout, as for `[[mcp-servers]]` ([`box` knows no agent](#box-knows-no-provider)). A new
+the imported command, and the host's off switch. The hook reader holds the checks and no
+harness's layout, as for `[[mcp-servers]]` ([pack-owned configuration](#box-knows-no-provider)). A new
 harness needs a row in its pack.
 
 **Rejected.** Copying the hooks with the other settings, through `[[storage.files]] keep`: the copy

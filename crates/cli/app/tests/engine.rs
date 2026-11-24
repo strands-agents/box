@@ -1663,37 +1663,69 @@ fn show_prints_the_options_and_full_adds_the_configuration() {
 }
 
 #[test]
-fn saved_settings_warning_precedes_the_agent_output() {
+fn codex_model_warning_precedes_the_agent_output_and_ignores_other_settings() {
     let scene = Scene::new();
-    scene.profile(
-        "probe",
-        &format!(
-            "{PROBE}\n[storage]\ndirectories = [\"config\"]\n\n[[storage.files]]\n\
-             source = \"${{{{ home }}}}/config.toml\"\ntarget = \"config/config.toml\"\n\
-             kind = \"toml\"\nkeep = [[\"model\"]]\nfill = true\n"
-        ),
-        PROBE_POLICY,
+    let profile = format!(
+        "{PROBE}\nenv.CODEX_HOME = \"${{{{ storage.config }}}}\"\n\
+         [storage]\ndirectories = [\"config\"]\n\n[[storage.files]]\n\
+         source = \"${{{{ home }}}}/config.toml\"\ntarget = \"config/config.toml\"\n\
+         kind = \"toml\"\nkeep = [[\"model\"], [\"personality\"]]\nfill = true\n"
     );
+    scene.profile("probe", &profile, PROBE_POLICY);
     let source = scene.home().join("config.toml");
-    std::fs::write(&source, "model = 'saved-model'\n").expect("host settings");
+    std::fs::write(&source, "model = 'saved-model'\npersonality = 'friendly'\n")
+        .expect("host settings");
     let first = scene.probe(&scene.workspace(), "printf agent-started >&2");
     succeeded(&first);
     assert!(!String::from_utf8_lossy(&first.stderr).contains("box profile reset"));
+
+    std::fs::write(
+        &source,
+        "model = 'saved-model'\npersonality = 'pragmatic'\n",
+    )
+    .expect("changed preference");
+    let preference = scene.probe(&scene.workspace(), "printf agent-started >&2");
+    succeeded(&preference);
+    assert!(!String::from_utf8_lossy(&preference.stderr).contains("box profile reset"));
 
     std::fs::write(&source, "model = 'changed-model'\n").expect("changed host settings");
     let next = scene.probe(&scene.workspace(), "printf agent-started >&2");
     succeeded(&next);
     let stderr = String::from_utf8_lossy(&next.stderr);
     let warning = stderr
-        .find("config.toml: model. Keeping the saved values.")
+        .find("Codex's saved model differs from `model` in ~/config.toml.")
         .expect("the saved model warning");
     let agent = stderr.find("agent-started").expect("agent output");
     assert!(warning < agent, "{stderr}");
+    assert!(stderr.contains("use `/model` in Codex"), "{stderr}");
     assert!(stderr.contains("box profile reset probe"), "{stderr}");
     assert!(stderr.contains("Reset deletes the agent's settings, sessions, and memory."));
     for value in ["saved-model", "changed-model"] {
         assert!(!stderr.contains(value), "{stderr}");
     }
+
+    scene.profile(
+        "probe",
+        &profile.replace("env.CODEX_HOME = \"${{ storage.config }}\"\n", ""),
+        PROBE_POLICY,
+    );
+    let other_agent = scene.probe(&scene.workspace(), "printf agent-started >&2");
+    succeeded(&other_agent);
+    assert!(!String::from_utf8_lossy(&other_agent.stderr).contains("box profile reset"));
+
+    scene.profile("probe", &profile, PROBE_POLICY);
+    let moved = scene.root.join("box\u{200b}");
+    std::fs::rename(scene.home().join(".strands/box"), &moved).expect("move box home");
+    let moved = scene
+        .command(&scene.workspace(), "probe", &["-c", "true"])
+        .env("BOX_HOME", moved)
+        .output()
+        .expect("run with moved home");
+    succeeded(&moved);
+    assert!(
+        String::from_utf8_lossy(&moved.stderr)
+            .contains("`box profile reset probe` with the same `BOX_HOME`")
+    );
 }
 
 #[test]
