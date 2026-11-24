@@ -9,7 +9,8 @@ import subprocess
 import sys
 
 
-BINARIES = ("box", "strands-box-sock-alias", "strands-box-contain-trampoline")
+BINARIES = ("box", "strands-box-sock-alias", "strands-box-contain-trampoline",
+            "strands-box-storage-compiler")
 GLIBC_LIMIT = (2, 34)
 DEFAULT_TARGET = "aarch64-unknown-linux-gnu"
 TARGETS = {
@@ -59,8 +60,14 @@ def main():
         "--target", choices=TARGETS, default=DEFAULT_TARGET,
         help="package target (default: %(default)s)",
     )
+    parser.add_argument("--require-storage-metadata", action="store_true",
+                        help="require the CLI archive storage compiler marker")
     args = parser.parse_args()
     try:
+        if args.require_storage_metadata:
+            metadata = json.loads((args.directory / "release.json").read_text())
+            if not isinstance(metadata, dict) or metadata.get("storage_compiler") is not True:
+                raise ValueError("release.json: storage_compiler must be true")
         result = [inspect(args.directory / name, args.target) for name in BINARIES]
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(str(error), file=sys.stderr)

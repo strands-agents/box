@@ -19,7 +19,8 @@ build:
 
 # Build the box CLI (`box`) and the Box Core binaries it runs, into target/debug.
 build-cli:
-    cargo build --locked -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline
+    set --; if [ "$(uname -s)" = Linux ]; then set -- --bin strands-box-storage-compiler; fi; \
+    cargo build --locked -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline "$@"
 
 # Build the release binaries into target/release, where they run in place.
 release:

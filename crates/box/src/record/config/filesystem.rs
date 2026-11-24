@@ -21,8 +21,12 @@ use crate::record::config::process::{Filesystem, Grant};
 use crate::record::config::secret_source::{ProtectedPath, Spelled};
 use crate::record::layout::{lies_within, resolved_to_its_deepest_existing_ancestor};
 
-#[cfg(test)]
+#[cfg(any(test, target_os = "linux"))]
 mod plan;
+#[cfg(target_os = "linux")]
+pub(crate) use plan::{
+    FilesystemCheckpoint, FilesystemGeneration, FilesystemPlan, PendingMask, PublicationTarget,
+};
 
 /// One host path a process's own syscalls reach, with no policy decision in the path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,8 +131,11 @@ pub(crate) struct Refusal {
 
 /// The device and inode pair that identifies one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(test, serde(deny_unknown_fields))]
+#[cfg_attr(
+    any(test, target_os = "linux"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
+#[cfg_attr(any(test, target_os = "linux"), serde(deny_unknown_fields))]
 pub(crate) struct FileIdentity {
     pub(crate) device: u64,
     pub(crate) inode: u64,

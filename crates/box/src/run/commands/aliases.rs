@@ -110,7 +110,7 @@ pub(super) fn contains(path: &Path, identities: &[(u64, u64)]) -> io::Result<boo
     )
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub(super) fn contains_excluding(
     path: &Path,
     identities: &[(u64, u64)],

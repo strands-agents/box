@@ -7,6 +7,15 @@ use std::path::PathBuf;
 pub(crate) struct BoxError(Internal);
 
 impl BoxError {
+    #[cfg(test)]
+    /// Expected interruption of a private storage controller during owned shutdown.
+    pub(crate) fn is_storage_cancelled(&self) -> bool {
+        matches!(
+            self.0,
+            Internal::Supervise(SuperviseError::StorageCancelled)
+        )
+    }
+
     /// Whether no box is open for reload in this process.
     pub(crate) fn is_not_running(&self) -> bool {
         matches!(self.0, Internal::Daemon(DaemonError::NotRunning))
@@ -584,6 +593,10 @@ pub(crate) enum ShellError {
 /// The child could not be spawned, supervised, or reaped.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SuperviseError {
+    #[cfg(test)]
+    #[error("storage admission cancelled: the Box is stopping")]
+    StorageCancelled,
+
     #[error("workload diagnostics failed: {source}")]
     Diagnostics { source: std::io::Error },
 

@@ -559,7 +559,7 @@ if grep -Eq '^(\./)*Box[.]app/Contents/MacOS/box$' "$box_work/names"; then
     [ "$box_system" = Darwin ] || die "native app bundles require macOS"
     box_native=1
 fi
-awk -v native="$box_native" '
+awk -v native="$box_native" -v box_os="$box_system" '
     BEGIN {
         alias["strands-box-sock-alias"] = "Box.app/Contents/MacOS/strands-box-sock-alias"
         alias["strands-box-contain-trampoline"] = "Box.app/Contents/MacOS/strands-box-contain-trampoline"
@@ -606,7 +606,8 @@ awk -v native="$box_native" '
                     if (kind[FNR] != "d") bad = 1
                 } else if (path !~ /^resources\/(packs|plugins|policies|starters)\// || (kind[FNR] != "-" && kind[FNR] != "d")) bad = 1
             } else bad = 1
-        } else if (name ~ /^(box|strands-box-sock-alias|strands-box-contain-trampoline|release[.]json)$/ || name == "resources/config.toml" || name == "resources/editing-box-profile.md") {
+        } else if (name ~ /^(box|strands-box-sock-alias|strands-box-contain-trampoline|release[.]json)$/ ||
+            (box_os == "Linux" && name == "strands-box-storage-compiler") || name == "resources/config.toml" || name == "resources/editing-box-profile.md") {
             if (kind[FNR] != "-") bad = 1
         } else if (name == "resources" || name == "resources/packs" || name == "resources/shared" || name == "resources/plugins" || name == "resources/policies" || name == "resources/starters") {
             if (kind[FNR] != "d") bad = 1
@@ -638,6 +639,29 @@ cmp -s "$box_work/actual-files" "$box_work/sorted-files" || die "extracted files
 for box_required in box strands-box-sock-alias strands-box-contain-trampoline release.json resources/config.toml resources/policies/open/policy.toml resources/policies/open/policy.dw; do
     [ -f "$box_payload/$box_required" ] || die "bundle is missing $box_required"
 done
+box_binaries="box strands-box-sock-alias strands-box-contain-trampoline"
+if [ "$box_system" = Linux ]; then
+    box_storage_compiler=$(python3 -I -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as source:
+        record = json.load(source)
+    if not isinstance(record, dict):
+        raise ValueError("expected an object")
+    if "storage_compiler" in record and record["storage_compiler"] is not True:
+        raise ValueError("storage_compiler must be true")
+    print("true" if record.get("storage_compiler") is True else "legacy")
+except (OSError, ValueError) as error:
+    sys.exit("install.sh: invalid release.json: " + str(error))
+' "$box_payload/release.json") || die "invalid Linux package metadata"
+    if [ "$box_storage_compiler" = true ]; then
+        [ -f "$box_payload/strands-box-storage-compiler" ] ||
+            die "bundle is missing strands-box-storage-compiler"
+        box_binaries="$box_binaries strands-box-storage-compiler"
+    elif [ -e "$box_payload/strands-box-storage-compiler" ]; then
+        die "bundle contains strands-box-storage-compiler without its metadata marker"
+    fi
+fi
 # Releases up to v0.1.11 hold their packs in resources/shared/, keep their starters inside the
 # agent packs, and ship the open and project policies. Only a packs/ release has the rest.
 # The profile guide is not required: packs/ releases before it ship without it.
@@ -690,7 +714,7 @@ done
 if [ "$box_system" = Darwin ] && [ "$box_unsigned" -eq 1 ]; then
     log "Allowing unsigned release; Apple signature and Gatekeeper checks are skipped."
 fi
-box_programs="box strands-box-sock-alias strands-box-contain-trampoline"
+box_programs="$box_binaries"
 if [ "$box_native" -eq 1 ]; then
     [ -x "$box_payload/box" ] && [ -x "$box_payload/Box.app/Contents/MacOS/box" ] ||
         die "native bundle launcher or executable is not executable"
@@ -732,7 +756,7 @@ box_reported=$("$box_payload/box" --version) || die "staged box --version failed
 [ "$box_reported" = "box $box_version" ] || die "binary version does not match $box_version"
 find "$box_payload" -type d -exec chmod 0755 {} +
 find "$box_payload" -type f -exec chmod 0644 {} +
-chmod 0755 "$box_payload/box" "$box_payload/strands-box-sock-alias" "$box_payload/strands-box-contain-trampoline"
+for box_binary in $box_binaries; do chmod 0755 "$box_payload/$box_binary"; done
 if [ "$box_native" -eq 1 ]; then chmod 0755 "$box_payload/Box.app/Contents/MacOS/box"; fi
 
 progress 99 Installing

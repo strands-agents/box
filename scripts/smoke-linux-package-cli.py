@@ -15,7 +15,8 @@ import tempfile
 
 from smoke_telemetry import prepare_installation
 
-BINARIES = {"box", "strands-box-sock-alias", "strands-box-contain-trampoline"}
+BINARIES = {"box", "strands-box-sock-alias", "strands-box-contain-trampoline",
+            "strands-box-storage-compiler"}
 
 
 def unpack(archive, directory):
@@ -53,6 +54,9 @@ def unpack(archive, directory):
         raise ValueError(f"missing package files: {sorted(required - seen)}")
     if not (directory / "resources/packs").is_dir():
         raise ValueError("missing package resources/packs")
+    metadata = json.loads((directory / "release.json").read_text())
+    if not isinstance(metadata, dict) or metadata.get("storage_compiler") is not True:
+        raise ValueError("release.json: storage_compiler must be true")
 
 
 def check(archive, allow_root_operator=False):
