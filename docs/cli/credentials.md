@@ -15,7 +15,7 @@ A key can come from one of four places. The scheme at the start of `secret.ref` 
 | | A variable in your shell | AWS credentials | The credentials daemon | A password manager or secret store |
 | --- | --- | --- | --- | --- |
 | `secret.ref` | `env://GH_TOKEN` | `aws://` or `aws://work` | `credsd://work` | `op://Personal/GitHub/token` |
-| Read | Once, when the box starts | On each request | On each request | Once, when the box starts |
+| Read | Once, when the box starts | On each request | On each request, or once at start for a token | Once, when the box starts |
 | The agent gets | A placeholder in `GH_TOKEN` | Placeholder AWS keys | Placeholder AWS keys | A placeholder in the variable `secret.env` names |
 | Works for | Any HTTPS host | AWS service hosts | AWS service hosts | Any HTTPS host |
 | Long-lived key kept in | Your shell | `~/.aws` | The daemon's keystore | Your password manager |
@@ -92,9 +92,29 @@ creds bootstrap --credential work aws-idc-sso \
   --sso-region us-east-1
 ```
 
-Box needs credsd 0.2.0 or later. The box uses the credential's AWS session credentials only, so the
-credential must be one of the AWS types, such as `aws-idc-sso`, `aws-iam-user`, or `aws-login`. A
-token type such as `oauth` or `static-secret` can't sign a request yet.
+Box needs credsd 0.2.0 or later. A route signs with AWS credentials unless it says otherwise, so
+the credential must be one of the AWS types, such as `aws-idc-sso`, `aws-iam-user`, or `aws-login`.
+Set `secret.type = "aws"` on such a route: a route without the key still signs, and `box run`
+warns that a later release requires it.
+
+### Use a token from credsd
+
+A token credential, such as one from `creds bootstrap --credential github static-secret`, works like
+a key in your shell. Set `secret.type = "token"`, and the route takes the same keys as an `env://`
+route:
+
+```toml
+[egress.github]
+destinations = ["github.com"]
+secret.ref = "credsd://github"
+secret.type = "token"
+secret.placement = "basic_auth"   # the credsd secret holds x-access-token:<token>
+secret.inject = "always"
+```
+
+The box reads the token once, when it starts, and doesn't refresh it during the run, as it does for
+a password manager. Without `secret.env`, the agent holds no placeholder, so the route needs
+`secret.inject = "always"`.
 
 ### What the box checks
 
@@ -103,8 +123,8 @@ credential the profile names. If either check fails, the run stops with a messag
 problem ([credsd errors](troubleshooting.md#the-credentials-daemon-refuses-the-run)). A profile with
 no `credsd://` route never contacts the daemon.
 
-After that, the box asks the daemon for the credential on each request and doesn't cache it between
-requests, so a credential you sign in to again mid-run works on the next request. A `credsd://`
+After that, a signed route asks the daemon for the credential on each request and doesn't cache it
+between requests, so a credential you sign in to again mid-run works on the next request. A `credsd://`
 route never falls back to your default AWS identity: when the daemon can't give a credential, the
 request fails with a 403.
 

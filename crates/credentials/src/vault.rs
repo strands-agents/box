@@ -495,7 +495,7 @@ impl Vault {
     /// follows the same model: the vault holds it for the run and does not refresh it. A token that
     /// names an expiry warns once at open, so an operator learns why a long run stops working.
     fn resolve_credsd_token(&self, route: &RouteSpec) -> Result<Secret> {
-        let environment = crate::legs::credsd_environment(route.credential_ref())?;
+        let environment = crate::legs::credsd_credential(route.credential_ref())?;
         let socket = self.credsd_socket().ok_or_else(|| {
             CredentialError::KeystoreAccess(format!(
                 "no credsd socket was resolved for credential {environment:?}"

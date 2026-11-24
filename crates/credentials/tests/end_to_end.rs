@@ -1685,6 +1685,74 @@ mod credsd_e2e {
         let _ = std::fs::remove_file(path);
     }
 
+    /// **A live daemon serves a token route.** Set `CREDSD_SOCKET` and `CREDSD_TEST_TOKEN_CREDENTIAL`
+    /// to an `access_token` credential the daemon serves, and `CREDSD_TEST_TOKEN` to its value. The
+    /// preflight passes, the vault reads the token at open, the gateway attaches it in place of the
+    /// phantom, and a credential the daemon does not serve fails the open. Skipped when unset.
+    #[test]
+    fn a_live_daemon_serves_a_token_route() {
+        let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+        let (Some(socket), Some(credential), Some(token)) = (
+            var("CREDSD_SOCKET"),
+            var("CREDSD_TEST_TOKEN_CREDENTIAL"),
+            var("CREDSD_TEST_TOKEN"),
+        ) else {
+            eprintln!(
+                "skipping: CREDSD_SOCKET, CREDSD_TEST_TOKEN_CREDENTIAL, or CREDSD_TEST_TOKEN is absent"
+            );
+            return;
+        };
+        let socket = PathBuf::from(socket);
+        credsd_preflight(Some(&socket), &[], &[&credential])
+            .expect("the daemon serves the token credential as an access token");
+        let route = |reference: &str| {
+            RouteSpec::opaque(
+                DestinationPattern::parse("api.github.com").unwrap(),
+                Locator::parse_uri(reference).unwrap(),
+                credentials::InjectMode::header("Bearer {}", None).unwrap(),
+            )
+        };
+        let opened = Vault::open(
+            VaultConfig::new(credentials::Backend::local(), "tenant-e2e")
+                .credsd_socket(socket.clone())
+                .route(route(&format!("credsd://{credential}")))
+                .require_every_route(),
+        )
+        .expect("the token route reads the live token at open");
+        let phantom = opened.phantoms()[0].token().to_string();
+        let vault = opened.into_vault();
+        let headers = [("Authorization".to_string(), format!("Bearer {phantom}"))];
+        let attachment = vault
+            .attach_for(Outbound {
+                destination: Destination {
+                    host: "api.github.com",
+                    port: 443,
+                    path: "/user",
+                },
+                method: "GET",
+                url: "https://api.github.com/user",
+                query: "",
+                headers: &headers,
+                body: b"",
+            })
+            .expect("the token attaches")
+            .expect("api.github.com is bound");
+        let authorization = attachment
+            .set_headers()
+            .find(|(name, _)| name.eq_ignore_ascii_case("Authorization"))
+            .map(|(_, value)| value.to_string());
+        assert_eq!(authorization, Some(format!("Bearer {token}")));
+
+        let missing = format!("strands-e2e-nonexistent-{}", std::process::id());
+        let error = Vault::open(
+            VaultConfig::new(credentials::Backend::local(), "tenant-e2e")
+                .credsd_socket(socket)
+                .route(route(&format!("credsd://{missing}"))),
+        )
+        .expect_err("a credential the daemon does not serve fails the open");
+        assert_unknown_credential(&error, &missing);
+    }
+
     /// A configured fixture proves caller access before the unknown-credential request.
     #[test]
     fn a_live_daemon_maps_an_unknown_credential_to_a_hard_failure() {
@@ -1694,7 +1762,9 @@ mod credsd_e2e {
         let known_credential = std::env::var("CREDSD_TEST_CREDENTIAL")
             .ok()
             .filter(|value| !value.trim().is_empty());
-        let required = explicit_socket.is_some() || known_credential.is_some();
+        // `CREDSD_SOCKET` alone may be set for the token test, so only this test's own credential
+        // makes it required.
+        let required = known_credential.is_some();
         let socket = explicit_socket.unwrap_or_else(|| {
             if cfg!(target_os = "macos") {
                 PathBuf::from("/var/run/credsd/credsd.sock")
@@ -1719,7 +1789,7 @@ mod credsd_e2e {
             eprintln!("skipping: CREDSD_TEST_CREDENTIAL is absent");
             return;
         };
-        credsd_preflight(Some(&socket), &[&known_credential])
+        credsd_preflight(Some(&socket), &[&known_credential], &[])
             .expect("the fixture must answer health and authorize the caller's known credential");
         let credential = format!("strands-e2e-nonexistent-{}", std::process::id());
         assert_ne!(credential, known_credential);

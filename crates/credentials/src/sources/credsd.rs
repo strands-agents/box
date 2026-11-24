@@ -164,7 +164,7 @@ impl CredsdClient {
     }
 
     /// The name of each credential this caller holds, with one unfiltered `credential/list`.
-    pub(crate) fn list(&self) -> Result<Vec<String>> {
+    pub(crate) fn list(&self) -> Result<Vec<(String, String)>> {
         let request = build_request(LIST_METHOD, serde_json::json!({}));
         let stream = self.send(&request, LIST_METHOD)?;
         let line = read_response(&stream, LIST_METHOD)?;
@@ -172,7 +172,7 @@ impl CredsdClient {
         Ok(result
             .credentials
             .into_iter()
-            .map(|entry| entry.credential)
+            .map(|entry| (entry.credential, entry.kind))
             .collect())
     }
 
@@ -591,10 +591,13 @@ struct ListResult {
     credentials: Vec<ListEntry>,
 }
 
-/// One `credential/list` entry.
+/// One `credential/list` entry, read for its name and kind.
 #[derive(Debug, Deserialize)]
 struct ListEntry {
     credential: String,
+    /// The credential's kind, such as `session_credentials` or `access_token`.
+    #[serde(default)]
+    kind: String,
 }
 
 /// A JSON-RPC error object.
@@ -684,7 +687,8 @@ mod tests {
         let line = format!(
             r#"{{"jsonrpc":"2.0","id":1,"result":{{"credential":"gh","material":{{"type":"access_token","token":"{token}","token_type":"{token_type}"}},"expires_at":{expires_at}}}}}"#
         );
-        parse_response::<CredentialResult>(line.as_bytes(), "github").expect("the result parses")
+        parse_response::<CredentialResult>(line.as_bytes(), Subject::Credential("github"))
+            .expect("the result parses")
     }
 
     /// An `access_token` result maps to its token, and keeps the expiry the daemon wrote.
@@ -721,7 +725,9 @@ mod tests {
     /// The token adapter refuses AWS material, naming the environment and both kinds.
     #[test]
     fn the_token_adapter_refuses_session_credentials() {
-        let result = parse_response::<CredentialResult>(&ok_response(), "github").unwrap();
+        let result =
+            parse_response::<CredentialResult>(&ok_response(), Subject::Credential("github"))
+                .unwrap();
         let error = access_token_from(result, "github").expect_err("AWS material is no token");
         let message = error.to_string();
         assert!(matches!(error, CredentialError::Credential(_)));
@@ -1152,10 +1158,10 @@ mod tests {
 
     // --- credential/list -----------------------------------------------------
 
-    /// `list` sends one `credential/list` with empty params and returns each entry's name, in the
-    /// daemon's real entry shape, ignoring kind, source, status, and tags.
+    /// `list` sends one `credential/list` with empty params and returns each entry's name and kind,
+    /// in the daemon's real entry shape, ignoring source, status, and tags.
     #[test]
-    fn list_sends_no_filter_and_returns_the_names() {
+    fn list_sends_no_filter_and_returns_the_names_and_kinds() {
         let path = socket_path();
         let (rx, handle) = fake_daemon(
             path.as_path(),
@@ -1164,10 +1170,16 @@ mod tests {
             .to_vec(),
         );
 
-        let names = CredsdClient::new(path.clone())
+        let listed = CredsdClient::new(path.clone())
             .list()
             .expect("the fake daemon answers credential/list");
-        assert_eq!(names, ["dev", "prod"]);
+        assert_eq!(
+            listed,
+            [
+                ("dev".to_string(), "session_credentials".to_string()),
+                ("prod".to_string(), "access_token".to_string()),
+            ]
+        );
 
         let request = rx.recv().expect("the daemon recorded the request");
         let value: serde_json::Value =

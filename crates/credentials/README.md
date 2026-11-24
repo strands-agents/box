@@ -281,8 +281,8 @@ instead of `*`.
 
 ## Live daemon test
 
-The `credsd_e2e` tests use local socket fixtures. One optional test checks a running
-credsd daemon. Give the test process a credential that it can list, then run:
+The `credsd_e2e` tests use local socket fixtures. Two optional tests check a running credsd
+daemon. For a signed route, give the test process an AWS credential that it can list, then run:
 
 ```sh
 CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_CREDENTIAL=test-credential \
@@ -295,5 +295,19 @@ requests a credential that does not exist. It requires the specific unknown-cred
 A connection failure cannot satisfy that assertion. The configured credential is used
 only for the credential-list check, not for credential acquisition.
 
-An explicit socket or test credential makes setup failures fatal. Without either
-setting, the test reports a skip. A skipped test does not prove daemon compatibility.
+`CREDSD_TEST_CREDENTIAL` makes setup failures fatal. Without it, the test reports a skip, so
+`CREDSD_SOCKET` can be set for the token test alone. A skipped test does not prove daemon compatibility.
+
+For a token route, store a token with `creds bootstrap --credential <name> static-secret`, then
+name it and its value. The test reads the token at open, attaches it in place of the phantom, and
+requires the unknown-credential error for a name the daemon does not serve:
+
+```sh
+CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_TOKEN_CREDENTIAL=github CREDSD_TEST_TOKEN=<token> \
+  cargo test -p strands-box-credentials --all-features --test end_to_end \
+  credsd_e2e::a_live_daemon_serves_a_token_route -- --exact --nocapture
+```
+
+The same three variables run `box_credentials::a_live_credsd_token_reaches_the_upstream`, which
+starts the real `strands-box` binary against the daemon.
+

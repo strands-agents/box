@@ -5004,7 +5004,7 @@ command = ["mcp-server-fetch"]
 
         // credsd preflight: the credsd source is visible over the union of both maps.
         assert_eq!(
-            egress::credsd_credentials(&record.egress, &record.remote_mcp),
+            egress::credsd_credentials(&record.egress, &record.remote_mcp).signed,
             vec!["prod-inference"],
             "the preflight must see a credsd source declared only on a remote MCP server"
         );
