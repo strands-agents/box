@@ -162,48 +162,11 @@ const PERMIT: &str = "permit(principal, action, resource);";
 /// The denial records for `path` in `records`, each as its `enforced` flag and its
 /// `would_deny.ids`.
 fn denials_of(records: &str, path: &str) -> Vec<(bool, Vec<String>)> {
-    let mut found = Vec::new();
-    for line in records.lines() {
-        let Ok(request) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        for resource in request["resourceLogs"].as_array().into_iter().flatten() {
-            for scope in resource["scopeLogs"].as_array().into_iter().flatten() {
-                for record in scope["logRecords"].as_array().into_iter().flatten() {
-                    let attribute = |key: &str| {
-                        record["attributes"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .find(|attribute| attribute["key"] == key)
-                            .map(|attribute| attribute["value"].clone())
-                    };
-                    let text = |key: &str| {
-                        attribute(key)
-                            .and_then(|value| value["stringValue"].as_str().map(str::to_string))
-                    };
-                    if text("strands.box.policy.verdict").as_deref() != Some("deny")
-                        || !text("strands.box.policy.resource")
-                            .is_some_and(|resource| resource.ends_with(path))
-                    {
-                        continue;
-                    }
-                    found.push((
-                        attribute("strands.box.policy.enforced")
-                            .and_then(|value| value["boolValue"].as_bool())
-                            .unwrap_or(true),
-                        attribute("strands.box.policy.would_deny.ids")
-                            .and_then(|value| value["arrayValue"]["values"].as_array().cloned())
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|id| id["stringValue"].as_str().map(str::to_string))
-                            .collect(),
-                    ));
-                }
-            }
-        }
-    }
-    found
+    test_common::parse_decisions(records)
+        .into_iter()
+        .filter(|decision| decision.denied() && decision.resource.ends_with(path))
+        .map(|decision| (decision.enforced, decision.would_deny))
+        .collect()
 }
 
 /// In log-only mode a native read the policy forbids goes ahead, and its record keeps the denial,

@@ -279,6 +279,13 @@ det_case! {
             "a let-through decision keeps its deny and names its rule; decisions:\n{}",
             listed(trial.decisions())
         );
+        for forbid in ["no_shell_secret", "no_monty_secret", "no_echo_secret", "no_recorder_path"] {
+            assert!(
+                let_through.iter().any(|decision| decision.would_deny.iter().any(|id| id == forbid)),
+                "the trial's let-through records name {forbid}; decisions:\n{}",
+                listed(trial.decisions())
+            );
+        }
         assert_eq!(
             let_through
                 .iter()
