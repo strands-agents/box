@@ -1209,16 +1209,11 @@ mod path_tests {
     }
     #[test]
     fn implicit_working_directory_paths_resolve_without_a_directory_argument() {
-        let fixture = tempfile::tempdir().unwrap();
+        let working_directory = std::env::current_dir().unwrap();
+        let fixture = tempfile::tempdir_in(&working_directory).unwrap();
         let file = fixture.path().join("file");
         std::fs::write(&file, b"working-directory").unwrap();
-        let mut relative = PathBuf::new();
-        for component in std::env::current_dir().unwrap().components() {
-            if matches!(component, std::path::Component::Normal(_)) {
-                relative.push("..");
-            }
-        }
-        relative.push(file.strip_prefix("/").unwrap());
+        let relative = file.strip_prefix(&working_directory).unwrap();
         let name = CString::new(relative.as_os_str().as_bytes()).unwrap();
         let root = root(Path::new("/"));
         let check = |number| {
