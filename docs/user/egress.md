@@ -414,10 +414,10 @@ message. The handshake can be refused:
 
 | Response | Cause |
 |---|---|
-| 400 `malformed WebSocket handshake` | The handshake isn't an HTTP/1.1 `GET` with `Connection: upgrade`, `Sec-WebSocket-Version: 13`, and no body. |
+| 400 `malformed WebSocket handshake` | The handshake isn't an HTTP/1.1 `GET` with `Connection: upgrade`, `Sec-WebSocket-Version: 13`, one `Sec-WebSocket-Key`, and no body. |
 | 403 `WebSocket requires TLS` | A plain `ws://` handshake, including to a host in `upgrade_http`. |
 | 403 `WebSocket refused for an MCP server` | The handshake went to an HTTP MCP server's host. |
-| 502 | The server's `101` doesn't name `websocket` as its `Upgrade`, or a reply other than `101` has no `Content-Length` and isn't chunked. |
+| 502 | The server's `101` doesn't name `websocket` as its `Upgrade`, or doesn't carry the `Sec-WebSocket-Accept` for the handshake's key. A reply other than `101` that has no `Content-Length` and isn't chunked also gets 502. |
 
 The gateway ends both connections, with no Close frame, when no byte moves for 300 seconds.
 

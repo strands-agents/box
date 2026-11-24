@@ -496,6 +496,21 @@ fn a_101_that_does_not_switch_to_websocket_is_refused() {
 }
 
 #[test]
+fn a_101_with_the_wrong_accept_is_refused() {
+    for accept in ["", "Sec-WebSocket-Accept: AAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n"] {
+        let mut session = Session::start(false, LIMIT, move |tls, _| {
+            let head = format!(
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                 Connection: Upgrade\r\n{accept}\r\n"
+            );
+            tls.write_all(head.as_bytes()).unwrap();
+        });
+        let head = session.handshake("");
+        assert!(head.starts_with("HTTP/1.1 502"), "{head}");
+    }
+}
+
+#[test]
 fn a_reply_to_a_handshake_with_no_body_framing_is_refused() {
     let mut session = Session::start(false, LIMIT, |tls, _| {
         tls.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\nno").unwrap();

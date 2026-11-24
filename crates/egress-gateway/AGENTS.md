@@ -128,13 +128,16 @@ Conventions: `docs/conventions.md`.
   ([memory is a defended asset](../../docs/design/decisions.md#the-trusted-processs-memory-is-a-defended-asset)).
   Only the public cert reaches disk, at `0o400`.
 - Apply response header controls before release, and scrub each body chunk before delivery.
-  Preserve credential order, cross-chunk matching, and encoded-body refusals.
+  Preserve credential order, cross-chunk matching, and encoded-body refusals. After a WebSocket's
+  `101`, the gateway copies bytes unchanged and scrubs nothing, as
+  [the decision](../../docs/design/decisions.md#no-connection-is-opaque-to-the-boundary) records.
   The workload follows a redirect, so each hop is a new request that policy decides.
 - Stream ordinary and credentialed responses through one bounded lifecycle. Keep `tools/list`
   capture bounded and attempt schema staging before release. Preserve staging failure behavior
   and the request body cap.
 - Retain the absolute upstream deadline through body receipt, including downstream backpressure.
   Track source completion separately from writes; a flushed prefix followed by failure is incomplete.
+  After a `101`, `upstream_read_deadline` is the WebSocket's idle limit, and each byte resets it.
 - Record the HTTP request outcome at upstream response completion, failure, or the absolute
   deadline. After downstream abandonment, retain and drain the upstream within the connection's
   runtime and slot. Preserve known status and the existing uncertain-outcome semantics for HTTP MCP.
@@ -147,6 +150,16 @@ Conventions: `docs/conventions.md`.
 - Decode the key in `strip_query_param`, because the workload picks the spelling and `a%2Fb`, `a%2fb`,
   and `a+b` are one key. Leave a malformed `%` escape verbatim. `AddQueryParam` appends, so keep
   `StripQueryParam` beside it.
+- Set `websocket` on `EffectAttempt::HttpRequest` only when `websocket::classify` returns
+  `Handshake::WebSocket`, so policy decides `websocket:connect` in place of `http:request`. Refuse a
+  malformed handshake with 400, and a plain `ws://` handshake or one to an MCP host with 403, before
+  policy is asked.
+- Open the relay only on a `101` with exactly one `Upgrade: websocket` and the
+  `Sec-WebSocket-Accept` for the handshake's key. Any other `101` gets 502, because a relay on it
+  gives the workload a raw pipe under a `websocket:connect` permit.
+- Write `Connection: close` on every response except a `101` (`hyper_response`), and do not set
+  hyper's `keep_alive(false)`. hyper then keeps a connection only for an upgrade, so a WebSocket
+  survives its `101`, and every other connection still carries one request.
 - Accept TLS on hyper's `Upgraded` stream, which replays the bytes hyper read after the CONNECT. A
   downcast to the socket must keep `Parts::read_buf`, or the `ClientHello` is lost.
 - Keep `BoundTransport`, and self-connect in `shutdown()` over the bound transport; a `u16`

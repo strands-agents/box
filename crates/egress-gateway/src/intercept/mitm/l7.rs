@@ -21,7 +21,7 @@ use crate::error::{ProxyError, Result};
 use crate::mcp::{
     McpTarget, McpTargetIdentity, canonicalize_mcp_frame, mcp_denial_response, normalize_path,
 };
-use crate::proxy::websocket::Handshake;
+use crate::proxy::websocket::{Handshake, accepts};
 
 /// Check the CONNECT binding of a request read in a TLS tunnel, then run [`run_l7_legs`].
 ///
@@ -417,6 +417,13 @@ async fn run_l7_legs(
             websocket,
         )
         .await;
+    let key = req.headers.get("sec-websocket-key").unwrap_or_default();
+    let response = response.and_then(|response| match response.upgraded {
+        Some(_) if !accepts(key, &response.head.headers) => Err(ProxyError::Intercept(
+            "a 101 reply to a WebSocket handshake has the wrong Sec-WebSocket-Accept".to_string(),
+        )),
+        _ => Ok(response),
+    });
     let response = match response {
         Ok(response) => response,
         Err(error) => {

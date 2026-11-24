@@ -5,6 +5,10 @@ use hyper::header::HeaderMap as WireHeaders;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::Instant;
 
+use crate::boundary::HeaderMap;
+
+const ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Handshake {
     None,
@@ -25,6 +29,8 @@ pub(crate) fn classify<B: hyper::body::Body>(request: &hyper::Request<B>) -> Han
         "websocket: handshake lacks Connection: upgrade"
     } else if one(headers, "sec-websocket-version") != Some("13") {
         "websocket: handshake version is not 13"
+    } else if one(headers, "sec-websocket-key").is_none() {
+        "websocket: handshake lacks one Sec-WebSocket-Key"
     } else if !request.body().is_end_stream() {
         "websocket: handshake carries a body"
     } else {
@@ -46,6 +52,38 @@ fn one<'a>(headers: &'a WireHeaders, name: &str) -> Option<&'a str> {
         (Some(value), None) => value.to_str().ok().map(str::trim),
         _ => None,
     }
+}
+
+pub(crate) fn accepts(key: &str, reply: &HeaderMap) -> bool {
+    let digest = ring::digest::digest(
+        &ring::digest::SHA1_FOR_LEGACY_USE_ONLY,
+        format!("{key}{ACCEPT_GUID}").as_bytes(),
+    );
+    let expected = base64(digest.as_ref());
+    let mut accepts = reply
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-accept"))
+        .map(|(_, value)| value.trim());
+    matches!((accepts.next(), accepts.next()), (Some(value), None) if value == expected)
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let group = (chunk.iter().enumerate()).fold(0u32, |group, (at, byte)| {
+            group | u32::from(*byte) << (16 - 8 * at)
+        });
+        for at in 0..4 {
+            let sextet = (group >> (18 - 6 * at)) as usize & 63;
+            out.push(if at <= chunk.len() {
+                char::from(ALPHABET[sextet])
+            } else {
+                '='
+            });
+        }
+    }
+    out
 }
 
 pub(crate) async fn run<W, U>(workload: W, upstream: U, limit: Duration)
@@ -134,6 +172,10 @@ mod tests {
             request.headers_mut().unwrap().remove("Connection");
             request
         })));
+        assert!(malformed(handshake(|mut request| {
+            request.headers_mut().unwrap().remove("Sec-WebSocket-Key");
+            request
+        })));
         let with_body = hyper::Request::get("/")
             .header("Upgrade", "websocket")
             .header("Connection", "Upgrade")
@@ -142,6 +184,37 @@ mod tests {
             .body(Full::new(Bytes::from_static(b"x")))
             .unwrap();
         assert!(malformed(classify(&with_body)));
+    }
+
+    #[test]
+    fn base64_matches_the_standard_alphabet_and_padding() {
+        for (bytes, encoded) in [
+            (&b""[..], ""),
+            (b"f", "Zg=="),
+            (b"fo", "Zm8="),
+            (b"foo", "Zm9v"),
+            (b"foob", "Zm9vYg=="),
+            (&[0xfb, 0xff], "+/8="),
+        ] {
+            assert_eq!(base64(bytes), encoded);
+        }
+    }
+
+    #[test]
+    fn only_the_accept_for_the_key_is_accepted() {
+        let reply = |values: &[&str]| {
+            HeaderMap::from_pairs(
+                values
+                    .iter()
+                    .map(|value| ("Sec-WebSocket-Accept".to_string(), value.to_string())),
+            )
+        };
+        assert!(accepts(KEY, &reply(&["s3pPLMBiTxaQ9kYGzzhZRbK+xOo="])));
+        assert!(!accepts(KEY, &reply(&[])));
+        assert!(!accepts(KEY, &reply(&["s3pPLMBiTxaQ9kYGzzhZRbK+xOo=x"])));
+        assert!(!accepts("other", &reply(&["s3pPLMBiTxaQ9kYGzzhZRbK+xOo="])));
+        let twice = ["s3pPLMBiTxaQ9kYGzzhZRbK+xOo="; 2];
+        assert!(!accepts(KEY, &reply(&twice)));
     }
 
     async fn relayed(limit: Duration, script: impl Future<Output = ()>, ends: [DuplexStream; 2]) {
