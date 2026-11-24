@@ -102,7 +102,7 @@ fixes keeps them in a README, linked here.
 - [`@box/git`](../../resources/packs/git/README.md)
 - [`@box/go`](../../resources/packs/go/README.md)
 - [`@box/node`](../../resources/packs/node/README.md)
-- `@box/npm`
+- [`@box/npm`](../../resources/packs/npm/README.md)
 - [`@box/npx`](../../resources/packs/npx/README.md)
 - [`@box/pnpm`](../../resources/packs/pnpm/README.md)
 - [`@box/pnpx`](../../resources/packs/pnpx/README.md)

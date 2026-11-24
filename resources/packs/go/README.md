@@ -5,8 +5,10 @@ Homebrew, or setup-go. Add `@box/go` to `packs` in your profile.
 
 ## Where go keeps its files
 
-go keeps GOPATH, its module cache, and its build cache in your project's `.cache/go` folder,
-because the box cannot write `~/go` or `~/Library/Caches/go-build`.
+go keeps GOPATH, its module cache, and its build cache in its own folder in the profile's storage,
+`~/.strands/box/storage/<profile>/default/tool/go/cache`, because the box cannot write `~/go` or
+`~/Library/Caches/go-build`. The agent cannot write that folder, so it cannot change a module that
+a later build compiles. Every project of the profile shares it.
 
 ## What go can reach
 
@@ -61,3 +63,8 @@ GONOSUMDB = "github.com/your-org/*"
 - On macOS, go must be 1.27 or later. An older go fails module downloads with
   `x509: OSStatus -26276`. A program that go builds, such as a test binary or `go run`, has the
   same failure unless the project's `go.mod` says `go 1.27` or later. Linux has no such floor.
+- A program that go runs, such as a test binary or `go run`, can change go's folder in storage, and
+  every project of the profile then builds with what it changed. To start over, delete
+  `~/.strands/box/storage/<profile>/default/tool/go`.
+- The agent cannot run a program that `go install` puts in GOPATH, because GOPATH is in go's own
+  storage.

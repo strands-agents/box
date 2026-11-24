@@ -12,8 +12,8 @@ guide is [limitations.md](../../cli/limitations.md#one-profile-is-shared-by-all-
 | --- | --- | --- |
 | Agent storage: settings, instructions, skills, memory, sessions | Profile | `~/.strands/box/storage/<profile>/default/agent/<dir>/` |
 | MCP launcher caches, which are also each server's `TMPDIR` | Profile | `~/.strands/box/storage/<profile>/default/mcp-cache/<launcher>/` |
-| A tool's own storage, such as the rustup toolchains that `cargo` runs | Profile | `~/.strands/box/storage/<profile>/default/tool/<tool>/<dir>/` |
-| Agent tool caches, such as `CARGO_HOME` | Project | The workspace |
+| A tool's own storage, such as the rustup toolchains that `cargo` runs, and the caches of `npm`, `go`, and `cargo` | Profile | `~/.strands/box/storage/<profile>/default/tool/<tool>/<dir>/` |
+| Other agent tool caches, such as `pnpm`'s store, and build output, such as `CARGO_TARGET_DIR` | Project | The workspace |
 | Box directory, temporary files of the agent's tools | Run | `~/.strands/box/r/<id>/` |
 
 [profile-language.md](profile-language.md#storage) states the storage layout. Boxes in different
