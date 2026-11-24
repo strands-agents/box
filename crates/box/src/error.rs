@@ -73,15 +73,15 @@ impl Internal {
                 | InstallationError::Changed { .. } => Code::B0107.into(),
             },
             Self::Supervise(error) => match error {
-                SuperviseError::Diagnostics { .. }
-                | SuperviseError::Spawn { .. }
-                | SuperviseError::Native { .. } => Code::B0108.into(),
+                SuperviseError::Spawn { .. } | SuperviseError::Native { .. } => Code::B0108.into(),
+                SuperviseError::NativeDuringRun { .. } => Code::B1003.into(),
                 SuperviseError::Callback { .. } => Code::B0112.into(),
                 SuperviseError::Ingress { .. } => Code::B0704.into(),
                 SuperviseError::AlsoShutdown { outcome, .. } => outcome.code(),
                 SuperviseError::NoProcessId
                 | SuperviseError::Wait { .. }
                 | SuperviseError::Signal { .. }
+                | SuperviseError::Diagnostics { .. }
                 | SuperviseError::Control { .. } => DEFECT,
             },
             Self::Shell(error) => match error {
@@ -131,13 +131,13 @@ impl Internal {
                 | NativeFilesystemError::Muting
                 | NativeFilesystemError::Client { .. }
                 | NativeFilesystemError::Paths { .. }
-                | NativeFilesystemError::Shutdown { .. }
-                | NativeFilesystemError::BootstrapIdentity { .. }
+                | NativeFilesystemError::BootstrapIdentity { .. } => Code::B0108.into(),
+                NativeFilesystemError::Shutdown { .. }
                 | NativeFilesystemError::Reply
                 | NativeFilesystemError::Sequence
                 | NativeFilesystemError::Outcome { .. }
                 | NativeFilesystemError::Panic
-                | NativeFilesystemError::Tracking => Code::B0108.into(),
+                | NativeFilesystemError::Tracking => Code::B1003.into(),
             },
         }
     }
@@ -785,6 +785,11 @@ pub(crate) enum SuperviseError {
     #[error("workload process control failed: {reason}")]
     Native { reason: String },
 
+    /// Native filesystem policy failed after the workload started, or did not stop cleanly.
+    #[cfg_attr(not(feature = "native-filesystem-policy"), allow(dead_code))]
+    #[error("workload process control failed: {reason}")]
+    NativeDuringRun { reason: String },
+
     /// The run failed, and its shutdown failed too; the run's failure names the code.
     #[error("workload process control failed: {outcome}; shutdown also failed: {shutdown}")]
     AlsoShutdown {
@@ -915,7 +920,21 @@ mod tests {
     #[test]
     fn refusals_name_their_code() {
         use ::diagnostics::{Code, Kind, Severity};
-        let cases: [(BoxError, Kind); 21] = [
+        let cases: [(BoxError, Kind); 23] = [
+            (
+                SuperviseError::NativeDuringRun {
+                    reason: "native request deadline exceeded".into(),
+                }
+                .into(),
+                Code::B1003.into(),
+            ),
+            (
+                SuperviseError::Diagnostics {
+                    source: std::io::Error::other("replay"),
+                }
+                .into(),
+                Kind::Uncoded(Severity::Error),
+            ),
             (ConfigError::EmptyWorkload.into(), Code::B0101.into()),
             (
                 SuperviseError::Callback {

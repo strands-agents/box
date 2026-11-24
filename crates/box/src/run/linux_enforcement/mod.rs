@@ -32,6 +32,14 @@ fn failure(reason: impl ToString) -> BoxError {
     }
     .into()
 }
+
+/// A failure of native enforcement after the workload started.
+fn run_failure(reason: impl ToString) -> BoxError {
+    SuperviseError::NativeDuringRun {
+        reason: reason.to_string(),
+    }
+    .into()
+}
 struct Worker {
     task: JoinHandle<()>,
     busy: Arc<Mutex<Option<Instant>>>,
@@ -53,7 +61,7 @@ impl State {
         // Keep the first error until stop has joined the worker that reported it.
         let reason = self.fatal_reason.get_or_init(|| reason.to_string());
         self.stopped.store(true, Ordering::Release);
-        let _ = self.fatal.send(failure(reason));
+        let _ = self.fatal.send(run_failure(reason));
     }
 }
 #[derive(Clone)]
@@ -147,7 +155,8 @@ impl FileMonitor {
     }
     pub(crate) fn stop(&mut self) -> Result<(), BoxError> {
         self.registration.0.stopped.store(true, Ordering::Release);
-        let workers = std::mem::take(&mut *self.registration.0.workers.lock().map_err(failure)?);
+        let workers =
+            std::mem::take(&mut *self.registration.0.workers.lock().map_err(run_failure)?);
         let deadline = Instant::now() + STOP_WAIT;
         let mut incomplete = false;
         for worker in workers {
@@ -168,10 +177,10 @@ impl FileMonitor {
             incomplete = true;
         }
         if let Some(reason) = self.registration.0.fatal_reason.get() {
-            return Err(failure(reason));
+            return Err(run_failure(reason));
         }
         if incomplete {
-            return Err(failure(
+            return Err(run_failure(
                 "native worker did not stop within the shutdown bound",
             ));
         }

@@ -218,12 +218,13 @@ These apply only when native filesystem policy is on. See
 
 <a id="b10"></a>
 
-## B10: Shutdown
+## B10: During and after the run
 
 | Code | Severity | Meaning | What to do |
 |---|---|---|---|
 | `B1001` | warning | Part of the box's shutdown failed. | Read the part that the text names. A failed final history flush can lose pending history, as [history persistence and process crashes](policy.md#history-persistence-and-process-crashes) describes. |
 | `B1002` | warning | Box held its messages while the workload drew on the terminal, and discarded those past its limit. | Run the box with stderr sent to a file or a pipe to read every message as it is written. |
+| `B1003` | error | Native filesystem policy failed after the workload started, or did not stop cleanly, so the box stopped. | The workload ran. Read the reason in the text. See [experimental native filesystem policy](native-filesystem-policy.md). If it repeats, report it with the full stderr of the run. |
 
 <a id="b11"></a>
 

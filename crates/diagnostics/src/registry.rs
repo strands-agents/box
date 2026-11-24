@@ -141,9 +141,10 @@ codes! {
     B0802 => strands_box warning, "refused native filesystem requests", "Native filesystem policy refused a request it cannot decide.";
     B0803 => strands_box warning, "failed native filesystem requests", "A native filesystem request was denied because deciding it failed.";
     B0804 => strands_box note, "native filesystem enforcement starts", "Native filesystem enforcement is ready.";
-    // Box: shutdown.
+    // Box: during and after the run.
     B1001 => strands_box warning, "shutdown failures", "Part of the box's shutdown failed.";
     B1002 => strands_box warning, "discarded messages", "Box held its messages while the workload drew on the terminal, and discarded those past its limit.";
+    B1003 => strands_box error, "native enforcement failures during a run", "Native filesystem policy failed after the workload started, or did not stop cleanly, so the box stopped.";
     // Box: broker connections.
     B1101 => strands_box warning, "rejected broker clients", "The broker rejected a client of its socket.";
     B1102 => strands_box warning, "failed broker clients", "Serving a client of the broker's socket failed.";
@@ -223,10 +224,32 @@ mod tests {
     /// The production code of one source file: no unit-test module, no comment line, and runs
     /// of whitespace joined, so a code that only a test or a comment names is not a use.
     fn production(text: &str) -> String {
-        let text = text
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .unwrap_or_default();
+        let mut text = text.to_string();
+        // Drop each `#[cfg(test)] mod <name> { ... }`, whatever the module is called.
+        while let Some(start) = text.find("#[cfg(test)]") {
+            let rest = text[start + "#[cfg(test)]".len()..].trim_start();
+            if !rest.starts_with("mod ") || !rest.contains('{') {
+                text.replace_range(start..start + "#[cfg(test)]".len(), "");
+                continue;
+            }
+            let open = text.len() - rest.len() + rest.find('{').unwrap();
+            let mut depth = 0;
+            let mut end = text.len();
+            for (offset, byte) in text.bytes().enumerate().skip(open) {
+                match byte {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = offset + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            text.replace_range(start..end, "");
+        }
         let lines: Vec<&str> = text
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
@@ -237,6 +260,35 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ")
             .replace("( ", "(")
+    }
+
+    /// Whether `sources` names `code` in a `Code::` path or as a `diag!` argument.
+    fn uses(sources: &str, code: &str) -> bool {
+        let writer = sources.match_indices("diag!(into ").any(|(at, form)| {
+            let call = &sources[at + form.len()..];
+            call.split_once(", ")
+                .is_some_and(|(_, rest)| rest.starts_with(&format!("{code},")))
+        });
+        writer
+            || [
+                format!("Code::{code}"),
+                format!("diag!({code},"),
+                format!("diag!(text {code},"),
+            ]
+            .iter()
+            .any(|shape| sources.contains(shape.as_str()))
+    }
+
+    #[test]
+    fn a_use_counts_only_in_production_code() {
+        let source = "fn f() { diag!(into out, B0201, \"x\"); }\n#[cfg(test)]\nmod probes {\n    fn g() { diag!(B0202, \"y\"); }\n}\nconst NOTE: &str = \"see, B0203, here\";";
+        let production = production(source);
+        assert!(uses(&production, "B0201"), "{production}");
+        assert!(
+            !uses(&production, "B0202"),
+            "a test module of any name is not a use"
+        );
+        assert!(!uses(&production, "B0203"), "a code in prose is not a use");
     }
 
     #[test]
@@ -263,14 +315,7 @@ mod tests {
         }
         for code in Code::ALL {
             let code = code.as_str();
-            let used = [
-                format!("Code::{code}"),
-                format!("diag!({code},"),
-                format!("text {code},"),
-                format!(", {code},"),
-            ]
-            .iter()
-            .any(|shape| sources.contains(shape.as_str()));
+            let used = uses(&sources, code);
             assert!(
                 used,
                 "{code} is declared and no Box Core production code uses it"

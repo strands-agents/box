@@ -689,13 +689,12 @@ hooks remain broken because most of them exec a script.
 
 Every Box Core message reaches stderr through `diagnostics::diag!` as
 `<source>: <severity>[<code>]: <text>`, and clippy refuses any other stderr write in Core crates.
-Each kind of message has one code, decided where its text is built, and the registry sets its
-source and severity. The one exception is an internal failure the reader can only report, which carries no
-code. The format is a convention on a stream the workload's processes share, not an
-authenticated channel.
+Each kind of message, one cause the reader can act on rather than one error type, has one code;
+the registry sets its source and severity. An internal failure the reader can only report has no
+code. The format is a convention on a shared stream, not an authenticated channel.
 
-**Rejected.** Codes only for messages a reader acts on today: whether to show a kind is the
-reader's choice, and an uncoded kind cannot be explained later.
+**Rejected.** Codes only for messages a reader acts on today: an uncoded kind cannot be
+explained later.
 
 **Cost.** Each new kind of message needs a code and a row on `message-codes.md`. A reader must not
 treat a coded line as proof that Box wrote it.

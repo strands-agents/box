@@ -1207,7 +1207,10 @@ impl HostedBox {
                 .shutdown()
                 .map(|_| ())
                 .map_err(|error| crate::error::Internal::HistoryFlush(error).into()),
-            Some(flusher) => flusher.stop().map(|_| ()).map_err(BoxError::from),
+            Some(flusher) => flusher
+                .stop()
+                .map(|_| ())
+                .map_err(|error| crate::error::Internal::HistoryFlush(error).into()),
             None => Ok(()),
         };
         #[cfg(not(feature = "experimental-idle-flush"))]
