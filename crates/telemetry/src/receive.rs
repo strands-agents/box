@@ -187,20 +187,6 @@ fn beyond_the_fan_out_bound(inbound: &Inbound, resources: usize) -> bool {
     beyond
 }
 
-/// The targets a payload is relayed to, counting each skipped one as a refused payload.
-fn admitted<'a>(
-    inbound: &'a Inbound,
-    targets: &'a [Arc<TargetExporter>],
-) -> impl Iterator<Item = &'a Arc<TargetExporter>> {
-    targets.iter().filter(move |target| {
-        let yields = target.yields_to_the_box();
-        if yields {
-            inbound.dropped.fetch_add(1, Ordering::Relaxed);
-        }
-        !yields
-    })
-}
-
 /// The answer every handler returns, so a client always reads one shape.
 fn answer(status: StatusCode) -> (StatusCode, [(&'static str, &'static str); 1], &'static str) {
     (status, [("content-type", "application/json")], "{}")
@@ -246,7 +232,7 @@ async fn accept_trace(
         );
     }
 
-    for relay in admitted(&inbound, &inbound.relays.traces) {
+    for relay in &inbound.relays.traces {
         let _ = relay.relay_trace(&trace).await;
     }
     answer(StatusCode::OK)
@@ -284,7 +270,7 @@ async fn accept_logs(
         );
     }
 
-    for relay in admitted(&inbound, &inbound.relays.logs) {
+    for relay in &inbound.relays.logs {
         let _ = relay.relay_logs(&logs).await;
     }
     answer(StatusCode::OK)
@@ -322,7 +308,7 @@ async fn accept_metrics(
         );
     }
 
-    for relay in admitted(&inbound, &inbound.relays.metrics) {
+    for relay in &inbound.relays.metrics {
         let _ = relay.relay_metrics(&metrics).await;
     }
     answer(StatusCode::OK)
