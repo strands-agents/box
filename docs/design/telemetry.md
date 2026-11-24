@@ -157,6 +157,10 @@ concurrency token, not a policy permit. A payload that finds it occupied is drop
 kinds of record share no queue](decisions.md#the-agents-lane-and-the-boxs-lane-share-no-queue). With
 a shared queue, the workload could fill it until subsequent decisions were dropped.
 
+The workload can still fill a Box queue with its own decisions, because each request it makes is
+recorded. A record that a full queue refuses is lost, but it is counted and reported when the run
+ends.
+
 The receiver bounds the memory needed to process a payload. It takes the relay slot before decoding.
 If the slot is occupied, it discards the payload without decoding it. The bytes have already
 arrived, subject to the request-size cap, but the expensive processing has not begun.
@@ -174,12 +178,13 @@ two-byte JSON body. A dropped payload still gets `200`.
 ## Limits
 
 - Delivery is best effort. A failed target write loses the record without a retry or a disk copy for
-  later delivery. The drain prints one stderr line when the run ends if an export to a configured
-  target failed or the final export did not finish in time. With `STRANDS_BOX_TELEMETRY_DEBUG` set,
-  Box also prints each failed export as it happens, with its cause. A record the SDK queue refuses,
-  an agent payload the receiver refuses, a batch the SDK cuts at its export deadline before
-  shutdown, and a relay in flight at shutdown are not counted, so the absence of
-  that line does not prove that nothing was lost. See [a record can be
+  later delivery. The drain prints one stderr line when the run ends if a record never reached an
+  export, an export to a configured target failed, or the final export did not finish in time. A
+  record never reaches an export when the SDK queue refuses it, or when it is still queued as the
+  drain ends. With `STRANDS_BOX_TELEMETRY_DEBUG` set, Box also prints each failed export as it
+  happens, with its cause. An agent payload the receiver refuses, a batch the SDK cuts at its export
+  deadline before shutdown, and a relay in flight at shutdown are not counted, so the absence of that
+  line does not prove that nothing was lost. See [a record can be
   lost](decisions.md#delivery-is-best-effort). The shutdown drain runs on every exit path, even when
   startup fails before the workload starts, so Box still records that it stopped. Relayed payloads
   do not join that drain and can be lost in flight. A decision cannot be lost through that shutdown
