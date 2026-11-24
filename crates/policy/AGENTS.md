@@ -196,6 +196,49 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `mcp_schema::tests::a_union_argument_accepts_each_member_and_refuses_a_non_member` and
   `tests/runtime_mcp_policy_staging.rs::a_union_argument_is_decided_by_the_policy` and
   `a_datetime_union_member_is_placed_and_its_rule_cannot_be_bypassed`.
+- An MCP `$defs` definition that refers to itself, directly or through other definitions, is cut
+  where it repeats: `make_definition_cycles_opaque` makes the reference that closes the cycle an
+  opaque `Unknown`, an entity type with no attributes. A rule that compares the cut field with a
+  string, a number, or a boolean does not validate; a comparison with an entity, such as
+  `<server>::Unknown::"x"` or the field itself, validates. A rule that reads a field inside it
+  validates only behind `has` tests. The request gate refuses an ordinary object, a string, a
+  number, a boolean, `null`, or a list at the cut field as `InternalFault`.
+  Renamed definitions and array elements change only generated type names. An output's own
+  `$defs` keep their names and are not moved or cut, so a server that generated before without
+  dropping an output generates the same schema. A reference to a renamed server or tool
+  definition follows the rename wherever it appears in an output, including inside the output's
+  own `$defs`, unless those `$defs` declare that name, which still shadows it. A reference is
+  rewritten only where the generator reads a schema: the values of `properties` and `$defs` and of
+  the keywords in `SCHEMA_KEYWORDS`, the same descent as the argument rename. A reference-shaped
+  object in a `default`, `const`, `examples` or `enum` value or under `allOf` keeps the server's
+  name, while the names a rename avoids are still collected from every `$ref`.
+  `without_unreadable_outputs` judges each output alone beside the server's `$defs`, as the pass
+  fixes them, so an output that refers to a server definition is not dropped for another tool's
+  problem. An output whose `$defs` name is not an identifier, or is an array of objects, is dropped
+  as before.
+  An output whose `$defs` refer to themselves generates and then fails composition with a cycle in
+  common types, so the whole server is refused. A server definition named `Action` is still
+  refused, and so is one named `Unknown` or `Null` beside a field the generator types that way. When
+  a cut or a moved array element leaves any definition deeper than `MAXIMUM_DEFINITION_DEPTH` schema
+  steps (about 32 object definitions), the list stays unchanged and is refused as before: Cedar
+  resolves the types by recursion, and on a 2 MiB debug test thread a chain of about 130 levels
+  overflowed the stack, which a long chain of plain definitions does on `main` too. A rename alone
+  never deepens a list, so it is not bounded. Pinned by
+  `mcp_schema::tests::fields_above_a_cut_reference_keep_their_types`,
+  `::an_output_schema_definition_is_left_for_the_generator_to_read_or_drop`,
+  `::renaming_a_server_definition_for_another_tool_keeps_the_output_that_refers_to_it`,
+  `::an_output_definition_shadows_a_renamed_server_definition_of_the_same_name`,
+  `::renaming_a_shared_definition_keeps_the_structured_output_of_every_tool`,
+  `::an_output_that_refers_to_a_server_definition_is_judged_with_the_server_definitions`,
+  `::an_output_that_refers_to_a_renamed_server_or_tool_definition_keeps_its_output`,
+  `::an_output_that_refers_to_a_moved_or_cut_server_definition_keeps_its_output`,
+  `::a_renamed_definition_name_in_a_data_value_or_an_ignored_keyword_stays_as_the_server_wrote_it`,
+  `::a_reference_below_each_keyword_the_parser_reads_follows_a_rename_and_the_data_beside_it_does_not`,
+  `::a_definition_list_that_would_nest_too_deep_is_left_unchanged`,
+  `::a_reference_the_parser_does_not_follow_into_a_common_type_stays_typed`,
+  `::a_generated_type_cannot_collide_with_the_server_action_type`, and
+  `tests/runtime_mcp_policy_staging.rs::a_recursive_argument_is_decided_and_a_forbid_above_the_cut_denies`
+  and `::a_rule_that_reads_below_the_cut_does_not_load_and_the_tool_is_refused`.
 - A per-tool rule keeps its history across a restart only when its head names per-tool actions
   alone. `commit_discovering` keeps it installed under the server fragments that
   `mcp_schema::mcp_schemas_in` recovers from the stored action schema. The tools it decides stay

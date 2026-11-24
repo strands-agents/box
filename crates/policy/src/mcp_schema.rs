@@ -111,10 +111,11 @@ pub fn generate_mcp_schema(server: &str, tools_list: &str) -> Result<String, Mcp
     }
 }
 
-/// `tools_list` without each `outputSchema` that does not generate alone, or without every
-/// `outputSchema` when none fails alone; `None` when no tool declares one.
+/// `tools_list` without each `outputSchema` that does not generate alone beside the server's
+/// `$defs`, or without every `outputSchema` when none fails alone; `None` when no tool declares one.
 fn without_unreadable_outputs(server: &str, tools_list: &str) -> Option<String> {
     let mut response = serde_json::from_str::<serde_json::Value>(tools_list).ok()?;
+    let server_definitions = response.pointer("/result/$defs").cloned();
     let pointer = if response.pointer("/result/tools").is_some() {
         "/result/tools"
     } else {
@@ -131,7 +132,11 @@ fn without_unreadable_outputs(server: &str, tools_list: &str) -> Option<String> 
         {
             continue;
         }
-        let alone = serde_json::json!({ "result": { "tools": [tool.clone()] } }).to_string();
+        let mut alone = serde_json::json!({ "result": { "tools": [tool.clone()] } });
+        if let Some(definitions) = &server_definitions {
+            alone["result"]["$defs"] = definitions.clone();
+        }
+        let alone = alone.to_string();
         if generate_from_tools(server, &alone).is_err()
             && let Some(tool) = tool.as_object_mut()
         {
@@ -160,6 +165,7 @@ fn generate_from_tools(server: &str, tools_list: &str) -> Result<String, McpSche
     let tools_with_output = tools_declaring_output(tools_list);
     let compatible_tools_list = make_unsupported_schema_references_opaque(tools_list);
     let tools_list = lower_arg_types(&compatible_tools_list);
+    let tools_list = make_definitions_generable(&tools_list);
     let (tools_list, argument_names) = identify_arguments(&tools_list);
     let description = ServerDescription::from_json_str(&tools_list).map_err(|source| {
         McpSchemaError::Description {
@@ -731,10 +737,10 @@ fn collect_property_names(value: &serde_json::Value, names: &mut BTreeSet<String
     }
 }
 
-/// The input argument renames of one server's tools.
+/// The input argument renames of one server's tools, or its definition renames.
 #[derive(Default)]
 struct ArgumentNames {
-    /// Every property name the server declares, renamed or not.
+    /// Every name of the renamed kind that the server declares or uses, renamed or not.
     taken: BTreeSet<String>,
     /// The identifier given to each renamed exact name.
     identifiers: BTreeMap<String, String>,
@@ -857,7 +863,7 @@ impl ArgumentNames {
         renames
     }
 
-    /// The identifier for one exact name, unique among the server's property names.
+    /// The identifier for one exact name, unique among the names taken and given.
     fn identifier_for(&mut self, name: &str) -> String {
         if let Some(identifier) = self.identifiers.get(name) {
             return identifier.clone();
@@ -932,6 +938,687 @@ fn restore_argument_names(value: &mut serde_json::Value, exact: &BTreeMap<String
 /// Compose the canonical action schema with ordered generated MCP schemas.
 pub fn compose_action_schema(generated: &[(&str, &str)]) -> Result<String, McpSchemaError> {
     crate::ToolGrammars::default().compose_action_schema(generated)
+}
+
+/// The Cedar type names that no definition can take.
+const RESERVED_TYPE_NAMES: [&str; 8] = [
+    "Bool",
+    "Boolean",
+    "Entity",
+    "Extension",
+    "Long",
+    "Record",
+    "Set",
+    "String",
+];
+
+/// The extension type names, which a server definition would shadow.
+const RESERVED_SERVER_TYPE_NAMES: [&str; 4] = ["datetime", "decimal", "duration", "ipaddr"];
+
+/// The deepest nesting of schema steps, through definitions, that a cut cycle or a moved array
+/// element may leave, because Cedar resolves the types by recursion and can overflow the stack.
+const MAXIMUM_DEFINITION_DEPTH: usize = 64;
+
+/// `tools_list` with the server's `$defs` and each input schema's `$defs` in a shape the generator
+/// accepts, or unchanged when it needs no fix or a cut or move leaves it too deep.
+fn make_definitions_generable(tools_list: &str) -> Cow<'_, str> {
+    let Ok(mut response) = serde_json::from_str::<serde_json::Value>(tools_list) else {
+        return Cow::Borrowed(tools_list);
+    };
+    match make_definitions_generable_in(&mut response) {
+        DefinitionFix::None => return Cow::Borrowed(tools_list),
+        DefinitionFix::Restructured
+            if deepest_definition(&mut response) > MAXIMUM_DEFINITION_DEPTH =>
+        {
+            return Cow::Borrowed(tools_list);
+        }
+        DefinitionFix::Renamed | DefinitionFix::Restructured => {}
+    }
+    Cow::Owned(response.to_string())
+}
+
+/// What [`make_definitions_generable_in`] changed in a tools/list response.
+#[derive(Clone, Copy, PartialEq)]
+enum DefinitionFix {
+    /// No definition needs a fix.
+    None,
+    /// Definition names and the references to them, which leaves the nesting as it was.
+    Renamed,
+    /// An array element moved or a cycle cut, which can change the nesting.
+    Restructured,
+}
+
+/// The deepest nesting of types that any definition in a tools/list response expands to.
+fn deepest_definition(response: &mut serde_json::Value) -> usize {
+    let (server, mut tools) = definition_scopes(response);
+    let server = definition_depths(server.and_then(serde_json::Value::as_object_mut), &[]);
+    let mut deepest = server.values().copied().max().unwrap_or_default();
+    for tool in &mut tools {
+        let own = definition_depths(
+            tool.definitions
+                .as_deref_mut()
+                .and_then(serde_json::Value::as_object_mut),
+            &[&server],
+        );
+        let input = definition_depths(
+            schema_definitions(tool.input.as_deref_mut()),
+            &[&own, &server],
+        );
+        for depths in [&input, &own] {
+            deepest = deepest.max(depths.values().copied().max().unwrap_or_default());
+        }
+    }
+    deepest
+}
+
+/// The deepest nesting of types each definition of one scope expands to, counting each schema the
+/// generator reads on the way, with `outer` holding the depths of the enclosing scopes.
+fn definition_depths(
+    definitions: Option<&mut serde_json::Map<String, serde_json::Value>>,
+    outer: &[&BTreeMap<String, usize>],
+) -> BTreeMap<String, usize> {
+    let Some(definitions) = definitions else {
+        return BTreeMap::new();
+    };
+    let index = definitions
+        .keys()
+        .enumerate()
+        .map(|(position, name)| (name.clone(), position))
+        .collect::<BTreeMap<_, _>>();
+    let nesting = definitions.values().map(json_depth).collect::<Vec<_>>();
+    let references = definitions
+        .values_mut()
+        .map(|definition| {
+            let mut targets = Vec::new();
+            for_each_common_type_reference(definition, 1, &mut |reference, depth| {
+                let name = reference
+                    .get("$ref")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|reference| reference.strip_prefix("#/$defs/"))
+                    .unwrap_or_default();
+                let outer_depth = outer.iter().find_map(|depths| depths.get(name).copied());
+                targets.push((
+                    depth,
+                    index.get(name).copied(),
+                    outer_depth.unwrap_or_default(),
+                ));
+            });
+            targets
+        })
+        .collect::<Vec<_>>();
+    let mut depths = vec![None; references.len()];
+    let mut open = vec![false; references.len()];
+    for root in 0..references.len() {
+        if depths[root].is_some() {
+            continue;
+        }
+        open[root] = true;
+        let mut path = vec![(root, 0)];
+        while let Some((definition, next)) = path.last_mut() {
+            let definition = *definition;
+            if let Some(&(_, local, _)) = references[definition].get(*next) {
+                *next += 1;
+                if let Some(target) = local
+                    && depths[target].is_none()
+                    && !open[target]
+                {
+                    open[target] = true;
+                    path.push((target, 0));
+                }
+                continue;
+            }
+            let deepest = references[definition]
+                .iter()
+                .map(|&(depth, local, outer)| {
+                    depth + local.map_or(outer, |target| depths[target].unwrap_or_default())
+                })
+                .fold(nesting[definition], usize::max);
+            depths[definition] = Some(deepest);
+            open[definition] = false;
+            path.pop();
+        }
+    }
+    index
+        .into_iter()
+        .map(|(name, position)| (name, depths[position].unwrap_or_default()))
+        .collect()
+}
+
+fn json_depth(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Object(object) => 1 + object.values().map(json_depth).max().unwrap_or(0),
+        serde_json::Value::Array(values) => 1 + values.iter().map(json_depth).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn make_definitions_generable_in(response: &mut serde_json::Value) -> DefinitionFix {
+    let mut names = ArgumentNames::default();
+    names.taken.extend(
+        RESERVED_TYPE_NAMES
+            .iter()
+            .chain(&RESERVED_SERVER_TYPE_NAMES)
+            .map(|name| name.to_string()),
+    );
+    collect_reference_names(response, &mut names.taken);
+    let (mut server, mut tools) = definition_scopes(response);
+    let mut server_names = BTreeSet::new();
+    for tool in &mut tools {
+        let identifier = cedar_identifier(&tool.name);
+        server_names.insert(format!("{identifier}Input"));
+        server_names.insert(format!("{identifier}Output"));
+        for definitions in tool.definitions_mut() {
+            names.taken.extend(definitions.keys().cloned());
+        }
+        if let Some(definitions) = schema_definitions(tool.output.as_deref_mut()) {
+            names.taken.extend(definitions.keys().cloned());
+        }
+    }
+    names.taken.extend(server_names.iter().cloned());
+    if let Some(definitions) = server
+        .as_deref_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        names.taken.extend(definitions.keys().cloned());
+    }
+
+    let server_scope = DefinitionScope::rename(
+        server
+            .as_deref_mut()
+            .and_then(serde_json::Value::as_object_mut),
+        &mut names,
+        |name| server_names.contains(name) || RESERVED_SERVER_TYPE_NAMES.contains(&name),
+    );
+    let mut renamed = !server_scope.renamed.is_empty();
+    let mut restructured = false;
+    for tool in &mut tools {
+        let tool_scope = DefinitionScope::rename(
+            tool.definitions
+                .as_deref_mut()
+                .and_then(serde_json::Value::as_object_mut),
+            &mut names,
+            |_| false,
+        );
+        let input_scope = DefinitionScope::rename(
+            schema_definitions(tool.input.as_deref_mut()),
+            &mut names,
+            |_| false,
+        );
+        renamed |= [&tool_scope, &input_scope]
+            .iter()
+            .any(|scope| !scope.renamed.is_empty());
+        if let Some(definitions) = tool
+            .definitions
+            .as_deref_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for definition in definitions.values_mut() {
+                renamed |= rewrite_definition_references(definition, &[&tool_scope, &server_scope]);
+            }
+        }
+        if let Some(input) = tool.input.as_deref_mut() {
+            renamed |=
+                rewrite_definition_references(input, &[&input_scope, &tool_scope, &server_scope]);
+        }
+        // The output's own definitions keep their names and shadow the renamed outer ones.
+        let output_scope = DefinitionScope {
+            names: schema_definitions(tool.output.as_deref_mut())
+                .map(|definitions| definitions.keys().cloned().collect())
+                .unwrap_or_default(),
+            renamed: BTreeMap::new(),
+        };
+        if let Some(output) = tool.output.as_deref_mut() {
+            renamed |=
+                rewrite_definition_references(output, &[&output_scope, &tool_scope, &server_scope]);
+        }
+        for definitions in tool.definitions_mut() {
+            restructured |= give_array_elements_definitions(definitions, &mut names);
+            restructured |= make_definition_cycles_opaque(definitions);
+        }
+    }
+    if let Some(definitions) = server
+        .as_deref_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for definition in definitions.values_mut() {
+            renamed |= rewrite_definition_references(definition, &[&server_scope]);
+        }
+    }
+    if let Some(definitions) = server.and_then(serde_json::Value::as_object_mut) {
+        restructured |= give_array_elements_definitions(definitions, &mut names);
+        restructured |= make_definition_cycles_opaque(definitions);
+    }
+    match (renamed, restructured) {
+        (_, true) => DefinitionFix::Restructured,
+        (true, false) => DefinitionFix::Renamed,
+        (false, false) => DefinitionFix::None,
+    }
+}
+
+/// The schemas of one tool whose `$defs` the generator reads.
+struct ToolDefinitions<'a> {
+    name: String,
+    definitions: Option<&'a mut serde_json::Value>,
+    input: Option<&'a mut serde_json::Value>,
+    output: Option<&'a mut serde_json::Value>,
+}
+
+impl ToolDefinitions<'_> {
+    /// The tool's own `$defs` map and that of its input schema.
+    fn definitions_mut(&mut self) -> Vec<&mut serde_json::Map<String, serde_json::Value>> {
+        let own = self
+            .definitions
+            .as_deref_mut()
+            .and_then(serde_json::Value::as_object_mut);
+        own.into_iter()
+            .chain(schema_definitions(self.input.as_deref_mut()))
+            .collect()
+    }
+}
+
+/// The server's `$defs` and each tool's schemas, in the three shapes the generator reads.
+fn definition_scopes(
+    response: &mut serde_json::Value,
+) -> (Option<&mut serde_json::Value>, Vec<ToolDefinitions<'_>>) {
+    let single_tool = response
+        .as_object()
+        .is_some_and(|object| !object.contains_key("result"));
+    let (server, tools) = match response {
+        _ if single_tool => (None, vec![response]),
+        serde_json::Value::Object(object) => match object.get_mut("result") {
+            Some(serde_json::Value::Object(result)) => {
+                let mut server = None;
+                let mut tools = Vec::new();
+                for (key, value) in result.iter_mut() {
+                    match (key.as_str(), value) {
+                        ("$defs", value) => server = Some(value),
+                        ("tools", serde_json::Value::Array(list)) => {
+                            tools = list.iter_mut().collect()
+                        }
+                        _ => {}
+                    }
+                }
+                (server, tools)
+            }
+            _ => (None, Vec::new()),
+        },
+        serde_json::Value::Array(tools) => (None, tools.iter_mut().collect()),
+        _ => (None, Vec::new()),
+    };
+    let tools = tools
+        .into_iter()
+        .filter_map(serde_json::Value::as_object_mut)
+        .map(|tool| {
+            let name = tool
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let input_key = if tool.contains_key("parameters") {
+                "parameters"
+            } else {
+                "inputSchema"
+            };
+            let mut definitions = ToolDefinitions {
+                name,
+                definitions: None,
+                input: None,
+                output: None,
+            };
+            for (key, value) in tool.iter_mut() {
+                match key.as_str() {
+                    "$defs" => definitions.definitions = Some(value),
+                    "outputSchema" => definitions.output = Some(value),
+                    key if key == input_key => definitions.input = Some(value),
+                    _ => {}
+                }
+            }
+            definitions
+        })
+        .collect();
+    (server, tools)
+}
+
+/// The `$defs` map of an input or output schema, inside its `json` wrapper when it has one.
+fn schema_definitions(
+    schema: Option<&mut serde_json::Value>,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    let schema = schema?;
+    let schema = if schema.get("json").is_some() {
+        schema.get_mut("json")?
+    } else {
+        schema
+    };
+    schema.get_mut("$defs")?.as_object_mut()
+}
+
+/// The definition name each `#/$defs/` reference in a value names, read everywhere and not only
+/// where [`rewrite_definition_references`] looks, so a new name avoids more names, never fewer.
+fn collect_reference_names(value: &serde_json::Value, names: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(name) = object
+                .get("$ref")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|reference| reference.strip_prefix("#/$defs/"))
+            {
+                names.insert(name.to_string());
+            }
+            for child in object.values() {
+                collect_reference_names(child, names);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                collect_reference_names(child, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The names one `$defs` map declares, and the name given to each one renamed.
+#[derive(Default)]
+struct DefinitionScope {
+    names: BTreeSet<String>,
+    renamed: BTreeMap<String, String>,
+}
+
+impl DefinitionScope {
+    /// Rename each definition the generator refuses, or that `refused` names, to a name that no
+    /// definition or reference in the server uses.
+    fn rename(
+        definitions: Option<&mut serde_json::Map<String, serde_json::Value>>,
+        names: &mut ArgumentNames,
+        refused: impl Fn(&str) -> bool,
+    ) -> Self {
+        let mut scope = Self::default();
+        let Some(definitions) = definitions else {
+            return scope;
+        };
+        let refused = |name: &str| {
+            cedar_identifier(name) != name || RESERVED_TYPE_NAMES.contains(&name) || refused(name)
+        };
+        scope.names = definitions.keys().cloned().collect();
+        if !scope.names.iter().any(|name| refused(name)) {
+            return scope;
+        }
+        *definitions = std::mem::take(definitions)
+            .into_iter()
+            .map(|(name, definition)| {
+                if !refused(&name) {
+                    return (name, definition);
+                }
+                let identifier = names.identifier_for(&name);
+                scope.renamed.insert(name, identifier.clone());
+                (identifier, definition)
+            })
+            .collect();
+        scope
+    }
+
+    /// The name of the definition `name` resolves to in this scope, or `None` when it declares
+    /// none by that name.
+    fn resolve(&self, name: &str) -> Option<String> {
+        self.names.contains(name).then(|| {
+            self.renamed
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| name.to_string())
+        })
+    }
+}
+
+/// Point each `#/$defs/` reference in a schema, and below it under `properties`, `$defs` and
+/// [`SCHEMA_KEYWORDS`], at the definition it resolves to in `scopes`, innermost first, reading it
+/// decoded only when it names no definition as written.
+fn rewrite_definition_references(
+    value: &mut serde_json::Value,
+    scopes: &[&DefinitionScope],
+) -> bool {
+    let resolve = |name: &str| scopes.iter().find_map(|scope| scope.resolve(name));
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut changed = false;
+            if let Some(serde_json::Value::String(reference)) = object.get_mut("$ref")
+                && let Some(name) = reference.strip_prefix("#/$defs/")
+                && let Some(target) = resolve(name)
+                    .or_else(|| decoded_reference(name).and_then(|decoded| resolve(&decoded)))
+                && target != name
+            {
+                *reference = format!("#/$defs/{target}");
+                changed = true;
+            }
+            for (key, child) in object.iter_mut() {
+                match key.as_str() {
+                    "properties" | "$defs" => {
+                        if let serde_json::Value::Object(schemas) = child {
+                            for schema in schemas.values_mut() {
+                                changed |= rewrite_definition_references(schema, scopes);
+                            }
+                        }
+                    }
+                    _ if SCHEMA_KEYWORDS.contains(&key.as_str()) => {
+                        changed |= rewrite_definition_references(child, scopes);
+                    }
+                    _ => {}
+                }
+            }
+            changed
+        }
+        serde_json::Value::Array(values) => {
+            let mut changed = false;
+            for child in values {
+                changed |= rewrite_definition_references(child, scopes);
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
+/// `name` with its URI percent escapes and then its JSON Pointer escapes decoded, or `None` when
+/// it has none or does not decode.
+fn decoded_reference(name: &str) -> Option<String> {
+    if !name.contains(['%', '~']) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(name.len());
+    let mut rest = name.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte == b'%' {
+            let digits = tail.get(..2)?;
+            let digit = |byte: u8| char::from(byte).to_digit(16);
+            bytes.push(u8::try_from(digit(digits[0])? * 16 + digit(digits[1])?).ok()?);
+            rest = &tail[2..];
+        } else {
+            bytes.push(byte);
+            rest = tail;
+        }
+    }
+    let decoded = String::from_utf8(bytes).ok()?;
+    Some(decoded.replace("~1", "/").replace("~0", "~"))
+}
+
+/// Move the object element of each array definition, below any nested arrays, into a definition
+/// of its own: the generator names that element after the array definition and refuses the clash.
+fn give_array_elements_definitions(
+    definitions: &mut serde_json::Map<String, serde_json::Value>,
+    names: &mut ArgumentNames,
+) -> bool {
+    let mut elements = Vec::new();
+    for (name, definition) in definitions.iter_mut() {
+        if let Some(element) = array_object_element(definition) {
+            let element_name = names.identifier_for(&format!("{name}_item"));
+            let reference = serde_json::json!({ "$ref": format!("#/$defs/{element_name}") });
+            elements.push((element_name, std::mem::replace(element, reference)));
+        }
+    }
+    let changed = !elements.is_empty();
+    definitions.extend(elements);
+    changed
+}
+
+/// The object schema an array schema's elements have, below any nested arrays, when the generator
+/// reads it as the array's element type.
+fn array_object_element(schema: &mut serde_json::Value) -> Option<&mut serde_json::Value> {
+    if schema.get("type").and_then(serde_json::Value::as_str) != Some("array")
+        || schema.get("prefixItems").is_some()
+    {
+        return None;
+    }
+    let items = schema.get_mut("items").filter(|items| items.is_object())?;
+    match items.get("type").and_then(serde_json::Value::as_str) {
+        Some("object") => Some(items),
+        Some("array") => array_object_element(items),
+        _ => None,
+    }
+}
+
+/// Make opaque, as [`make_unsupported_schema_references_opaque`] does, each reference that closes
+/// a cycle among one scope's definitions, which Cedar refuses as a recursive common type.
+fn make_definition_cycles_opaque(
+    definitions: &mut serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Visit {
+        New,
+        Open,
+        Done,
+    }
+    let index = definitions
+        .keys()
+        .enumerate()
+        .map(|(position, name)| (name.clone(), position))
+        .collect::<BTreeMap<_, _>>();
+    let references = definitions
+        .values_mut()
+        .map(|definition| {
+            let mut targets = Vec::new();
+            for_each_common_type_reference(definition, 0, &mut |reference, _| {
+                targets.push(
+                    reference
+                        .get("$ref")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|reference| reference.strip_prefix("#/$defs/"))
+                        .and_then(|name| index.get(name).copied()),
+                );
+            });
+            targets
+        })
+        .collect::<Vec<_>>();
+    let mut cut = references
+        .iter()
+        .map(|targets| vec![false; targets.len()])
+        .collect::<Vec<_>>();
+    let mut visit = vec![Visit::New; references.len()];
+    let mut any_cut = false;
+    for root in 0..references.len() {
+        if visit[root] != Visit::New {
+            continue;
+        }
+        visit[root] = Visit::Open;
+        let mut path = vec![(root, 0)];
+        while let Some((definition, next)) = path.last_mut() {
+            let (definition, edge) = (*definition, *next);
+            let Some(target) = references[definition].get(edge) else {
+                visit[definition] = Visit::Done;
+                path.pop();
+                continue;
+            };
+            *next += 1;
+            match target.map(|target| (target, visit[target])) {
+                Some((_, Visit::Open)) => {
+                    cut[definition][edge] = true;
+                    any_cut = true;
+                }
+                Some((target, Visit::New)) => {
+                    visit[target] = Visit::Open;
+                    path.push((target, 0));
+                }
+                _ => {}
+            }
+        }
+    }
+    if any_cut {
+        for (definition, cut) in definitions.values_mut().zip(&cut) {
+            let mut edge = 0;
+            for_each_common_type_reference(definition, 0, &mut |reference, _| {
+                if cut[edge] {
+                    reference.clear();
+                }
+                edge += 1;
+            });
+        }
+    }
+    any_cut
+}
+
+/// Call `visit`, in a fixed order, on each `$ref` object that the generator reads from `schema`
+/// into a Cedar common type without passing through an entity type.
+fn for_each_common_type_reference(
+    schema: &mut serde_json::Value,
+    depth: usize,
+    visit: &mut impl FnMut(&mut serde_json::Map<String, serde_json::Value>, usize),
+) {
+    let serde_json::Value::Object(object) = schema else {
+        return;
+    };
+    let (object_kind, array_kind) = match object.get("type") {
+        Some(serde_json::Value::String(kind)) => (kind == "object", kind == "array"),
+        Some(serde_json::Value::Array(kinds)) => (
+            kinds.iter().any(|kind| kind == "object"),
+            kinds.iter().any(|kind| kind == "array"),
+        ),
+        Some(_) => return,
+        None => {
+            match ["anyOf", "oneOf"]
+                .into_iter()
+                .find(|key| object.contains_key(*key))
+            {
+                Some(key) => {
+                    if let Some(serde_json::Value::Array(members)) = object.get_mut(key) {
+                        for member in members {
+                            for_each_common_type_reference(member, depth + 1, visit);
+                        }
+                    }
+                }
+                None if object.get("$ref").is_some_and(serde_json::Value::is_string) => {
+                    visit(object, depth)
+                }
+                None => {}
+            }
+            return;
+        }
+    };
+    if object_kind
+        && object
+            .get("additionalProperties")
+            .is_none_or(|schema| schema.is_boolean() || schema.is_null())
+        && let Some(serde_json::Value::Object(properties)) = object.get_mut("properties")
+    {
+        for property in properties.values_mut() {
+            for_each_common_type_reference(property, depth + 1, visit);
+        }
+    }
+    if array_kind {
+        let items = object.get("items");
+        let (prefix, element) = match object.get("prefixItems") {
+            Some(serde_json::Value::Array(prefix)) => (
+                items.and_then(serde_json::Value::as_bool) == Some(false),
+                prefix.iter().all(|member| Some(member) == items),
+            ),
+            _ => (false, true),
+        };
+        if prefix && let Some(serde_json::Value::Array(members)) = object.get_mut("prefixItems") {
+            for member in members {
+                for_each_common_type_reference(member, depth + 1, visit);
+            }
+        }
+        if element && let Some(items) = object.get_mut("items") {
+            for_each_common_type_reference(items, depth + 1, visit);
+        }
+    }
 }
 
 fn make_unsupported_schema_references_opaque(tools_list: &str) -> Cow<'_, str> {
@@ -1328,6 +2015,287 @@ mod tests {
             assert!(
                 !action("broken").contains("structured"),
                 "the unreadable output is dropped: {unreadable}\n{schema}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_output_schema_definition_is_left_for_the_generator_to_read_or_drop() {
+        for definitions in [
+            serde_json::json!({"zone-record": {"type": "object", "properties": {"a": {"type": "string"}}}}),
+            serde_json::json!({"zone_record": {"type": "array", "items": {"type": "object", "properties": {"a": {"type": "string"}}}}}),
+        ] {
+            let tools = serde_json::json!({"result": {"tools": [
+                {"name": "read", "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}},
+                 "outputSchema": {"type": "object", "properties": {"verified": {"type": "boolean"}}}},
+                {"name": "broken", "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}},
+                 "outputSchema": {
+                     "type": "object",
+                     "properties": {"r": {"$ref": format!("#/$defs/{}", definitions.as_object().and_then(|map| map.keys().next()).expect("one definition"))}},
+                     "$defs": definitions.clone()
+                 }}
+            ]}})
+            .to_string();
+            assert!(
+                matches!(make_definitions_generable(&tools), Cow::Borrowed(_)),
+                "{definitions}"
+            );
+            let schema = generate_mcp_schema("desk", &tools)
+                .unwrap_or_else(|error| panic!("{definitions}: {error:?}"));
+            assert!(schema.contains("structured?: readOutput"), "{schema}");
+            assert!(
+                !schema.contains("structured?: brokenOutput"),
+                "{definitions}\n{schema}"
+            );
+        }
+        let cycle = serde_json::json!({"result": {"tools": [
+            {"name": "read", "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}},
+             "outputSchema": {
+                 "type": "object",
+                 "properties": {"r": {"$ref": "#/$defs/Group"}},
+                 "$defs": {"Group": {"type": "object", "properties": {"up": {"$ref": "#/$defs/Group"}}}}
+             }}
+        ]}})
+        .to_string();
+        assert!(matches!(
+            make_definitions_generable(&cycle),
+            Cow::Borrowed(_)
+        ));
+        let refused = generate_mcp_schema("desk", &cycle)
+            .and_then(|schema| validate_mcp_schema_composition(&[("desk", &schema)]));
+        assert!(refused.is_err(), "an output cycle stays refused, as before");
+    }
+
+    #[test]
+    fn a_renamed_definition_avoids_an_output_definition_name_so_no_tool_loses_its_output() {
+        let tools = serde_json::json!({"result": {"tools": [
+            {"name": "t", "inputSchema": {"type": "object", "properties": {"s": {"type": "string"}}},
+             "outputSchema": {
+                 "type": "object",
+                 "properties": {"s": {"type": "string"}},
+                 "$defs": {"k_x": {"type": "object", "properties": {"o": {"type": "string"}}}}
+             }},
+            {"name": "t_Output", "inputSchema": {"type": "object", "properties": {"a": {"$ref": "#/$defs/k-x"}}},
+             "$defs": {"k-x": {"type": "object", "properties": {"q": {"type": "string"}}}}}
+        ]}})
+        .to_string();
+        let schema = generate_mcp_schema("cf", &tools).unwrap_or_else(|error| panic!("{error:?}"));
+        validate_mcp_schema_composition(&[("cf", &schema)])
+            .unwrap_or_else(|error| panic!("{error:?}\n{schema}"));
+        assert!(schema.contains("a?: cf::t_Output_k_x_2"), "{schema}");
+        assert!(schema.contains("structured?: tOutput"), "{schema}");
+    }
+
+    /// A server whose tool `b` answers with a field `r` that refers to `name` in `definitions`,
+    /// beside the tools in `others`, with `definitions` in the server's or in `b`'s own `$defs`.
+    fn output_referring_tools(
+        name: &str,
+        definitions: serde_json::Value,
+        in_tool: bool,
+        others: &[serde_json::Value],
+    ) -> serde_json::Value {
+        let mut b = serde_json::json!({"name": "b",
+            "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}},
+            "outputSchema": {"type": "object", "properties": {"r": {"$ref": format!("#/$defs/{name}")}}, "required": ["r"]}});
+        let mut tools = others.to_vec();
+        if in_tool {
+            b["$defs"] = definitions;
+            tools.push(b);
+            return serde_json::json!({"result": {"tools": tools}});
+        }
+        tools.push(b);
+        serde_json::json!({"result": {"tools": tools, "$defs": definitions}})
+    }
+
+    const B: &str = r#"cf::Action::"b""#;
+
+    /// Whether a rule on `b` can compare `output.structured.r.<field>` with `value` and not `other`.
+    fn reads_output_field(schema: &Schema, field: &str, value: &str, other: &str) -> bool {
+        let condition = |value: &str| {
+            format!(
+                "context has output && context.output has structured \
+                 && context.output.structured.r.{field} == {value}"
+            )
+        };
+        validates(schema, B, &condition(value)) && !validates(schema, B, &condition(other))
+    }
+
+    /// One definition `name` of an object with a required string field `x`.
+    fn string_field(name: &str) -> serde_json::Value {
+        serde_json::json!({ name: {"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]} })
+    }
+
+    #[test]
+    fn renaming_a_shared_definition_keeps_the_structured_output_of_every_tool() {
+        let tools = serde_json::json!({"result": {
+            "$defs": {"label-text": {"type": "string"}, "Plain": {"type": "integer"}},
+            "tools": [
+                {"name": "list",
+                 "inputSchema": {"type": "object", "properties": {"key": {"$ref": "#/$defs/label-text"}}},
+                 "outputSchema": {"type": "object", "properties": {"value": {"$ref": "#/$defs/label-text"}}}},
+                {"name": "get",
+                 "inputSchema": {"type": "object", "properties": {}},
+                 "outputSchema": {"type": "object", "properties": {"value": {"$ref": "#/$defs/Plain"}}}}
+            ]
+        }});
+        let (generated, schema) = composed(&tools);
+        let lost = [("list", r#""v""#, "1"), ("get", "1", r#""v""#)]
+            .into_iter()
+            .filter(|(tool, value, other)| {
+                let action = format!(r#"cf::Action::"{tool}""#);
+                let condition = |value: &str| {
+                    format!(
+                        "context has output && context.output has structured \
+                         && context.output.structured has value \
+                         && context.output.structured.value == {value}"
+                    )
+                };
+                !(validates(&schema, &action, &condition(value))
+                    && !validates(&schema, &action, &condition(other)))
+            })
+            .map(|(tool, _, _)| tool)
+            .collect::<Vec<_>>();
+        assert!(
+            lost.is_empty(),
+            "these tools lost their output: {lost:?}\n{generated}"
+        );
+    }
+
+    #[test]
+    fn an_output_that_refers_to_a_server_definition_is_judged_with_the_server_definitions() {
+        let tools = serde_json::json!({"result": {
+            "$defs": {"Plain": {"type": "integer"}},
+            "tools": [
+                {"name": "get",
+                 "inputSchema": {"type": "object", "properties": {}},
+                 "outputSchema": {"type": "object", "properties": {"value": {"$ref": "#/$defs/Plain"}}, "required": ["value"]}},
+                {"name": "broken",
+                 "inputSchema": {"type": "object", "properties": {}},
+                 "outputSchema": {"type": "object", "properties": {"if": {"type": "string"}}}}
+            ]
+        }});
+        let (generated, schema) = composed(&tools);
+        let get = r#"cf::Action::"get""#;
+        let condition = |value: &str| {
+            format!(
+                "context has output && context.output has structured \
+                 && context.output.structured.value == {value}"
+            )
+        };
+        assert!(
+            validates(&schema, get, &condition("1"))
+                && !validates(&schema, get, &condition(r#""v""#)),
+            "{generated}"
+        );
+        assert!(
+            !generated.contains("structured?: brokenOutput"),
+            "{generated}"
+        );
+    }
+
+    #[test]
+    fn renaming_a_server_definition_for_another_tool_keeps_the_output_that_refers_to_it() {
+        let a = serde_json::json!({"name": "a", "inputSchema": {"type": "object", "properties": {"p": {"type": "string"}}}});
+        for name in ["aOutput", "aInput"] {
+            let (alone, schema) = composed(&output_referring_tools(
+                name,
+                string_field(name),
+                false,
+                &[],
+            ));
+            assert!(
+                reads_output_field(&schema, "x", r#""v""#, "1"),
+                "{name}\n{alone}"
+            );
+            let (generated, schema) = composed(&output_referring_tools(
+                name,
+                string_field(name),
+                false,
+                std::slice::from_ref(&a),
+            ));
+            assert!(
+                reads_output_field(&schema, "x", r#""v""#, "1"),
+                "the output follows the rename of {name}\n{generated}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_output_that_refers_to_a_renamed_server_or_tool_definition_keeps_its_output() {
+        for (name, in_tool) in [
+            ("String", false),
+            ("datetime", false),
+            ("zone-record", false),
+            ("String", true),
+            ("zone-record", true),
+        ] {
+            let (generated, schema) = composed(&output_referring_tools(
+                name,
+                string_field(name),
+                in_tool,
+                &[],
+            ));
+            assert!(
+                reads_output_field(&schema, "x", r#""v""#, "1"),
+                "{name} in the tool: {in_tool}\n{generated}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_output_definition_shadows_a_renamed_server_definition_of_the_same_name() {
+        let a = serde_json::json!({"name": "a", "inputSchema": {"type": "object", "properties": {"p": {"$ref": "#/$defs/aOutput"}}}});
+        let mut tools = output_referring_tools("aOutput", string_field("aOutput"), false, &[a]);
+        tools["result"]["tools"][1]["outputSchema"]["$defs"] = serde_json::json!(
+            {"aOutput": {"type": "object", "properties": {"y": {"type": "integer"}}, "required": ["y"]}}
+        );
+        let (generated, schema) = composed(&tools);
+        assert!(
+            reads_output_field(&schema, "y", "1", r#""v""#),
+            "{generated}"
+        );
+        assert!(
+            !validates(
+                &schema,
+                B,
+                r#"context has output && context.output has structured && context.output.structured.r.x == "v""#
+            ),
+            "{generated}"
+        );
+        assert!(validates(
+            &schema,
+            r#"cf::Action::"a""#,
+            r#"context.input has p && context.input.p.x == "v""#
+        ));
+    }
+
+    #[test]
+    fn an_output_that_refers_to_a_moved_or_cut_server_definition_keeps_its_output() {
+        let a = serde_json::json!({"name": "a", "inputSchema": {"type": "object", "properties": {"p": {"$ref": "#/$defs/List"}}}});
+        let definitions = serde_json::json!({
+            "List": {"type": "array", "items": {"type": "object", "properties": {"x": {"type": "string"}}}},
+            "Node": {"type": "object", "properties": {"x": {"type": "string"}, "up": {"$ref": "#/$defs/Node"}}, "required": ["x"]}
+        });
+        for (name, condition) in [
+            ("List", "context.output.structured.r.isEmpty()"),
+            ("Node", r#"context.output.structured.r.x == "v""#),
+        ] {
+            let (generated, schema) = composed(&output_referring_tools(
+                name,
+                definitions.clone(),
+                false,
+                std::slice::from_ref(&a),
+            ));
+            let reads = |condition: &str| {
+                validates(
+                    &schema,
+                    B,
+                    &format!("context has output && context.output has structured && {condition}"),
+                )
+            };
+            assert!(
+                reads(condition) && !reads("context.output.structured.r == 1"),
+                "{name}\n{generated}"
             );
         }
     }
@@ -2589,5 +3557,838 @@ namespace Box {
 
         validate_mcp_schema_composition(&[("a", &first), ("a___b", &second)])
             .expect("server namespaces keep the actions distinct");
+    }
+
+    /// The schema generated for server `cf`, after it composes with the Box schema.
+    fn composed(tools: &serde_json::Value) -> (String, Schema) {
+        let generated = generate_mcp_schema("cf", &tools.to_string())
+            .unwrap_or_else(|error| panic!("the schema generates: {error}"));
+        validate_mcp_schema_composition(&[("cf", &generated)])
+            .unwrap_or_else(|error| panic!("the schema composes: {error}\n{generated}"));
+        let (schema, warnings) =
+            Schema::from_cedarschema_str(&format!("{SCHEMA_SRC}\n{generated}"))
+                .expect("the schema parses");
+        assert_eq!(warnings.count(), 0);
+        (generated, schema)
+    }
+
+    /// A server with a healthy tool and a tool `read` whose `p` argument refers to `name`.
+    fn referring_tools(name: &str, definitions: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"result": {
+            "tools": [
+                {"name": "get_zone", "inputSchema": {"type": "object", "properties": {"zone_id": {"type": "string"}}}},
+                {"name": "read", "inputSchema": {
+                    "type": "object",
+                    "properties": {"p": {"$ref": format!("#/$defs/{name}")}}
+                }}
+            ],
+            "$defs": definitions
+        }})
+    }
+
+    const READ: &str = r#"cf::Action::"read""#;
+
+    #[test]
+    fn a_server_definition_name_that_is_not_a_cedar_identifier_generates() {
+        let tools = serde_json::json!({"result": {
+            "tools": [
+                {"name": "get_zone", "inputSchema": {"type": "object", "properties": {"zone_id": {"type": "string"}}}},
+                {"name": "read", "inputSchema": {"type": "object", "properties": {
+                    "record": {"$ref": "#/$defs/zone-record"},
+                    "batch": {"$ref": "#/$defs/record batch"}
+                }}}
+            ],
+            "$defs": {
+                "zone-record": {"type": "object", "properties": {"name": {"type": "string"}}},
+                "record batch": {"type": "object", "properties": {"first": {"$ref": "#/$defs/zone-record"}}}
+            }
+        }});
+        let (generated, schema) = composed(&tools);
+
+        assert!(generated.contains("type zone_record = "), "{generated}");
+        for condition in [
+            r#"context.input has record && context.input.record has name && context.input.record.name == "x""#,
+            r#"context.input has batch && context.input.batch has first && context.input.batch.first has name && context.input.batch.first.name == "x""#,
+        ] {
+            assert!(
+                validates(&schema, READ, condition),
+                "{condition}\n{generated}"
+            );
+        }
+        assert!(validates(
+            &schema,
+            r#"cf::Action::"get_zone""#,
+            r#"context.input has zone_id && context.input.zone_id == "z""#
+        ));
+    }
+
+    #[test]
+    fn a_tool_definition_name_that_is_not_a_cedar_identifier_generates() {
+        let tools = serde_json::json!({"result": {"tools": [
+            {
+                "name": "read",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "account": {"$ref": "#/$defs/iam_create-account"},
+                        "owner": {"$ref": "#/$defs/owner-ref"}
+                    },
+                    "$defs": {"owner-ref": {"type": "object", "properties": {"id": {"type": "integer"}}}}
+                },
+                "$defs": {
+                    "iam_create-account": {"type": "object", "properties": {
+                        "name": {"type": "string"},
+                        "admin": {"$ref": "#/$defs/admin-user"}
+                    }},
+                    "admin-user": {"type": "object", "properties": {"id": {"type": "integer"}}}
+                }
+            },
+            {
+                "name": "wrapped",
+                "inputSchema": {"json": {
+                    "type": "object",
+                    "properties": {"zone": {"$ref": "#/$defs/zone-ref"}},
+                    "$defs": {"zone-ref": {"type": "object", "properties": {"id": {"type": "string"}}}}
+                }}
+            }
+        ]}});
+        let (generated, schema) = composed(&tools);
+
+        for condition in [
+            r#"context.input has account && context.input.account has name && context.input.account.name == "x""#,
+            "context.input has owner && context.input.owner has id && context.input.owner.id == 1",
+            "context.input has account && context.input.account has admin && context.input.account.admin has id && context.input.account.admin.id == 1",
+        ] {
+            assert!(
+                validates(&schema, READ, condition),
+                "{condition}\n{generated}"
+            );
+        }
+        assert!(validates(
+            &schema,
+            r#"cf::Action::"wrapped""#,
+            r#"context.input has zone && context.input.zone has id && context.input.zone.id == "z""#
+        ));
+    }
+
+    #[test]
+    fn two_definition_names_that_normalize_alike_both_generate() {
+        let tools = serde_json::json!({"result": {
+            "tools": [{"name": "read", "inputSchema": {"type": "object", "properties": {
+                "a": {"$ref": "#/$defs/zone-record"},
+                "b": {"$ref": "#/$defs/zone.record"},
+                "c": {"$ref": "#/$defs/zone_record"},
+                "d": {"$ref": "#/$defs/名前"},
+                "e": {"$ref": "#/$defs/住所"}
+            }}}],
+            "$defs": {
+                "zone-record": {"type": "object", "properties": {"name": {"type": "string"}}},
+                "zone.record": {"type": "object", "properties": {"id": {"type": "integer"}}},
+                "zone_record": {"type": "object", "properties": {"tag": {"type": "boolean"}}},
+                "名前": {"type": "string"},
+                "住所": {"type": "integer"}
+            }
+        }});
+        let (generated, schema) = composed(&tools);
+
+        for condition in [
+            r#"context.input has a && context.input.a has name && context.input.a.name == "x""#,
+            "context.input has b && context.input.b has id && context.input.b.id == 1",
+            "context.input has c && context.input.c has tag && context.input.c.tag",
+            r#"context.input has d && context.input.d == "x""#,
+            "context.input has e && context.input.e == 1",
+        ] {
+            assert!(
+                validates(&schema, READ, condition),
+                "{condition}\n{generated}"
+            );
+        }
+        for condition in [
+            "context.input has a && context.input.a.id == 1",
+            r#"context.input has c && context.input.c.name == "x""#,
+            "context.input has d && context.input.d == 1",
+        ] {
+            assert!(
+                !validates(&schema, READ, condition),
+                "{condition}\n{generated}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_renamed_definition_keeps_the_shadowing_of_every_reference() {
+        let tools = serde_json::json!({"result": {
+            "tools": [{"name": "read", "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "server": {"$ref": "#/$defs/zone-record"},
+                    "local": {"$ref": "#/$defs/zone_record"},
+                    "shadowed": {"$ref": "#/$defs/zone-id"},
+                    "named": {"$ref": "#/$defs/zone-name"}
+                },
+                "$defs": {
+                    "zone_record": {"type": "integer"},
+                    "zone-id": {"type": "integer"},
+                    "zone_name": {"type": "integer"}
+                }
+            }}],
+            "$defs": {
+                "zone-record": {"type": "string"},
+                "zone-id": {"type": "string"},
+                "zone-name": {"type": "string"}
+            }
+        }});
+        let (generated, schema) = composed(&tools);
+
+        for condition in [
+            r#"context.input has server && context.input.server == "x""#,
+            "context.input has local && context.input.local == 1",
+            "context.input has shadowed && context.input.shadowed == 1",
+            r#"context.input has named && context.input.named == "x""#,
+        ] {
+            assert!(
+                validates(&schema, READ, condition),
+                "{condition}\n{generated}"
+            );
+        }
+        for condition in [
+            "context.input has server && context.input.server == 1",
+            r#"context.input has shadowed && context.input.shadowed == "x""#,
+            "context.input has named && context.input.named == 1",
+        ] {
+            assert!(
+                !validates(&schema, READ, condition),
+                "{condition}\n{generated}"
+            );
+        }
+
+        let tools = serde_json::json!({"result": {
+            "tools": [
+                {"name": "read", "inputSchema": {
+                    "type": "object",
+                    "properties": {"own": {"$ref": "#/$defs/datetime"}},
+                    "$defs": {"datetime": {"type": "object", "properties": {"b": {"type": "integer"}}, "required": ["b"]}}
+                }},
+                {"name": "other", "inputSchema": {
+                    "type": "object",
+                    "properties": {"server": {"$ref": "#/$defs/datetime"}}
+                }}
+            ],
+            "$defs": {"datetime": {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}}
+        }});
+        let (generated, schema) = composed(&tools);
+        let other = r#"cf::Action::"other""#;
+        assert!(
+            validates(
+                &schema,
+                READ,
+                "context.input has own && context.input.own.b == 1"
+            ),
+            "a definition only the server scope renames keeps its shadowing\n{generated}"
+        );
+        assert!(!validates(
+            &schema,
+            READ,
+            r#"context.input has own && context.input.own.a == "x""#
+        ));
+        assert!(
+            validates(
+                &schema,
+                other,
+                r#"context.input has server && context.input.server.a == "x""#
+            ),
+            "{generated}"
+        );
+    }
+
+    #[test]
+    fn a_reference_that_names_no_definition_names_none_after_a_rename() {
+        let tools = referring_tools(
+            "zone_record",
+            serde_json::json!({"zone-record": {"type": "string"}}),
+        );
+        assert!(
+            generate_mcp_schema("cf", &tools.to_string()).is_err(),
+            "the rename never gives a definition the name of a dangling reference"
+        );
+    }
+
+    #[test]
+    fn a_definition_named_like_a_reserved_or_built_in_type_generates() {
+        let field = serde_json::json!({"type": "object", "properties": {"x": {"type": "string"}}});
+        let everywhere = [
+            "if",
+            "__cedar",
+            "String",
+            "Long",
+            "Bool",
+            "Boolean",
+            "Set",
+            "Record",
+            "Entity",
+            "Extension",
+        ];
+        let server_level = [
+            "ipaddr",
+            "decimal",
+            "datetime",
+            "duration",
+            "readInput",
+            "readOutput",
+        ];
+        let condition =
+            r#"context.input has p && context.input.p has x && context.input.p.x == "v""#;
+        for name in everywhere.iter().chain(&server_level) {
+            let (generated, schema) = composed(&referring_tools(
+                name,
+                serde_json::json!({ *name: field.clone() }),
+            ));
+            assert!(validates(&schema, READ, condition), "{name}\n{generated}");
+        }
+        for name in everywhere {
+            let tools = serde_json::json!({"result": {"tools": [{"name": "read", "inputSchema": {
+                "type": "object",
+                "properties": {"p": {"$ref": format!("#/$defs/{name}")}},
+                "$defs": { name: field.clone() }
+            }}]}});
+            let (generated, schema) = composed(&tools);
+            assert!(validates(&schema, READ, condition), "{name}\n{generated}");
+        }
+        let tools = serde_json::json!({"result": {"tools": [{"name": "read", "inputSchema": {
+            "type": "object",
+            "properties": {"p": {"$ref": "#/$defs/ipaddr"}},
+            "$defs": {"ipaddr": field.clone()}
+        }}]}});
+        let (generated, _) = composed(&tools);
+        assert!(
+            generated.contains("type read_Input_ipaddr = "),
+            "a name Cedar accepts in a tool's scope keeps it\n{generated}"
+        );
+    }
+
+    #[test]
+    fn an_unreferenced_definition_name_that_is_not_an_identifier_generates() {
+        let tools = serde_json::json!({"result": {
+            "tools": [{
+                "name": "create_account",
+                "inputSchema": {"type": "object", "$defs": {"create-account": {}}},
+                "$defs": {"account-id": {"type": "string"}}
+            }],
+            "$defs": {"zone-record": {"type": "object"}}
+        }});
+        composed(&tools);
+    }
+
+    #[test]
+    fn an_escaped_or_nested_definition_reference_resolves_to_its_definition() {
+        let tools = serde_json::json!({"result": {
+            "tools": [{"name": "read", "inputSchema": {"type": "object", "properties": {
+                "slash": {"$ref": "#/$defs/a~1b"},
+                "tilde": {"$ref": "#/$defs/a~0b"},
+                "space": {"$ref": "#/$defs/zone%20record"},
+                "literal": {"$ref": "#/$defs/x~1y"},
+                "ordered": {"$ref": "#/$defs/p~01q"},
+                "nested": {"$ref": "#/$defs/outer-def"}
+            }}}],
+            "$defs": {
+                "a/b": {"type": "object", "properties": {"x": {"type": "string"}}},
+                "a~b": {"type": "object", "properties": {"y": {"type": "integer"}}},
+                "zone record": {"type": "object", "properties": {"z": {"type": "boolean"}}},
+                "x~1y": {"type": "object", "properties": {"w": {"type": "string"}}},
+                "x/y": {"type": "object", "properties": {"w": {"type": "integer"}}},
+                "p~1q": {"type": "object", "properties": {"u": {"type": "string"}}},
+                "p/q": {"type": "object", "properties": {"u": {"type": "integer"}}},
+                "outer-def": {"type": "object", "properties": {"inner": {"$ref": "#/$defs/inner-def"}}},
+                "inner-def": {"type": "object", "properties": {"leaf": {"$ref": "#/$defs/a~1b"}}}
+            }
+        }});
+        let (generated, schema) = composed(&tools);
+
+        for condition in [
+            r#"context.input has slash && context.input.slash has x && context.input.slash.x == "v""#,
+            "context.input has tilde && context.input.tilde has y && context.input.tilde.y == 1",
+            "context.input has space && context.input.space has z && context.input.space.z",
+            r#"context.input has literal && context.input.literal has w && context.input.literal.w == "v""#,
+            r#"context.input has ordered && context.input.ordered has u && context.input.ordered.u == "v""#,
+            r#"context.input has nested && context.input.nested has inner && context.input.nested.inner has leaf && context.input.nested.inner.leaf has x && context.input.nested.inner.leaf.x == "v""#,
+        ] {
+            assert!(
+                validates(&schema, READ, condition),
+                "{condition}\n{generated}"
+            );
+        }
+        assert!(
+            !validates(
+                &schema,
+                READ,
+                "context.input has literal && context.input.literal has w && context.input.literal.w == 1"
+            ),
+            "a reference that names a definition literally keeps naming it\n{generated}"
+        );
+    }
+
+    #[test]
+    fn a_renamed_definition_name_in_a_data_value_or_an_ignored_keyword_stays_as_the_server_wrote_it()
+     {
+        let data = serde_json::json!({"$ref": "#/$defs/zone-record"});
+        let tools = |name: &str| {
+            let reference = format!("#/$defs/{name}");
+            serde_json::json!({"result": {
+                "tools": [{
+                    "name": "read",
+                    "inputSchema": {"type": "object", "properties": {
+                        "record": {"$ref": reference, "default": data, "examples": [data]},
+                        "fixed": {"type": "object", "const": data},
+                        "kind": {"type": "string", "enum": [data]},
+                        "combined": {"type": "object", "allOf": [data]}
+                    }},
+                    "outputSchema": {"type": "object", "properties": {
+                        "value": {"$ref": reference, "default": data}
+                    }}
+                }],
+                "$defs": {name: {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "default": data
+                }}
+            }})
+        };
+        let fixed = make_definitions_generable(&tools("zone-record").to_string()).into_owned();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fixed).expect("the fixed list parses"),
+            tools("zone_record")
+        );
+
+        let (generated, schema) = composed(&tools("zone-record"));
+        for condition in [
+            r#"context.input has record && context.input.record has name && context.input.record.name == "x""#,
+            r#"context has output && context.output has structured && context.output.structured has value
+               && context.output.structured.value has name && context.output.structured.value.name == "x""#,
+        ] {
+            assert!(
+                validates(&schema, READ, condition),
+                "{condition}\n{generated}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reference_below_each_keyword_the_parser_reads_follows_a_rename_and_the_data_beside_it_does_not()
+     {
+        let data = serde_json::json!({"$ref": "#/$defs/zone-record"});
+        let tools = |server: &str, local: &str| {
+            let real = serde_json::json!({"$ref": format!("#/$defs/{server}"), "default": data});
+            let record = serde_json::json!({"type": "object", "properties": {"inner": real}});
+            let input = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "default": real,
+                    "list": {"type": "array", "items": real, "default": [data]},
+                    "pair": {"type": "array", "prefixItems": [real], "items": false},
+                    "either": {"anyOf": [real, {"type": "string"}]},
+                    "one": {"oneOf": [real, {"type": "string"}]},
+                    "labels": {"type": "object", "additionalProperties": real},
+                    "local": {"$ref": format!("#/$defs/{local}"), "default": {"$ref": "#/$defs/local-record"}}
+                },
+                "$defs": {local: record}
+            });
+            serde_json::json!({"result": {
+                "tools": [
+                    {"name": "read", "inputSchema": input,
+                     "outputSchema": {"type": "object", "properties": {"value": real}, "$defs": {"own": record}}},
+                    {"name": "wrapped", "inputSchema": {"json": input}, "$defs": {"tool_record": record}}
+                ],
+                "$defs": {server: {"type": "object", "properties": {"name": {"type": "string"}}}}
+            }})
+        };
+        let fixed = make_definitions_generable(&tools("zone-record", "local-record").to_string())
+            .into_owned();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fixed).expect("the fixed list parses"),
+            tools("zone_record", "local_record")
+        );
+        composed(&tools("zone-record", "local-record"));
+    }
+
+    #[test]
+    fn an_array_definition_of_objects_generates_at_every_level() {
+        let element = serde_json::json!({
+            "type": "object",
+            "properties": {"key": {"type": "string"}},
+            "required": ["key"]
+        });
+        let tools = serde_json::json!({"result": {
+            "tools": [{
+                "name": "read",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "rows": {"$ref": "#/$defs/rows"},
+                        "cells": {"$ref": "#/$defs/cells"},
+                        "entries": {"$ref": "#/$defs/entry-list"},
+                        "tags": {"$ref": "#/$defs/tags"}
+                    },
+                    "$defs": {"entry-list": {"type": "array", "items": element.clone()}}
+                },
+                "$defs": {"cells": {"type": "array", "items": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"}
+                }}}
+            }],
+            "$defs": {
+                "rows": {"type": "array", "items": element.clone()},
+                "tags": {"type": "array", "items": {"type": "object", "additionalProperties": true}}
+            }
+        }});
+        let (generated, schema) = composed(&tools);
+
+        for condition in [
+            r#"context.input has rows && context.input.rows.contains({key: "x"})"#,
+            r#"context.input has entries && context.input.entries.contains({key: "x"})"#,
+            "context.input has cells && context.input.cells.isEmpty()",
+            "context.input has tags && context.input.tags.isEmpty()",
+        ] {
+            assert!(
+                validates(&schema, READ, condition),
+                "{condition}\n{generated}"
+            );
+        }
+        assert!(
+            !validates(
+                &schema,
+                READ,
+                "context.input has rows && context.input.rows.contains({key: 1})"
+            ),
+            "the element keeps its field types\n{generated}"
+        );
+    }
+
+    #[test]
+    fn an_array_of_arrays_definition_generates_beside_a_definition_named_like_its_element() {
+        let tools = serde_json::json!({"result": {
+            "tools": [{"name": "read", "inputSchema": {"type": "object", "properties": {
+                "grid": {"$ref": "#/$defs/grid"},
+                "label": {"$ref": "#/$defs/grid_item"}
+            }}}],
+            "$defs": {
+                "grid": {"type": "array", "items": {"type": "array", "items": {
+                    "type": "object",
+                    "properties": {"v": {"type": "integer"}},
+                    "required": ["v"]
+                }}},
+                "grid_item": {"type": "string"}
+            }
+        }});
+        let (generated, schema) = composed(&tools);
+
+        for condition in [
+            "context.input has grid && context.input.grid.contains([{v: 1}])",
+            r#"context.input has label && context.input.label == "x""#,
+        ] {
+            assert!(
+                validates(&schema, READ, condition),
+                "{condition}\n{generated}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cycle_through_each_keyword_the_parser_follows_generates() {
+        let string = serde_json::json!({"type": "string"});
+        let cycles = [
+            serde_json::json!({"A": {"type": "object", "properties": {"a": {"$ref": "#/$defs/A"}}}}),
+            serde_json::json!({"A": {"type": "array", "items": {"$ref": "#/$defs/A"}}}),
+            serde_json::json!({"A": {"type": "array", "prefixItems": [{"$ref": "#/$defs/A"}], "items": false}}),
+            serde_json::json!({"A": {"anyOf": [{"$ref": "#/$defs/A"}, string.clone()]}}),
+            serde_json::json!({"A": {"oneOf": [{"$ref": "#/$defs/A"}, string.clone()]}}),
+            serde_json::json!({"A": {"type": ["object", "string"], "properties": {"a": {"$ref": "#/$defs/A"}}}}),
+            serde_json::json!({"A": {"$ref": "#/$defs/A"}}),
+            serde_json::json!({"A": {"$ref": "#/$defs/B"}, "B": {"$ref": "#/$defs/A"}}),
+            serde_json::json!({
+                "A": {"type": "object", "properties": {"b": {"$ref": "#/$defs/B"}}},
+                "B": {"type": "array", "items": {"$ref": "#/$defs/A"}}
+            }),
+        ];
+        for definitions in cycles {
+            let (generated, _) = composed(&referring_tools("A", definitions.clone()));
+            assert!(
+                generated.contains("entity Unknown"),
+                "{definitions}\n{generated}"
+            );
+            for tool in [
+                serde_json::json!({"name": "read", "inputSchema": {
+                    "type": "object",
+                    "properties": {"p": {"$ref": "#/$defs/A"}},
+                    "$defs": definitions.clone()
+                }}),
+                serde_json::json!({"name": "read", "$defs": definitions.clone(), "inputSchema": {
+                    "type": "object",
+                    "properties": {"p": {"$ref": "#/$defs/A"}}
+                }}),
+                serde_json::json!({"name": "read", "inputSchema": {"json": {
+                    "type": "object",
+                    "properties": {"p": {"$ref": "#/$defs/A"}},
+                    "$defs": definitions.clone()
+                }}}),
+            ] {
+                composed(&serde_json::json!({"result": {"tools": [tool]}}));
+            }
+        }
+    }
+
+    #[test]
+    fn a_reference_the_parser_does_not_follow_into_a_common_type_stays_typed() {
+        for definitions in [
+            serde_json::json!({"A": {"type": "object", "additionalProperties": {"$ref": "#/$defs/A"}}}),
+            serde_json::json!({"A": {"type": "object", "properties": {"x": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+                "properties": {"y": {"$ref": "#/$defs/A"}}
+            }}}}),
+            serde_json::json!({"A": {"allOf": [{"$ref": "#/$defs/A"}]}}),
+            serde_json::json!({"A": {"not": {"$ref": "#/$defs/A"}}}),
+            serde_json::json!({"A": {"type": "object", "patternProperties": {"x": {"$ref": "#/$defs/A"}}}}),
+            serde_json::json!({"A": {"type": "string", "$ref": "#/$defs/A"}}),
+            serde_json::json!({"A": {"anyOf": [{"type": "string"}], "oneOf": [{"$ref": "#/$defs/A"}]}}),
+            serde_json::json!({"A": {"type": "array", "prefixItems": [{"$ref": "#/$defs/A"}], "items": {"type": "string"}}}),
+            serde_json::json!({"A": {"type": "array", "prefixItems": [{"type": "string"}], "items": {"$ref": "#/$defs/A"}}}),
+        ] {
+            let tools = referring_tools("A", definitions.clone()).to_string();
+            assert!(
+                matches!(make_definitions_generable(&tools), Cow::Borrowed(_)),
+                "{definitions}"
+            );
+            composed(&serde_json::from_str(&tools).expect("the tools parse"));
+        }
+    }
+
+    #[test]
+    fn fields_above_a_cut_reference_keep_their_types() {
+        let tools = referring_tools(
+            "Group",
+            serde_json::json!({"Group": {"type": "object", "properties": {
+                "name": {"type": "string"},
+                "owner": {"type": "object", "properties": {"id": {"type": "integer"}}},
+                "parent": {"$ref": "#/$defs/Group"}
+            }}}),
+        );
+        let (generated, schema) = composed(&tools);
+
+        for condition in [
+            r#"context.input has p && context.input.p has name && context.input.p.name == "x""#,
+            "context.input has p && context.input.p has owner && context.input.p.owner has id && context.input.p.owner.id == 1",
+        ] {
+            assert!(
+                validates(&schema, READ, condition),
+                "{condition}\n{generated}"
+            );
+        }
+        assert!(
+            !validates(
+                &schema,
+                READ,
+                r#"context.input has p && context.input.p has parent && context.input.p.parent.name == "x""#
+            ),
+            "a rule that reads below the cut is refused at validation\n{generated}"
+        );
+    }
+
+    #[test]
+    fn a_definition_list_that_would_nest_too_deep_is_left_unchanged() {
+        let deep = |length: usize| {
+            let definitions = (0..length)
+                .map(|index| {
+                    (
+                        format!("link-{index}"),
+                        serde_json::json!({"type": "object", "properties": {
+                            "next": {"$ref": format!("#/$defs/link-{}", (index + 1) % length)}
+                        }}),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>();
+            referring_tools("link-0", serde_json::Value::Object(definitions)).to_string()
+        };
+        assert!(matches!(
+            make_definitions_generable(&deep(MAXIMUM_DEFINITION_DEPTH / 4)),
+            Cow::Owned(_)
+        ));
+        let tools = deep(MAXIMUM_DEFINITION_DEPTH);
+        assert!(
+            matches!(make_definitions_generable(&tools), Cow::Borrowed(_)),
+            "a list whose definitions would nest deeper than the limit keeps its refusal"
+        );
+        assert!(generate_mcp_schema("cf", &tools).is_err());
+        let mut nested = serde_json::json!({"type": "string"});
+        for _ in 0..=MAXIMUM_DEFINITION_DEPTH / 2 {
+            nested = serde_json::json!({"type": "object", "properties": {"inner": nested}});
+        }
+        let tools = referring_tools(
+            "deep-rows",
+            serde_json::json!({ "deep-rows": {"type": "array", "items": nested} }),
+        );
+        assert!(
+            matches!(
+                make_definitions_generable(&tools.to_string()),
+                Cow::Borrowed(_)
+            ),
+            "the nesting inside one definition counts too"
+        );
+
+        let length = MAXIMUM_DEFINITION_DEPTH / 2 + 4;
+        let mut definitions = (0..length)
+            .map(|index| {
+                let next = if index + 1 < length {
+                    serde_json::json!({"$ref": format!("#/$defs/Link{}", index + 1)})
+                } else {
+                    serde_json::json!({"type": "string"})
+                };
+                (
+                    format!("Link{index}"),
+                    serde_json::json!({"type": "object", "properties": {"next": next}}),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        definitions.insert(
+            "zone-record".to_string(),
+            serde_json::json!({"type": "string"}),
+        );
+        let mut tools = referring_tools("Link0", serde_json::Value::Object(definitions));
+        tools["result"]["tools"][0]["inputSchema"]["properties"]["zone"] =
+            serde_json::json!({"$ref": "#/$defs/zone-record"});
+        assert!(
+            matches!(
+                make_definitions_generable(&tools.to_string()),
+                Cow::Owned(_)
+            ),
+            "a rename adds no nesting, so a deep list that needs only renames is fixed"
+        );
+        composed(&tools);
+    }
+
+    #[test]
+    fn a_catalog_with_only_plain_definitions_is_left_unchanged() {
+        let tools = serde_json::json!({"result": {
+            "tools": [{
+                "name": "read",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "a": {"$ref": "#/$defs/Shared"},
+                        "b": {"$ref": "#/$defs/Local"},
+                        "c": {"$ref": "#/$defs/Tree"},
+                        "d": {"$ref": "#/$defs/ipaddr"},
+                        "e": {"$ref": "#/$defs/Pair"},
+                        "f": {"$ref": "#/$defs/Matrix"},
+                        "g": {"$ref": "#/$defs/Top"}
+                    },
+                    "$defs": {
+                        "Local": {"type": "array", "items": {"type": "string"}},
+                        "ipaddr": {"type": "string"}
+                    }
+                },
+                "$defs": {"Pair": {"type": "array", "prefixItems": [{"type": "object"}], "items": false}}
+            }],
+            "$defs": {
+                "Shared": {"anyOf": [{"type": "string"}, {"type": "object", "properties": {"x": {"type": "string"}}}]},
+                "Tree": {"type": "object", "additionalProperties": {"$ref": "#/$defs/Tree"}},
+                "Matrix": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+                "Unknown": {"type": "object", "properties": {"x": {"type": "string"}}},
+                "Top": {"type": "object", "properties": {"l": {"$ref": "#/$defs/Left"}, "r": {"$ref": "#/$defs/Right"}}},
+                "Left": {"type": "object", "properties": {"b": {"$ref": "#/$defs/Bottom"}}},
+                "Right": {"type": "object", "properties": {"b": {"$ref": "#/$defs/Bottom"}}},
+                "Bottom": {"type": "object", "properties": {"x": {"type": "string"}}}
+            }
+        }})
+        .to_string();
+        assert!(matches!(
+            make_definitions_generable(&tools),
+            Cow::Borrowed(_)
+        ));
+        composed(&serde_json::from_str(&tools).expect("the tools parse"));
+    }
+
+    #[test]
+    fn three_definition_problems_in_one_server_leave_the_healthy_tool_its_catalog() {
+        let tools = serde_json::json!({"result": {"tools": [
+            {"name": "get_zone", "inputSchema": {"type": "object",
+                "properties": {"zone_id": {"type": "string"}}}},
+            {"name": "create_account", "inputSchema": {"type": "object",
+                "$defs": {"create-account": {}}}},
+            {"name": "bulk_write", "inputSchema": {"type": "object",
+                "$defs": {"rows": {"type": "array", "items": {"type": "object"}}}}},
+            {"name": "validate_rule", "inputSchema": {"type": "object",
+                "$defs": {"Group": {"type": "array", "items": {"$ref": "#/$defs/Group"}}}}}
+        ]}});
+        let (generated, schema) = composed(&tools);
+        assert!(validates(
+            &schema,
+            r#"cf::Action::"get_zone""#,
+            r#"context.input has zone_id && context.input.zone_id == "z""#
+        ));
+        for tool in ["create_account", "bulk_write", "validate_rule"] {
+            assert!(
+                generated.contains(&format!("action \"{tool}\"")),
+                "{generated}"
+            );
+        }
+    }
+
+    #[test]
+    fn many_definitions_on_one_base_and_a_long_cycle_generate() {
+        let count = 1_000_u32;
+        let cycle = 24;
+        let names = (0x4e00_u32..0x4e00 + count)
+            .filter_map(char::from_u32)
+            .map(|character| format!("x{character}"))
+            .collect::<Vec<_>>();
+        let mut definitions = names
+            .iter()
+            .map(|name| (name.clone(), serde_json::json!({"type": "string"})))
+            .collect::<serde_json::Map<_, _>>();
+        for index in 0..cycle {
+            definitions.insert(
+                format!("link-{index}"),
+                serde_json::json!({"type": "object", "properties": {
+                    "next": {"$ref": format!("#/$defs/link-{}", (index + 1) % cycle)}
+                }}),
+            );
+        }
+        let properties = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                (
+                    format!("p{index}"),
+                    serde_json::json!({"$ref": format!("#/$defs/{name}")}),
+                )
+            })
+            .chain((0..count).map(|index| {
+                (
+                    format!("q{index}"),
+                    serde_json::json!({"$ref": "#/$defs/link-0"}),
+                )
+            }))
+            .collect::<serde_json::Map<_, _>>();
+        let tools = serde_json::json!({"result": {
+            "tools": [{"name": "read", "inputSchema": {"type": "object", "properties": properties}}],
+            "$defs": definitions
+        }});
+        let (generated, schema) = composed(&tools);
+        assert!(validates(
+            &schema,
+            READ,
+            r#"context.input has p0 && context.input.p0 == "x""#
+        ));
+        assert!(validates(
+            &schema,
+            READ,
+            "context.input has q999 && context.input.q999 has next && context.input.q999.next has next"
+        ));
+
+        assert!(
+            generated.contains(&format!("type x__{count} = String;")),
+            "{}",
+            generated.len()
+        );
     }
 }
