@@ -32,6 +32,8 @@ behavior on a native Mac with an uncontained control when changing a rule.
 - `(version 1)` supplies default allows even beside `(deny default)`. A census of explicit allows
   misses them. Deny view-changing operations by exact leaf names: `fs-snapshot-mount`, `file-graft`,
   and `file-ungraft` were reachable without them. A wildcard deny did not close those routes.
+  Other version-1 default allows remain untriaged, including `nvram*`, `syscall-mach`, and
+  `syscall-mig`. Changing profile version needs native compatibility measurements.
 - `file-graft` and `file-ungraft` are unbound on measured macOS 14/15 releases; an unguarded name
   prevents the entire profile loading. Keep `defined?` only on names that need it. Changing
   `(version ...)` does not change the compiler's symbol table. Kernel grafting reach on releases
@@ -65,6 +67,7 @@ behavior on a native Mac with an uncontained control when changing a rule.
 
 ## Linux traps
 
+- Add a syscall permit only with measured evidence and a compatibility rationale.
 - A read-only bind needs a remount; `MS_BIND` ignores `MS_RDONLY`. Recursive read-only remounting
   walks deepest first because `MS_REMOUNT` ignores `MS_REC`. Device binds need their `MS_NODEV`
   exception or `/dev/null` stops working.
@@ -93,7 +96,9 @@ behavior on a native Mac with an uncontained control when changing a rule.
 
 ### Native notification forwarding
 
-One containment supervisor receives both filesystem-information and native-policy notifications.
+The approved design uses one receiver in the existing containment supervisor for both
+filesystem-information and native-policy notifications, including its private forwarding protocol.
+Changing that ownership needs explicit approval.
 A second seccomp listener fails with `EBUSY`, even for disjoint syscall sets. Box receives a copy
 for validation and replies, never for notification receive. Finish startup acknowledgement before
 Box reads the forwarding stream, and close the workload's stream copy before exec.

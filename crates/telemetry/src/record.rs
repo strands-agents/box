@@ -1642,9 +1642,6 @@ mod tests {
     /// **Each lane states its subject under the standard names.** A destination comes from the
     /// enforcement point that holds it apart; an `fs:*` resource is already the path.
     /// A LITERAL argument is reported whatever its shape, and an expanded one still meets the rule.
-    ///
-    /// This is what recovered `setopt pipefail`, `cat allowed.txt`, and the closing `]]` from a
-    /// record that had redacted all three. The measurement is in `crates/telemetry/AGENTS.md`.
     #[test]
     fn a_literal_argument_is_reported_and_an_expanded_one_is_judged() {
         let args = vec![

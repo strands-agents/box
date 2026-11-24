@@ -124,8 +124,9 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
 
    **Test deletion is the tell, and check for it explicitly.** A deleted, renamed, or newly
    `#[ignore]`d test in `tests/box_*.rs`, `containment`'s conformance suite,
-   `shell/tests/kernel_effect_interception.rs`, or any test named in a crate's `AGENTS.md` ("must
-   not be deleted") is a BLOCKER unless the diff says why the property it pinned no longer exists.
+   `shell/tests/kernel_effect_interception.rs`, or any test enforcing a frozen surface or
+   foundational safety premise is a BLOCKER unless the diff says why the property it pinned no
+   longer exists. Removing a test's name from guidance does not remove this protection.
 
    **Check only the diff from the fork point.** A diff against `main` itself on a long-lived branch
    returns hundreds of hits, almost all of them tests that moved between files, and a reviewer who

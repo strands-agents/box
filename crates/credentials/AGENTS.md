@@ -23,6 +23,10 @@ request edits, never a credential accessor or an authorization. Keep backend pro
 
 ## AWS identity and refresh
 
+- For the AWS SDK signing path, use
+  `AwsSource::with_provider(self.aws_provider(), self.ambient_policy())`.
+  Using `new()` or `Default` there would select `AllowWithWarning` and bypass
+  `require_scoped_aws_profile`.
 - Named profiles use the profile-only SDK provider. `DefaultCredentialsChain::profile_name` still
   tries environment keys first and can fall through to metadata, signing as the wrong identity.
   Preserve `named_profile_ignores_ambient_env_and_refuses_a_missing_profile`.

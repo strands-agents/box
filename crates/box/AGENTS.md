@@ -14,6 +14,8 @@ Read [configuration](../../docs/user/config.md) for the surface, and the relevan
 - `HOME` and `workspace` grant no filesystem access. Direct filesystem lists bypass `fs:*`
   policy and must be disclosed. A tool gets its own lists, never the agent's. Linux writable binds
   also read; `contain_egress = false` bypasses the gateway and needs its residual-risk disclosure.
+- Reading harness configuration can expose live login tokens. Writing it can plant hooks that
+  [run later outside Box](../../docs/cli/limitations.md#the-agent-can-plant-code-that-runs-outside-the-box-later).
 - Keep this box's private tree unreachable from agent and tools. A declared home must neither lie
   inside trusted state nor enclose `box_dir`. Preserve `the_boxs_own_private_tree_is_unreachable_from_inside`
   and `a_tool_grant_cannot_expose_the_box_directory`.
@@ -36,6 +38,11 @@ Read [configuration](../../docs/user/config.md) for the surface, and the relevan
 - Protect every symbolic link on the route to a secret-source program. Protecting only the final
   inode lets the workload redirect the next run. Interpreter arguments and files a source loads
   itself are outside that protection; do not claim the whole command is pinned.
+  Extending protection to intermediate links of ordinary tool commands or files named by later
+  `command` arguments needs explicit approval.
+- Adding a runtime check comparing process-table `env` or `command` values with
+  `pass-secret-env` values needs approval.
+  That rejected check copied secrets into memory and missed values in other encodings.
 - `box_dir` retains its authored spelling. Callers and fixtures should canonicalize it on macOS:
   `/var` and `/private/var` can otherwise disagree between environment and grants.
 - Keep trampoline validation and execution on the opened identity. The embedded marker identifies
