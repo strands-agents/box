@@ -85,7 +85,7 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
    - The four box inputs (policy, credentials, name, workload). A fifth input, or a key naming a
      host path, a working directory, an env overlay, a proxy port, or a mechanism value, is a
      BLOCKER against the box contract in `crates/box/AGENTS.md`.
-   - On-disk records: `Record`/`RECORD_VERSION`, `LiveRecord`/`LIVE_VERSION`: a field added,
+   - On-disk records: `Record`/`RECORD_VERSION`, `BoxLive`/`LIVE_VERSION`: a field added,
      removed, or retyped **without** a version bump is the worst case, since an old artifact then
      parses as if it were new. Confirm the bump; if the shape changed and the const did not, quote
      both lines.
@@ -96,7 +96,8 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
    - Alias names and derivation: `SHELL_ALIAS_NAMES`, `PYTHON_ALIAS_NAMES`, `public/bin/`,
      `public/run/*.sock`, and the rule that an alias derives its socket from its own path. A
      harness resolves these off `PATH` by name.
-   - Policy vocabulary: action names (`shell:exec`, `fs:*`, `net:*`, `cred:inject`), the
+   - Policy vocabulary: action names (`fs:*`, `net:connect`, `http:request`, `shell:exec`,
+     `shell:spawn`, `mcp:call`), the
      attributes a rule may read, what `when temporal { … }` observes. An operator's policy file is
      their source code; a renamed action silently stops matching.
    - Mechanism-crate façades: the `pub use` sets in `containment`, `credentials`, `policy`,
@@ -317,7 +318,7 @@ First, before `BLOCKERS`:
 
 ```
 FREEZE   (always present for a crates/** diff, even when clean)
-- surfaces checked: CLI | box.toml | four inputs | Record/LiveRecord | wire protocol
+- surfaces checked: CLI | box.toml | four inputs | Record/BoxLive | wire protocol
   | alias names | policy vocabulary | crate façades | box library | workload env | operator-facing docs
 - interface changes: none  (or: path/to/file.rs:12 : <surface> <what moved>; approved by <KD/spec> | UNAPPROVED)
 - premise changes: none    (or: path/to/file.rs:34 : weakens <premise>; UNAPPROVED)

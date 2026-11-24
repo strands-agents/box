@@ -40,8 +40,9 @@ construct is not in these sources, it does not exist.
 - **[The fixed vocabulary](#the-fixed-vocabulary)** below — the one principal, the fixed resource,
   every action and its context, and the temporal event shape. The source of truth for the box.
 - **The built-in schema** you author against, read but never edit. Generate it in the workspace
-  with `box policy generate-schema`, which writes `.strands-box/actions.cedarschema` (actions and
-  their context) and `.strands-box/events.dwschema` (what a `when temporal { … }` rule observes).
+  with `strands-box policy generate-schema --config <file> --output-dir <dir>`, which writes
+  `actions.cedarschema` (actions and their context) and `events.dwschema` (what a
+  `when temporal { … }` rule observes) into that directory.
   The generated files also carry each declared MCP server's per-tool actions, which a static copy
   cannot.
 - **The bundled `examples/`** — whole agent policies and single-shape refinements to copy from. See

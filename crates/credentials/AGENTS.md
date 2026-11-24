@@ -152,8 +152,8 @@ wired feature.
 Run `build`, `test`,
 `clippy --all-targets`, and `fmt --check`, each with `--all-features`, then the doc gate with
 `RUSTDOCFLAGS="-D warnings --document-private-items"`; the default gate misses a dangling intra-doc
-link when this surface shrinks. Build and test the three consumers: `strands-box-egress-gateway`,
-`strands-box`, and `strands-box-containment`. The last is a
+link when this surface shrinks. Build and test the four consumers: `strands-box-egress-gateway`,
+`strands-box`, `strands-box-telemetry`, and `strands-box-containment`. The last is a
 `[dev-dependencies]` entry, so `cargo build` misses it. Run the required artifact critics. Modify
 `Cargo.lock` only for a dependency this crate added.
 
@@ -305,7 +305,7 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
 - `env://` refuses every `DENYLIST` name (`src/sources/env.rs`), case-insensitively and hard, so a
   manifest cannot exfiltrate ambient credentials or process-injection state. It is a floor, not a
   catalogue. A bare `aws://` default chain reads those `AWS_*` names on purpose, through the SDK.
-- Do not merge `DENYLIST` with `reserved_workload_environment` (`box/src/define/config.rs`), which
+- Do not merge `DENYLIST` with `reserved_workload_environment` (`box/src/record/config/env.rs`), which
   governs what a credential may claim in the workload environment and refuses at `create`.
 - `op://` has no soft tier; `op read` cannot signal absence, so every failure is hard. A declared
   source has none for the same reason.
