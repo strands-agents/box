@@ -513,6 +513,7 @@ pub struct Launch {
     journal: PathBuf,
     not_copied: Vec<(String, String)>,
     synced: Vec<String>,
+    different_settings: Vec<String>,
     mcp_unstarted: Vec<(String, String)>,
     mcp_servers: Vec<(String, String, String)>,
     mcp_imports: Vec<String>,
@@ -1230,8 +1231,11 @@ impl Launcher {
                 self.claim_name(name, file)?;
             }
             prepare_tool_scratch(&resolved, &instance.directory)?;
-            let Copied { not_copied, synced } =
-                copy_files(&compiled.storage, &instance.directory, home, base)?;
+            let Copied {
+                not_copied,
+                synced,
+                different_settings,
+            } = copy_files(&compiled.storage, &instance.directory, home, base)?;
             let hooks = apply_hooks(&compiled.storage, &hooks, home)?;
             let mut mcp_imports = Vec::new();
             for config in &resolved.servers.configs {
@@ -1298,6 +1302,7 @@ impl Launcher {
                 skipped: resolved.tools.skipped,
                 not_copied,
                 synced,
+                different_settings,
                 mcp_unstarted: compiled.unstarted,
                 mcp_servers: resolved.servers.detected_lines(home),
                 mcp_imports,
@@ -2418,6 +2423,25 @@ impl Launch {
         &self.synced
     }
 
+    /// The startup notice for saved settings that differ from the current import.
+    pub fn settings_notice(&self) -> Option<String> {
+        if self.different_settings.is_empty() {
+            return None;
+        }
+        let mut notice = self
+            .different_settings
+            .iter()
+            .map(|line| format!("box: warning: {}", banner::clean(line)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let reset = self.box_command(&format!("profile reset {}", self.profile_name));
+        notice.push_str(&format!(
+            "\nbox: change the saved settings in the agent, or run `{reset}` to import again. \
+             Reset deletes the agent's settings, sessions, and memory."
+        ));
+        Some(notice)
+    }
+
     /// Each stdio MCP server that gets no permit to start, as `(name, reason)`.
     pub fn mcp_unstarted(&self) -> &[(String, String)] {
         &self.mcp_unstarted
@@ -2493,6 +2517,11 @@ impl Launch {
     /// `BOX_HOME` moves the box home, the command sets it too, so it also works in a shell that
     /// does not have it. A box home that a shell word cannot hold as typed is left out.
     pub(crate) fn history_command(&self, deny: bool) -> String {
+        let deny = if deny { " --deny" } else { "" };
+        self.box_command(&format!("runs history {}{deny}", self.name))
+    }
+
+    fn box_command(&self, arguments: &str) -> String {
         let box_home = self
             .box_home
             .as_deref()
@@ -2509,8 +2538,7 @@ impl Launch {
                 }
             })
             .unwrap_or_default();
-        let deny = if deny { " --deny" } else { "" };
-        format!("{box_home}box runs history {}{deny}", self.name)
+        format!("{box_home}box {arguments}")
     }
 
     /// The command that runs this profile in this box again.
@@ -2645,6 +2673,9 @@ impl Launch {
     }
 
     fn run_inner(&self, args: &[OsString]) -> Result<ExitCode, Error> {
+        if let Some(notice) = self.settings_notice() {
+            eprintln!("{notice}");
+        }
         let result = if terminal::attached() {
             terminal::run(self, |options| {
                 strands_box::run(self.config.clone(), args.to_vec(), options)

@@ -7,6 +7,15 @@ For profiles in general, see [Profiles](../../../docs/cli/profiles.md).
 
 ## Make a profile
 
+For Bedrock Mantle in `us-west-2`, set a model that supports the Responses API in your Codex
+folder's `config.toml` before the first run, for example:
+
+```toml
+model = "openai.gpt-5.6-terra"
+```
+
+`openai.gpt-oss-120b` does not support that API.
+
 Match the `model_provider` in your Codex folder's `config.toml`: use `bedrock` for
 `amazon-bedrock-runtime`, `bedrock-mantle` for `amazon-bedrock`, or `openai` for the OpenAI API:
 
@@ -77,6 +86,12 @@ Trust saved for a repository root comes in when you run Box from that root.
 A choice saved in the box stays, even if you change the host setting. If neither has a model set,
 Codex uses its own default. Other settings, except `mcp_servers`, and your sessions stay outside
 the box.
+
+When one of these saved settings differs from your Codex folder's `config.toml`, Box names it
+in a startup warning.
+To change the saved model, use Codex's `/model`. To import these settings again, exit the agent and
+run `box profile reset <profile>`, then start a new run. Reset also deletes that profile's
+agent sessions and memory ([Reset](../../../docs/cli/cli.md#box-profile-reset)).
 
 Your Codex folder's `agents/` folder comes into `home/agents`. Its `skills` and `~/.agents/skills` come into separate folders,
 `home/skills/codex` and `home/skills/agents`, so matching names stay separate.

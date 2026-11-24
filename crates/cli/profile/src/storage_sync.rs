@@ -642,6 +642,7 @@ pub const SYNC_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(6
 pub struct Copied {
     pub not_copied: Vec<(String, String)>,
     pub synced: Vec<String>,
+    pub different_settings: Vec<String>,
 }
 
 /// Copy each `[[storage.files]]` row whose target storage lacks, building each copy in the run
@@ -730,8 +731,22 @@ pub(crate) fn copy_files_waiting(
             State::WillCopy(_) | State::NothingKept => {}
             State::InStorage => storage_files::rewrite(file)?,
             State::Fill { text, .. } => {
-                if let Some(why) = storage_files::fill(file, &text)? {
+                let (refused, different) = storage_files::fill(file, &text)?;
+                if let Some(why) = refused {
                     not_copied.push((tilde(home, &file.source), why));
+                }
+                if !different.is_empty() {
+                    let keys = different
+                        .iter()
+                        .map(|key| crate::storage_edit::shown(key))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    copied.different_settings.push(format!(
+                        "saved settings in {} differ from the current import from {}: {keys}. \
+                         Keeping the saved values.",
+                        tilde(home, &file.target),
+                        tilde(home, &file.source),
+                    ));
                 }
             }
             State::Absent => {

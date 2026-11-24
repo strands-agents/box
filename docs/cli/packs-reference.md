@@ -372,6 +372,9 @@ A row with `fill` needs `keep` and `kind`, and has no `set` rows. It can share i
 `target-key`. `box profile show` prints a `fills` line with the names it would add. When the copy is
 a link, a hard link, or not a file, `box run` leaves it alone and prints a `did not copy` line.
 
+When a kept setting is present in both files with different values, `box run` keeps the saved
+value and prints a startup warning naming the setting. The warning shows no setting values.
+
 ### Set a value in the copy on every run
 
 A `[[storage.files.set]]` row writes a value into the copy before each run starts, for a setting
