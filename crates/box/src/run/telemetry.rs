@@ -1444,14 +1444,14 @@ mod tests {
                 (
                     false,
                     "no_match",
-                    crate::Enforcement::LetThrough { first: true }
+                    crate::DecisionEnforcement::LetThrough { first: true }
                 ),
                 (
                     false,
                     "no_match",
-                    crate::Enforcement::LetThrough { first: false }
+                    crate::DecisionEnforcement::LetThrough { first: false }
                 ),
-                (false, "enforcement", crate::Enforcement::Applied),
+                (false, "enforcement", crate::DecisionEnforcement::Applied),
             ]
         );
     }
@@ -1988,6 +1988,7 @@ mod tests {
                 path: "/v1/items/7",
                 body_bytes: 0,
                 intercepted: true,
+                websocket: false,
                 mcp: None,
             })
             .expect("log-only mode lets the request through")
