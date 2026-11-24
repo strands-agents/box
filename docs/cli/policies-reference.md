@@ -1,8 +1,3 @@
----
-reader: Someone who reads or writes policy rules and needs to know how box joins a run's policy, or what wrote the rule that the run history names.
-belongs: How box joins the profile's rule files with the rules it writes, and one row for each kind of rule box writes. What a policy is and how to write a rule goes to policies.md. Policy starters and the policy menu go to starters-reference.md. A fix after an error goes to troubleshooting.md.
----
-
 # Policy reference
 
 This page says how `box` builds a run's policy, and lists each rule it writes from your packs and

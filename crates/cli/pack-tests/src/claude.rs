@@ -643,7 +643,7 @@ fn a_claude_run_declares_the_operators_and_the_projects_mcp_servers() {
                  "github": {{"type": "http", "url": "https://api.githubcopilot.com/mcp/", "headers": {{"Authorization": "Bearer x"}}}},
                  "keyed": {{"url": "https://keyed.example.com/mcp", "headers": {{"Authorization": "Bearer ${{BOX_TEST_UNSET}}"}}}}}},
                 "projects": {{"{}": {{"mcpServers": {{"docs": {{"type": "http", "url": "https://docs.example.com/mcp"}},
-                    "tracker": {{"command": "mcp-tracker", "env": {{"TRACKER_TOKEN": "${{BOX_TEST_TOKEN}}"}}}}}}}}}}}}"#,
+                    "tracker": {{"command": "mcp-tracker", "env": {{"TRACKER_TOKEN": "${{BOX_TEST_TOKEN}}", "TRACKER_FLAGS": "--verbose"}}}}}}}}}}}}"#,
             host.project().display()
         ),
     )
@@ -689,9 +689,17 @@ fn a_claude_run_declares_the_operators_and_the_projects_mcp_servers() {
             (
                 "tracker".to_string(),
                 "~/.claude.json".to_string(),
-                ", with TRACKER_TOKEN".to_string()
+                ", with TRACKER_FLAGS, TRACKER_TOKEN".to_string()
             ),
         ]
+    );
+    assert_eq!(
+        preview.mcp_unchecked,
+        vec![(
+            "TRACKER_FLAGS".to_string(),
+            "tracker".to_string(),
+            "~/.claude.json".to_string()
+        )]
     );
     assert_eq!(
         preview.mcp_dropped,
@@ -759,6 +767,7 @@ fn a_claude_run_declares_the_operators_and_the_projects_mcp_servers() {
         .expect("a launch");
     assert_eq!(launch.mcp_servers(), preview.mcp_servers.as_slice());
     assert_eq!(launch.mcp_dropped(), preview.mcp_dropped.as_slice());
+    assert_eq!(launch.mcp_unchecked(), preview.mcp_unchecked.as_slice());
     assert_eq!(launch.mcp_skipped(), preview.mcp_skipped.as_slice());
     host.profile()
         .with("claude")
@@ -1344,5 +1353,56 @@ fn a_claude_box_on_the_anthropic_api_keeps_webfetchs_domain_lookup_and_routes_it
         strings(&file["egress"]["anthropic"]["destinations"]),
         ["api.anthropic.com"],
         "Claude Code asks api.anthropic.com/api/web/domain_info before each WebFetch"
+    );
+}
+
+#[test]
+fn the_claude_starter_offers_a_subscription_that_adds_its_pack_and_the_anthropic_host() {
+    let host = FakeHost::new();
+    let created = host
+        .profile()
+        .name("claude")
+        .with("claude")
+        .with("claude-subscription")
+        .policy("open")
+        .answer(None)
+        .expect("answered by --with")
+        .create()
+        .expect("a profile");
+    let file: toml::Table = toml::from_str(created.text()).expect("TOML");
+    assert_eq!(
+        strings(&file["packs"])[..2],
+        ["@box/claude", "@box/claude-subscription"],
+        "{}",
+        created.text()
+    );
+    assert!(
+        !created.text().contains("@box/anthropic"),
+        "{}",
+        created.text()
+    );
+    assert_eq!(
+        file["options"]["claude"]["host"].as_str(),
+        Some("anthropic"),
+        "{}",
+        created.text()
+    );
+    created.write(false).expect("a write");
+    let mut input: &[u8] = &[b'\n'; 32];
+    let mut output = Vec::new();
+    let edited = host
+        .profile()
+        .edit("claude")
+        .expect("an edit")
+        .answer(Some(Terminal::new(&mut input, &mut output)))
+        .expect("Enter keeps each answer")
+        .create()
+        .expect("a profile");
+    let shown = String::from_utf8_lossy(&output);
+    assert!(shown.contains("A Claude subscription"), "{shown}");
+    assert!(
+        edited.text().contains("@box/claude-subscription"),
+        "the edit keeps the subscription: {shown}\n{}",
+        edited.text()
     );
 }

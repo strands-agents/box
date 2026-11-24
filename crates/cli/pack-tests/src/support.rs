@@ -6,7 +6,7 @@ pub(crate) use strands_box_cli::test_support::{
     Trees, box_toml, brew_program, codex_settings, macos_cargo, no_agent, operator_pack, pack,
     profiles_root, resolution, resources, run_folder, script_with, strings, text, tool, trial,
 };
-pub(crate) use strands_box_cli::{Error, FakeHost, Trial, Trialed};
+pub(crate) use strands_box_cli::{Error, FakeHost, Terminal, Trial, Trialed};
 pub(crate) use strands_box_cli_profile::fixtures::{binary, executable, script, write};
 pub(crate) use strands_box_cli_profile::host::resolved;
 pub(crate) use strands_box_cli_profile::lang::storage_root;

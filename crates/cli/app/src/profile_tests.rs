@@ -11,7 +11,7 @@ use crate::host::resolved;
 use crate::lang::{Inputs, Lookup, storage_root};
 use crate::profile::{Profile, Resolved, validate_name};
 use crate::reference::Sources;
-use crate::run::{Cleaned, Launcher, confirm, existing, mint, mint_claimed};
+use crate::run::{Launcher, confirm, existing, mint, mint_claimed};
 use crate::test_support::script;
 
 /// A home, a workspace below it, an instance beside neither, and a folder of packs.
@@ -340,11 +340,11 @@ fn profile(text: &str) -> Profile {
 
 /// The profile `text` as it is.
 fn bare_profile(text: &str) -> Profile {
-    Profile::parse(text, Path::new("test.toml")).expect("a profile")
+    Profile::parse(text, Path::new("test.toml"), crate::VERSION).expect("a profile")
 }
 
 fn refusal(text: &str) -> String {
-    match Profile::parse(text, Path::new("test.toml")) {
+    match Profile::parse(text, Path::new("test.toml"), crate::VERSION) {
         Err(Error::Profile { reason, .. }) => reason,
         other => panic!("a refusal, not {other:?}"),
     }
@@ -582,7 +582,7 @@ fn a_key_of_one_run_names_its_line() {
         ("[agent]\ncommand = [\"/bin/x\"]\nworkspace = \"/x\"", 3),
         ("\n\npolicy = \"p\"\n[agent]\ncommand = [\"/bin/x\"]", 3),
     ] {
-        match Profile::parse(text, Path::new("test.toml")) {
+        match Profile::parse(text, Path::new("test.toml"), crate::VERSION) {
             Err(Error::Profile { line: at, .. }) => assert_eq!(at, Some(line), "{text}"),
             other => panic!("a refusal, not {other:?}"),
         }
@@ -671,7 +671,7 @@ fn the_name_box_is_reserved() {
 fn the_name_base_is_reserved() {
     let error = validate_name("base").expect_err("a reserved name");
     assert!(error.to_string().contains("`base` is reserved"), "{error}");
-    let profiles = Profiles::at("/nonexistent");
+    let profiles = Profiles::at("/nonexistent", crate::VERSION);
     assert!(matches!(
         profiles.load("base"),
         Err(Error::ProfileName { .. })
@@ -709,7 +709,7 @@ fn policy_references_are_nonempty_literal_paths() {
         ("policies = [\"${{ profile }}/policy.dw\"]", "`policies[0]`"),
     ] {
         let path = Path::new("profiles/test/profile.toml");
-        match Profile::parse(text, path) {
+        match Profile::parse(text, path, crate::VERSION) {
             Err(Error::Profile {
                 path: found,
                 line,
@@ -727,7 +727,7 @@ fn policy_references_are_nonempty_literal_paths() {
 #[test]
 fn policy_references_load_relative_absolute_and_linked_files() {
     let scene = Scene::new();
-    let profiles = Profiles::at(scene.root.join("profiles"));
+    let profiles = Profiles::at(scene.root.join("profiles"), crate::VERSION);
     let folder = profiles.folder("test");
     std::fs::create_dir_all(folder.join("policies")).expect("policy folder");
     let first = "  // service policy\r\n@id(\"service\") permit (principal, action, resource);  ";
@@ -768,7 +768,7 @@ fn policy_references_load_relative_absolute_and_linked_files() {
 #[test]
 fn policy_references_refuse_paths_outside_the_profile() {
     let scene = Scene::new();
-    let profiles = Profiles::at(scene.root.join("profiles"));
+    let profiles = Profiles::at(scene.root.join("profiles"), crate::VERSION);
     let folder = profiles.folder("test");
     let sibling = profiles.folder("test-other");
     std::fs::create_dir_all(&folder).expect("profile folder");
@@ -816,7 +816,7 @@ fn policy_references_refuse_paths_outside_the_profile() {
 #[test]
 fn policy_references_refuse_hard_linked_files() {
     let scene = Scene::new();
-    let profiles = Profiles::at(scene.root.join("profiles"));
+    let profiles = Profiles::at(scene.root.join("profiles"), crate::VERSION);
     let folder = profiles.folder("test");
     std::fs::create_dir_all(&folder).expect("profile folder");
     std::fs::write(folder.join("ok.dw"), "// local").expect("local policy");
@@ -854,7 +854,7 @@ fn policy_references_refuse_hard_linked_files() {
 fn policy_references_refuse_redirected_profile_directories() {
     for redirect_root in [false, true] {
         let scene = Scene::new();
-        let profiles = Profiles::at(scene.root.join("profiles"));
+        let profiles = Profiles::at(scene.root.join("profiles"), crate::VERSION);
         let folder = profiles.folder("test");
         std::fs::create_dir_all(&folder).expect("profile folder");
         std::fs::write(
@@ -892,7 +892,7 @@ fn policy_references_allow_aliases_above_the_profiles_root() {
     let scene = Scene::new();
     let alias = scene.root.join("home-link");
     std::os::unix::fs::symlink(scene.home(), &alias).expect("home alias");
-    let profiles = Profiles::at(alias.join(".strands/box/profiles"));
+    let profiles = Profiles::at(alias.join(".strands/box/profiles"), crate::VERSION);
     let folder = profiles.folder("test");
     std::fs::create_dir_all(&folder).expect("profile folder");
     let file = folder.join("policy.dw");
@@ -916,7 +916,7 @@ fn policy_references_allow_aliases_above_the_profiles_root() {
 #[test]
 fn policy_references_ignore_unlisted_adjacent_files() {
     let scene = Scene::new();
-    let profiles = Profiles::at(scene.root.join("profiles"));
+    let profiles = Profiles::at(scene.root.join("profiles"), crate::VERSION);
     std::fs::create_dir_all(profiles.folder("test").join("policy.dw"))
         .expect("an unreadable adjacent policy directory");
     std::fs::write(profiles.folder("test").join("listed.dw"), "// listed").expect("policy");
@@ -934,7 +934,7 @@ fn policy_references_ignore_unlisted_adjacent_files() {
 #[test]
 fn policy_references_report_the_unreadable_entry() {
     let scene = Scene::new();
-    let profiles = Profiles::at(scene.root.join("profiles"));
+    let profiles = Profiles::at(scene.root.join("profiles"), crate::VERSION);
     let folder = profiles.folder("test");
     std::fs::create_dir_all(folder.join("directory.dw")).expect("folder");
     std::fs::write(folder.join("ok.dw"), "// a valid file").expect("policy");
@@ -961,7 +961,7 @@ fn policy_references_report_the_unreadable_entry() {
 #[test]
 fn policy_references_refuse_repeated_files_and_symlink_aliases() {
     let scene = Scene::new();
-    let profiles = Profiles::at(scene.root.join("profiles"));
+    let profiles = Profiles::at(scene.root.join("profiles"), crate::VERSION);
     let folder = profiles.folder("test");
     std::fs::create_dir_all(folder.join("policies")).expect("folder");
     std::os::unix::fs::symlink("policy.dw", folder.join("alias.dw")).expect("policy link");
@@ -2013,7 +2013,7 @@ fn a_profile_refuses_a_banner_table_it_cannot_read() {
             .lines()
             .position(|line| line.starts_with(at))
             .map(|index| index + 1);
-        match Profile::parse(&text, Path::new("test.toml")) {
+        match Profile::parse(&text, Path::new("test.toml"), crate::VERSION) {
             Err(Error::Profile {
                 reason: found,
                 line: found_line,
@@ -3116,18 +3116,16 @@ fn the_records_go_to_the_runs_own_file() {
 }
 
 #[test]
-fn a_clean_of_every_box_keeps_a_box_that_is_starting() {
+fn a_profile_clean_refuses_a_box_that_is_starting() {
     let scene = Scene::new();
     let launcher = Launcher::from_host().home(scene.home());
     let (instance, _claim) =
         mint_claimed(&launcher.runs_root(), "claude", &scene.home()).expect("an instance");
 
-    assert_eq!(
-        cleaned(&launcher),
-        Cleaned {
-            removed: 0,
-            running: vec![instance.name.clone()]
-        }
+    let held = launcher.hold_boxes(std::slice::from_ref(&instance.name), "clean");
+    assert!(
+        matches!(&held, Err(Error::CleanBoxRunning { id, .. }) if *id == instance.name),
+        "{held:?}"
     );
     assert!(instance.box_directory.is_dir(), "the starting box stays");
 }
@@ -3342,7 +3340,7 @@ fn a_saved_run_with_a_malformed_id_is_refused() {
 #[test]
 fn a_profile_is_removed_by_name_and_only_by_a_name_box_accepts() {
     let root = tempfile::tempdir().expect("a temporary root");
-    let profiles = Profiles::at(root.path().join("profiles"));
+    let profiles = Profiles::at(root.path().join("profiles"), crate::VERSION);
     assert!(!profiles.contains("claude").expect("a look"));
     assert!(!profiles.remove("claude").expect("a removal of nothing"));
     for name in ["claude", "codex"] {
@@ -3375,7 +3373,7 @@ fn a_profile_is_removed_by_name_and_only_by_a_name_box_accepts() {
 #[test]
 fn a_reset_with_no_name_takes_the_whole_profiles_folder() {
     let root = tempfile::tempdir().expect("a temporary root");
-    let profiles = Profiles::at(root.path().join("profiles"));
+    let profiles = Profiles::at(root.path().join("profiles"), crate::VERSION);
     assert!(!profiles.reset().expect("a reset of nothing"));
     for name in ["claude", "codex"] {
         std::fs::create_dir_all(profiles.folder(name)).expect("a folder");
@@ -3396,7 +3394,7 @@ fn a_removal_takes_a_link_and_not_its_target() {
     let target = root.path().join("elsewhere");
     std::fs::create_dir_all(&target).expect("a target");
     std::fs::write(target.join("keep"), "").expect("a file");
-    let profiles = Profiles::at(root.path().join("profiles"));
+    let profiles = Profiles::at(root.path().join("profiles"), crate::VERSION);
     std::fs::create_dir_all(profiles.root()).expect("a root");
     std::os::unix::fs::symlink(&target, profiles.folder("linked")).expect("a link");
 
@@ -3434,106 +3432,6 @@ fn a_removal_needs_a_yes_on_a_terminal() {
 }
 
 #[test]
-fn a_clean_removes_each_run_and_keeps_a_linked_target() {
-    let root = tempfile::tempdir().expect("a temporary root");
-    let launcher = Launcher::from_host().home(root.path().join("home"));
-    assert_eq!(launcher.runs().expect("no runs"), Vec::<String>::new());
-    assert_eq!(cleaned(&launcher), Cleaned::default());
-    let runs = launcher.runs_root();
-    for name in ["claude-00000001", "codex-00000002"] {
-        std::fs::create_dir_all(runs.join(name).join("box")).expect("a run");
-        std::fs::write(runs.join(name).join("records.jsonl"), "").expect("records");
-    }
-    let target = root.path().join("elsewhere");
-    std::fs::create_dir_all(&target).expect("a target");
-    std::fs::write(target.join("keep"), "").expect("a file");
-    std::os::unix::fs::symlink(&target, runs.join("linked")).expect("a link");
-    std::fs::write(runs.join("note"), "").expect("a file beside the runs");
-
-    assert_eq!(
-        launcher.runs().expect("the runs"),
-        ["claude-00000001", "codex-00000002", "linked"]
-    );
-    assert_eq!(
-        cleaned(&launcher),
-        Cleaned {
-            removed: 3,
-            running: Vec::new()
-        }
-    );
-    assert_eq!(launcher.runs().expect("no runs"), Vec::<String>::new());
-    assert!(target.join("keep").exists(), "the target stays");
-    assert!(runs.join("note").exists(), "a file is no run");
-}
-
-#[test]
-fn a_clean_with_a_box_id_removes_only_that_run() {
-    let root = tempfile::tempdir().expect("a temporary root");
-    let launcher = Launcher::from_host().home(root.path().join("home"));
-    let runs = launcher.runs_root();
-    for name in ["claude-00000001", "codex-00000002"] {
-        std::fs::create_dir_all(runs.join(name).join("box")).expect("a run");
-    }
-    let target = root.path().join("elsewhere");
-    std::fs::create_dir_all(&target).expect("a target");
-    std::fs::write(target.join("keep"), "").expect("a file");
-    std::os::unix::fs::symlink(&target, runs.join("linked")).expect("a link");
-
-    launcher.remove_run("claude-00000001").expect("one run");
-    assert_eq!(
-        launcher.runs().expect("the runs"),
-        ["codex-00000002", "linked"]
-    );
-    for refused in [
-        "claude-00000001",
-        "../home",
-        "codex-00000002/box",
-        "",
-        ".",
-        "linked/",
-        "linked/.",
-        "codex-00000002/",
-    ] {
-        assert!(
-            matches!(launcher.remove_run(refused), Err(Error::BoxUnknown { .. })),
-            "{refused:?} names no run"
-        );
-    }
-    assert!(target.join("keep").exists(), "a link's target stays");
-    assert!(
-        runs.join("codex-00000002").exists(),
-        "a run named with a trailing slash stays"
-    );
-    launcher.remove_run("linked").expect("a link");
-    assert!(target.join("keep").exists(), "the target stays");
-    assert_eq!(launcher.runs().expect("the runs"), ["codex-00000002"]);
-}
-
-/// What `box clean --all` removes and keeps in `launcher`'s runs.
-fn cleaned(launcher: &Launcher) -> Cleaned {
-    let mut cleaned = Cleaned::default();
-    launcher.remove_runs(&mut cleaned).expect("a clean");
-    cleaned
-}
-
-/// A run folder held as `box run` holds it while its box runs.
-struct RunningBox(std::fs::File);
-
-impl Drop for RunningBox {
-    /// Unlock the run folder, even while a forked child shares the file.
-    fn drop(&mut self) {
-        let _ = self.0.unlock();
-    }
-}
-
-/// Hold the run folder `name` as `box run` does while its box runs.
-fn running(runs: &Path, name: &str) -> RunningBox {
-    let file = std::fs::File::open(runs.join(name)).expect("a run folder");
-    file.try_lock().expect("the run lock");
-    RunningBox(file)
-}
-
-#[test]
 fn a_profile_clean_holds_each_box_until_it_removes_it() {
     let root = tempfile::tempdir().expect("a temporary root");
     let launcher = Launcher::from_host().home(root.path().join("home"));
@@ -3559,63 +3457,6 @@ fn a_profile_clean_holds_each_box_until_it_removes_it() {
     held.remove(&mut removed).expect("the boxes are removed");
     assert_eq!(removed, 2);
     assert!(launcher.runs().expect("the runs").is_empty());
-}
-
-#[test]
-fn a_clean_refuses_a_box_that_is_still_running() {
-    let root = tempfile::tempdir().expect("a temporary root");
-    let launcher = Launcher::from_host().home(root.path().join("home"));
-    let runs = launcher.runs_root();
-    std::fs::create_dir_all(runs.join("claude-00000001").join("box")).expect("a run");
-    let held = running(&runs, "claude-00000001");
-    let child = held.0.try_clone().expect("a forked child's copy");
-
-    for result in [
-        launcher.find_run("claude-00000001"),
-        launcher.remove_run("claude-00000001"),
-    ] {
-        assert!(
-            matches!(&result, Err(Error::BoxRunning { id }) if id == "claude-00000001"),
-            "{result:?}"
-        );
-    }
-    assert!(runs.join("claude-00000001").exists(), "a running box stays");
-
-    drop(held);
-    launcher
-        .remove_run("claude-00000001")
-        .expect("a stopped box");
-    assert!(launcher.runs().expect("no runs").is_empty());
-    drop(child);
-}
-
-#[test]
-fn a_clean_of_every_box_keeps_each_box_that_is_still_running() {
-    let root = tempfile::tempdir().expect("a temporary root");
-    let launcher = Launcher::from_host().home(root.path().join("home"));
-    let runs = launcher.runs_root();
-    for name in [
-        "claude-00000001",
-        "codex-00000002",
-        "kiro-00000003",
-        "pi-00000004",
-    ] {
-        std::fs::create_dir_all(runs.join(name).join("box")).expect("a run");
-    }
-    let _codex = running(&runs, "codex-00000002");
-    let _pi = running(&runs, "pi-00000004");
-
-    assert_eq!(
-        cleaned(&launcher),
-        Cleaned {
-            removed: 2,
-            running: vec!["codex-00000002".to_string(), "pi-00000004".to_string()]
-        }
-    );
-    assert_eq!(
-        launcher.runs().expect("the runs"),
-        ["codex-00000002", "pi-00000004"]
-    );
 }
 
 #[test]
@@ -5569,7 +5410,7 @@ mod on_the_host {
                     .starts_with("# Written by `box profile create`")
             );
             assert_eq!(
-                Profile::parse(created.text(), &created.path()).expect("a profile"),
+                Profile::parse(created.text(), &created.path(), crate::VERSION).expect("a profile"),
                 *created.profile()
             );
             assert_eq!(
@@ -5819,7 +5660,7 @@ mod on_the_host {
             std::fs::read_to_string(&path).expect("a profile"),
             created.text()
         );
-        let profiles = Profiles::at(host.home().join(".strands/box/profiles"));
+        let profiles = Profiles::at(host.home().join(".strands/box/profiles"), crate::VERSION);
         let (profile, policy) = profiles.load("claude").expect("a load").expect("a profile");
         assert_eq!(profile, *created.profile());
         assert_eq!(policy, None, "an empty policy is not written");
@@ -5852,7 +5693,7 @@ mod on_the_host {
             "{text}"
         );
         assert_eq!(
-            Profile::parse(&text, &created.path()).expect("a profile"),
+            Profile::parse(&text, &created.path(), crate::VERSION).expect("a profile"),
             *created.profile()
         );
         std::fs::write(&copy, "an old copy\n").expect("a copy from an older box");
@@ -6442,7 +6283,7 @@ mod on_the_host {
             .expect("a profile")
             .write(false)
             .expect("a write");
-        let profiles = Profiles::at(host.home().join(".strands/box/profiles"));
+        let profiles = Profiles::at(host.home().join(".strands/box/profiles"), crate::VERSION);
         std::fs::create_dir_all(profiles.folder("broken")).expect("a folder");
         std::fs::write(profiles.path("broken"), "name = \"x\"\n").expect("a file");
         let listed = profiles.list().expect("a list");
@@ -6458,7 +6299,7 @@ mod on_the_host {
     #[test]
     fn policy_references_refuse_workspace_files_in_preview_and_run() {
         let host = FakeHost::new();
-        let profiles = Profiles::at(host.home().join(".strands/box/profiles"));
+        let profiles = Profiles::at(host.home().join(".strands/box/profiles"), crate::VERSION);
         let folder = profiles.folder("claude");
         std::fs::create_dir_all(&folder).expect("profile folder");
         let outside = host.project().join("rules.dw");
@@ -6503,7 +6344,7 @@ mod on_the_host {
     #[test]
     fn policy_references_join_files_cleanly_in_preview_and_run() {
         let host = FakeHost::new();
-        let profiles = Profiles::at(host.home().join(".strands/box/profiles"));
+        let profiles = Profiles::at(host.home().join(".strands/box/profiles"), crate::VERSION);
         let folder = profiles.folder("test");
         std::fs::create_dir_all(&folder).expect("profile folder");
         let first = "\t// literal ${{ workspace }}\r\n@id(\"one\") permit (principal, action, resource);  \r\n\r\n\t// final comment";
@@ -6561,7 +6402,7 @@ mod on_the_host {
     #[test]
     fn policy_references_refuse_duplicate_ids_across_files_before_a_run() {
         let host = FakeHost::new();
-        let profiles = Profiles::at(host.home().join(".strands/box/profiles"));
+        let profiles = Profiles::at(host.home().join(".strands/box/profiles"), crate::VERSION);
         let folder = profiles.folder("test");
         std::fs::create_dir_all(&folder).expect("profile folder");
         std::fs::write(
@@ -6877,7 +6718,7 @@ mod on_the_host {
     #[test]
     fn an_error_in_a_second_policy_file_names_its_line_in_the_combined_program() {
         let host = FakeHost::new();
-        let profiles = Profiles::at(host.home().join(".strands/box/profiles"));
+        let profiles = Profiles::at(host.home().join(".strands/box/profiles"), crate::VERSION);
         let folder = profiles.folder("claude");
         std::fs::create_dir_all(&folder).expect("profile folder");
         std::fs::write(
@@ -9019,6 +8860,229 @@ fn a_grant_through_a_link_in_the_workspace_is_refused() {
     }
 }
 
+/// A profile whose `holder` table has a write grant on `notes`, and whose agent names `entry` in
+/// `list`.
+fn beneath_a_write_grant(holder: &str, notes: &Path, list: &str, entry: &Path) -> String {
+    let mut lists = vec![(list, vec![entry])];
+    if holder == "[agent]" && list == "write" {
+        lists[0].1.push(notes);
+    } else if holder == "[agent]" {
+        lists.push(("write", vec![notes]));
+    }
+    let agent: String = lists
+        .iter()
+        .map(|(name, entries)| format!("filesystem.{name} = {entries:?}\n"))
+        .collect();
+    let holder = if holder == "[agent]" {
+        String::new()
+    } else {
+        format!("{holder}\ncommand = [\"/usr/bin/true\"]\nfilesystem.write = [{notes:?}]\n")
+    };
+    format!("[agent]\ncommand = [\"/bin/x\"]\n{agent}{holder}")
+}
+
+#[test]
+fn a_grant_through_a_link_under_a_write_grant_is_refused() {
+    let scene = Scene::new();
+    let notes = scene.home().join("notes");
+    let out = notes.join("out");
+    let outside = scene.home().join("outside");
+    std::fs::create_dir_all(&out).expect("a folder beneath the grant");
+    std::fs::create_dir_all(&outside).expect("a folder that no entry names");
+    let holders = ["[agent]", "[tool.t]", "[mcp.s]\ntype = \"stdio\""];
+    let lists = ["read", "write", "read_file", "deny"];
+    for holder in holders {
+        for list in lists {
+            let compiled = scene
+                .compile(
+                    &profile(&beneath_a_write_grant(holder, &notes, list, &out)),
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("{holder} {list}: a real folder: {error}"));
+            let granted = strings(&table(&compiled)["agent"]["filesystem"][list]);
+            // The agent's own grant on `notes` covers a second write grant beneath it.
+            assert!(
+                granted.contains(&out.display().to_string())
+                    || (holder == "[agent]" && list == "write"),
+                "{holder} {list}: {granted:?}"
+            );
+        }
+    }
+
+    std::fs::remove_dir(&out).expect("remove the folder");
+    std::os::unix::fs::symlink(&outside, &out).expect("a link where the folder was");
+    for holder in holders {
+        for list in lists {
+            let reason = scene.refusal(&beneath_a_write_grant(holder, &notes, list, &out));
+            assert!(
+                reason.contains(&format!(
+                    "resolves through a link to {}, inside {}, which the box can write",
+                    outside.display(),
+                    notes.display()
+                )),
+                "{holder} {list}: {reason}"
+            );
+        }
+    }
+    let below = scene.refusal(&beneath_a_write_grant(
+        "[agent]",
+        &notes,
+        "read",
+        &out.join("absent"),
+    ));
+    assert!(below.contains("resolves through a link"), "{below}");
+
+    std::fs::remove_file(&out).expect("remove the link");
+    let nothing = scene.home().join("nothing");
+    std::os::unix::fs::symlink(&nothing, &out).expect("a link to nothing");
+    let dangling = scene.refusal(&beneath_a_write_grant("[agent]", &notes, "read", &out));
+    assert!(
+        dangling.contains(&format!("resolves through a link to {}", nothing.display())),
+        "{dangling}"
+    );
+}
+
+#[test]
+fn a_grant_through_a_link_in_the_box_home_is_refused() {
+    let scene = Scene::new();
+    let shared = scene.home().join(".strands/box/shared");
+    let outside = scene.home().join("outside");
+    std::fs::create_dir_all(shared.join("real")).expect("a folder in the box home");
+    std::fs::create_dir_all(&outside).expect("a folder that no entry names");
+    std::os::unix::fs::symlink(&outside, shared.join("link")).expect("a link in the box home");
+    let text = |entry: &str| {
+        format!(
+            "[agent]\ncommand = [\"/bin/x\"]\nfilesystem.read = [{:?}]",
+            shared.join(entry)
+        )
+    };
+    scene
+        .resolve(&profile(&text("real")))
+        .expect("a real folder in the box home");
+    let reason = scene.resolve_refusal(&text("link"));
+    assert!(
+        reason.contains(&format!(
+            "resolves through a link to {}, inside {}, which the box can write",
+            outside.display(),
+            scene.home().join(".strands/box").display()
+        )),
+        "{reason}"
+    );
+}
+
+#[test]
+fn a_tool_entry_through_a_link_under_a_write_grant_is_refused() {
+    let scene = Scene::new();
+    let notes = scene.home().join("notes");
+    let outside = scene.home().join("outside");
+    std::fs::create_dir_all(notes.join("out-real")).expect("a folder beneath the grant");
+    std::fs::create_dir_all(&outside).expect("a folder that no entry names");
+    scene.share(
+        "rt",
+        &format!(
+            "kind = \"tool\"\n[inputs.rt.path]\ntype = \"program\"\nprogram = \"rt\"\n\
+             search = [{{ env = \"PATH\" }}]\n[run]\ncommand = [\"${{{{ inputs.rt.path }}}}\"]\n\
+             [filesystem]\nread = [{:?}]",
+            notes.join("out-*")
+        ),
+    );
+    let text = format!("packs = [\"@box/rt\"]\n{AGENT}\nfilesystem.write = [{notes:?}]");
+    let resolved = detected(&scene, &text).expect("a real folder beneath the grant");
+    let read = &resolved.tool["rt"].filesystem.read;
+    assert!(
+        read.contains(&notes.join("out-real").display().to_string()),
+        "{read:?}"
+    );
+    std::os::unix::fs::symlink(&outside, notes.join("out-link")).expect("a link beside it");
+    let refused = detected(&scene, &text).expect_err("a match that is a link");
+    assert!(
+        refused.to_string().contains(&format!(
+            "resolves through a link to {}, inside {}, which the box can write",
+            outside.display(),
+            notes.display()
+        )),
+        "{refused}"
+    );
+}
+
+#[test]
+fn a_link_above_a_write_grant_is_followed() {
+    let scene = Scene::new();
+    let real = scene.root.join("private/notes");
+    std::fs::create_dir_all(real.join("out")).expect("a folder beneath the grant");
+    let above = scene.root.join("above");
+    std::os::unix::fs::symlink(scene.root.join("private"), &above).expect("a link above");
+    let at = scene.home().join("notes");
+    std::os::unix::fs::symlink(&real, &at).expect("a link at the grant");
+    let mut grants = vec![above.join("notes"), at];
+    // On macOS, `/tmp` is a link that a box cannot write.
+    let temporary = Path::new("/tmp")
+        .is_symlink()
+        .then(|| tempfile::tempdir_in("/tmp").expect("a folder in /tmp"));
+    if let Some(temporary) = &temporary {
+        std::fs::create_dir_all(temporary.path().join("out")).expect("a folder beneath the grant");
+        grants.push(temporary.path().to_path_buf());
+    }
+    for notes in grants {
+        let real = resolved(&notes);
+        assert_ne!(real, notes, "{notes:?} holds a link");
+        let compiled = scene
+            .compile(
+                &profile(&beneath_a_write_grant(
+                    "[agent]",
+                    &notes,
+                    "read",
+                    &notes.join("out"),
+                )),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{notes:?}: a link above the grant: {error}"));
+        let filesystem = &table(&compiled)["agent"]["filesystem"];
+        let text = |path: &Path| path.display().to_string();
+        assert!(strings(&filesystem["write"]).contains(&text(&real)));
+        assert!(strings(&filesystem["read"]).contains(&text(&real.join("out"))));
+    }
+}
+
+#[test]
+fn a_home_that_is_a_link_keeps_its_grants() {
+    let scene = Scene::new();
+    let real = scene.root.join("real-home");
+    std::fs::rename(scene.home(), &real).expect("move the home");
+    std::os::unix::fs::symlink(&real, scene.home()).expect("a home that is a link");
+    let context = Context {
+        workspace: real.join("work").join(&scene.workspace),
+        os: "macos",
+    };
+    let notes = scene.home().join("notes");
+    let out = notes.join("out");
+    std::fs::create_dir_all(&out).expect("a folder beneath the grant");
+    std::fs::write(scene.home().join("settings"), "").expect("a file in the home");
+    let text = format!(
+        "{}filesystem.read_file = [{:?}]\n",
+        beneath_a_write_grant("[agent]", &notes, "read", &out),
+        scene.home().join("settings")
+    );
+    let resolved = scene
+        .resolve_with(&profile(&text), &context)
+        .expect("each entry is below a home that is a link");
+    let read = &resolved.agent.filesystem.read;
+    assert!(
+        read.contains(&real.join("notes/out").display().to_string()),
+        "{read:?}"
+    );
+
+    std::fs::remove_dir(&out).expect("remove the folder");
+    std::os::unix::fs::symlink(real.join("work"), &out).expect("a link where the folder was");
+    let refused = scene
+        .resolve_with(&profile(&text), &context)
+        .expect_err("a link beneath the grant");
+    assert!(
+        refused.to_string().contains("resolves through a link"),
+        "{refused}"
+    );
+}
+
 #[test]
 fn a_path_argument_under_a_write_grant_is_no_program() {
     let scene = Scene::new();
@@ -9193,12 +9257,16 @@ fn a_pack_needs_a_header_with_a_name_and_a_version() {
             "`[pack]` holds the unknown key `license`",
         ),
         (
-            format!("{name}\nversion = 1\nengine = \">=99.0\""),
+            format!("{name}\nversion = 1\n[requires]\nbox = \">=99.0\""),
             "this pack needs box >=99.0, and this is box",
         ),
         (
-            format!("{name}\nversion = 1\nengine = \"0.1\""),
+            format!("{name}\nversion = 1\n[requires]\nbox = \"0.1\""),
             "is not `>=X.Y.Z`",
+        ),
+        (
+            format!("{name}\nversion = 1\nengine = \">=0.1.0\""),
+            "`[pack]` holds the unknown key `engine`",
         ),
     ] {
         scene.share_raw("p", &text);
@@ -9218,7 +9286,7 @@ fn a_pack_needs_a_header_with_a_name_and_a_version() {
     scene.share_raw(
         "p",
         &format!(
-            "{name}\nversion = 1\nengine = \">={major}.{minor}.{}\"",
+            "{name}\nversion = 1\n[requires]\nbox = \">={major}.{minor}.{}\"",
             patch + 1
         ),
     );
@@ -9230,7 +9298,7 @@ fn a_pack_needs_a_header_with_a_name_and_a_version() {
     scene.share_raw(
         "p",
         &format!(
-            "{name}\nversion = 1\nengine = \">={}\"",
+            "{name}\nversion = 1\n[requires]\nbox = \">={}\"",
             env!("CARGO_PKG_VERSION")
         ),
     );
@@ -9243,11 +9311,11 @@ fn a_pack_needs_a_header_with_a_name_and_a_version() {
 }
 
 #[test]
-fn a_pack_that_another_pack_extends_is_checked_for_its_engine() {
+fn a_pack_that_another_pack_extends_is_checked_for_its_requires() {
     let scene = Scene::new();
     scene.share_raw(
         "newer",
-        "[pack]\nname = \"@box/newer\"\nversion = 1\nkind = \"support\"\nengine = \">=99.0\"",
+        "[pack]\nname = \"@box/newer\"\nversion = 1\nkind = \"support\"\n[requires]\nbox = \">=99.0\"",
     );
     scene.share("base", "extend = [\"@box/newer\"]");
     let reason = scene.refusal("packs = [\"@box/base\"]\n[agent]\ncommand = [\"/bin/x\"]");
@@ -10272,10 +10340,57 @@ fn a_storage_files_row_takes_only_its_keys_and_an_absolute_source() {
             "source = \"/a.md\"\nsync = true\nkind = \"json\"\nkeep = [[\"a\"]]",
             "`storage.files[0] sync = true` works only on a row without `kind`",
         ),
+        (
+            "source = \"/a.md\"\nexclude = [\"mcp.json\"]",
+            "`storage.files[0] exclude` works only on a row with `sync = true`",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = \"mcp.json\"",
+            "`storage.files[0] exclude` is a list of one or more file names",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = []",
+            "`storage.files[0] exclude` is a list of one or more file names",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = [1]",
+            "`storage.files[0] exclude` is a list of one or more file names",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = [\"a/mcp.json\"]",
+            "`storage.files[0] exclude[0]` = \"a/mcp.json\" is not one file name",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = [\"..\"]",
+            "`storage.files[0] exclude[0]` = \"..\" is not one file name",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = [\"\"]",
+            "is not one file name",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = [\"*.pem\"]",
+            "`storage.files[0] exclude[0]` = \"*.pem\" is a pattern",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = [\".env[0-9]\"]",
+            "is a pattern",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = [\"mcp.json\"]\nkind = \"json\"\nkeep = [[\"a\"]]",
+            "`storage.files[0] exclude` works only on a whole copy of a folder, not on a row \
+             with `kind`",
+        ),
     ] {
         let reason = scene.refusal(&format!("{base}{row}"));
         assert!(reason.contains(expected), "{row}: {reason}");
     }
+    let resolved = scene
+        .resolve(&profile(&format!(
+            "{base}source = \"/a.md\"\nsync = true\nexclude = [\"mcp.json\", \".env\"]"
+        )))
+        .expect("`exclude` beside `sync`");
+    assert_eq!(resolved.storage.files[0].exclude, ["mcp.json", ".env"]);
     let copy = scene
         .resolve(&profile(&format!(
             "{base}source = \"/a.md\"\noptional = true\nmode = \"copy\""
@@ -14605,14 +14720,24 @@ fn the_shipped_node_pack_reads_the_hosts_file() {
 
 #[test]
 fn the_shipped_launchers_that_run_node_as_a_helper_read_the_hosts_file() {
-    for pack in [
-        include_str!("../../../../resources/packs/bunx/pack.toml"),
-        include_str!("../../../../resources/packs/pnpx/pack.toml"),
+    // Each pack also reads the interpreter that a package's bin names on its #! line.
+    for (pack, shebang) in [
+        (
+            include_str!("../../../../resources/packs/bunx/pack.toml"),
+            "/usr/bin/env",
+        ),
+        (
+            include_str!("../../../../resources/packs/pnpx/pack.toml"),
+            "/bin/sh",
+        ),
     ] {
         let table: toml::Table = pack.parse().expect("TOML");
         let read_file = table["filesystem"]["read_file"].as_array().expect("a list");
+        let plain: Vec<&str> = read_file.iter().filter_map(toml::Value::as_str).collect();
+        assert_eq!(plain, [shebang]);
         let paths: Vec<(&str, &str)> = read_file
             .iter()
+            .filter(|entry| entry.is_table())
             .map(|entry| {
                 (
                     entry["path"].as_str().expect("a path"),
@@ -15699,3 +15824,18 @@ fn a_profile_header_holds_only_a_name() {
 }
 
 mod plugins;
+
+#[test]
+fn a_profile_requires_box_before_the_keys_that_parse_checks() {
+    // A later box added `style` to `[banner]`; this box names the version, not the key.
+    let reason = refusal("[requires]\nbox = \">=99.0.0\"\n[banner]\nstyle = \"compact\"\n");
+    assert!(
+        reason.contains("this profile needs box >=99.0.0, and this is box"),
+        "{reason}"
+    );
+    let reason = refusal("[requires]\nbox = \">=0.0.1\"\n[banner]\nstyle = \"compact\"\n");
+    assert!(
+        reason.contains("`[banner]` holds the unknown key `style`"),
+        "{reason}"
+    );
+}

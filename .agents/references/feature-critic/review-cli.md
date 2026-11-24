@@ -171,8 +171,9 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
      is a Claude Code fact that `getting-started.md` needs to finish the walkthrough.
    - Do not report a behavior change as a regression when the change is the intent of the diff or
      the behavior is in flux. Report it only when it fails `engine.rs` or breaks a safety rule.
-   - A section that a diff adds to a `docs/cli/` page with front matter, and that fails the page's
-     `belongs` test, is a `DOCS` finding. Name the page that the test sends it to.
+   - A section that a diff adds to a `docs/cli/` page with an entry in
+     [`user-page-tests.md`](../user-page-tests.md), and that fails the page's `belongs` test, is a
+     `DOCS` finding. Name the page that the test sends it to.
    - A `docs/cli/` page may link a page in `docs/design/cli/` for background. It still states
      each fact the operator needs to act.
    - A `docs/cli/` or pack `README.md` change that adds implementation detail, an edge case the
@@ -190,7 +191,14 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
    that ships as an operator who has never used `box`. Report each sentence a person would need to
    read twice, each step with no expected output, each internal name (a module, a type) that leaks
    in, and each run of uniform, choppy sentences. Use `.agents/references/writing.md`.
-10. **Standards.** A comment names what an item is, in one line. A type is named after what it is
+10. **The Box Core boundary.** The CLI is a client of Box Core
+    ([When the CLI needs something Box Core lacks](../../../crates/cli/AGENTS.md#when-the-cli-needs-something-box-core-lacks)).
+    - A diff that changes a CLI path and also changes Box Core's contract (a `box.toml` key, a
+      `strands-box` verb or flag, or the library's public API in `crates/box/src/lib.rs`) is a
+      BLOCKER. Name the Core change, which goes in its own pull request first.
+    - A profile or pack key whose only stated reason is to match a `box.toml` name or shape is a
+      `DESIGN` note. Name the spelling a `box` user would expect.
+11. **Standards.** A comment names what an item is, in one line. A type is named after what it is
     in the product. In a shipped `pack.toml`, a line that the diff adds or changes for a reason only
     that pack has carries the reason in a comment beside it, and a comment that the diff makes false
     is a docs finding ([Pack comments](../../../crates/cli/AGENTS.md#pack-comments)).

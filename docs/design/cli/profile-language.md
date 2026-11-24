@@ -168,7 +168,11 @@ with `.`. A name in `packs` or `extend` holds no placeholder.
 Every pack starts with `[pack]`. Its keys are in
 [`[pack]`](../../cli/packs-reference.md#pack). `lang::check_kind` checks the header, and refuses
 any other key in it, before it loads the packs that the pack extends: `name` must be the name that
-imports the pack, and `engine` is a floor that `box` compares with its own version. The load takes
+imports the pack. Before that, `lang::take_requires` checks the file's `[requires]` against
+`box`'s own version and takes the table out, so the merge never sees it. It does the same for a
+plugin and for the profile, and checks `box` before any other requirement. `Profile::parse` takes
+the profile's `[requires]` out before its own key checks, so a profile for a later `box` gets the
+version before a key of `[banner]` or `policies` that the later `box` added. The load takes
 `extend` out of the header and keeps it at the top of the table. `box profile show` prints each
 pack's `name` and `version` in the order that `packs` and `extend` name them: a pack, then the
 packs it extends, and each pack once.
@@ -234,7 +238,7 @@ literal, so `${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}` in a Codex argument stays as
 | Template fields | A placeholder goes only in the fields that [Which fields take a placeholder](../../cli/profiles-reference.md#which-fields-take-a-placeholder) lists. For the tables that reach `box.toml`, `takes_template` decides it. Every other field is literal, and a table key never holds a placeholder. |
 | Option values | A value in `[options]` is literal. A placeholder in it stops the load. |
 | Paths | A path field is a filesystem list entry, a `[[storage.files]]` `source`, a `[[mcp-servers]]` `file`, and a `command` element that holds a placeholder and is element 0 or starts with a path name (`workspace` with or without steps, `home`, `profile`, `box`, `cache`, `storage.*`, `root` and `tool.*.root` with or without steps, `macos.developer_dir`, `macos.toolchain`, `macos.sdk_root`, or a `program` input). An `agent-args` element is never element 0, so it is a path only when it starts with a path name. In a path field, a placeholder comes first, each later placeholder fills one path component (no `/`, not `.` or `..`), and the result is absolute (or starts with `~/`, which Box Core accepts in a filesystem list) with no `..`. |
-| Grants | `box` resolves existing filesystem entries to their real paths. A `read_file` link to a file keeps its name in its real parent folder, so Box Core can make that name available. |
+| Grants | `box` resolves existing filesystem entries to their real paths. A `read_file` link to a file keeps its name in its real parent folder, so Box Core can make that name available. An entry that resolves through a link inside a place a box can write stops the run ([safety rules](#safety-rules)). |
 | Encoding | The destination encodes the value. A policy rule gets a quoted policy literal (`render::literal`). `box` never builds shell text. |
 
 Terraform's JSON syntax takes the same approach: in a plain data format, a string is a template, a
@@ -1064,8 +1068,11 @@ The row's keys, their values, and their defaults are in
 directory, or more than one name, stops the load. `Resolver::edit` reads `kind`, `keep`, `set`,
 and `fill` together: `kind` comes with `keep`, `set`, or `fill`, and never without one of them,
 and the file name selects no format. `keep` paths and `set` keys are key paths, as in
-`[[mcp-servers]] key`. `sync` is refused beside any of them for now. An agent row with a link
-`mode` stops the load ([Tool storage](#tool-storage)).
+`[[mcp-servers]] key`. `sync` is refused beside any of them for now, and so is `exclude`, which
+names entries of a folder by file name. `exclude` also needs `sync = true`: only a `sync` update
+checks the copy against it on each run, so on a row without `sync` an `exclude` added after the
+first copy would leave the named file in the box with no line. An agent row with a link `mode` stops the load
+([Tool storage](#tool-storage)).
 
 An optional row whose source uses an environment-sourced input as a directory prefix first
 checks that root.
@@ -1092,8 +1099,31 @@ For each row, `box run` does this:
    - A link out of the source is followed if its target passes the step 2 checks.
    - `box` leaves out a link that fails the checks, a broken link, a link that loops back, a file
      it cannot read, and anything that is not a file or a folder.
-4. **Move it into place.** `box` builds the copy in the run directory, where no box can reach, then
-   moves it to the target. A row with `kind` copies one file: `box` parses it, keeps the `keep`
+   - `box` leaves out each entry, at any depth, whose name the row's `exclude` lists, before it
+     follows a link of that name. A name matches whole and without regard to case, because macOS
+     file systems usually ignore case, so `MCP.json` is read as `mcp.json`. `exclude` takes no
+     pattern, and a name with `*`, `?`, or `[` stops the load. The walk that a `sync` update makes
+     of the host is the same walk, so an entry that `exclude` names never comes in. A copy from an
+     earlier run that a later `exclude` names stays in storage, because `box` deletes nothing the
+     box may hold. Each run and `box profile show` name it in a `kept` line, not as gone from the
+     host, until the operator deletes it. A
+     source that is one file, with `exclude`, stops the run.
+4. **Check that nothing changed.** `box` notes each host file's device, inode, size, and
+   modification and change times when it plans the copy. It compares them when it opens the file,
+   and again for every file once the whole copy is made. A file that changed or went in that time
+   fails the copy, so a copy of a database and its journal comes from one moment. `box` then plans
+   the row again and tries again, three times in all. When the files still change, the run stops
+   with `Error::Unsettled`, which names the file, before the box starts. Going on without the copy
+   would let the agent make the target itself, and the copy would then never be made. This is a
+   check that the files held still, not a database snapshot: `box` reads no file's format. Only a
+   first copy makes it. A `sync` update keeps its device and inode check, so a run does not stop
+   each time the host agent writes a synced file, and a file written during an update is fixed
+   by the next one.
+5. **Move it into place.** `box` builds the copy in the run directory, where no box can reach. It
+   opens each folder on the way to the target's folder without following a link, makes a
+   missing folder inside the one it holds open, and moves the copy into the last one. A link on the
+   way stops the run. The move replaces nothing, so a target that appeared since step 1 is kept.
+   A row with `kind` copies one file: `box` parses it, keeps the `keep`
    paths, sets each `set` value, and writes the result.
 
 `box profile show` does steps 1 to 3 without copying anything. It lists each copy, each link it
@@ -1561,25 +1591,26 @@ wins over a `permit`. Box Core rejects duplicate `@id` values across authored an
 | A storage path escapes storage | Each storage directory name is one plain path component, and a copy's `target` starts with a declared storage directory, then plain names. |
 | A copy carries a credential into the box | Each pack names only the files its agent needs, and `box` copies only what a row names and does not judge what a file holds ([decisions.md](decisions.md#the-packs-decide-what-is-copied)). The one exception is a `reads` or `deny` path of a declared secret source. A copy row or a tool's link row whose source meets one, as written or real, stops the load. A link that a copy follows to one is left out ([What stays on the host](plugins.md#what-stays-on-the-host)). |
 | A copy reads what a box planted | A source, and each link that a copy follows, cannot reach the workspace, the run's storage, `~/.strands/box`, or a write grant, as written or real. `box`'s own packs in `~/.strands/box` are the exception, because a run cannot write them. |
-| A box redirects a later copy | A copy is built in the run directory, out of every box's reach. It never writes through a link above its target, and a target that exists, a link included, is left alone, except that a row with `set` rewrites its values and stops the run at a link or a hard link, and a row with `fill` adds what it lacks and leaves a link or a hard link alone ([copies](#copies)). |
-| A source file changes after the check | `box` copies a file only when the file it opens has the device and inode it planned. |
+| A box redirects a later copy | A copy is built in the run directory, out of every box's reach. `box` opens each folder on the way to the target without following a link, and moves the copy into the folder it holds open, so a folder that a box swaps for a link receives nothing. The move replaces nothing: a target that exists, a link included, is left alone, except that a row with `set` rewrites its values and stops the run at a link or a hard link, and a row with `fill` adds what it lacks and leaves a link or a hard link alone ([copies](#copies)). |
+| A source file changes after the check | A first copy takes a file only when the file it opens has the device, inode, size, and times it planned, and reaches storage only when every file still has them once the copy is made ([copies](#copies)). A `sync` update reads a file only when it has the device and inode it planned. |
 | The box rewrites what a later run trusts | The policy forbids writes, deletes, and moves in `~/.strands/box` except the run's own storage, and `box run` refuses a write grant there ([decisions.md](decisions.md#a-run-cannot-write-what-a-later-run-trusts)). |
-| A grant follows a link the box planted | A filesystem entry inside the workspace or storage that resolves through a link stops the run. |
+| A grant follows a link the box planted | A filesystem entry that resolves through a link stops the run when the link is inside a place a box can write: the workspace, the run's storage, `~/.strands/box`, or a write grant of the agent, a tool, or a stdio MCP server. `box` checks each entry after it fills in the profile, and it compares the real folder that holds the link. So a link above such a place is followed, such as `/tmp` on macOS or a home folder that is a link. |
 | A box plants an MCP configuration for a later run | A `[[mcp-servers]]` `file` that is, holds, or lies in the workspace, the run's storage, `~/.strands/box`, or a write grant, as written or real, is not read ([decisions.md](decisions.md#no-file-a-box-can-write-is-an-input)). |
 | A detected server runs what a box planted | A stdio server's program, its real file, its `#!` interpreter, and each full `PATH` directory must lie outside those places, or the server is skipped. A `[mcp.<name>]` table with no `type` counts as a write grant holder, so its `write` entries join the places checked. |
 | A stdio server finds a program a box planted through `PATH` | An entry of the operator's `PATH` that is not a full path (`.`, an empty part, or one that starts with `~`) finds programs in the workspace, where each server starts. It reaches no stdio server that inherits that `PATH`, whether `box` detects the server or the profile declares it. A table whose `env.PATH` the profile writes keeps it as written. |
 | A detected server's key reaches the agent | For a server declared from host settings, a remote key reaches `box.toml` only as `secret.ref = "env://<VAR>"`, and a header that holds a variable but is not exactly one, or a variable in its `url` other than a whole query value, prevents that declaration. A field `box` does not read, a plain header included, goes into no `box.toml` table ([decisions.md](decisions.md#a-detected-server-carries-no-credential)). A stdio server's key is a value in its own `[mcp.<name>] env`, which only its own sandbox gets ([decisions.md](decisions.md#a-local-servers-key-is-in-box-toml)). An imported entry that a final stdio declaration matches keeps no environment fields, and neither does an imported stdio entry whose `env` holds the operator's value of a variable that a `pass-secret-env` entry covers, or that sets such a variable. An imported stdio entry with that value in an argument, as written, keeps no `args`. Other entries keep their original fields in the agent's settings, including literal keys ([MCP import](decisions.md#mcp-import-does-not-require-generated-policy)). A profile table with no `type` gives a detected server no key ([MCP servers](profiles.md#mcp-servers)). |
 | A detected server carries a vault credential | A detected stdio server whose `references` or `variable-names` field reads a `pass-secret-env` variable of a declared source, a prefix entry included, is skipped, whether the variable is set or not. So is one whose `env` or arguments hold the operator's value of a variable that an entry covers, a prefix entry included, one whose `command`, `env`, or `variable-names` field reads a variable that a `secret.env` names for a key from a source, and a remote server whose key comes from one ([profiles.md](profiles.md#mcp-servers)). |
-| A detected server's `env` loads code or redirects the box | An `env` name that makes a program load code, or `PATH`, skips the server, and a name the box sets itself is dropped. A relative `HOME` or `TMPDIR` skips the server. A full path is copied, so a home in the workspace is one the agent reads and writes too. |
+| A detected server's `env` loads code or redirects the box | An `env` name that makes a program load code, or `PATH`, skips the server, and a name the box sets itself is dropped. A relative `HOME` or `TMPDIR` skips the server. A full path is copied, so a home in the workspace is one the agent reads and writes too. Any other `env` value with a path in it skips the server when the path starts with `./`, `../`, or a `~/` that `box` did not fill in, or is or lies in the workspace, the run's storage, `~/.strands/box`, or a write grant, as written or real, and so does a path list with a part that is not a full path. A value that opens as options do is no path list, and the report names its variable ([profiles.md](profiles.md#mcp-servers)). |
 | A box plants a settings file that picks a later profile's provider | A starter's `[[source]]` place in the current directory, `~/.strands/box`, or a write grant that detection can fill before the answers is not read, and a value can only pick a starter choice or fill an input that `pattern` or `values` bounds. A pack keeps a settings folder under any other grant read-only with `deny_write` ([detection](detection.md#what-detection-never-reads)). |
 | A host path reads as a template | `box` escapes each tool's real file before it fills in placeholders, so a path that holds `${{` stays literal. |
 
 The rows for secret sources are in [plugins.md](plugins.md#safety-rules).
 
-**Residual risk.** `box` checks storage for links by path, then creates each directory. A box of
-the same profile that is still running, in any workspace, can swap a storage directory for a link
-between the check and the run's start, and the same holds for the folder that receives a
-copy's rename. A fix opens each path part with `O_NOFOLLOW` and writes relative to the directory handle.
+**Residual risk.** `box` creates each storage directory, and moves each first copy, relative to a
+directory that it holds open, and it opens no link on the way. Box Core then takes each storage
+directory by path. A box of the same profile that is still running, in any workspace, can swap a
+storage directory for a link between that check and the run's start. `box` still makes a tool's
+link rows by path, so the same holds for the folder that receives a link.
 
 ## Box Core behavior that the packs follow
 

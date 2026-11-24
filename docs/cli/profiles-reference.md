@@ -1,8 +1,3 @@
----
-reader: Someone who writes or reads a profile, knows the key or table they want, and needs what it does and which file may hold it.
-belongs: A key or table that a profile writes, and the rules that profiles and packs share, such as placeholders, when, and the merge. A rarer task goes here too, under the key it uses. A key that only a pack writes goes to packs-reference.md, a task that most users need in their first month goes to profiles.md, and a fix after an error goes to troubleshooting.md.
----
-
 # Profile reference
 
 This page lists every key that a `profile.toml` can hold, and what each one does. Packs write many
@@ -21,6 +16,7 @@ writes. `packs`, `plugins`, `policies`, `agent-args`, and `file-attributes` go a
 
 | Key | What it does |
 | --- | --- |
+| `[requires]` | What the profile needs of the `box` that runs it, such as its oldest version. See [`[requires]`](#requires). |
 | `[profile] name` | The profile's name, for a profile file that you run by its path ([Run a profile file](cli.md#run-a-profile-file)). A profile in `~/.strands/box/profiles/` can leave it out, and if it sets it, it matches the folder name. |
 | `packs` | The packs to use, as a list of names, in [merge order](#merge-order). `@box/<name>` is a pack that ships with `box`, and a plain name is a folder in `~/.strands/box/packs/`. |
 | `plugins` | The [plugins](plugins.md) to use, as a list of names, such as `plugins = ["@box/1password"]`. `@box/<name>` is a plugin that ships with `box`, and a plain name is a folder in `~/.strands/box/plugins/`. |
@@ -246,8 +242,10 @@ element) or that starts with a path name, such as `${{ home }}` or a `program` i
 3. The result is an absolute path, or a path that starts with `~/` for your home directory, and it
    holds no `..`.
 
-`box` refuses a path that goes through a link inside your project or the run's storage, because
-the agent could change that link. An entry whose path does not exist stops the run, so mark an
+`box` refuses a path that goes through a link inside a folder the box can write, because the agent
+could change that link. Those folders are your project, the run's storage, `~/.strands/box`, and
+each folder that a `write` entry names. Name the real path instead. A link above such a folder is
+fine, such as `/tmp` on macOS. An entry whose path does not exist stops the run, so mark an
 entry that some machines lack `optional = true`.
 [Values](../design/cli/profile-language.md#values) says how `box` writes each value safely into
 the run's files.
@@ -286,6 +284,25 @@ placeholder in `when` that gives anything other than `true` or `false` is an err
 `box` applies `when` after the merge, so a table that drops out takes with it what every pack and
 your profile put there. A `when` on `[agent.env]` removes all of the agent's variables, for
 example.
+
+## `[requires]`
+
+`[requires]` says what a file needs of the `box` that reads it. A profile, a pack, and a plugin
+each can hold one, and `box` checks each file's own table when it reads the file, before the
+merge. When a requirement does not hold, `box` refuses the file and names it. `[requires]` only
+checks: it loads nothing, and it is not merged into the profile.
+
+```toml
+[requires]
+box = ">=0.3.0"
+```
+
+| Key | What it does |
+| --- | --- |
+| `box` | The oldest version of `box` that reads this file, as `>=X.Y.Z`. An older `box` refuses the file with `this pack needs box >=0.3.0, and this is box 0.2.3`. A preview build of `box`, such as `0.3.0-preview.1` or `0.3.0-linux-preview.1`, counts as its release, `0.3.0`. |
+
+`box` checks `box` first. So when a later `box` adds a requirement, an older `box` that reads it
+names the version to update to. A requirement that this `box` does not know is refused.
 
 ## Merge order
 
@@ -369,8 +386,8 @@ signs with the first credentials that the AWS SDK finds outside the box, in this
 4. The ECS or EKS container credentials endpoint.
 5. EC2 instance metadata.
 
-So on a cloud machine, `aws://` can sign as the machine's own role. The box prints a warning on
-each request it signs this way.
+So on a cloud machine, `aws://` can sign as the machine's own role. The box prints a
+[warning](../user/egress.md#credential-sources) about it.
 
 Neither form signs with an AWS SSO or `aws login` profile
 ([AWS credentials resolve to nothing](troubleshooting.md#aws-credentials-resolve-to-nothing)).

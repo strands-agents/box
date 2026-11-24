@@ -79,6 +79,27 @@ pub enum Error {
         reason: String,
     },
 
+    /// A host file of a `[[storage.files]]` copy changed, or went, while `box` copied it.
+    #[error("cannot copy {path} into storage: the file changed while box copied it")]
+    Changed {
+        /// The host file.
+        path: PathBuf,
+    },
+
+    /// A host file of a first `[[storage.files]]` copy changed on every try.
+    #[error(
+        "cannot copy {path} into storage: {file} changed each time box copied it ({tries} \
+         tries); stop the program that writes it, then start the run again"
+    )]
+    Unsettled {
+        /// The row's source.
+        path: PathBuf,
+        /// The host file that changed last.
+        file: PathBuf,
+        /// How many times `box` tried.
+        tries: u32,
+    },
+
     /// A `[[storage.files.set]]` row cannot rewrite the copy in storage.
     #[error("`{at}`: {reason}")]
     Set {
@@ -439,15 +460,6 @@ pub enum Error {
         id: String,
     },
 
-    /// `box clean` names no saved box.
-    #[error("no saved box {id} in {root}; pass a box ID from `box runs list`")]
-    BoxUnknown {
-        /// The box ID.
-        id: String,
-        /// The runs directory.
-        root: PathBuf,
-    },
-
     /// `box profile clean --box-id` names a box that the named profile does not own.
     #[error(
         "box {id} is not a box of profile {profile}; pass a box ID that `box runs list {profile}` shows"
@@ -498,13 +510,6 @@ pub enum Error {
         command: &'static str,
         /// The running box IDs, comma-separated.
         ids: String,
-    },
-
-    /// `box clean` names a box that is still running.
-    #[error("box {id} is still running; wait for it to exit, then run box clean again")]
-    BoxRunning {
-        /// The box ID.
-        id: String,
     },
 
     /// The operator did not answer yes to a removal.

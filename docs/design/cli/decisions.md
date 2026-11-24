@@ -15,7 +15,7 @@ pull request that changes what an entry says fixes that entry.
   - [Box Core helper programs stay beside `box`](#box-finds-box-core-at-an-explicit-path)
   - [The packs that `box` ships are separate resource files](#the-starters-are-files-beside-box)
   - [The command is `box`](#the-command-is-box)
-  - [The macOS `box` has its own identifier and signs through Box Core's setup](#box-signs-through-box-core)
+  - [The macOS `box` shares Box Core's identifier and signing setup](#box-signs-through-box-core)
   - [`box` supports macOS and Linux](#box-supports-macos-only)
   - [Packs and profiles are their own crate](#packs-and-profiles-are-their-own-crate)
 - **Profiles and packs**
@@ -171,38 +171,26 @@ does not install Box Core's own `box` binary.
 **Rejected.** The tried `~/.box` home is short, but collides with the Box.com CLI.
 
 **Cost.** Box Core's binary is also `box`. An operator who puts both on `PATH` runs the first
-one, and the CLI and its macOS identifier must stay distinct from Box Core's. See
-[the signing entry](#box-signs-through-box-core). The default home has no fallback: profiles and
-saved telemetry choices under the former home are not loaded.
+one. Both use [the same macOS signing identity](#box-signs-through-box-core). The default home
+has no fallback: profiles and saved telemetry choices under the former home are not loaded.
 
 <a id="box-signs-through-box-core"></a>
-### The macOS `box` has its own identifier and signs through Box Core's setup
+### The macOS `box` shares Box Core's identifier and signing setup
 
-`crates/cli/app/Info.plist` gives `box` the identifier `com.amazon.strands.box-cli`, and the two
-helpers keep Box Core's `com.amazon.strands.box`. For ordinary packages,
-`scripts/macos-release-cli.py` signs all three in one request for Box Core's application, with
-Box Core's AWS role and notarization credential. The reusable `CLI release` workflow runs it, and
-`Release Box` calls that workflow, so one release publishes both Box Core and `box`. The signing
-service signs each program with the identifier in its plist. macOS does not treat the CLI and Box Core's `box` as one program, for example in the
-access list of a keychain item.
+The CLI and its helpers use Box Core's `com.amazon.strands.box` macOS identifier and share its
+signing role and notarization credential. A signed experimental native app uses the matching
+Developer ID profile with Endpoint Security authorization. The reusable `CLI release` workflow
+runs inside `Release Box`, so one release publishes both Box Core and `box`.
 
-A signed experimental native package keeps that identity separation and shared service setup.
-It signs the helpers first, then signs a CLI app bundle with a separate distribution profile
-for `com.amazon.strands.box-cli`. The profile must authorize Endpoint Security, Apple's API for
-authorizing file operations. `CD_SIGNER_CLI_PROFILE_NAME` selects it. A missing or mismatched
-profile stops signing; configuring it and granting access remain administrator actions.
+**Rejected.** The tried separate CLI identifier lets macOS access rules distinguish the CLI from
+Box Core, but adds separate registration and native capability provisioning for the same product.
+A separate signing role: the shared service already signs both packages.
 
-**Rejected.** Box Core's identifier for the CLI: macOS would treat the CLI and Box Core's `box` as
-one program.
-A separate service role for ordinary CLI signing: the shared setup already signs that package.
-Reusing the Core application profile for native CLI signing: its application identifier does
-not authorize the CLI.
-
-**Cost.** Two maintainers, one to start a run and one to approve it, can produce a program that
-is signed and notarized under the configured Apple team.
-Box Core and `box` use one AWS role and one bucket, under `box-release/`, and one change to the
-notarization secret changes the credential for both. Native CLI signing also needs an authorized
-CLI distribution profile. Local script tests do not establish that this permission is granted.
+**Cost.** Box Core and the CLI trust the same signing role and notarization credential. For
+operator consequences and older-release support, see
+[macOS upgrades and permissions](../../cli/install.md#upgrade-or-choose-a-version).
+Sharing the identifier does not prove native enforcement; the signed package must pass the
+protected macOS validation run.
 
 <a id="box-supports-macos-only"></a>
 ### `box` supports macOS and Linux
@@ -226,7 +214,7 @@ parses a profile and its packs, resolves them against a host, and compiles `box.
 `policy.dw`. `crates/cli/app` owns the operator: the commands, `box run` and its terminal, starters,
 `create`, `detect`, Box Core's policy check, and the call into Box Core. The profile crate names
 no CLI module, and the CLI passes in what only it knows, such as its version for a pack's
-`engine` floor (`Lookup::version`). This follows Box Core, whose `strands-box-policy` owns
+`[requires] box` floor (`Lookup::version`). This follows Box Core, whose `strands-box-policy` owns
 Dogwood end to end. Both crates link `strands-box`, because a tool grammar and a read grant are
 Box Core's rules, and the profile crate asks Box Core instead of copying them. The modules moved
 whole, so git follows each file to its new path, and the CLI imports each one it names at its old
@@ -915,7 +903,7 @@ placeholder that the gateway swaps, as for a remote server: a local server names
 each server would need a route first.
 
 **Cost.** The key stays in `~/.strands/box/r/<run>/box.toml`, which the agent cannot read, until
-`box clean`. The agent can plant files in the workspace, or under a `HOME` that lies in
+`box profile clean`. The agent can plant files in the workspace, or under a `HOME` that lies in
 it, that the server reads or loads at start, and so get the key.
 
 <a id="a-detected-server-reads-its-install-directory"></a>
@@ -1234,7 +1222,7 @@ entry with no secret.
 SDK default credential chain, so the box carries the host's ambient identity from the environment, a
 static-keys profile, a web identity, the container endpoint, or instance metadata. The "Next" list
 that `box profile create` prints names an `[egress.<name>]` route that signs this way, and Box Core
-warns on each request for any site that uses the bare form. `box` adds no refusal over `~/.aws`.
+warns once at startup for any site that uses the bare form. `box` adds no refusal over `~/.aws`.
 
 A bare `aws://` reads the same AWS configuration, and runs the same `credential_process` in Box
 Core's trusted process, as the `aws://<profile>` form that `box` already accepts. So a bare route
@@ -1246,7 +1234,7 @@ stays refused. A policy rule does not enter into it: Box Core enforces `[agent.f
 and this floor in the OS, below policy.
 
 **Rejected.** Refuse the bare form, and make the operator write `aws://<profile>`. A named profile
-is a narrower identity, but Box Core supports and discloses the bare form and warns on each request,
+is a narrower identity, but Box Core supports and discloses the bare form and warns once at startup,
 so refusing it blocks an operator whose host identity is an instance role, a container endpoint, or
 a web identity, which no profile file holds.
 
@@ -1265,8 +1253,8 @@ can be wider than a named profile and which the operator cannot narrow in the pr
 floor stops a box from writing the default credential paths, but not a config file that
 `AWS_CONFIG_FILE` or `AWS_SHARED_CREDENTIALS_FILE` moves elsewhere, nor a store the operator names
 exactly; keeping those out of a write grant is the invoker's. A route that an operator adds by
-editing `profile.toml`, or that a pack adds after create, is disclosed only by Box Core's warning on
-each signed request, not by the create "Next" list. The shipped Bedrock packs sign with a bare
+editing `profile.toml`, or that a pack adds after create, is disclosed only by Box Core's startup
+warning, not by the create "Next" list. The shipped Bedrock packs sign with a bare
 route by default, so on a cloud machine a Bedrock profile signs as the machine's own role unless the
 operator picks a key.
 
@@ -1303,7 +1291,7 @@ timing.
 
 **Cost.** A run without `--box-id` starts each `when temporal` rule empty. A reused box carries its
 history to every workspace: a limit counts all of them, and a gate opened in one stays open in the
-next. A rule that names a path sees only events at that path. `box clean` removes kept boxes too.
+next. A rule that names a path sees only events at that path. `box profile clean` removes kept boxes too.
 
 <a id="box-core-uses-the-box-id"></a>
 ### Box Core uses the box ID that `box` mints
@@ -1422,8 +1410,8 @@ could interrupt the agent. Restart the agent without a banner: Box Core allows o
 to start a run in each `box` process.
 
 **Cost.** A crash or a failure to start the banner disables it for the rest of the run.
-A stuck update can leave the banner frozen. `box` shows saved messages after it restores the
-terminal and keeps only the first 32 KiB. Temporary output delays do not stop the agent.
+A stuck update can leave the banner frozen. `box` shows recent errors after it restores the
+terminal. Temporary output delays do not stop the agent.
 Final output waits are limited so a blocked terminal cannot hold up normal shutdown indefinitely.
 A disconnected terminal still stops the run.
 
@@ -1558,9 +1546,8 @@ process can then read FSEvents, which discloses names of paths it cannot read
 because the disclosure reaches past the process's own grants.
 
 **Cost.** A pack that sets the key discloses names for its program in every profile that names
-the pack, and the profile does not say so. Box Core's startup line does, but a run in a terminal
-shows it only when the run fails, as for `file-attributes`. Otherwise the operator sees the key
-only in `box profile show --full`.
+the pack, and the profile does not say so. The operator can see the key in `box profile show --full`
+or read Box Core's startup line in the terminal run's [log](../../cli/files.md#profile-storage-and-runs).
 
 <a id="only-a-profile-turns-off-a-tools-network-containment"></a>
 ### Only a profile turns off a tool's network containment
@@ -1888,17 +1875,16 @@ that the source answers.
 <a id="removing-state-never-starts-a-box"></a>
 ### A command that removes state never also starts a box
 
-`box clean <BOX_ID>` removes one run directory, and `box clean --all` removes every run
-directory whose box is not running. Neither starts a box or takes a profile. A running box keeps
-its run directory, because its configuration and records are in it. `box clean <BOX_ID>` refuses a
-running box before it asks. `--all` keeps each running box and names it.
+No command that removes boxes also starts one. A running box keeps its run directory, because its
+configuration and records are in it. Which boxes each command removes, and how it refuses a running
+box, is in [the removal commands](#reset-with-no-name-removes-every-profile).
 
 **Rejected.** `box run --clean-up claude`, which cleaned up and then ran: tried first. One command
 that removes old boxes and starts a new one reads as two commands. `box run --clean-up
 [--box-id <BOX_ID>]`: tried next. A flag on `run` reads as a way to run, and it removed running
 boxes.
 
-**Cost.** `box clean` cannot stop a box, so the operator exits it first. A box counts as running
+**Cost.** `box profile clean` cannot stop a box, so the operator exits it first. A box counts as running
 while its `box run` process lives, so an agent that outlives a killed `box run` is not kept.
 
 <a id="reset-with-no-name-removes-every-profile"></a>
@@ -1923,19 +1909,23 @@ folder, so an entry there that is not a profile goes too.
 <a id="box-asks-only-at-a-terminal"></a>
 ### A starter answers from the host first, and `box` asks only at a terminal
 
-A starter first answers what the agent's host settings decide, at a terminal and without one
-([detection](detection.md)). `box` then asks only when stdin and stderr are terminals. With no
-terminal, `box profile reset` and `box clean` refuse unless the operator gives
+A starter first answers what the agent's host settings decide ([detection](detection.md)). `box`
+then asks only when stdin and stderr are terminals. At a terminal it still asks each question that
+detection answered, with the detected choice as the preset, because detection reads no key, so a
+choice whose only sign is a key, such as the Anthropic API or a Claude subscription, has no
+`detect`. With no
+terminal, `box profile reset` and `box profile clean` refuse unless the operator gives
 `--no-ask`, and a starter takes defaults or stops with the flag that answers
 ([starters](starters.md#without-a-terminal)). The policy question has no default there, so it
 stops `box` until `--policy` answers it. A profile that runs the agent the way the host runs
 it is worth more than one script writing the same profile on every machine.
 
 **Rejected.** Remove without asking when there is no terminal: a script could then delete a
-profile by accident. Detection only as the prompt's default: the operator would confirm each
-detected answer at a terminal, but a script would then get a different profile than a terminal on
-the same host. Earlier this entry rejected a starter that answers before it asks, because only a
-prompt could name a provider; a starter's choices now name it.
+profile by accident. Skip a question that detection answered at a terminal: a Bedrock setting
+then hid the API-key choices, and only Review showed what was picked. Detection only as the
+prompt's default, with no answer without a terminal: a script would then get a different profile
+than Enter at a terminal on the same host. Earlier this entry rejected a starter that answers
+before it asks, because only a prompt could name a provider; a starter's choices now name it.
 
 **Cost.** One script writes different profiles on two hosts whose agent settings differ, and no
 one confirms the detected answers. A script that removes state passes `--no-ask`, and a script

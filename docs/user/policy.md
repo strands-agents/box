@@ -1,4 +1,4 @@
-# Policy
+# Policy language
 
 A policy is the `policy.dw` file of `permit` and `forbid` rules that decides each request the
 workload makes through the box's trusted process (the part of Box that runs outside the box and
@@ -112,7 +112,7 @@ Three refusals look like a denial, and no `permit` lifts them:
 
 ## The actions
 
-The box ships ten actions in four categories, and generates one more for each MCP tool it
+The box ships eleven actions in four categories, and generates one more for each MCP tool it
 discovers. Each experimental [tool grammar](config.md#toolnamegrammar) adds its own `Tool::<name>`
 actions. [The action vocabulary](policy/actions.md) lists the fields of each one.
 
@@ -120,7 +120,8 @@ actions. [The action vocabulary](policy/actions.md) lists the fields of each one
   `fs:read`, `fs:write`, `fs:delete`, `fs:move`, and the reserved `fs:other`.
 - **[Network](policy/actions.md#network)**: an outbound call through the egress gateway. Each call
   is two decisions: `net:connect` for the connection, before TLS, and `http:request` for each
-  request inside it, after TLS on an HTTPS connection.
+  request inside it, after TLS on an HTTPS connection. A WebSocket handshake is
+  `websocket:connect` in place of `http:request`.
 - **[Shell](policy/actions.md#shell)**: a command line in Strands Shell, judged once after the
   shell resolves its first word to a program. `shell:exec` for a program the shell implements, such
   as `cat` or `grep`, and `shell:spawn` for a program of the surrounding OS, such as `git`, and for

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -20,6 +21,7 @@ class NativeSigningWorkflow(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.capture = self.root / "calls.jsonl"
+        self.profiles = self.root / "profiles.jsonl"
         self.tools = self.root / "tools"
         self.tools.mkdir()
         self.runner = self.root / "runner"
@@ -35,6 +37,8 @@ class NativeSigningWorkflow(unittest.TestCase):
 import json, os, pathlib, sys
 with pathlib.Path({str(self.capture)!r}).open("a") as output:
     print(json.dumps(sys.argv[1:]), file=output)
+with pathlib.Path({str(self.profiles)!r}).open("a") as output:
+    print(json.dumps(os.environ.get("CD_SIGNER_PROFILE_NAME")), file=output)
 if sys.argv[1] == "scripts/install-native-macos-package.py":
     if os.environ.get("TEST_INSTALL_FAILURE"): sys.exit(7)
     print("/var/tmp/installed-native/release")
@@ -50,7 +54,7 @@ if sys.argv[1] == "scripts/install-native-macos-package.py":
                        if "        env:" in experimental.workflow_step(step) else os.environ.copy())
         environment.update(
             PATH=f"{self.tools}:{os.environ['PATH']}", RUNNER_TEMP=str(self.runner),
-            CD_SIGNER_CLI_PROFILE_NAME="Box CLI distribution", NOTARY_CREDENTIAL_SECRET="test-reference")
+            CD_SIGNER_PROFILE_NAME="Box CLI distribution", NOTARY_CREDENTIAL_SECRET="test-reference")
         environment.update(extra_environment or {})
         command = release_source.workflow_command(step)
         if prefix:
@@ -72,11 +76,60 @@ if sys.argv[1] == "scripts/install-native-macos-package.py":
                 if not succeeds:
                     self.assertIn("requires", result.stderr)
 
-    def test_native_signing_requires_a_named_cli_profile(self):
+    def workflow_value(self, job, section, key, context):
+        lines = release_source.CLI_WORKFLOW.read_text().splitlines()
+        start = lines.index(f"  {job}:") + 1
+        end = next((i for i in range(start, len(lines))
+                    if re.match(r"^  [a-z][a-z-]*:$", lines[i])), len(lines))
+        block = lines[start:end]
+        start = block.index(f"    {section}:") + 1
+        end = next((i for i in range(start, len(block))
+                    if block[i].startswith("    ") and not block[i].startswith("      ")), len(block))
+        value = next(line.removeprefix(f"      {key}: ") for line in block[start:end]
+                     if line.startswith(f"      {key}: "))
+        match = re.fullmatch(r"\$\{\{\s*([^{}]+?)\s*\}\}", value)
+        self.assertIsNotNone(match, value)
+        return context.get(match[1].strip(), "")
+
+    def assert_profile_reaches_signing_and_verification(self, context):
+        expected = context["vars.CD_SIGNER_PROFILE_NAME"]
+        signing = self.workflow_value("sign-macos", "env", "CD_SIGNER_PROFILE_NAME", context)
+        result, _ = self.execute("Check native signing configuration",
+                                 extra_environment={"CD_SIGNER_PROFILE_NAME": signing})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result, _ = self.execute("Sign and notarize the executables",
+                                 extra_environment={"CD_SIGNER_PROFILE_NAME": signing})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(self.profiles.read_text().splitlines()[-1]), expected)
+        context = {"needs.sign-macos.outputs.cli_profile_name":
+                   self.workflow_value("sign-macos", "outputs", "cli_profile_name", context)}
+        verification = self.workflow_value("verify-macos", "env", "CD_SIGNER_PROFILE_NAME", context)
+        (self.root / "signed").mkdir()
+        with tarfile.open(self.root / "signed/box-cli-v0.2.1-aarch64-apple-darwin.tar.gz", "w:gz"):
+            pass
+        result, _ = self.execute("Verify the package and run a box with it",
+                                 prefix='"$package/box" --version',
+                                 extra_environment={"CD_SIGNER_PROFILE_NAME": verification})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(self.profiles.read_text().splitlines()[-1]), expected)
+
+    def test_shared_profile_setting_reaches_signing_and_verification(self):
+        self.assert_profile_reaches_signing_and_verification(
+            {"vars.CD_SIGNER_PROFILE_NAME": "Shared Box distribution"})
+
+    def test_legacy_profile_setting_cannot_override_the_shared_profile(self):
+        self.assert_profile_reaches_signing_and_verification(
+            {"vars.CD_SIGNER_PROFILE_NAME": "Shared Box distribution",
+             "vars.CD_SIGNER_CLI_PROFILE_NAME": "Different legacy CLI profile"})
+
+    def test_native_signing_requires_the_shared_profile_even_with_a_legacy_setting(self):
+        profile = self.workflow_value("sign-macos", "env", "CD_SIGNER_PROFILE_NAME",
+                                      {"vars.CD_SIGNER_PROFILE_NAME": "",
+                                       "vars.CD_SIGNER_CLI_PROFILE_NAME": "Legacy CLI profile"})
         result, calls = self.execute("Check native signing configuration",
-                                     extra_environment={"CD_SIGNER_CLI_PROFILE_NAME": ""})
+                                     extra_environment={"CD_SIGNER_PROFILE_NAME": profile})
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("CD_SIGNER_CLI_PROFILE_NAME", result.stderr + result.stdout)
+        self.assertIn("CD_SIGNER_PROFILE_NAME", result.stderr + result.stdout)
         self.assertEqual(calls, [])
 
     def test_native_signing_passes_the_archive_bound_build_record(self):

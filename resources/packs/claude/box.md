@@ -74,6 +74,19 @@ or egress routes), the user starts a new run.
   destinations = ["docs.rs"]
   ```
 
+  A route takes effect in a new run. To reach the host in this session, the user adds these two
+  permits to a policy file that `policies` lists, and presses Ctrl+Alt+R:
+
+  ```text
+  @id("docs_connect")
+  permit (principal, action == Box::Action::"net:connect", resource)
+  when { context.input.host == "docs.rs" && context.input.port == 443 };
+
+  @id("docs_request")
+  permit (principal, action == Box::Action::"http:request", resource)
+  when { context.input.host == "docs.rs" };
+  ```
+
 - Send a token from the user's shell to one host (they export `GITHUB_TOKEN` before `box run`):
 
   ```toml

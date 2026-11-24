@@ -250,7 +250,7 @@ reply's `output.status`, so a temporal rule can count server errors; a rule cann
 reply's size.
 
 **Four** enforcement points read the same authority, and each sees the actions it can enforce. The
-egress gateway decides `net:connect` and `http:request`. The Strands Shell decides `shell:exec`,
+egress gateway decides `net:connect`, `http:request`, and `websocket:connect`. The Strands Shell decides `shell:exec`,
 `shell:spawn`, and `fs:*`. The Python interpreter decides `fs:*`. The local MCP broker decides
 `mcp:call` and generated tool refinements. All four are adapters over the one `PolicyEngine` the
 trusted `run` process holds for that box, so they share one decision history.
@@ -434,8 +434,9 @@ credentials, and the signed leg strips whatever it signed with before signing ag
 profile: its static keys, `credential_process`, assume-role, or web identity. It never reads the
 ambient `AWS_*` keys or instance metadata, and a missing profile is refused rather than signing as
 the ambient identity. A bare `aws://` resolves the default chain under the host's ambient identity,
-and the box warns on every signed request. AWS SSO and `aws login` profiles are refused (the `sso` provider is
-compiled out), and the refusal names the missing provider.
+with a warning ([credential sources](../../docs/user/egress.md#credential-sources)). AWS SSO and
+`aws login` profiles are refused (the `sso` provider is compiled out), and the refusal names the
+missing provider.
 
 Because either form reads `credential_process`, which the trusted process runs outside containment,
 an `aws://` route is a remote-code-execution path when the workload can write `~/.aws`; the shipped
@@ -664,6 +665,57 @@ permits exec on the literals the box granted, so a longer `PATH` advertises noth
 run. `a_declared_home_and_path_win_beneath_cores_names` pins the order.
 
 `TERM`, `TMPDIR`, `LANG`, and `TZ` are the operator's to set, in `env`.
+
+## Use Box as a Rust library
+
+Link the `strands-box` package in `crates/box`, then call:
+
+```rust,no_run
+let exit_code = strands_box::run("/absolute/box.toml".into(), Vec::new(), Default::default());
+```
+
+This runs the existing Box command in the calling process and waits until it finishes.
+By default, it uses the process's terminal and returns its exit
+code. The second argument appends arguments to `[agent] command`.
+Use `RunOptions::terminal` to supply the workload's terminal and `RunOptions::on_ready`
+to start host threads after hardening and signal registration, before workload setup.
+Use `RunOptions::policy_decisions` to receive each policy decision in memory as the box makes it
+(see [Policy decisions for a library caller](#policy-decisions-for-a-library-caller)).
+Use `RunOptions::box_id` to give a new box your own ID, such as
+`my-app-3f9a1c0e7b2d4a6f`: a prefix of 1 to 15 letters, digits, `.`, `_`, or `-`, then `-` and 16
+lowercase hexadecimal digits. Box stores it, prints it, and labels telemetry with it. A box that
+already has an ID refuses a different one. Without `box_id`, Box generates `box-` and 16
+hexadecimal digits.
+Call it before starting application threads or loading secrets, and use one Box workload
+per host process. Later `run` calls fail, even if the first call failed, unless `run` refused a
+malformed `box_id`.
+Ship the matching Box helper binaries beside the host application.
+
+To replace the running box's policy from a host thread:
+
+```rust,no_run
+strands_box::reload(&[strands_box::Policy {
+    origin: "policy.dw".into(),
+    text: new_policy_text,
+}])?;
+```
+
+`reload` waits until the change takes effect. Invalid policy returns `ReloadRefused` and leaves
+the current policy in place. An empty list denies all policy requests. Policy files and the
+OS sandbox stay unchanged. A box must be open; `on_ready` runs too early.
+Use `ReloadRefused::is_not_running()` to distinguish that case from a rejected policy.
+A rule for an MCP tool can reload only after Box loads that server's tool definitions.
+Without them, even reloading the unchanged policy is refused. If policy blocks discovery,
+waiting will not help. The current policy stays in place.
+
+To generate policy schemas:
+
+```rust,no_run
+let exit_code = strands_box::generate_policy_schema(
+    "/absolute/box.toml".into(),
+    "/absolute/schemas".into(),
+);
+```
 
 ## Policy decisions for a library caller
 

@@ -211,14 +211,18 @@ compiled out to keep the dependency surface small). Such a profile, named or def
 and the refusal names the missing provider. If your identity is SSO, log in with a tool that writes
 static or session keys to `~/.aws/credentials`.
 
-Because a bare `aws://` signs with whatever identity the host carries, the box prints a warning on
-**every** request it signs that way:
+Because a bare `aws://` signs with whatever identity the host carries, the box prints a warning in
+the startup disclosure, once for each destination that signs this way:
 
 ```
-strands-box credentials [<tenant>]: signing with the host's ambient AWS identity: a bare aws://
-resolved the default credential provider chain. Name a scoped profile (aws://PROFILE) to pin which
-identity signs, and grant the workload no write access to ~/.aws
+strands-box: warning: aws:// for bedrock-runtime.us-west-2.amazonaws.com signs with this machine's AWS identity
 ```
+
+The line names the destination as the route writes it, so a box with two such destinations prints
+two lines.
+
+Each request it signs that way still gets its own audit record. To pin which identity signs, name a
+profile with `aws://PROFILE`, and grant the workload no write access to `~/.aws`.
 
 Naming a profile with `aws://PROFILE` pins *which* identity signs and does not warn. The shipped box
 has no setting that refuses a bare `aws://` outright. It always signs with a warning. So a
@@ -401,6 +405,21 @@ re-routes to one:
 
 A 502 with no `x-strands-box-egress` header answers a `CONNECT`, or a plain `http://` request, that
 the gateway couldn't resolve or connect to. Any other 502 without the header comes from the server.
+
+A WebSocket needs `wss://`, so it rides a `CONNECT`. The handshake is decided as
+[`websocket:connect`](policy/actions.md#network), and the gateway adds the credential to it and
+redacts the credential in the `101`, as for any request. After the `101`, the gateway copies bytes
+both ways, unchanged, and asks policy nothing more. It doesn't redact a credential in a WebSocket
+message. The handshake can be refused:
+
+| Response | Cause |
+|---|---|
+| 400 `malformed WebSocket handshake` | The handshake isn't an HTTP/1.1 `GET` with `Connection: upgrade`, `Sec-WebSocket-Version: 13`, one `Sec-WebSocket-Key`, and no body. |
+| 403 `WebSocket requires TLS` | A plain `ws://` handshake, including to a host in `upgrade_http`. |
+| 403 `WebSocket refused for an MCP server` | The handshake went to an HTTP MCP server's host. |
+| 502 | The server's `101` doesn't name `websocket` as its `Upgrade`, or doesn't carry the `Sec-WebSocket-Accept` for the handshake's key. A reply other than `101` that has no `Content-Length` and isn't chunked also gets 502. |
+
+The gateway ends both connections, with no Close frame, when no byte moves for 300 seconds.
 
 Responses arrive progressively, including on credentialed routes. Credential redaction retains a
 short tail until more bytes arrive or the response completes cleanly. Requests and HTTP MCP

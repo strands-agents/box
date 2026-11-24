@@ -173,6 +173,14 @@ fallback. A name with a `/` is that path, relative to the Shell's working direct
 will run, and the program gets the agent's spelling as its `argv[0]`. See [a bare name runs its tool's
 file](decisions.md#a-host-binary-resolves-on-the-operator-path).
 
+The program reads the stdin of the command that runs it. Box's trusted process copies that input
+into a pipe to the program's sandbox while the program runs. When the program exits, Box drops the
+input it didn't read. Strands Shell keeps a command's input once it hands the command to Box, so the
+commands after the program read no input either way, and dropping the rest loses nothing. A
+command whose input is already at its end, or closed, gives the program `/dev/null`, because a
+tool chooses what to read by the kind of stdin it holds. The program's output comes back whole
+when it exits, and the Shell writes it to the command's own output.
+
 Use `context.input.program_path` to allow a program by its resolved file, which reads as `~/…` under
 the operator's home, as a path does. `program` and the argument fields work as they do for
 `shell:exec`, so a rule can refuse one subcommand.

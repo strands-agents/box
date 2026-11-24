@@ -138,6 +138,8 @@ pub struct Update {
     pub(crate) adopted: Vec<String>,
     /// Files `box` copied before that the host no longer has, kept as the box left them.
     pub(crate) gone: Vec<String>,
+    /// Files `box` copied before that the row's `exclude` now names, kept as the box left them.
+    pub(crate) excluded: Vec<String>,
     /// Files `box` could not update, with the reason.
     pub(crate) blocked: Vec<(String, String)>,
     /// Each link or entry on the host that the copy leaves out, as `(host path, reason)`.
@@ -171,6 +173,13 @@ impl Update {
             lines.push(format!(
                 "kept {}, which {source} no longer has",
                 self.gone.join(", ")
+            ));
+        }
+        if !self.excluded.is_empty() {
+            lines.push(format!(
+                "kept {} from an earlier copy, which the row's `exclude` now names; delete it in \
+                 storage to take it out of the box",
+                self.excluded.join(", ")
             ));
         }
         lines.extend(
@@ -209,6 +218,12 @@ impl Update {
             parts.push(format!(
                 "keeps {}, which the host no longer has",
                 self.gone.join(", ")
+            ));
+        }
+        if !self.excluded.is_empty() {
+            parts.push(format!(
+                "keeps {} from an earlier copy, which the row's `exclude` now names",
+                self.excluded.join(", ")
             ));
         }
         parts.extend(
@@ -583,13 +598,39 @@ pub fn update(
         }
         update.record.insert(key, now);
     }
-    update.gone = last
+    // A key the walk did not see because `exclude` names a part of it is still on the host, so
+    // it is not gone. The copy in storage stays: `box` deletes nothing the box may hold. The
+    // record keeps the key while the copy is there, so each run and `box profile show` name it
+    // until the operator deletes it.
+    let unseen = last
         .into_iter()
-        .flat_map(BTreeMap::keys)
-        .filter(|key| !seen.contains(key))
-        .map(|key| shown(key))
-        .collect();
+        .flatten()
+        .filter(|(key, _)| !seen.contains(key));
+    for (key, recorded) in unseen {
+        if !excluded_by(file, key) {
+            update.gone.push(shown(key));
+            continue;
+        }
+        let path = names(Path::new(&file.relative))
+            .into_iter()
+            .chain(names(Path::new(key.as_str())))
+            .flatten()
+            .collect::<Vec<_>>();
+        if read_copy(&mut folders, &path, &[])? != Copy::Missing {
+            update.excluded.push(shown(key));
+            update.record.insert(key.clone(), recorded.clone());
+        }
+    }
     Ok(update)
+}
+
+/// Whether the row's `exclude` names a part of `key`, a `/`-separated path in the copy. A name
+/// matches without regard to case, as the walk matches it.
+fn excluded_by(file: &StorageFile, key: &str) -> bool {
+    key.split('/').any(|part| {
+        let part = part.to_lowercase();
+        file.exclude.iter().any(|name| name.to_lowercase() == part)
+    })
 }
 
 /// How long a run waits for another run of the profile to finish updating its copies.
@@ -666,19 +707,27 @@ pub(crate) fn copy_files_waiting(
             record.set(&file.relative, update.record);
             continue;
         }
-        match copy_state(file, storage)? {
+        let state = match copy_state(file, storage)? {
             State::WillCopy(plan) => {
-                let made =
-                    storage_files::copy(file, &plan, &run.join(format!("copy-{index}")), base)?;
-                not_copied.extend(
-                    plan.skipped
-                        .iter()
-                        .map(|(path, why)| (tilde(home, &file.source.join(path)), why.clone())),
-                );
-                if file.sync {
-                    record.set(&file.relative, first_record(made));
+                let staging = run.join(format!("copy-{index}"));
+                let copy = |plan: &_| storage_files::copy(file, plan, &staging, base);
+                match first_copy(file, plan, storage, copy)? {
+                    FirstCopy::Made(plan, made) => {
+                        not_copied.extend(plan.skipped.iter().map(|(path, why)| {
+                            (tilde(home, &file.source.join(path)), why.clone())
+                        }));
+                        if file.sync {
+                            record.set(&file.relative, first_record(made));
+                        }
+                        continue;
+                    }
+                    FirstCopy::Now(state) => state,
                 }
             }
+            state => state,
+        };
+        match state {
+            State::WillCopy(_) | State::NothingKept => {}
             State::InStorage => storage_files::rewrite(file)?,
             State::Fill { text, .. } => {
                 if let Some(why) = storage_files::fill(file, &text)? {
@@ -686,15 +735,60 @@ pub(crate) fn copy_files_waiting(
                 }
             }
             State::Absent => {
-                storage_files::create(file, &run.join(format!("copy-{index}")), home)?;
+                storage_files::create(file, &run.join(format!("copy-{index}")), base)?;
             }
-            State::NothingKept => {}
         }
     }
     if record != before {
         save(&storage.root, &record)?;
     }
     Ok(copied)
+}
+
+/// How many times a run tries the first copy of a row whose host files change while `box` copies
+/// them.
+pub const COPY_TRIES: u32 = 3;
+
+/// What the first copy of a row did.
+enum FirstCopy {
+    /// The copy reached storage, as the last plan states.
+    Made(storage_files::Plan, Vec<(PathBuf, Entry)>),
+    /// A new plan after a change copies nothing: the source went, or the target is there. The
+    /// state is never [`State::WillCopy`].
+    Now(State),
+}
+
+/// Copy `file` as `plan` states with `copy`. When a host file changes during the copy, plan it
+/// again and try again, up to [`COPY_TRIES`] times in all. When it changes on every try, the run
+/// stops, so that the agent never starts without the copy and makes the target itself.
+fn first_copy(
+    file: &StorageFile,
+    mut plan: storage_files::Plan,
+    storage: &Storage,
+    mut copy: impl FnMut(&storage_files::Plan) -> Result<Vec<(PathBuf, Entry)>, Error>,
+) -> Result<FirstCopy, Error> {
+    let mut tries = 1;
+    loop {
+        match copy(&plan) {
+            Ok(made) => return Ok(FirstCopy::Made(plan, made)),
+            Err(Error::Changed { path }) if tries >= COPY_TRIES => {
+                return Err(Error::Unsettled {
+                    path: file.source.clone(),
+                    file: path,
+                    tries,
+                });
+            }
+            Err(Error::Changed { .. }) => {
+                std::thread::sleep(Duration::from_millis(100 * u64::from(tries)));
+                tries += 1;
+                match copy_state(file, storage)? {
+                    State::WillCopy(next) => plan = next,
+                    state => return Ok(FirstCopy::Now(state)),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Clear what an earlier link row left at a tool copy row's target, or at a folder above it in the
@@ -817,6 +911,7 @@ mod tests {
                 at: "storage.files[0]".into(),
                 edit: None,
                 sync,
+                exclude: Vec::new(),
             }
         }
 
@@ -886,6 +981,91 @@ mod tests {
         assert!(fixture.run(&file).synced.is_empty());
     }
 
+    fn planned(fixture: &Fixture, file: &StorageFile) -> storage_files::Plan {
+        match copy_state(file, &fixture.storage(file)).expect("a state") {
+            State::WillCopy(plan) => plan,
+            other => panic!("a copy, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_first_copy_that_the_host_changes_is_planned_and_made_again() {
+        let fixture = Fixture::new();
+        let database = fixture.write(".kiro/memories/memories.db", "db 1");
+        let file = fixture.row(".kiro/memories", "config/memories", false);
+        let storage = fixture.storage(&file);
+        let staging = fixture.home.join(".strands/box/r/r/copy-0");
+        std::fs::create_dir_all(staging.parent().expect("a parent")).expect("a run folder");
+        let mut tries = 0;
+        let outcome = first_copy(&file, planned(&fixture, &file), &storage, |plan| {
+            tries += 1;
+            if tries == 1 {
+                std::fs::write(&database, "db 1, and a page").expect("a write");
+            }
+            storage_files::copy(&file, plan, &staging, &fixture.home)
+        })
+        .expect("a copy");
+        assert!(matches!(outcome, FirstCopy::Made(..)));
+        assert_eq!(tries, 2);
+        assert_eq!(
+            fixture.read("config/memories/memories.db"),
+            "db 1, and a page"
+        );
+    }
+
+    #[test]
+    fn a_first_copy_that_changes_on_every_try_stops_the_run_with_no_copy() {
+        let fixture = Fixture::new();
+        let database = fixture.write(".kiro/memories/memories.db", "db");
+        let file = fixture.row(".kiro/memories", "config/memories", false);
+        let storage = fixture.storage(&file);
+        let staging = fixture.home.join(".strands/box/r/r/copy-0");
+        std::fs::create_dir_all(staging.parent().expect("a parent")).expect("a run folder");
+        let mut tries = 0;
+        let outcome = first_copy(&file, planned(&fixture, &file), &storage, |plan| {
+            tries += 1;
+            std::fs::write(&database, "db, and a page".repeat(tries)).expect("a write");
+            storage_files::copy(&file, plan, &staging, &fixture.home)
+        });
+        let Err(error) = outcome else {
+            panic!("the run stops");
+        };
+        assert!(
+            matches!(&error, Error::Unsettled { path, file: changed, tries: 3 }
+                if *path == file.source && *changed == database),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("stop the program that writes it"),
+            "{error}"
+        );
+        assert_eq!(tries, COPY_TRIES as usize);
+        assert!(!file.target.exists(), "nothing reaches storage");
+        assert!(!staging.exists(), "the staging folder is removed");
+        assert!(
+            matches!(copy_state(&file, &storage), Ok(State::WillCopy(_))),
+            "the next run copies it"
+        );
+    }
+
+    #[test]
+    fn a_first_copy_whose_source_goes_between_tries_hands_back_the_new_state() {
+        let fixture = Fixture::new();
+        let database = fixture.write(".kiro/memories/memories.db", "db");
+        let file = fixture.row(".kiro/memories", "config/memories", false);
+        let storage = fixture.storage(&file);
+        let staging = fixture.home.join(".strands/box/r/r/copy-0");
+        std::fs::create_dir_all(staging.parent().expect("a parent")).expect("a run folder");
+        let outcome = first_copy(&file, planned(&fixture, &file), &storage, |plan| {
+            std::fs::remove_dir_all(database.parent().expect("a folder")).expect("remove");
+            storage_files::copy(&file, plan, &staging, &fixture.home)
+        })
+        .expect("no error");
+        assert!(matches!(outcome, FirstCopy::Now(State::Absent)));
+    }
+
     #[test]
     fn a_row_without_sync_keeps_the_first_copy() {
         let fixture = Fixture::new();
@@ -939,6 +1119,94 @@ mod tests {
             ]
         );
         assert_eq!(fixture.read("config/skills/a.md"), "a 2");
+    }
+
+    #[test]
+    fn a_synced_folder_never_brings_in_what_exclude_names() {
+        let fixture = Fixture::new();
+        fixture.write(".kiro/powers/installed/a/POWER.md", "a 1");
+        fixture.write(".kiro/powers/installed/a/mcp.json", "{\"key\": 1}");
+        let file = StorageFile {
+            exclude: vec!["mcp.json".into()],
+            ..fixture.row(".kiro/powers/installed", "config/powers", true)
+        };
+        let left_out = |copied: &Copied| -> Vec<String> {
+            copied
+                .not_copied
+                .iter()
+                .map(|(path, why)| format!("{path}: {why}"))
+                .collect()
+        };
+        let first = fixture.run(&file);
+        assert_eq!(
+            left_out(&first),
+            ["~/.kiro/powers/installed/a/mcp.json: the row's `exclude` names it"]
+        );
+        assert_eq!(fixture.read("config/powers/a/POWER.md"), "a 1");
+        assert!(!fixture.root.join("config/powers/a/mcp.json").exists());
+
+        fixture.write(".kiro/powers/installed/a/mcp.json", "{\"key\": 2}");
+        fixture.write(".kiro/powers/installed/b/mcp.json", "{}");
+        fixture.write(".kiro/powers/installed/b/POWER.md", "b 1");
+        let second = fixture.run(&file);
+        assert_eq!(
+            second.synced,
+            ["updated config/powers/b/POWER.md from ~/.kiro/powers/installed"]
+        );
+        assert_eq!(
+            left_out(&second),
+            [
+                "~/.kiro/powers/installed/a/mcp.json: the row's `exclude` names it",
+                "~/.kiro/powers/installed/b/mcp.json: the row's `exclude` names it",
+            ]
+        );
+        for path in ["config/powers/a/mcp.json", "config/powers/b/mcp.json"] {
+            assert!(!fixture.root.join(path).exists(), "{path}");
+        }
+        let record = load(&fixture.root).expect("a record");
+        let row = record.row("config/powers").expect("the row's record");
+        assert_eq!(
+            row.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["a/POWER.md", "b/POWER.md"]
+        );
+    }
+
+    #[test]
+    fn exclude_added_after_a_first_copy_reports_the_copy_it_now_names_and_not_as_gone() {
+        let fixture = Fixture::new();
+        fixture.write(".kiro/powers/installed/a/POWER.md", "a 1");
+        fixture.write(".kiro/powers/installed/a/mcp.json", "{\"key\": 1}");
+        let row = fixture.row(".kiro/powers/installed", "config/powers", true);
+        fixture.run(&row);
+        assert_eq!(fixture.read("config/powers/a/mcp.json"), "{\"key\": 1}");
+        let file = StorageFile {
+            exclude: vec!["MCP.json".into()],
+            ..row
+        };
+        assert_eq!(
+            fixture.run(&file).synced,
+            [
+                "kept config/powers/a/mcp.json from an earlier copy, which the row's `exclude` now \
+                 names; delete it in storage to take it out of the box"
+            ]
+        );
+        assert_eq!(fixture.read("config/powers/a/mcp.json"), "{\"key\": 1}");
+        // Each run names the copy again, until the operator deletes it in storage.
+        assert_eq!(
+            fixture.run(&file).synced,
+            [
+                "kept config/powers/a/mcp.json from an earlier copy, which the row's `exclude` now \
+                 names; delete it in storage to take it out of the box"
+            ]
+        );
+        std::fs::remove_file(fixture.root.join("config/powers/a/mcp.json")).expect("a delete");
+        assert!(fixture.run(&file).synced.is_empty());
+        let record = load(&fixture.root).expect("a record");
+        let recorded = record.row("config/powers").expect("the row's record");
+        assert_eq!(
+            recorded.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["a/POWER.md"]
+        );
     }
 
     #[test]

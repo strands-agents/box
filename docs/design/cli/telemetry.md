@@ -18,7 +18,8 @@ context construction and identity persistence.
 
 `Session::delivering` connects event capture to `Delivery`. Each event is one compact JSON
 `POST` to `https://telemetry.strandsagents.com/box/ping`, with
-`Content-Type: application/json`. The request has no authentication header or cookies.
+`Content-Type: application/json` and `User-Agent: box/<version>`, where `<version>` is the
+`context.box_version` the events carry. The request has no authentication header or cookies.
 The service accepts the existing envelope and returns 204. It does not deduplicate requests,
 so delivery makes one attempt per event, with no retries or redirects.
 
@@ -73,7 +74,7 @@ session. `save_telemetry_choice` writes the key under the same lock and atomic r
 creation, and keeps every other key, including the ID. Like the ID, the choice lives in
 `~/.strands/box` whatever `BOX_HOME` names.
 
-On a first install, `install.sh` reads `telemetry status` from the installed launcher.
+On an install or update (not a rerun of the installed version), `install.sh` reads `telemetry status` from the installed launcher.
 It prints the usage notice only when the command succeeds and reports that telemetry is on.
 A failed or unrecognized status leaves the notice out and installation succeeds.
 

@@ -70,6 +70,7 @@ fn http_request() -> Request<'static> {
         path: "/v1",
         body_bytes: 10,
         intercepted: true,
+        websocket: false,
     }
 }
 
@@ -2779,6 +2780,7 @@ fn partial_staging_retains_the_unchanged_authority_and_adds_the_staged_tool() {
                     delivery: Delivery::Completed { bytes: 10 },
                     status: Some(200),
                     intercepted: true,
+                    websocket: false,
                 },
             )
             .expect("the existing authority records history");
@@ -2940,6 +2942,7 @@ fn discovering_record_observes_an_outcome() {
                 delivery: Delivery::Completed { bytes: 10 },
                 status: Some(200),
                 intercepted: true,
+                websocket: false,
             },
         )
         .expect("record observes an outcome while discovering");
@@ -3330,6 +3333,7 @@ fn an_existing_store_uses_one_batch_and_retains_temporal_state() {
                     delivery: Delivery::Completed { bytes: 150 },
                     status: Some(200),
                     intercepted: true,
+                    websocket: false,
                 },
             )
             .expect("the delivery records");

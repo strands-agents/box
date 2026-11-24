@@ -886,7 +886,7 @@ fn the_codex_starter_selects_one_bedrock_endpoint_and_its_region() {
             };
             assert_eq!(
                 created.profile().packs(),
-                ["@box/codex", pack],
+                ["@box/codex", "@box/rg", pack],
                 "{detected:?}, {flag:?}"
             );
             let saved: toml::Table = toml::from_str(created.text()).unwrap();
@@ -946,7 +946,7 @@ fn the_codex_starter_selects_the_openai_api_from_a_flag_or_the_host_provider() {
         let created = request.answer(None).unwrap().create().unwrap();
         assert_eq!(
             created.profile().packs(),
-            ["@box/codex", "@box/openai"],
+            ["@box/codex", "@box/rg", "@box/openai"],
             "{detected:?}, {flag:?}"
         );
         let saved: toml::Table = toml::from_str(created.text()).unwrap();

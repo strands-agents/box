@@ -70,7 +70,7 @@ ring = { version = "0.17", optional = true }
 # X.509 cert generation for the ephemeral CA + per-host leaves (ring backend, matching rustls).
 rcgen = { version = "0.14", optional = true, default-features = false, features = ["ring", "pem"] }
 # HTTP/1.1 on both legs. Each connection thread runs a small runtime for its own connection.
-tokio = { version = "1", optional = true, features = ["macros", "net", "rt", "time"] }
+tokio = { version = "1", optional = true, features = ["io-util", "macros", "net", "rt", "time"] }
 # `ring`, as `rustls` above; the default features pull `aws-lc-rs`.
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring"] }
 hyper = { version = "1", optional = true, features = ["client", "http1", "server"] }

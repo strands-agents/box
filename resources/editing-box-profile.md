@@ -247,6 +247,7 @@ when { context.input.host like "*dynamodb*" };
 | `fs:move` | `path`, and `operation`: `rename` |
 | `net:connect` | `host`, `port`, and optional `ip4`, `ip6` |
 | `http:request` | `host`, `port`, `method`, `path` (the URL path), `body_bytes`, `intercepted` |
+| `websocket:connect` | The `http:request` fields without `body_bytes`, for a WebSocket handshake |
 | `shell:exec` | `program`, `command`, `arg_count`, `cwd`, and optional `arg1`, `arg2` |
 | `shell:spawn` | The `shell:exec` fields, `program_path`, and optional `credential_reads` |
 | `mcp:call` | `server`, `method`, and optional `tool`, `prompt`, `uri` |
@@ -273,7 +274,8 @@ is 2. The box decides a program that a tool table declares, such as `npm` from `
 5. To refuse one case of something that is permitted, write a `forbid`. A narrow `permit` does not
    limit a broad one.
 6. A host needs both `net:connect` and `http:request`. A route in `profile.toml` writes both, so
-   prefer a route to hand-written network permits.
+   prefer a route to hand-written network permits. A WebSocket also needs a permit on
+   `websocket:connect`, which a route does not write.
 7. Keep the `shell_commands` and `dev_null` rules of the copied `policy.dw` unless the operator
    asks to change them.
 8. An `fs:*` rule decides only the Shell and Monty. The agent's own file tools, each tool, and
@@ -337,11 +339,11 @@ has no top-level keys: every key is in a table, and the file starts with `[pack]
 
 | File | Accepted contents |
 | --- | --- |
-| Profile | `packs`, `plugins`, `policies`, `agent-args`, `file-attributes`; `[profile]`, `[options]`, `[limits]`, `[project]`, `[filesystem]` with only `deny` and `deny_write`, `[banner]`, `[experimental-features]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[mcp.<name>]`, `[storage]`, `[telemetry]`, `[secret-source.<scheme>]` |
-| Agent pack | `[pack]`, `[inputs.<name>]`, `[run]` with `command`, `dependency`, `file-watching`, and `when`, then `[env]` and `[filesystem]` for the agent, which `box` reads as `[agent]`, plus `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, and `[[mcp-servers]]`. It writes no `[agent]` table. |
-| Support pack | `[pack]`, `[inputs.<name>]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, `[[mcp-servers]]`; `[mcp.<name>]` may add only `filesystem` and `network` grants. No `[run]`, `[env]`, or `[filesystem]`. |
-| Tool pack | `[pack]`, `[inputs.<name>]` with the program input, `[run]` with `command` and the tool's other keys, then the tool's tables, such as `[env]` and `[filesystem]`. See [Tools](#tools-and-program-trust). |
-| Plugin | `[plugin]` with `name`, `version`, `kind = "secret-source"`, `scheme`, and optional `engine`; `[inputs.<name>]`; `[run]` with `command` and optional `output`; `[env]`, where each entry is `NAME = { from = "env:NAME" }` and nothing else; `[protect]` with only `env`, a list of names of `[env]`, and `paths`, a list of path strings. Nothing else: no `[filesystem]` and no `[secret-source.<scheme>]` table. |
+| Profile | `packs`, `plugins`, `policies`, `agent-args`, `file-attributes`; `[profile]`, `[requires]`, `[options]`, `[limits]`, `[project]`, `[filesystem]` with only `deny` and `deny_write`, `[banner]`, `[experimental-features]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[mcp.<name>]`, `[storage]`, `[telemetry]`, `[secret-source.<scheme>]` |
+| Agent pack | `[pack]`, `[requires]`, `[inputs.<name>]`, `[run]` with `command`, `dependency`, `file-watching`, and `when`, then `[env]` and `[filesystem]` for the agent, which `box` reads as `[agent]`, plus `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, and `[[mcp-servers]]`. It writes no `[agent]` table. |
+| Support pack | `[pack]`, `[requires]`, `[inputs.<name>]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, `[[mcp-servers]]`; `[mcp.<name>]` may add only `filesystem` and `network` grants. No `[run]`, `[env]`, or `[filesystem]`. |
+| Tool pack | `[pack]`, `[requires]`, `[inputs.<name>]` with the program input, `[run]` with `command` and the tool's other keys, then the tool's tables, such as `[env]` and `[filesystem]`. See [Tools](#tools-and-program-trust). |
+| Plugin | `[plugin]` with `name`, `version`, `kind = "secret-source"`, and `scheme`; optional `[requires]`; `[inputs.<name>]`; `[run]` with `command` and optional `output`; `[env]`, where each entry is `NAME = { from = "env:NAME" }` and nothing else; `[protect]` with only `env`, a list of names of `[env]`, and `paths`, a list of path strings. Nothing else: no `[filesystem]` and no `[secret-source.<scheme>]` table. |
 
 A profile has no `[pack]`, `[inputs]`, `extend`, `include`, `[run]`, or `[[mcp-servers]]`. Packs have no `packs`,
 `plugins`, `policies`, `[profile]`, `[options]`, `agent-args`, `file-attributes`, `[limits]`, `[project]`,
@@ -376,8 +378,8 @@ and support packs, support packs extend support packs; a tool pack that extends 
 that tool's env, filesystem with writes, and program folder on `PATH` into its own tool, its own env
 wins, not `PATH` or `TMPDIR`, a skipped base gives nothing, and the base is not a tool of its own
 unless the profile or a support pack sets its `[tool.<name>] program`),
-optional `include` lists tool packs to load as tools of their own (nothing merged), and optional `engine = ">=X.Y.Z"` names the oldest Box CLI it needs.
-The header accepts only these keys.
+and optional `include` lists tool packs to load as tools of their own (nothing merged).
+The header accepts only these keys. A separate optional `[requires]` table with `box = ">=X.Y.Z"` names the oldest Box CLI that the pack, plugin, or profile needs.
 
 `kind` decides what `[run]` holds. A `tool` pack's `[run]` sets `command` to its program input alone, and the pack extends
 tool and support packs. An `agent` pack's `[run]` sets `command`, or the pack extends an agent pack
@@ -653,8 +655,9 @@ A filesystem entry is a path. So are copy sources, the program in a command, and
 - Every later placeholder fills one component, with no `/`, `.` or `..` value.
 - The result is absolute and contains no `..` component.
 
-Existing filesystem paths are resolved through links. A path through a link in the project or
-run storage fails because the workload can change it. A missing required path can resolve but
+Existing filesystem paths are resolved through links. A path through a link in the project,
+run storage, `~/.strands/box`, or a folder that a `write` entry names fails because the workload
+can change it; name the real path. A missing required path can resolve but
 Box Core refuses it when the run starts. Use an entry table for a path that is optional or
 conditional:
 
@@ -943,6 +946,7 @@ host source alone does not update an existing ordinary copy.
 | `kind` | `json` or `toml` when selecting or rewriting structured values |
 | `keep` | Array of key paths to retain, such as `[["theme"], ["spinnerVerbs", "mode"]]`; requires `kind` |
 | `sync` | Copy changed host files on every run; cannot combine with `kind`, `keep`, `set`, or `fill` |
+| `exclude` | File or folder names a folder copy leaves out at any depth, such as `["mcp.json"]`, also on each `sync`; one whole name each, matched without regard to case, no `/` and no `*`, `?`, or `[`; needs `sync = true`; cannot combine with `kind`, `keep`, `set`, or `fill`, and refused for a source that is one file |
 | `fill` | Add missing selected values on every run; requires `keep` and `kind = "json"` or `"toml"`, and cannot have `set` |
 
 Active rows cannot have equal or nested targets. A profile row does not replace an inherited

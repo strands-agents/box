@@ -113,21 +113,24 @@ the shape of each page that a diff changes.
 | Limits (`limitations.md`) | Know what a box leaves to the operator before you trust a run. | One section for each limit: what the box leaves open, who it affects, and what to check or turn off. It links the reference for a key, and holds no install or create steps. |
 | Overview (`how-box-works.md`) | See what Box is and how its parts fit together. | Short sections, one for each part, that say how it relates to the others and link the part's topic page. No steps and no option lists. `docs/cli/README.md` lists it after the tutorial, how-to, and reference entries. |
 
-#### Front matter: the page's reader and test
+#### Page tests: the page's reader and test
 
-A user page can open with YAML front matter that states who the page is for and what belongs on it.
-It is optional. Add it when a change reworks the page and the user agrees on the reader and the test:
+A user page can have an entry in [`user-page-tests.md`](user-page-tests.md) that states who the
+page is for and what belongs on it. It is optional. Add one when a change reworks the page and the
+user agrees on the reader and the test:
 
-```yaml
----
-reader: Someone who has a profile, usually from Get started, and wants to understand it or change it.
-belongs: A section belongs here only if most users need it in their first month. Anything else goes to profiles-reference.md, cli.md, or troubleshooting.md, and nowhere on this page.
----
+```markdown
+## `profiles.md`
+
+**Reader:** Someone who has a profile, usually from Get started, and wants to understand it or change it.
+
+**Belongs:** A section belongs here only if most users need it in their first month. Anything else goes to profiles-reference.md, cli.md, or troubleshooting.md, and nowhere on this page.
 ```
 
-When a page has it, read it before you edit the page. Apply `belongs` to each section you add or keep: a section that
-fails it goes to the page that `belongs` names. Change the front matter only with the user's
-approval. GitHub shows it as a table at the top of the page.
+When a page has an entry, read it before you edit the page. Apply `belongs` to each section you add
+or keep: a section that fails it goes to the page that `belongs` names. Change an entry only with the
+user's approval. A page holds no YAML front matter: strandsagents.com publishes the pages and
+refuses it, and the first line of each page is its H1.
 
 Every page opens with what the reader will do there, and covers what that reader came for. It does
 not walk through every option, message, or edge case. A task or reference page has no glossary: it

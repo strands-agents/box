@@ -4,6 +4,10 @@
 `strands-box run --config FILE`; the tutorial's download names the binary `box`. Box reads the
 selected file and its policy on every start.
 
+`box.toml` is Box Core's stable interface. A program that runs Box Core, such as the `box` CLI,
+writes it, and each key keeps its meaning across releases. If you use the `box` CLI, you don't
+write this file: the CLI builds it from your [profile](../cli/profiles.md).
+
 Audience: an operator who runs an agent or another command under a box, and who declares the
 paths, hosts, credentials, MCP servers, and telemetry targets it can use. The example on this page
 is the box that [getting started](./getting-started.md) builds: the Strands CLI on a
@@ -1072,9 +1076,9 @@ remote MCP server as `[mcp.<name>]` with `type = "http"`, which the next section
 
 An `aws://` route signs inside the box, so it takes no `header`, `prefix`, `placement`, `param`,
 `inject`, or `phantom_prefix`. Setting one is refused when the configuration loads. A bare `aws://`
-(no profile) signs with the host's ambient identity and prints a warning on every signed request;
+(no profile) signs with the host's ambient identity;
 [Credential sources](egress.md#credential-sources) describes the default chain, the profiles it does
-not resolve (AWS SSO), the warning, and the writable-`~/.aws` rule.
+not resolve (AWS SSO), the warning and when it prints, and the writable-`~/.aws` rule.
 
 An entry re-routes to a backend with one `[[egress.<name>.backends]]` table, holding a `url`
 (`scheme://host[:port][/prefix]`, `https` or `http`) and an optional `auth`, which is the backend's own

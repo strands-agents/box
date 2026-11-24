@@ -1,4 +1,12 @@
 {
-  "pageIds": [],
-  "slugs": []
+  "pageIds": [
+    "tutorial-claude-code",
+    "tutorial-codex-cli",
+    "tutorial-pi"
+  ],
+  "slugs": [
+    "guides/run-claude-code",
+    "guides/run-codex-cli",
+    "guides/run-pi"
+  ]
 }

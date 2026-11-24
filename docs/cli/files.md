@@ -1,8 +1,3 @@
----
-reader: Someone who wants to know where Box keeps its files, where a profile, pack, starter, or policy of their own goes, what Box writes by itself, and what's safe to delete or copy.
-belongs: Where each file lives, who writes it, and what it's for, with a link to the page that explains what goes in it. What goes in a profile, pack, starter, or policy goes to profiles.md, packs.md, starters.md, or policies.md. Each command and flag goes to cli.md. A fix after an error goes to troubleshooting.md.
----
-
 # Where Box keeps its files
 
 Box reads your settings from two places. Your Box folder, `~/.strands/box`, holds what you use in every
@@ -59,7 +54,8 @@ when the project has none. Keep `.box` a folder: `box run` stops when
 it's a file or a link.
 
 The tools the agent runs still write their own files in the project, such as caches and build
-output, so add those to the project's `.gitignore`.
+output, so add those to the project's `.gitignore`
+([Tools write into the project](limitations.md#tools-write-into-the-project)).
 
 ## Custom packs, starters, and policies
 
@@ -153,6 +149,10 @@ holds the settings and rules the run used (`box.toml` and `policy.dw`), a record
 allowed and stopped (`records.jsonl`), and the box's own state. The box ID lets you
 [run in the same box again](cli.md#run-in-the-same-box-again).
 
+[Terminal runs](cli.md#box-run) append the Box messages they receive, including warnings, to
+`box.log`. Only your account can read it, and it has no size limit. The agent's output stays on
+the terminal.
+
 A new run that fails before the box starts leaves no folder. Every other run folder stays until you
 clean it up, and storage stays until you delete it.
 
@@ -200,8 +200,7 @@ run `box telemetry off` on the new computer too.
 | List your profiles and the starters you can make one from | [`box profile list`](cli.md#box-profile-list) |
 | Find a run's box ID | [`box runs list`](cli.md#box-runs-list) |
 | Read what a run allowed and stopped | [`box runs history`](cli.md#box-runs-history) |
-| Remove finished runs | [`box clean`](cli.md#box-clean) |
-| Remove the runs of one profile | [`box profile clean`](cli.md#box-profile-clean) |
+| Remove the runs of a profile, or every run | [`box profile clean`](cli.md#box-profile-clean) |
 | Start a profile's agent fresh, without its settings and sessions | [`box profile reset`](cli.md#box-profile-reset) |
 | Delete a profile, with its runs and storage | [`box profile delete`](cli.md#box-profile-delete) |
 | Turn usage telemetry on or off | [`box telemetry`](cli.md#box-telemetry) |

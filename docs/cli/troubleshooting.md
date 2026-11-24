@@ -1,8 +1,3 @@
----
-reader: Someone whose box run or profile command failed or did something unexpected.
-belongs: A section per symptom: a heading that names it, the message quoted, the cause, and the fix. Only messages that don't name their own fix. A limit with no fix goes to limitations.md. A key's meaning goes to its reference page.
----
-
 # Troubleshooting
 
 Use this page when `box` stops with an error, or when the agent can't do something in the box.
@@ -125,6 +120,7 @@ The reason after the colon usually says what to change. These reasons need more:
 | `needs DOCS_TOKEN, which is not set in your environment` | Export the variable in the shell you start `box run` from, or give a local server a default, such as `${LOG_LEVEL:-info}`. |
 | `which is not on your PATH outside the project`, `which is not an executable file`, `is a link out of a folder the box can write`, or `its HOME "mcp-home" is not a full path` | Use a real program at a full path, and a full path for `HOME`. The box doesn't look on `PATH` for a replacement. A server writes a `HOME` outside your project only when you grant that folder in its `[mcp.<name>.filesystem]`. |
 | `sets NODE_OPTIONS`, `LD_PRELOAD`, a name that starts with `PYTHON`, `sets PATH`, or `your PATH directory ... lies in the workspace` | Remove the variable from the server's `env`, and keep project folders off your own `PATH`. These make a program load other code. |
+| `sets RUBYLIB to a path that is not a full path`, `sets RUBYLIB, which box reads as a path by its name, to a path that is not a full path`, or `sets RUBYLIB to a place the box can write` | The variable holds a file or a folder, alone or in a list, and the agent could put code there for the server to load. Use a full path to a folder outside your project and outside every folder the box can write. `box` reads a part of a value as a path when it starts with `/`, `./`, `../`, or `~/`. It reads the whole value as a list of paths, with `:` or `;` between them, when the variable's name ends in `PATH`, `PATHS`, `LIB`, `LIBS`, `DIR`, `DIRS`, or `HOME`, unless the value is a number or a word such as `true`. If the value isn't a path at all, declare the server yourself, as described below this table. Until you do, the server's entry stays in the agent's settings with the keys in its `env`. |
 | `reads OP_SERVICE_ACCOUNT_TOKEN, which the plugin @box/1password passes to its program as a credential`, or `takes its key from ...` for a remote server, `its env T holds the value of ...` or `its argument 2 holds the value of ...` for a copy of the value, or `its env sets ...` for a variable that the server sets itself | A [plugin](plugins.md) in your profile keeps the sign-in of your vault on your machine, so no server in the box gets it. Give the server a token of its own in another variable. |
 | ``reads GH_TOKEN, which the route github names in `secret.env` for its op:// key`` | In the box, that variable holds a stand-in, and the box puts the key from your vault on each request to the route's hosts. Your shell's own `GH_TOKEN` is not that key. The route refuses a request to its hosts without the stand-in, so a token of the server's own works only for other hosts. For the route's hosts, declare the server in your profile as an `[mcp.<name>]` table whose `env` doesn't set the variable, so the server gets the stand-in as the agent does. |
 | `runs <program>, which ... runs too`, or `reaches <host>, which ... reaches too` | The box puts one program of each name on `PATH`, and routes a remote server by its host alone. Remove the duplicate entry. |
@@ -188,9 +184,10 @@ You have two ways out:
 
 - **Fix the clock.** Set it right, or wait until it is within five minutes of the history. Then run
   again. A reused box keeps its history. If it happened in a running box, apply the edit again.
-- **Leave the box behind.** Remove it with `box clean <box ID>` and run again without `--box-id`.
-  The new box starts with an empty history, so rules that count over time start from zero. For a box
-  that was running, stop the run first, because `box clean` skips a run that is still going.
+- **Leave the box behind.** Remove it with `box profile clean <name> --box-id <box ID>` and run again
+  without `--box-id`. The new box starts with an empty history, so rules that count over time start
+  from zero. For a box that was running, stop the run first, because `box profile clean` refuses a
+  box that is still running.
 
 ### The agent could change what a later run trusts
 

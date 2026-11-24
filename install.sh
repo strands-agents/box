@@ -699,12 +699,17 @@ fi
 for box_binary in $box_programs; do
     [ -x "$box_payload/$box_binary" ] || die "not executable: $box_binary"
     [ "$box_system" = Darwin ] && [ "$box_unsigned" -eq 0 ] || continue
-    case "$box_binary" in
-        box|Box.app) box_identifier=com.amazon.strands.box-cli ;;
-        *) box_identifier=com.amazon.strands.box ;;
-    esac
     codesign --display --verbose=4 -r- "$box_payload/$box_binary" > "$box_work/signature" 2>&1 ||
         die "cannot read signing identity: $box_binary"
+    box_identifier=com.amazon.strands.box
+    case "$box_binary" in
+        box|Box.app)
+            box_identifier=$(sed -n 's/^Identifier=//p' "$box_work/signature")
+            case "$box_identifier" in
+                com.amazon.strands.box|com.amazon.strands.box-cli) ;;
+                *) die "unexpected publisher or signing options: $box_binary" ;;
+            esac ;;
+    esac
     awk -v identifier="$box_identifier" -v team="$BOX_TEAM_ID" '
         /^Identifier=/ { identities++; if ($0 != "Identifier=" identifier) bad = 1 }
         /^Authority=/ { authorities++; if (authorities == 1 && $0 !~ /^Authority=Developer ID Application: /) bad = 1 }
@@ -793,9 +798,11 @@ if [ "$box_drawing" -eq 1 ]; then
     printf '\n\033[?25h' >&2
     box_drawing=0
 fi
+box_welcome=1
 if [ -n "$box_previous" ]; then
     box_old_version=${box_previous%-$box_triple}
     if [ "$box_old_version" = "$box_version" ]; then
+        box_welcome=0
         log "box $box_version is already installed."
     else
         log "Updated box $box_old_version to $box_version."
@@ -818,7 +825,9 @@ case ":${PATH-}:" in
         esac
         ;;
 esac
-if [ -z "$box_previous" ]; then
+# Installs and updates both welcome, so an update also shows the commands and the telemetry
+# notice. A rerun of the installed version keeps that release and leaves the welcome out.
+if [ "$box_welcome" -eq 1 ]; then
     printf '\n' >&2
     welcome
 fi

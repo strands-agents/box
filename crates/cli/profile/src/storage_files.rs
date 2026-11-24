@@ -1,6 +1,7 @@
 //! The host files and directories that `[[storage.files]]` copies into storage once.
 
 use std::io::{Read as _, Write as _};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{
     DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
 };
@@ -10,8 +11,8 @@ use nix::libc;
 
 use crate::error::Error;
 use crate::files::{
-    create_real_directory, io_error, make_directory_at, open_at, open_directory, remove_if_present,
-    rename_at, unlink_at,
+    io_error, make_directory_at, move_new_at, open_at, open_directory, open_real_directory,
+    remove_if_present, rename_at, unlink_at,
 };
 use crate::host::{canonical, resolved, tilde, within};
 use crate::storage_edit::{Edit, Failure, Kept, shown};
@@ -31,6 +32,8 @@ pub struct StorageFile {
     pub edit: Option<Edit>,
     /// Whether each run brings the copy up to date with the host.
     pub sync: bool,
+    /// The names that a folder copy leaves out, at any depth.
+    pub exclude: Vec<String>,
 }
 
 /// The places a source and each link it follows may not reach.
@@ -131,6 +134,11 @@ impl Refusals {
         self.refusal(path, true)
     }
 
+    /// How `path` is or lies in a refused root, as written or real, if it does.
+    pub(crate) fn inside(&self, path: &Path) -> Option<String> {
+        self.refusal(path, false)
+    }
+
     fn refusal(&self, path: &Path, include_contents: bool) -> Option<String> {
         for (root, what) in &self.roots {
             let Some(how) = overlap(path, root) else {
@@ -211,13 +219,35 @@ pub struct Plan {
 #[derive(Debug, Clone, PartialEq)]
 enum Item {
     Directory,
-    /// A file, with the device and inode it had when `box` planned the copy.
+    /// A file, with its stamp when `box` planned the copy.
     File {
         from: PathBuf,
         mode: u32,
-        device: u64,
-        inode: u64,
+        stamp: Stamp,
     },
+}
+
+/// What tells a host file apart from a changed one: its device, inode, size, and modification and
+/// change times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+impl Stamp {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.size(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
 }
 
 /// What `file` does now: nothing when its target exists, else the copy it makes.
@@ -241,13 +271,17 @@ pub(crate) fn state(file: &StorageFile, refusals: &Refusals) -> Result<State, St
     if let Some(edit) = &file.edit {
         return edited_plan(file, edit, &root);
     }
+    refuse_exclude_on_a_file(file, &root)?;
     let mut plan = Plan::default();
     add(
         &root,
         PathBuf::new(),
         &root,
         &mut Vec::new(),
-        refusals,
+        &Walk {
+            refusals,
+            exclude: &file.exclude,
+        },
         &mut plan,
     );
     if plan.items.is_empty() {
@@ -273,16 +307,32 @@ pub(crate) fn host_tree(file: &StorageFile, refusals: &Refusals) -> Result<Optio
         ));
     };
     refusals.check(&root)?;
+    refuse_exclude_on_a_file(file, &root)?;
     let mut plan = Plan::default();
     add(
         &root,
         PathBuf::new(),
         &root,
         &mut Vec::new(),
-        refusals,
+        &Walk {
+            refusals,
+            exclude: &file.exclude,
+        },
         &mut plan,
     );
     Ok(Some(plan))
+}
+
+/// Refuse `exclude` on a row whose source `root` is one file, which has no entries to leave out.
+fn refuse_exclude_on_a_file(file: &StorageFile, root: &Path) -> Result<(), String> {
+    if file.exclude.is_empty() || root.is_dir() {
+        return Ok(());
+    }
+    Err(format!(
+        "`{} exclude` names entries of a folder, and {} is not a folder",
+        file.at,
+        root.display()
+    ))
 }
 
 impl Plan {
@@ -294,18 +344,23 @@ impl Plan {
     /// Each file of the copy, as it was when `box` planned the copy.
     pub(crate) fn files(&self) -> impl Iterator<Item = HostFile<'_>> {
         self.items.iter().filter_map(|(relative, item)| match item {
-            Item::File {
-                from,
-                mode,
-                device,
-                inode,
-            } => Some(HostFile {
+            Item::File { from, mode, stamp } => Some(HostFile {
                 relative,
                 from,
                 mode: *mode,
-                device: *device,
-                inode: *inode,
+                device: stamp.device,
+                inode: stamp.inode,
             }),
+            Item::Directory => None,
+        })
+    }
+
+    /// The first host file that is gone or whose stamp is not the one the plan took.
+    fn changed(&self) -> Option<&Path> {
+        self.items.iter().find_map(|(_, item)| match item {
+            Item::File { from, stamp, .. } => std::fs::symlink_metadata(from)
+                .map_or(true, |now| Stamp::of(&now) != *stamp)
+                .then_some(from.as_path()),
             Item::Directory => None,
         })
     }
@@ -409,8 +464,7 @@ fn edited_plan(file: &StorageFile, edit: &Edit, root: &Path) -> Result<State, St
             Item::File {
                 from: root.to_path_buf(),
                 mode: metadata.permissions().mode() & 0o755,
-                device: metadata.dev(),
-                inode: metadata.ino(),
+                stamp: Stamp::of(&metadata),
             },
         )],
         followed: Vec::new(),
@@ -457,17 +511,25 @@ fn failure_text(
     }
 }
 
+/// What a walk of a source checks each entry against.
+struct Walk<'a> {
+    refusals: &'a Refusals,
+    /// The names the row's `exclude` leaves out.
+    exclude: &'a [String],
+}
+
 /// Add the real path `real` at `relative` to `plan`. `root` is the real directory that its links
-/// stay in, and `stack` holds each real directory being added. An entry that cannot be read is
-/// left out and reported.
+/// stay in, and `stack` holds each real directory being added. An entry that cannot be read, or
+/// that `exclude` names, is left out and reported.
 fn add(
     real: &Path,
     relative: PathBuf,
     root: &Path,
     stack: &mut Vec<PathBuf>,
-    refusals: &Refusals,
+    walk: &Walk<'_>,
     plan: &mut Plan,
 ) {
+    let refusals = walk.refusals;
     let metadata = match std::fs::metadata(real) {
         Ok(metadata) => metadata,
         Err(error) => {
@@ -482,8 +544,7 @@ fn add(
             Item::File {
                 from: real.to_path_buf(),
                 mode: metadata.permissions().mode() & 0o755,
-                device: metadata.dev(),
-                inode: metadata.ino(),
+                stamp: Stamp::of(&metadata),
             },
         ));
         return;
@@ -519,6 +580,18 @@ fn add(
     for entry in entries {
         let path = entry.path();
         let child = relative.join(entry.file_name());
+        // Without regard to case: macOS file systems usually ignore case, so the agent would
+        // read `MCP.json` as `mcp.json`. Leaving out one more entry is the safe side.
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if walk
+            .exclude
+            .iter()
+            .any(|excluded| excluded.to_lowercase() == name)
+        {
+            plan.skipped
+                .push((child, "the row's `exclude` names it".into()));
+            continue;
+        }
         let kind = match entry.file_type() {
             Ok(kind) => kind,
             Err(error) => {
@@ -529,7 +602,7 @@ fn add(
         };
         if !kind.is_symlink() {
             if kind.is_dir() || kind.is_file() {
-                add(&path, child, root, stack, refusals, plan);
+                add(&path, child, root, stack, walk, plan);
             } else {
                 plan.skipped
                     .push((child, "it is not a file or a directory".into()));
@@ -547,7 +620,7 @@ fn add(
             continue;
         }
         if within(&target, root) {
-            add(&target, child, root, stack, refusals, plan);
+            add(&target, child, root, stack, walk, plan);
             continue;
         }
         if let Err(reason) = refusals.check(&target) {
@@ -555,14 +628,17 @@ fn add(
             continue;
         }
         plan.followed.push((child.clone(), target.clone()));
-        add(&target, child, &target, stack, refusals, plan);
+        add(&target, child, &target, stack, walk, plan);
     }
     stack.pop();
 }
 
-/// Copy `file` as `plan` states. `box` builds the copy in `staging`, a fresh directory that no box
-/// can reach, then renames it into place beside nothing: a target that exists by then is kept.
-/// For a `sync` row, return what each file of the copy holds, or nothing if the copy was kept.
+/// Copy `file` as `plan` states. `box` opens each directory from `home` down to the target's
+/// folder without following a link, builds the copy in `staging`, a fresh directory that no box
+/// can reach, then moves it into the folder it holds open, replacing nothing: a target that exists
+/// by then is kept. A host file that changed or went between the plan and the end of the whole
+/// copy fails it with [`Error::Changed`], and nothing reaches storage. For a `sync` row, return
+/// what each file of the copy holds, or nothing if the copy was kept.
 pub(crate) fn copy(
     file: &StorageFile,
     plan: &Plan,
@@ -570,15 +646,15 @@ pub(crate) fn copy(
     home: &Path,
 ) -> Result<Vec<(PathBuf, Entry)>, Error> {
     let parent = file.target.parent().unwrap_or(&file.target);
-    create_real_directory(parent, home)?;
+    let directory = open_real_directory(parent, home)?;
     remove_if_present(staging)?;
-    let made = make(staging, plan, file);
-    if made.is_ok() && std::fs::symlink_metadata(&file.target).is_err() {
-        create_real_directory(parent, home)?;
-        if let Err(source) = std::fs::rename(staging, &file.target) {
-            remove_if_present(staging)?;
-            return Err(io_error("copy", &file.target, source));
-        }
+    let made = make(staging, plan, file).and_then(|made| match plan.changed() {
+        Some(path) => Err(Error::Changed {
+            path: path.to_path_buf(),
+        }),
+        None => Ok(made),
+    });
+    if made.is_ok() && place(staging, &directory, &file.target)? {
         return made;
     }
     remove_if_present(staging)?;
@@ -586,8 +662,8 @@ pub(crate) fn copy(
 }
 
 /// Write a new copy of a row whose host file is absent, holding only its `set` values. `box`
-/// writes it in `staging` and renames it into place beside nothing, as [`copy`] does. A row that
-/// sets nothing writes nothing.
+/// writes it in `staging` and moves it into the target's open folder, as [`copy`] does. A row
+/// that sets nothing writes nothing.
 pub(crate) fn create(file: &StorageFile, staging: &Path, home: &Path) -> Result<(), Error> {
     let Some(edit) = &file.edit else {
         return Ok(());
@@ -600,7 +676,7 @@ pub(crate) fn create(file: &StorageFile, staging: &Path, home: &Path) -> Result<
         return Ok(());
     };
     let parent = file.target.parent().unwrap_or(&file.target);
-    create_real_directory(parent, home)?;
+    let directory = open_real_directory(parent, home)?;
     remove_if_present(staging)?;
     let written = std::fs::OpenOptions::new()
         .write(true)
@@ -609,16 +685,29 @@ pub(crate) fn create(file: &StorageFile, staging: &Path, home: &Path) -> Result<
         .open(staging)
         .and_then(|mut output| output.write_all(text.as_bytes()))
         .map_err(|source| io_error("write", staging, source));
-    if written.is_ok() && std::fs::symlink_metadata(&file.target).is_err() {
-        create_real_directory(parent, home)?;
-        if let Err(source) = std::fs::rename(staging, &file.target) {
-            remove_if_present(staging)?;
-            return Err(io_error("copy", &file.target, source));
-        }
+    if written.is_ok() && place(staging, &directory, &file.target)? {
         return Ok(());
     }
     remove_if_present(staging)?;
     written
+}
+
+/// Move the copy at `staging` to the name of `target` in `directory`, its open folder, and return
+/// whether it moved. A target that exists is kept, and the copy at `staging` is removed.
+fn place(staging: &Path, directory: &OwnedFd, target: &Path) -> Result<bool, Error> {
+    let copied = |source| io_error("copy", target, source);
+    let moved = match (staging.parent(), staging.file_name(), target.file_name()) {
+        (Some(run), Some(from), Some(to)) => open_directory(run)
+            .and_then(|run| move_new_at(&run, from, directory, to))
+            .map_err(copied),
+        _ => Err(copied(std::io::Error::from(
+            std::io::ErrorKind::InvalidInput,
+        ))),
+    };
+    if !matches!(moved, Ok(true)) {
+        remove_if_present(staging)?;
+    }
+    moved
 }
 
 /// Make each item of `plan` under `staging`, and refuse a file that changed since the plan.
@@ -635,22 +724,20 @@ fn make(staging: &Path, plan: &Plan, file: &StorageFile) -> Result<Vec<(PathBuf,
                 .mode(0o700)
                 .create(&path)
                 .map_err(|source| io_error("create", &path, source))?,
-            Item::File {
-                from,
-                mode,
-                device,
-                inode,
-            } => {
-                let mut input =
-                    std::fs::File::open(from).map_err(|source| io_error("read", from, source))?;
+            Item::File { from, mode, stamp } => {
+                let changed = || Error::Changed { path: from.clone() };
+                let mut input = match std::fs::File::open(from) {
+                    Ok(input) => input,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(changed());
+                    }
+                    Err(source) => return Err(io_error("read", from, source)),
+                };
                 let opened = input
                     .metadata()
                     .map_err(|source| io_error("read", from, source))?;
-                if opened.dev() != *device || opened.ino() != *inode || !opened.is_file() {
-                    return Err(Error::Copy {
-                        path: from.clone(),
-                        reason: "the file changed while box copied it".into(),
-                    });
+                if Stamp::of(&opened) != *stamp || !opened.is_file() {
+                    return Err(changed());
                 }
                 let mut output = std::fs::OpenOptions::new()
                     .write(true)
@@ -686,10 +773,27 @@ fn make(staging: &Path, plan: &Plan, file: &StorageFile) -> Result<Vec<(PathBuf,
                     std::io::copy(&mut input, &mut output)
                         .map_err(|source| io_error("write", &path, source))?;
                 }
+                #[cfg(test)]
+                AFTER_EACH_FILE.with(|hook| {
+                    if let Some(hook) = &*hook.borrow() {
+                        hook(from);
+                    }
+                });
             }
         }
     }
     Ok(made)
+}
+
+/// A test's step that [`make`] runs after it copies each host file, so a test can change a host
+/// file in the middle of a copy.
+#[cfg(test)]
+type AfterEachFile = Option<Box<dyn Fn(&Path)>>;
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_EACH_FILE: std::cell::RefCell<AfterEachFile> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Apply each `set` row of `file` to its copy in storage. `box` opens each directory from the
@@ -878,12 +982,7 @@ pub fn edit_in_storage(
 }
 
 /// Write `text` to a new file beside `name` in `directory`, then rename it over `name`.
-fn write_beside(
-    directory: &std::os::fd::OwnedFd,
-    name: &str,
-    mode: u32,
-    text: &str,
-) -> std::io::Result<()> {
+fn write_beside(directory: &OwnedFd, name: &str, mode: u32, text: &str) -> std::io::Result<()> {
     let staged = format!(".{name}.box-{}", std::process::id());
     let written = open_at(
         directory,
@@ -973,6 +1072,7 @@ mod tests {
                 at: "storage.files[0]".into(),
                 edit: None,
                 sync: false,
+                exclude: Vec::new(),
             }
         }
 
@@ -1236,6 +1336,85 @@ mod tests {
     }
 
     #[test]
+    fn exclude_leaves_out_each_entry_of_that_name_at_any_depth() {
+        let fixture = Fixture::new();
+        fixture.write(".kiro/powers/installed/a/POWER.md", "a");
+        fixture.write(".kiro/powers/installed/a/mcp.json", "{}");
+        fixture.write(".kiro/powers/installed/a/steering/a.md", "steering");
+        fixture.write(".kiro/powers/installed/b/mcp.json/server.json", "{}");
+        fixture.write(".kiro/powers/installed/e/MCP.json", "{}");
+        fixture.write(".kiro/powers/installed/mcp.json.bak", "kept");
+        fixture.write("tools/linked/POWER.md", "linked");
+        fixture.write("tools/linked/mcp.json", "{}");
+        fixture.write("tools/named/POWER.md", "named");
+        let installed = fixture.home.join(".kiro/powers/installed");
+        symlink(fixture.home.join("tools/linked"), installed.join("c")).expect("a link");
+        symlink(
+            fixture.home.join("tools/named"),
+            installed.join("a/mcp.json.d"),
+        )
+        .expect("a link");
+        symlink(
+            fixture.home.join("tools/named/POWER.md"),
+            installed.join("d"),
+        )
+        .expect("a link");
+        let file = StorageFile {
+            exclude: vec!["mcp.json".into(), "d".into()],
+            ..fixture.row(".kiro/powers/installed", "home/.kiro/powers/installed")
+        };
+        let plan = fixture.plan(&file);
+        let named = "the row's `exclude` names it".to_string();
+        assert_eq!(
+            plan.skipped,
+            vec![
+                (PathBuf::from("a/mcp.json"), named.clone()),
+                (PathBuf::from("b/mcp.json"), named.clone()),
+                (PathBuf::from("c/mcp.json"), named.clone()),
+                (PathBuf::from("d"), named.clone()),
+                (PathBuf::from("e/MCP.json"), named),
+            ]
+        );
+        copy(&file, &plan, &fixture.staging(), &fixture.home).expect("a copy");
+        for kept in [
+            "a/POWER.md",
+            "a/steering/a.md",
+            "a/mcp.json.d/POWER.md",
+            "c/POWER.md",
+            "mcp.json.bak",
+        ] {
+            assert!(file.target.join(kept).is_file(), "{kept}");
+        }
+        for left_out in ["a/mcp.json", "b/mcp.json", "c/mcp.json", "d", "e/MCP.json"] {
+            assert!(!file.target.join(left_out).exists(), "{left_out}");
+        }
+        assert!(file.target.join("b").is_dir(), "the folder around it stays");
+    }
+
+    #[test]
+    fn exclude_on_a_source_that_is_one_file_is_refused() {
+        let fixture = Fixture::new();
+        fixture.write(".kiro/powers/installed.json", "{}");
+        let file = StorageFile {
+            exclude: vec!["mcp.json".into()],
+            ..fixture.row(
+                ".kiro/powers/installed.json",
+                "home/.kiro/powers/installed.json",
+            )
+        };
+        let source = fixture.home.join(".kiro/powers/installed.json");
+        let reason = format!(
+            "`storage.files[0] exclude` names entries of a folder, and {} is not a folder",
+            source.display()
+        );
+        assert_eq!(state(&file, &fixture.refusals()), Err(reason.clone()));
+        assert_eq!(
+            host_tree(&file, &fixture.refusals()).map(|_| ()),
+            Err(reason)
+        );
+    }
+
+    #[test]
     fn a_target_that_exists_is_left_as_the_box_left_it() {
         let fixture = Fixture::new();
         fixture.write(".claude/CLAUDE.md", "host");
@@ -1264,6 +1443,102 @@ mod tests {
             "host, changed",
             "a deleted copy is copied again"
         );
+    }
+
+    #[test]
+    fn a_copy_moves_into_the_folder_that_box_opened() {
+        let fixture = Fixture::new();
+        let file = fixture.row(".claude/CLAUDE.md", "config/CLAUDE.md");
+        let config = file.target.parent().expect("a folder");
+        let directory = open_real_directory(config, &fixture.home).expect("the open folder");
+        let staging = fixture.staging();
+        std::fs::write(&staging, "host").expect("a staged copy");
+        let outside = fixture.home.join("outside");
+        std::fs::create_dir_all(&outside).expect("a folder outside storage");
+        let aside = config.with_file_name("aside");
+        std::fs::rename(config, &aside).expect("move the folder aside");
+        symlink(&outside, config).expect("a link where the folder was");
+
+        assert!(place(&staging, &directory, &file.target).expect("a move"));
+        assert_eq!(std::fs::read_dir(&outside).expect("list").count(), 0);
+        assert_eq!(
+            std::fs::read_to_string(aside.join("CLAUDE.md")).expect("read"),
+            "host"
+        );
+    }
+
+    #[test]
+    fn a_copy_stays_in_storage_while_its_folder_is_swapped_for_a_link() {
+        let fixture = Fixture::new();
+        fixture.write(".claude/CLAUDE.md", "host");
+        let file = fixture.row(".claude/CLAUDE.md", "config/CLAUDE.md");
+        let plan = fixture.plan(&file);
+        let staging = fixture.staging();
+        let config = file.target.parent().expect("a folder").to_path_buf();
+        let aside = config.with_file_name("aside");
+        let outside = fixture.home.join("outside");
+        std::fs::create_dir_all(&config).expect("the folder");
+        std::fs::create_dir_all(&outside).expect("a folder outside storage");
+        let landed = || std::fs::read_dir(&outside).expect("list").count();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::fs::rename(&config, &aside);
+                    let _ = std::fs::remove_file(aside.join("CLAUDE.md"));
+                    let _ = symlink(&outside, &config);
+                    let _ = std::fs::remove_file(&config);
+                    let _ = std::fs::rename(&aside, &config);
+                }
+            });
+            for _ in 0..2000 {
+                let _ = copy(&file, &plan, &staging, &fixture.home);
+                if landed() != 0 {
+                    break;
+                }
+            }
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        assert_eq!(landed(), 0, "a copy landed outside storage");
+    }
+
+    #[test]
+    fn a_copy_replaces_nothing_at_its_target() {
+        let fixture = Fixture::new();
+        fixture.write(".claude/skills/a/SKILL.md", "a");
+        let file = fixture.row(".claude/skills", "config/skills");
+        let plan = fixture.plan(&file);
+        let config = file.target.parent().expect("a folder");
+        let directory = open_real_directory(config, &fixture.home).expect("the open folder");
+        let staging = fixture.staging();
+        let outside = fixture.home.join("outside");
+        std::fs::create_dir_all(&outside).expect("a folder outside storage");
+        type Put = fn(&Path, &Path);
+        let at_target: [(&str, Put); 3] = [
+            ("an empty folder", |target, _| {
+                std::fs::create_dir(target).expect("a folder");
+            }),
+            ("a file", |target, _| {
+                std::fs::write(target, "the box wrote this").expect("a file");
+            }),
+            ("a link", |target, outside| {
+                symlink(outside, target).expect("a link");
+            }),
+        ];
+        for (what, put) in at_target {
+            make(&staging, &plan, &file).expect("a staged copy");
+            put(&file.target, &outside);
+            let before = std::fs::symlink_metadata(&file.target).expect("the target");
+            assert!(
+                !place(&staging, &directory, &file.target).expect("a kept target"),
+                "{what}"
+            );
+            let after = std::fs::symlink_metadata(&file.target).expect("the target");
+            assert_eq!((before.ino(), before.len()), (after.ino(), after.len()));
+            assert!(std::fs::symlink_metadata(&staging).is_err(), "{what}");
+            assert_eq!(std::fs::read_dir(&outside).expect("list").count(), 0);
+            remove_if_present(&file.target).expect("remove");
+        }
     }
 
     #[test]
@@ -1327,7 +1602,86 @@ mod tests {
         std::fs::remove_file(&skill).expect("remove");
         symlink(fixture.home.join(".ssh/id_ed25519"), &skill).expect("a swapped link");
         let error = copy(&file, &plan, &fixture.staging(), &fixture.home).expect_err("a refusal");
-        assert!(matches!(error, Error::Copy { .. }), "{error}");
+        assert!(matches!(error, Error::Changed { .. }), "{error}");
+        assert!(!file.target.exists(), "nothing reaches storage");
+        assert!(!fixture.staging().exists(), "the staging folder is removed");
+    }
+
+    #[test]
+    fn a_file_rewritten_in_place_or_gone_after_the_plan_is_not_copied() {
+        let fixture = Fixture::new();
+        let database = fixture.write(".kiro/memories/memories.db", "db 1");
+        let wal = fixture.write(".kiro/memories/memories.db-wal", "wal 1");
+        let file = fixture.row(".kiro/memories", "home/.kiro/memories");
+
+        let plan = fixture.plan(&file);
+        let later = std::fs::metadata(&database)
+            .expect("stat")
+            .modified()
+            .expect("a time")
+            + std::time::Duration::from_secs(5);
+        let output = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&database)
+            .expect("open");
+        output.set_modified(later).expect("a new time");
+        drop(output);
+        let error = copy(&file, &plan, &fixture.staging(), &fixture.home).expect_err("a change");
+        assert!(
+            matches!(&error, Error::Changed { path } if *path == database),
+            "same inode and size, a new time: {error}"
+        );
+        assert!(!file.target.exists(), "nothing reaches storage");
+        assert!(!fixture.staging().exists(), "the staging folder is removed");
+
+        let plan = fixture.plan(&file);
+        std::fs::remove_file(&wal).expect("remove");
+        let error = copy(&file, &plan, &fixture.staging(), &fixture.home).expect_err("a change");
+        assert!(
+            matches!(&error, Error::Changed { path } if *path == wal),
+            "{error}"
+        );
+        assert!(!file.target.exists(), "nothing reaches storage");
+    }
+
+    #[test]
+    fn a_file_written_after_box_copied_it_is_seen_at_the_end_of_the_copy() {
+        let fixture = Fixture::new();
+        let database = fixture.write(".kiro/memories/memories.db", "db 1");
+        fixture.write(".kiro/memories/memories.db-wal", "wal 1");
+        let file = fixture.row(".kiro/memories", "home/.kiro/memories");
+        let plan = fixture.plan(&file);
+        let staging = fixture.staging();
+        make(&staging, &plan, &file).expect("a copy in staging");
+        assert_eq!(plan.changed(), None);
+        std::fs::write(&database, "db 1, and a page").expect("a write");
+        assert_eq!(plan.changed(), Some(database.as_path()));
+    }
+
+    #[test]
+    fn a_file_that_changes_after_box_copied_it_fails_the_copy_and_nothing_reaches_storage() {
+        let fixture = Fixture::new();
+        let database = fixture.write(".kiro/memories/memories.db", "db 1");
+        fixture.write(".kiro/memories/memories.db-wal", "wal 1");
+        let file = fixture.row(".kiro/memories", "home/.kiro/memories");
+        let plan = fixture.plan(&file);
+        // The open-time check has passed for the database by now, so only the check at the end
+        // of the copy can see this write.
+        let written = database.clone();
+        AFTER_EACH_FILE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |from: &Path| {
+                if from == written.as_path() {
+                    std::fs::write(&written, "db 1, and a page").expect("a write");
+                }
+            }));
+        });
+        let copied = copy(&file, &plan, &fixture.staging(), &fixture.home);
+        AFTER_EACH_FILE.with(|hook| hook.borrow_mut().take());
+        let error = copied.expect_err("a change");
+        assert!(
+            matches!(&error, Error::Changed { path } if *path == database),
+            "{error}"
+        );
         assert!(!file.target.exists(), "nothing reaches storage");
         assert!(!fixture.staging().exists(), "the staging folder is removed");
     }

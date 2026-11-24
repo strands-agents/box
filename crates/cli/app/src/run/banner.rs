@@ -53,6 +53,13 @@ impl From<strands_box::PolicyDecision> for Decision {
     }
 }
 
+/// The `box runs history` commands the full view offers: every decision, and only denials.
+#[derive(Clone, Debug)]
+pub(super) struct HistoryCommands {
+    pub(super) all: String,
+    pub(super) denials: String,
+}
+
 pub(super) struct Banner {
     profile: String,
     cwd: String,
@@ -62,6 +69,8 @@ pub(super) struct Banner {
     pub(super) box_file: String,
     pub(super) policy_file: String,
     pub(super) copied: Option<(String, Instant)>,
+    /// The `box runs history` commands for this run, which the full view offers to copy.
+    pub(super) history: Option<HistoryCommands>,
     blocked: u64,
     total: u64,
     denials: VecDeque<Arc<Operation>>,
@@ -100,6 +109,7 @@ impl Banner {
             box_file: box_file.into(),
             policy_file: policy_file.into(),
             copied: None,
+            history: None,
             blocked: 0,
             total: 0,
             denials: VecDeque::new(),

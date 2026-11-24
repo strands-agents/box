@@ -94,6 +94,9 @@ exception.
 Your shell runs under a policy and is not a full bash. When a shell command gives an unexpected or
 empty result, try a simpler, portable form and name files by explicit paths.
 
+`rg` runs only when the profile lists `@box/rg` and ripgrep is installed on the user's machine.
+When `rg` is not found or is refused, search with `grep -rn` instead.
+
 ## How the user changes what the box allows
 
 You cannot change the policy. The box refuses writes to the user's box files. Tell the user the
@@ -107,6 +110,19 @@ or egress routes), the user starts a new run.
   ```toml
   [egress.docs]
   destinations = ["docs.rs"]
+  ```
+
+  A route takes effect in a new run. To reach the host in this session, the user adds these two
+  permits to a policy file that `policies` lists, and presses Ctrl+Alt+R:
+
+  ```text
+  @id("docs_connect")
+  permit (principal, action == Box::Action::"net:connect", resource)
+  when { context.input.host == "docs.rs" && context.input.port == 443 };
+
+  @id("docs_request")
+  permit (principal, action == Box::Action::"http:request", resource)
+  when { context.input.host == "docs.rs" };
   ```
 
 - Send a token from the user's shell to one host (they export `GITHUB_TOKEN` before `box run`):
@@ -177,6 +193,8 @@ type = "bool"
 default = false
 warning = """Includes servers you add later.
 Local servers run in the box with keys from their settings and your environment.
+A server variable that names a library folder or runtime options can load code.
+If it points where the agent can write, the agent's code runs with the server's keys.
 Remote servers' hosts become reachable.
 Copied settings can expose keys to the agent, even for servers Box skips."""
 

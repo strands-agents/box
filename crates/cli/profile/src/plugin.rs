@@ -37,7 +37,7 @@ const FILESYSTEM: &str = "filesystem";
 const PLUGIN_KEYS: &[&str] = &[HEADER, "inputs", RUN, ENV, PROTECT];
 
 /// The keys of a plugin's `[plugin]` header.
-pub(crate) const HEADER_KEYS: &[&str] = &["name", "version", "kind", "scheme", "engine"];
+pub(crate) const HEADER_KEYS: &[&str] = &["name", "version", "kind", "scheme"];
 
 /// The keys of a plugin's `[run]`, which Box Core's table holds under the same names.
 const RUN_KEYS: &[&str] = &["command", "output"];
@@ -130,9 +130,11 @@ pub(crate) fn load(name: &str, lookup: &Lookup, profile: &Path) -> Result<Layer,
         path: path.clone(),
         source,
     })?;
-    let table: toml::Table =
+    let mut table: toml::Table =
         toml::from_str(&text).map_err(|error| invalid(&path, error.to_string()))?;
-    check(&table, &text, name, lookup.version).map_err(|refusal| refusal.in_file(&path, &text))?;
+    lang::take_requires(&mut table, "plugin", lookup.version)
+        .map_err(|refusal| refusal.in_file(&path, &text))?;
+    check(&table, &text, name).map_err(|refusal| refusal.in_file(&path, &text))?;
     let table = translated(table, &text);
     let mut layer = Layer {
         name: name.to_string(),
@@ -156,7 +158,7 @@ pub(crate) fn load(name: &str, lookup: &Lookup, profile: &Path) -> Result<Layer,
 /// in `[inputs]` that it does not declare, and each `[run]`, `[env]`, or `[protect]` whose shape
 /// the translation cannot read. Box Core checks what a source may hold, such as the form of a
 /// scheme and of a path, as it does for a source of the profile.
-fn check(table: &toml::Table, text: &str, name: &str, version: &str) -> Result<(), Refusal> {
+fn check(table: &toml::Table, text: &str, name: &str) -> Result<(), Refusal> {
     let Some(toml::Value::Table(header)) = table.get(HEADER) else {
         return Err(format!(
             "a plugin needs a `[{HEADER}]` header with `name`, `version`, `kind`, and `scheme`"
@@ -193,7 +195,7 @@ fn check(table: &toml::Table, text: &str, name: &str, version: &str) -> Result<(
             &[key],
         ));
     }
-    lang::check_header(header, HEADER, name, version)?;
+    lang::check_header(header, HEADER, name)?;
     match header.get("kind") {
         None => {
             return Err(Refusal::at(
@@ -1532,8 +1534,12 @@ mod tests {
                 "`[plugin] kind` is \"secret-source\"",
             ),
             (
-                format!("{header}engine = \">=9.0.0\"\n{op}"),
+                format!("{header}{op}[requires]\nbox = \">=9.0.0\"\n"),
                 "this plugin needs box >=9.0.0, and this is box 0.1.0",
+            ),
+            (
+                format!("{header}engine = \">=0.1.0\"\n{op}"),
+                "`[plugin]` holds the unknown key `engine`; `[plugin]` holds `name`, `version`, `kind`, `scheme`",
             ),
             (
                 format!(
@@ -1549,11 +1555,11 @@ mod tests {
         }
         shelf.write(
             &shelf.plugin_file("op"),
-            &format!("{header}engine = \">=0.1.0\"\n{op}"),
+            &format!("{header}{op}[requires]\nbox = \">=0.1.0\"\n"),
         );
         shelf
             .merged("plugins = [\"@box/op\"]")
-            .expect("a plugin within its engine floor loads");
+            .expect("a plugin within its floor loads");
     }
 
     #[test]
