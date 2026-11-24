@@ -161,10 +161,12 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   the catalog refuses its calls as unlisted and a rule that names it degrades
   (`tests/runtime_mcp_policy_staging.rs::a_rule_on_a_left_out_tool_degrades_it_and_the_rest_of_the_server_works`).
   Never keep such a tool with untyped arguments instead: a guarded `forbid` on an argument would
-  load and never fire. It tries each tool alone against a stub of `Box::Agent` and `Box::Resource`,
-  because a composition with the whole Box schema costs about 4 ms a tool, and the tools that pass
-  then compose with the Box schema together. Measured on Linux aarch64, release: 3,000 tools with
-  500 bad ones stage in 4.0 s, and the 2,500 good ones alone in 2.1 s.
+  load and never fire. Each check composes with a stub of `Box::Agent` and `Box::Resource`, the only
+  Box types a server schema names, because the whole Box schema costs about 4 ms a tool and, for a
+  256-tool list in a debug build, 3.1 s against the stub's 1.0 s; that extra time timed out
+  `catalog_page_limit_accepts_256_pages_and_refuses_a_257th` in CI. `stage_mcp_schema` and
+  `compose_action_schema` still compose with the whole Box schema. Measured on Linux aarch64,
+  release: 3,000 tools with 500 bad ones stage in 2.8 s, and the 2,500 good ones in 0.9 s.
   The workload can still make its own http reply unreadable (an output over 16 MiB, or a server
   that compresses anyway), so only a precondition on `output.structured` is sound; a `forbid`
   keyed on an earlier output can be avoided.

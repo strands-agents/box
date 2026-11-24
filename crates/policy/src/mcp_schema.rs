@@ -169,13 +169,13 @@ impl fmt::Display for OmittedTool {
 }
 
 /// [`generate_mcp_schema`], leaving out each tool whose schema does not generate and compose with
-/// the Box schema alone, or refusing the server with the whole list's error when nothing or
+/// the Box entity types alone, or refusing the server with the whole list's error when nothing or
 /// everything fails alone or the remaining tools still fail together.
 pub fn generate_mcp_schema_with_omissions(
     server: &str,
     tools_list: &str,
 ) -> Result<(String, Vec<OmittedTool>), McpSchemaError> {
-    let error = match composable_mcp_schema(server, tools_list) {
+    let error = match schema_with_box_entities(server, tools_list) {
         Ok(schema) => return Ok((schema, Vec::new())),
         Err(error) => error,
     };
@@ -201,7 +201,7 @@ pub fn generate_mcp_schema_with_omissions(
             .pointer_mut(pointer)
             .expect("the tools array was just read");
         *slot = serde_json::Value::Array(vec![tool]);
-        let alone = tool_schema_alone(server, &response.to_string());
+        let alone = schema_with_box_entities(server, &response.to_string());
         let slot = response
             .pointer_mut(pointer)
             .expect("the tools array was just written");
@@ -225,20 +225,13 @@ pub fn generate_mcp_schema_with_omissions(
     *response
         .pointer_mut(pointer)
         .expect("the tools array was just read") = serde_json::Value::Array(kept);
-    let schema = composable_mcp_schema(server, &response.to_string()).map_err(|_| error)?;
+    let schema = schema_with_box_entities(server, &response.to_string()).map_err(|_| error)?;
     Ok((schema, omitted))
 }
 
-/// [`generate_mcp_schema`], refused unless the schema also composes with the Box schema.
-fn composable_mcp_schema(server: &str, tools_list: &str) -> Result<String, McpSchemaError> {
-    let schema = generate_mcp_schema(server, tools_list)?;
-    validate_mcp_schema_composition(&[(server, schema.as_str())])?;
-    Ok(schema)
-}
-
-/// Whether the schema of a one-tool list generates and composes with `Box::Agent` and
+/// [`generate_mcp_schema`], refused unless the schema also composes with `Box::Agent` and
 /// `Box::Resource`, the only Box types a server schema names.
-fn tool_schema_alone(server: &str, tools_list: &str) -> Result<(), McpSchemaError> {
+fn schema_with_box_entities(server: &str, tools_list: &str) -> Result<String, McpSchemaError> {
     const BOX_ENTITIES: &str = "namespace Box { entity Agent; entity Resource; }";
     let schema = generate_mcp_schema(server, tools_list)?;
     let composition = |source: &str| McpSchemaError::Composition {
@@ -253,7 +246,7 @@ fn tool_schema_alone(server: &str, tools_list: &str) -> Result<(), McpSchemaErro
         })
         .collect::<Result<Vec<_>, _>>()?;
     Schema::from_schema_fragments(fragments).map_err(|error| composition(&error.to_string()))?;
-    Ok(())
+    Ok(schema)
 }
 
 /// The JSON Pointer to the tools array of a tools/list response or result.
