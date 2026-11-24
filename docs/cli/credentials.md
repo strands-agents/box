@@ -123,6 +123,11 @@ The box connects to the socket that credsd's own install sets up. If your daemon
 else, set `CREDSD_SOCKET` to its full path in the shell where you run `box run`.
 [The credsd socket](../user/egress.md#the-credsd-socket) lists the default on each system.
 
+On macOS, the box uses a socket in `~/Library/Application Support/credsd` whenever one is there, so
+keep that folder out of every folder the box can write. A profile that lets the agent write all of
+`~` or `~/Library` would let it put its own socket there, and a later run would ask that socket for
+its credentials.
+
 ## A password manager or secret store
 
 A [plugin](plugins.md) reads a key from a password manager or secret store, such as 1Password or AWS
