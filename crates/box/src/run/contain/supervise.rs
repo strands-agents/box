@@ -511,6 +511,7 @@ impl Contained {
     }
 
     /// The one spawn body. `stdio` supplies stdin and stdout; stderr is always inherited.
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_with(
         boundary: Boundary,
         layout: &BoxRoot,
