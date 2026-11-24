@@ -222,7 +222,8 @@ fn descendant_fixture(root: &Path, ready: bool) -> (BoxFixture, SeparateWorkload
     std::fs::write(
         root.join("supervisor.py"),
         r#"import os, pathlib, signal, subprocess, sys
-workload = subprocess.Popen(["/bin/sleep", "10"], start_new_session=True)
+# Outlive the readiness test's 10 s ready timeout, so SIGTERM finds the workload alive.
+workload = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
 def stop(signum, frame):
     os.killpg(workload.pid, signal.SIGTERM)
     workload.wait(timeout=2)
