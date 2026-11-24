@@ -33,7 +33,9 @@ default = "${{ home }}/.cargo"
 
 [env]
 PATH = "${{ root }}:/usr/bin:/bin"
-CARGO_HOME = "${{ workspace }}/.cargo"
+# The packages cargo downloads, and what `cargo install` adds, are in the tool's own storage, so
+# the agent cannot change a crate that a later build compiles.
+CARGO_HOME = "${{ storage.cargo }}"
 CARGO_TARGET_DIR = "${{ workspace }}/target"
 # rustup keeps one home. In the box it is in the tool's own storage, which links to your own
 # toolchains and settings, read-only, and holds each toolchain that a project pins and you lack
@@ -61,7 +63,7 @@ AR_x86_64_apple_darwin = { value = "${{ macos.toolchain }}/ar", when = "macos" }
 
 # The tool's own storage: the agent gets no grant to it.
 [storage]
-directories = ["rustup"]
+directories = ["rustup", "cargo"]
 
 [[storage.files]]
 source = "${{ inputs.rust.home }}/settings.toml"
@@ -74,11 +76,12 @@ target = "rustup/toolchains"
 mode = "link-children"
 
 [filesystem]
-write = ["${{ storage.rustup }}"]
+write = ["${{ storage.rustup }}", "${{ storage.cargo }}"]
 read = [
     "${{ inputs.rust.home }}",
     "${{ inputs.rust.cargo_home }}/bin",
     "${{ storage.rustup }}",
+    "${{ storage.cargo }}",
     # Only rustc, never all of root: for a system install, root is /usr/bin.
     "${{ root }}/rustc",
     "${{ root.parent }}/lib/rustlib",

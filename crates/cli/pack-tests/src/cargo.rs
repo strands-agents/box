@@ -278,3 +278,18 @@ fn a_dnf_cargo_reads_rustc_as_a_file_and_a_rustup_cargo_reads_its_proxies() {
         assert!(cargo["env"].get(name).is_none(), "{name}: {cargo}");
     }
 }
+
+#[test]
+fn cargo_home_is_in_the_tools_storage_outside_the_project() {
+    let host = FakeHost::new();
+    let generated = host
+        .trial()
+        .with("claude")
+        .with("bedrock")
+        .tools(["cargo"])
+        .generate()
+        .expect("a configuration");
+    let cargo = tool(&generated, "cargo");
+    let home = cargo["env"]["CARGO_HOME"].as_str().expect("a cargo home");
+    assert_in_tool_storage(&generated, &host, home, "/tool/cargo/cargo");
+}
