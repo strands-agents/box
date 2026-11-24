@@ -7,11 +7,12 @@ For profiles in general, see [Profiles](../../../docs/cli/profiles.md).
 
 ## Make a profile
 
-For Bedrock Mantle in `us-west-2`, set a model that supports the Responses API in your Codex
-folder's `config.toml` before the first run, for example:
+For Bedrock Mantle in `us-east-1`, set a model that supports the Responses API in your Codex
+folder's `config.toml` before the first run, such as
+[GPT-6.2 Sol](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-2-sol.html):
 
 ```toml
-model = "openai.gpt-5.6-terra"
+model = "openai.gpt-6.2-sol"
 ```
 
 Match the `model_provider` in your Codex folder's `config.toml`: use `bedrock` for
@@ -19,14 +20,14 @@ Match the `model_provider` in your Codex folder's `config.toml`: use `bedrock` f
 
 ```sh
 box profile create codex-runtime --with codex,bedrock
-box profile create codex-mantle --with codex,bedrock-mantle
+box profile create codex-mantle --with codex,bedrock-mantle --option bedrock.region=us-east-1
 box profile create codex-openai --with codex,openai
 ```
 
 If you run `box profile create codex` without naming a provider, Box asks which one to use, with
 the provider in your Codex folder's `config.toml` selected when it recognizes it. Otherwise, Mantle
 is the default. Without a terminal, Box uses that provider or the default. To choose a
-region, pass `--option bedrock.region=us-west-2`. Without it, the starter checks the selected
+region, pass `--option bedrock.region=us-east-1`. Without it, the starter checks the selected
 provider's `aws.region` in that file, then `AWS_REGION`.
 The starter also asks how the box signs in to Bedrock ([Sign in](../bedrock/README.md#sign-in)),
 whether to bring in your MCP servers and hooks, and which policy to use.
