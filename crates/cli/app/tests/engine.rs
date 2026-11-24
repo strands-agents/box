@@ -1669,27 +1669,31 @@ fn saved_settings_warning_precedes_the_agent_output() {
         "probe",
         &format!(
             "{PROBE}\n[storage]\ndirectories = [\"config\"]\n\n[[storage.files]]\n\
-             source = \"${{{{ home }}}}/settings.json\"\ntarget = \"config/settings.json\"\n\
-             kind = \"json\"\nkeep = [[\"model\"]]\nfill = true\n"
+             source = \"${{{{ home }}}}/config.toml\"\ntarget = \"config/config.toml\"\n\
+             kind = \"toml\"\nkeep = [[\"model\"]]\nfill = true\n"
         ),
         PROBE_POLICY,
     );
-    let source = scene.home().join("settings.json");
-    std::fs::write(&source, r#"{"model":"saved"}"#).expect("host settings");
+    let source = scene.home().join("config.toml");
+    std::fs::write(&source, "model = 'saved-model'\n").expect("host settings");
     let first = scene.probe(&scene.workspace(), "printf agent-started >&2");
     succeeded(&first);
-    assert!(!String::from_utf8_lossy(&first.stderr).contains("Keeping the saved values."));
+    assert!(!String::from_utf8_lossy(&first.stderr).contains("box profile reset"));
 
-    std::fs::write(&source, r#"{"model":"changed"}"#).expect("changed host settings");
+    std::fs::write(&source, "model = 'changed-model'\n").expect("changed host settings");
     let next = scene.probe(&scene.workspace(), "printf agent-started >&2");
     succeeded(&next);
     let stderr = String::from_utf8_lossy(&next.stderr);
     let warning = stderr
-        .find("settings.json: model. Keeping the saved values.")
+        .find("config.toml: model. Keeping the saved values.")
         .expect("the saved model warning");
     let agent = stderr.find("agent-started").expect("agent output");
     assert!(warning < agent, "{stderr}");
     assert!(stderr.contains("box profile reset probe"), "{stderr}");
+    assert!(stderr.contains("Reset deletes the agent's settings, sessions, and memory."));
+    for value in ["saved-model", "changed-model"] {
+        assert!(!stderr.contains(value), "{stderr}");
+    }
 }
 
 #[test]

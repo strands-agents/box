@@ -14,8 +14,6 @@ folder's `config.toml` before the first run, for example:
 model = "openai.gpt-5.6-terra"
 ```
 
-`openai.gpt-oss-120b` does not support that API.
-
 Match the `model_provider` in your Codex folder's `config.toml`: use `bedrock` for
 `amazon-bedrock-runtime`, `bedrock-mantle` for `amazon-bedrock`, or `openai` for the OpenAI API:
 

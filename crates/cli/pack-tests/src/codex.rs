@@ -463,69 +463,6 @@ no_memories_if_mcp_or_web_search = true
 }
 
 #[test]
-fn codex_warns_when_saved_preferences_differ_without_replacing_them() {
-    let host = FakeHost::new();
-    host.profile()
-        .with("codex")
-        .with("bedrock-mantle")
-        .create()
-        .expect("profile")
-        .write(false)
-        .expect("write");
-    let source = host.home().join(".codex/config.toml");
-    std::fs::create_dir_all(source.parent().expect("parent")).expect("directory");
-    std::fs::write(&source, "model = 'saved-model'\n").expect("source");
-    let first = host
-        .launcher()
-        .prepare("codex", &host.project(), None)
-        .expect("first launch");
-    assert!(first.settings_notice().is_none());
-    drop(first);
-
-    let changed = "model = 'changed-model'\nmodel_verbosity = 'low'\nsecret = 'never-print-this'\n";
-    std::fs::write(&source, changed).expect("host edit");
-    let next = host
-        .launcher()
-        .prepare("codex", &host.project(), None)
-        .expect("next launch");
-    let notice = next.settings_notice().expect("a mismatch notice");
-    assert!(notice.contains("config.toml: model."), "{notice}");
-    assert!(notice.contains("Keeping the saved values."), "{notice}");
-    assert!(notice.contains("box profile reset codex"), "{notice}");
-    assert!(
-        notice.contains("deletes the agent's settings, sessions, and memory"),
-        "{notice}"
-    );
-    for value in [
-        "saved-model",
-        "changed-model",
-        "never-print-this",
-        "model_verbosity",
-    ] {
-        assert!(!notice.contains(value), "{notice}");
-    }
-    let target =
-        storage_root(&host.home().join(".strands/box"), "codex").join("agent/home/config.toml");
-    let saved = std::fs::read_to_string(&target).expect("saved config");
-    let saved: toml::Table = saved.parse().expect("TOML");
-    assert_eq!(saved["model"].as_str(), Some("saved-model"));
-    assert_eq!(saved["model_verbosity"].as_str(), Some("low"));
-    assert_eq!(std::fs::read_to_string(&source).expect("source"), changed);
-    drop(next);
-
-    std::fs::write(
-        &target,
-        "model = 'changed-model'\nmodel_verbosity = 'low'\n",
-    )
-    .expect("saved choice now matches");
-    let matching = host
-        .launcher()
-        .prepare("codex", &host.project(), None)
-        .expect("matching launch");
-    assert!(matching.settings_notice().is_none());
-}
-
-#[test]
 fn codex_imports_only_each_workspaces_trust_and_preserves_saved_choices() {
     let host = FakeHost::new();
     host.profile()

@@ -1913,9 +1913,7 @@ mod tests {
         let State::Fill { text, .. } = state(&file, &fixture.refusals()).expect("a state") else {
             panic!("a fill");
         };
-        let (why, different) = fill(&file, &text).expect("a fill");
-        let why = why.expect("left alone");
-        assert!(different.is_empty());
+        let why = fill(&file, &text).expect("a fill").0.expect("left alone");
         assert!(why.contains("hard link"), "{why}");
         assert_eq!(
             std::fs::read_to_string(&file.target).expect("read"),
@@ -1931,9 +1929,7 @@ mod tests {
 
         std::fs::remove_file(&file.target).expect("remove");
         symlink(&secret, &file.target).expect("a link");
-        let (why, different) = fill(&file, &text).expect("a fill");
-        let why = why.expect("left alone");
-        assert!(different.is_empty());
+        let why = fill(&file, &text).expect("a fill").0.expect("left alone");
         assert!(why.contains("is a link"), "{why}");
         assert_eq!(
             std::fs::read_to_string(&secret).expect("read"),

@@ -2423,25 +2423,6 @@ impl Launch {
         &self.synced
     }
 
-    /// The startup notice for saved settings that differ from the current import.
-    pub fn settings_notice(&self) -> Option<String> {
-        if self.different_settings.is_empty() {
-            return None;
-        }
-        let mut notice = self
-            .different_settings
-            .iter()
-            .map(|line| format!("box: warning: {}", banner::clean(line)))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let reset = self.box_command(&format!("profile reset {}", self.profile_name));
-        notice.push_str(&format!(
-            "\nbox: change the saved settings in the agent, or run `{reset}` to import again. \
-             Reset deletes the agent's settings, sessions, and memory."
-        ));
-        Some(notice)
-    }
-
     /// Each stdio MCP server that gets no permit to start, as `(name, reason)`.
     pub fn mcp_unstarted(&self) -> &[(String, String)] {
         &self.mcp_unstarted
@@ -2673,8 +2654,15 @@ impl Launch {
     }
 
     fn run_inner(&self, args: &[OsString]) -> Result<ExitCode, Error> {
-        if let Some(notice) = self.settings_notice() {
-            eprintln!("{notice}");
+        if !self.different_settings.is_empty() {
+            for notice in &self.different_settings {
+                eprintln!("box: warning: {}", banner::clean(notice));
+            }
+            let reset = self.box_command(&format!("profile reset {}", self.profile_name));
+            eprintln!(
+                "box: change the saved settings in the agent, or run `{reset}` to import again. \
+                 Reset deletes the agent's settings, sessions, and memory."
+            );
         }
         let result = if terminal::attached() {
             terminal::run(self, |options| {

@@ -214,10 +214,6 @@ and existing sections (see [MCP servers](profile-language.md#mcp-servers)). When
 keeps a reused one with its box. A policy error comes before this step, so it creates no storage
 directory and copies nothing.
 
-For a `fill` row, the run also compares each kept setting present in both the source and the copy.
-Before the agent starts, it names settings with different values in a warning and keeps the
-copy's values.
-
 ### Start Box Core
 
 `box` calls `strands_box::run()`. At a terminal, its `on_ready` callback starts stderr capture,
