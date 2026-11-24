@@ -17,6 +17,7 @@ struct Fixture {
     probe: PathBuf,
     policy: String,
     writable: bool,
+    log_only: bool,
 }
 
 impl Fixture {
@@ -51,7 +52,20 @@ impl Fixture {
             probe,
             policy: policy.into(),
             writable,
+            log_only: false,
         }
+    }
+
+    /// Open the policy in log-only mode.
+    fn log_only(mut self) -> Self {
+        self.log_only = true;
+        self
+    }
+
+    /// The box's decision records.
+    fn records(&self) -> String {
+        std::fs::read_to_string(self.root.join("box/private/telemetry/records.jsonl"))
+            .unwrap_or_default()
     }
 
     fn command(
@@ -67,7 +81,7 @@ impl Fixture {
         let config = format!(
             r#"name = "mac-native"
 box_dir = {}
-policy = "policy.dw"
+policy = {}
 [experimental-features]
 native-filesystem-policy = true
 [agent]
@@ -79,6 +93,11 @@ read = [{}]
 write = [{}]
 "#,
             quote(&self.root.join("box")),
+            if self.log_only {
+                r#"{ source = "policy.dw", enforcement = "log_only" }"#
+            } else {
+                r#""policy.dw""#
+            },
             quote(&self.probe),
             quote(&self.workspace),
             quote(&self.workspace),
@@ -139,6 +158,84 @@ write = [{}]
 }
 
 const PERMIT: &str = "permit(principal, action, resource);";
+
+/// The denial records for `path` in `records`, each as its `enforced` flag and its
+/// `would_deny.ids`.
+fn denials_of(records: &str, path: &str) -> Vec<(bool, Vec<String>)> {
+    let mut found = Vec::new();
+    for line in records.lines() {
+        let Ok(request) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        for resource in request["resourceLogs"].as_array().into_iter().flatten() {
+            for scope in resource["scopeLogs"].as_array().into_iter().flatten() {
+                for record in scope["logRecords"].as_array().into_iter().flatten() {
+                    let attribute = |key: &str| {
+                        record["attributes"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .find(|attribute| attribute["key"] == key)
+                            .map(|attribute| attribute["value"].clone())
+                    };
+                    let text = |key: &str| {
+                        attribute(key)
+                            .and_then(|value| value["stringValue"].as_str().map(str::to_string))
+                    };
+                    if text("strands.box.policy.verdict").as_deref() != Some("deny")
+                        || !text("strands.box.policy.resource")
+                            .is_some_and(|resource| resource.ends_with(path))
+                    {
+                        continue;
+                    }
+                    found.push((
+                        attribute("strands.box.policy.enforced")
+                            .and_then(|value| value["boolValue"].as_bool())
+                            .unwrap_or(true),
+                        attribute("strands.box.policy.would_deny.ids")
+                            .and_then(|value| value["arrayValue"]["values"].as_array().cloned())
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|id| id["stringValue"].as_str().map(str::to_string))
+                            .collect(),
+                    ));
+                }
+            }
+        }
+    }
+    found
+}
+
+/// In log-only mode a native read the policy forbids goes ahead, and its record keeps the denial,
+/// unenforced, naming the `forbid`. The same box enforcing refuses the read, which is the paired
+/// control.
+#[test]
+fn log_only_mode_lets_a_forbidden_native_read_through_and_records_it() {
+    const POLICY: &str = r#"permit(principal, action, resource);
+@id("native_protected")
+forbid(principal, action == Box::Action::"fs:read", resource)
+when { context.input.path like "*/protected" };
+"#;
+    let trial = Fixture::new(POLICY, true).log_only();
+    std::fs::write(trial.workspace.join("protected"), "original").unwrap();
+    trial.run("read", "protected", "-", "allow", false);
+    assert_eq!(
+        denials_of(&trial.records(), "/protected"),
+        [(false, vec!["native_protected".to_string()])],
+        "{}",
+        trial.records()
+    );
+
+    let enforcing = Fixture::new(POLICY, true);
+    std::fs::write(enforcing.workspace.join("protected"), "original").unwrap();
+    enforcing.run("read", "protected", "-", "deny", false);
+    assert_eq!(
+        denials_of(&enforcing.records(), "/protected"),
+        [(true, Vec::new())],
+        "{}",
+        enforcing.records()
+    );
+}
 
 #[test]
 fn permission_changes_obey_dogwood_for_files_directories_and_children() {
