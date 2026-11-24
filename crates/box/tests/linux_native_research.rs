@@ -710,25 +710,31 @@ fn no_controlling_terminal_flag_does_not_bypass_policy() {
     run("quiet", false, true, None, false);
 }
 
+fn path_truncate(allow: bool, agent_enabled: bool, tool: Option<bool>) {
+    for operation in ["xtruncate", "Rxtruncate"] {
+        run(operation, allow, agent_enabled, tool, false);
+    }
+}
+
 #[test]
 fn agent_path_truncate_allow() {
-    run("xtruncate", true, true, None, false);
+    path_truncate(true, true, None);
 }
 #[test]
 fn agent_path_truncate_deny() {
-    run("xtruncate", false, true, None, false);
+    path_truncate(false, true, None);
 }
 #[test]
 fn tool_path_truncate_allow() {
-    run("xtruncate", true, false, Some(true), false);
+    path_truncate(true, false, Some(true));
 }
 #[test]
 fn tool_path_truncate_deny() {
-    run("xtruncate", false, false, Some(true), false);
+    path_truncate(false, false, Some(true));
 }
 #[test]
 fn disabled_native_path_truncate_keeps_the_baseline_behavior() {
-    run("xtruncate", false, false, None, false);
+    path_truncate(false, false, None);
 }
 
 #[cfg(target_arch = "x86_64")]

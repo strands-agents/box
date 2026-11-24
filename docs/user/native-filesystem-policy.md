@@ -39,6 +39,7 @@ The host must support seccomp user notifications, descriptor injection, BPF Linu
 BPF lets Box attach the checks that prevent delete and rename from affecting a replacement file.
 The checks use the kernel's file identity while the filesystem operation holds its locks.
 Testing used Amazon Linux 2023 on ARM64 with kernel `6.12.111-136.204.amzn2023.aarch64`.
+Development testing also used Linux x86-64 with kernel `6.12.115-140.210.amzn2023.x86_64`.
 Other kernels and distributions need qualification.
 
 Start the trusted Box process with `CAP_BPF` and `CAP_PERFMON` when any workload selects native checks.

@@ -80,7 +80,7 @@ void native_main(long *stack) {
         __builtin_unreachable();
 #endif
     }
-    int relative = legacy && argv[1][0] == 'R';
+    int relative = argv[1][0] == 'R' && (legacy || argv[1][1] == 'x');
     if (relative) argv[1]++;
     if ((argv[1][0] == 'v' || argv[1][0] == 'l') && argv[1][1] == 'c') {
         long child = invoke(__NR_clone, 17, 0, 0, 0, 0);
