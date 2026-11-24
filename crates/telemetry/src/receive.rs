@@ -31,7 +31,7 @@ use crate::export::TargetExporter;
 /// The most a single request body may carry.
 const BODY_LIMIT: usize = 4 * 1024 * 1024;
 
-/// The most posted traces decoded at once.
+/// The most posted payloads of one signal decoded and relayed at once.
 const RELAY_CAPACITY: usize = 1;
 
 /// The most resource entries one request may carry, whichever signal it names.
@@ -74,8 +74,25 @@ struct Inbound {
     box_name: String,
     run_id: String,
     relays: Relays,
-    admitted: Semaphore,
+    admitted: Admitted,
     dropped: Arc<AtomicU64>,
+}
+
+/// One relay slot per signal, so a slow relay of one signal never drops a payload of another.
+struct Admitted {
+    traces: Semaphore,
+    logs: Semaphore,
+    metrics: Semaphore,
+}
+
+impl Admitted {
+    fn new() -> Self {
+        Self {
+            traces: Semaphore::new(RELAY_CAPACITY),
+            logs: Semaphore::new(RELAY_CAPACITY),
+            metrics: Semaphore::new(RELAY_CAPACITY),
+        }
+    }
 }
 
 /// A bound loopback listener, and the port the kernel gave it.
@@ -138,7 +155,7 @@ impl Receiver {
                 box_name,
                 run_id,
                 relays,
-                admitted: Semaphore::new(RELAY_CAPACITY),
+                admitted: Admitted::new(),
                 dropped,
             }));
         let _ = axum::serve(listener, router).await;
@@ -200,7 +217,7 @@ async fn accept_trace(
 ) -> impl axum::response::IntoResponse {
     // Taken before the decode, because the decode is where the cost is. `try_acquire`, never
     // `acquire`: a queue the agent could wait in is a queue it could measure.
-    let Ok(_permit) = inbound.admitted.try_acquire() else {
+    let Ok(_permit) = inbound.admitted.traces.try_acquire() else {
         inbound.dropped.fetch_add(1, Ordering::Relaxed);
         return answer(StatusCode::OK);
     };
@@ -244,7 +261,7 @@ async fn accept_logs(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl axum::response::IntoResponse {
-    let Ok(_permit) = inbound.admitted.try_acquire() else {
+    let Ok(_permit) = inbound.admitted.logs.try_acquire() else {
         inbound.dropped.fetch_add(1, Ordering::Relaxed);
         return answer(StatusCode::OK);
     };
@@ -282,7 +299,7 @@ async fn accept_metrics(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl axum::response::IntoResponse {
-    let Ok(_permit) = inbound.admitted.try_acquire() else {
+    let Ok(_permit) = inbound.admitted.metrics.try_acquire() else {
         inbound.dropped.fetch_add(1, Ordering::Relaxed);
         return answer(StatusCode::OK);
     };
@@ -625,6 +642,64 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// **A log relay in flight does not drop the agent's spans.**
+    ///
+    /// One slot shared by every signal answered a trace with `200` and dropped it while a log batch
+    /// was still being relayed.
+    #[tokio::test]
+    async fn a_trace_is_relayed_while_a_log_relay_holds_its_slot() {
+        use crate::config::{Target, TargetKind};
+        use axum::response::IntoResponse as _;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("agent.jsonl");
+        let target = Target::new(TargetKind::File, path.to_string_lossy().to_string());
+        let dropped = Arc::new(AtomicU64::new(0));
+        let exporter = Arc::new(
+            TargetExporter::open(&target, Arc::clone(&dropped)).expect("open the file target"),
+        );
+        let inbound = Arc::new(Inbound {
+            box_name: "probe".to_string(),
+            run_id: "probe-run".to_string(),
+            relays: Relays {
+                traces: vec![Arc::clone(&exporter)],
+                logs: vec![exporter],
+                metrics: Vec::new(),
+            },
+            admitted: Admitted::new(),
+            dropped: Arc::clone(&dropped),
+        });
+        let log_relay_in_flight = inbound.admitted.logs.try_acquire().expect("the log slot");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/x-protobuf".parse().unwrap());
+        let body = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![Span {
+                        name: "the agent's span during a log relay".to_string(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }
+        .encode_to_vec();
+        let answered = accept_trace(State(Arc::clone(&inbound)), headers, Bytes::from(body))
+            .await
+            .into_response();
+
+        assert_eq!(answered.status(), StatusCode::OK);
+        assert_eq!(dropped.load(Ordering::Relaxed), 0, "the span was dropped");
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("the relayed span")
+                .contains("the agent's span during a log relay")
+        );
+        drop(log_relay_in_flight);
     }
 
     /// A live receiver writing to one file target, and that file's path.
