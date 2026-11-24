@@ -1765,19 +1765,32 @@ secret.ref = "aws://runtime"
             &DeclaredSources::none(),
         )
         .expect("accepted");
-        let traces = &stored["x"];
-        assert_eq!(traces.destination, "https://xray.us-west-2.amazonaws.com");
-        assert_eq!(traces.accepts.as_deref(), Some(&[Payload::Traces][..]));
-        let headers = traces.headers.as_ref().expect("headers");
         assert_eq!(
-            headers.get("x-aws-log-group").map(String::as_str),
-            Some("/aws/agents/runtime-a")
+            stored["x"],
+            TelemetryEntry {
+                kind: TelemetryKind::Otlp,
+                destination: "https://xray.us-west-2.amazonaws.com".to_string(),
+                include: None,
+                secret: Some(TelemetrySecret {
+                    reference: "aws://p".to_string(),
+                    header: None,
+                    prefix: None,
+                    placement: None,
+                }),
+                accepts: Some(vec![Payload::Traces]),
+                headers: Some(BTreeMap::from([
+                    (
+                        "x-aws-log-group".to_string(),
+                        "/aws/agents/runtime-a".to_string()
+                    ),
+                    ("x-aws-log-stream".to_string(), "spans".to_string()),
+                ])),
+                log_group: None,
+                log_stream: None,
+                project: None,
+                region: None,
+            }
         );
-        assert_eq!(
-            headers.get("x-aws-log-stream").map(String::as_str),
-            Some("spans")
-        );
-        assert_eq!(headers.len(), 2);
         assert_eq!(
             checked(
                 &stored,
