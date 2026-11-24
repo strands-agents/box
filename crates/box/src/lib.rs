@@ -25,7 +25,8 @@ use command::cli::{Cli, Command, PolicyCommand};
 
 pub use policy::{Finding, Location, Policy, PolicyCheck, RuleRef};
 pub use run::decisions::{
-    Enforcement, PolicyDecision, PolicyDecisionReceiver, PolicyDecisionSender, policy_decisions,
+    DecisionEnforcement, PolicyDecision, PolicyDecisionReceiver, PolicyDecisionSender,
+    policy_decisions,
 };
 
 static STARTED: AtomicBool = AtomicBool::new(false);

@@ -104,7 +104,7 @@ pub struct PolicyDecision {
     /// The reason for a refusal.
     pub reason: Option<String>,
     /// Whether Box applied the decision, or log-only mode let a denied action through.
-    pub enforcement: Enforcement,
+    pub enforcement: DecisionEnforcement,
     /// Each rule that would have denied the action in log-only mode, across all its steps.
     pub would_deny: Vec<String>,
 }
@@ -112,7 +112,7 @@ pub struct PolicyDecision {
 /// Whether Box applied one decision as the policy made it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Enforcement {
+pub enum DecisionEnforcement {
     /// Box applied the decision as the policy made it.
     Applied,
     /// Log-only mode let through a decision the policy denied.
@@ -135,9 +135,9 @@ impl PolicyDecision {
             cause: record.cause().as_str().to_string(),
             reason: record.reason().map(str::to_string),
             enforcement: if record.enforced() {
-                Enforcement::Applied
+                DecisionEnforcement::Applied
             } else {
-                Enforcement::LetThrough {
+                DecisionEnforcement::LetThrough {
                     first: record.is_first_flip(),
                 }
             },
