@@ -2,12 +2,8 @@ use std::cell::Cell;
 use std::time::Duration;
 
 use hyper::header::HeaderMap as WireHeaders;
-use hyper::upgrade::Upgraded;
-use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::Instant;
-
-use crate::intercept::mitm::SharedState;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Handshake {
@@ -52,15 +48,19 @@ fn one<'a>(headers: &'a WireHeaders, name: &str) -> Option<&'a str> {
     }
 }
 
-pub(crate) async fn run(workload: Upgraded, upstream: Upgraded, state: &SharedState) {
-    let (mut from_workload, mut to_workload) = tokio::io::split(TokioIo::new(workload));
-    let (mut from_server, mut to_server) = tokio::io::split(TokioIo::new(upstream));
+pub(crate) async fn run<W, U>(workload: W, upstream: U, limit: Duration)
+where
+    W: AsyncRead + AsyncWrite,
+    U: AsyncRead + AsyncWrite,
+{
+    let (mut from_workload, mut to_workload) = tokio::io::split(workload);
+    let (mut from_server, mut to_server) = tokio::io::split(upstream);
     let active = Cell::new(Instant::now());
     let up = copy(&active, &mut from_workload, &mut to_server);
     let down = copy(&active, &mut from_server, &mut to_workload);
     tokio::select! {
         _ = async { tokio::try_join!(up, down) } => {}
-        () = idle(&active, state.config.upstream_read_deadline) => {}
+        () = idle(&active, limit) => {}
     }
 }
 
@@ -92,6 +92,7 @@ async fn idle(active: &Cell<Instant>, limit: Duration) {
 mod tests {
     use http_body_util::{Empty, Full};
     use hyper::body::Bytes;
+    use tokio::io::DuplexStream;
 
     use super::*;
 
@@ -141,5 +142,55 @@ mod tests {
             .body(Full::new(Bytes::from_static(b"x")))
             .unwrap();
         assert!(malformed(classify(&with_body)));
+    }
+
+    async fn relayed(limit: Duration, script: impl Future<Output = ()>, ends: [DuplexStream; 2]) {
+        let [workload, upstream] = ends;
+        let both = async { tokio::join!(run(workload, upstream, limit), script) };
+        tokio::time::timeout(Duration::from_secs(5), both)
+            .await
+            .expect("the relay and the script end");
+    }
+
+    #[tokio::test]
+    async fn a_close_from_either_side_reaches_the_other_side() {
+        for agent_closes_first in [true, false] {
+            let (workload, mut agent) = tokio::io::duplex(64);
+            let (upstream, mut server) = tokio::io::duplex(64);
+            let script = async {
+                let (first, second) = if agent_closes_first {
+                    (&mut agent, &mut server)
+                } else {
+                    (&mut server, &mut agent)
+                };
+                first.write_all(b"bye").await.unwrap();
+                first.shutdown().await.unwrap();
+                let mut seen = Vec::new();
+                second.read_to_end(&mut seen).await.unwrap();
+                assert_eq!(seen, b"bye");
+                second.shutdown().await.unwrap();
+                let mut rest = Vec::new();
+                first.read_to_end(&mut rest).await.unwrap();
+                assert!(rest.is_empty());
+            };
+            relayed(Duration::from_secs(60), script, [workload, upstream]).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn traffic_keeps_a_websocket_open_past_the_idle_limit() {
+        let (workload, mut agent) = tokio::io::duplex(64);
+        let (upstream, mut server) = tokio::io::duplex(64);
+        let script = async {
+            for _ in 0..10 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                agent.write_all(b"x").await.unwrap();
+                let mut byte = [0; 1];
+                server.read_exact(&mut byte).await.unwrap();
+            }
+            agent.shutdown().await.unwrap();
+            server.shutdown().await.unwrap();
+        };
+        relayed(Duration::from_millis(300), script, [workload, upstream]).await;
     }
 }

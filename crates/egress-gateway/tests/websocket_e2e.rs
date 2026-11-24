@@ -201,6 +201,7 @@ impl Session {
                 max_body_bytes: limit,
             },
             upstream_read_deadline: idle,
+            upgrade_http: vec![HOST.to_string()],
             ..MitmConfig::default()
         };
         let policy = Decisions::default();
@@ -355,21 +356,23 @@ fn a_handshake_to_an_mcp_server_host_is_refused_with_403() {
 #[test]
 fn a_plain_handshake_is_refused_with_403() {
     let session = Session::start(false, LIMIT, echo(Arc::default()));
-    let authority = format!("{HOST}:{}", session.upstream.port());
-    let mut plain = TcpStream::connect(("127.0.0.1", session.gateway.port().unwrap())).unwrap();
-    let handshake = format!(
-        "GET http://{authority}/v1/realtime?access_token=abc HTTP/1.1\r\nHost: {authority}\r\n\
-         Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
-         Sec-WebSocket-Key: {KEY}\r\n\r\n"
-    );
-    plain.write_all(handshake.as_bytes()).unwrap();
-    let head = harness::read_http_head(&mut plain);
-    assert!(head.starts_with("HTTP/1.1 403"), "{head}");
+    let direct = format!("{HOST}:{}", session.upstream.port());
+    for authority in [direct.as_str(), HOST] {
+        let mut plain = TcpStream::connect(("127.0.0.1", session.gateway.port().unwrap())).unwrap();
+        let handshake = format!(
+            "GET http://{authority}/v1/realtime?access_token=abc HTTP/1.1\r\nHost: {authority}\r\n\
+             Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: {KEY}\r\n\r\n"
+        );
+        plain.write_all(handshake.as_bytes()).unwrap();
+        let head = harness::read_http_head(&mut plain);
+        assert!(head.starts_with("HTTP/1.1 403"), "{authority}: {head}");
+    }
     let records = session.records.records().into_iter();
     let denied = records.filter(|record| record.decision == AuditDecision::Deny);
     assert_eq!(
         denied.map(|record| record.path).collect::<Vec<_>>(),
-        ["/v1/realtime"]
+        ["/v1/realtime", "/v1/realtime"]
     );
     assert!(session.decided().is_empty());
     assert_eq!(session.upstream.request_count(), 0);
@@ -456,9 +459,28 @@ fn an_idle_websocket_ends_both_connections() {
         read_frame(&mut session.client),
         Some((true, 1, b"hi".to_vec()))
     );
+    let waited = std::time::Instant::now();
     assert_eq!(read_frame(&mut session.client), None);
+    assert!(
+        waited.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        waited.elapsed()
+    );
     assert!(ended(&frames));
     assert!(session.denials().is_empty());
+}
+
+#[test]
+fn a_malformed_handshake_is_refused_with_400() {
+    let mut session = Session::start(false, LIMIT, echo(Arc::default()));
+    let head = session.handshake("Sec-WebSocket-Version: 8\r\n");
+    assert!(head.starts_with("HTTP/1.1 400"), "{head}");
+    assert_eq!(
+        session.denials(),
+        ["websocket: handshake version is not 13"]
+    );
+    assert!(session.decided().is_empty());
+    assert_eq!(session.upstream.request_count(), 0);
 }
 
 #[test]

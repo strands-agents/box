@@ -137,9 +137,24 @@ fn a_permit_on_http_request_does_not_admit_a_handshake() {
 #[test]
 fn the_guard_refuses_the_next_handshake() {
     let fixture = Fixture::open();
+    assert!(fixture.admits(&handshake(REALTIME, "/v1/realtime", true)));
+    assert!(fixture.admits(&handshake(GITHUB, "/events", false)));
     fixture.read_the_key();
-    assert!(!fixture.admits(&handshake(REALTIME, "/v1/realtime", true)));
-    assert!(!fixture.admits(&handshake(GITHUB, "/events", false)));
+    let refusal = |attempt| {
+        fixture
+            .egress
+            .intercept(&attempt)
+            .err()
+            .unwrap()
+            .to_string()
+    };
+    let websocket = refusal(handshake(REALTIME, "/v1/realtime", true));
+    assert!(
+        websocket.starts_with("websocket:connect gate: "),
+        "{websocket}"
+    );
+    let http = refusal(handshake(GITHUB, "/events", false));
+    assert!(http.starts_with("http:request gate: "), "{http}");
 }
 
 #[test]

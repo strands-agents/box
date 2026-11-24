@@ -247,6 +247,8 @@ certificate that does not parse as a root is skipped. `upstream_read_deadline` s
 upstream TLS, request transmission, and complete response receipt.
 Arriving chunks do not reset it. If delivery has started, expiry closes the incomplete response.
 Once upstream receipt finishes, this deadline does not bound the final workload write.
+After a WebSocket opens, the same value is also its idle limit. The gateway ends both connections
+when no byte moves in either direction for that long, and each byte starts the wait again.
 `box.toml` exposes no key for it.
 
 Responses stream through bounded buffers, including credentialed responses and ordinary HTTP MCP

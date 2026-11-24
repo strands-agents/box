@@ -242,7 +242,8 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
         let workload = upgrade
             .await
             .map_err(|e| ProxyError::Io(format!("WebSocket upgrade: {e}")))?;
-        websocket::run(workload, relay, state).await;
+        let limit = state.config.upstream_read_deadline;
+        websocket::run(TokioIo::new(workload), TokioIo::new(relay), limit).await;
     }
     Ok(())
 }

@@ -7,7 +7,7 @@ this route unless the operator enables the network exception described below.
 
 | The gateway | What it does |
 |---|---|
-| Requests policy decisions | `net:connect` for each destination before DNS and again for each address it connects to; `http:request` for each request; `mcp:call` for MCP requests whose host matches a configured HTTP MCP server, except the protocol methods that pass without an MCP decision. |
+| Requests policy decisions | `net:connect` for each destination before DNS and again for each address it connects to; `http:request` for each request, or `websocket:connect` for a WebSocket handshake; `mcp:call` for MCP requests whose host matches a configured HTTP MCP server, except the protocol methods that pass without an MCP decision. |
 | Adds | The secret an `[egress.<name>]` route binds to the destination. |
 | Removes | A copy of that secret from the response, before the process sees it. |
 
@@ -143,7 +143,8 @@ Once a pinned address answers, the gateway acknowledges the `CONNECT` and comple
 handshake with a certificate for that host, signed by the box's certificate authority. Every
 `CONNECT` is intercepted, and the request inside must name the same host as the `CONNECT`.
 
-Policy decides `http:request` for every request. It sees the host, the port, the method, the path,
+Policy decides `http:request` for every request except a WebSocket handshake, which
+[WebSocket](#websocket) describes. It sees the host, the port, the method, the path,
 the body size, and whether the request came inside a `CONNECT`. The gateway puts the path in one
 canonical form first. It decodes percent-escapes only for unreserved characters, leaving `%2F`
 encoded. It removes `.` and `..` segments and omits the query from the policy path.
