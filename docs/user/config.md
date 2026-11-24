@@ -340,6 +340,10 @@ by default.
 `ingress = true` turns on [`[[agent.ingress]]`](#agentingress), which is experimental and off by
 default.
 
+The Linux ARM64 `container-agent = true` setting selects a container-provided PID
+namespace for the agent. See [container agent mode](linux-requirements.md#run-an-agent-in-a-container-pid-namespace) for the
+required process, procfs, and installer boundaries. It refuses hosted tools and MCP servers.
+
 `secret-sources = true` turns on [`[secret-source.<scheme>]`](#secret-sourcescheme) and the
 `secret.env` key of a route or a remote MCP server, which are experimental and off by default.
 
@@ -634,7 +638,7 @@ mounted aliases, and enclosing directories.
 | `metadata` | Inspect file properties below a directory without content access on macOS. Linux omits this grant without an error. **`[agent.filesystem]` only.** |
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
-| `deny_write` | Refuse every write below an existing directory inside a `write` directory. Reads and `exec` grants there still apply. The box stores its record at version 38. The agent, a tool, and a local MCP server take it. |
+| `deny_write` | Refuse every write below an existing directory inside a `write` directory. Reads and `exec` grants there still apply. This list requires at least record version 38. The agent, a tool, and a local MCP server take it. |
 
 Use `deny_write` for a directory that the agent runs code from, such as a Python virtual
 environment in a writable project. Create and fill the directory before the box starts. The agent
@@ -1186,8 +1190,7 @@ Each of these is refused when the configuration loads:
   environment, even when a `pass-secret-env` list names the AWS keys. So a request that policy
   permits to that route's destinations is signed as the identity that reads the vault.
 
-A box that declares a source stores its record at version 39, and so does a box with a
-`secret.env` key. An older build refuses that record.
+A secret source declaration or a `secret.env` key requires at least record version 39. An older build refuses that record.
 
 ### How a run reads the secrets
 

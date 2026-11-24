@@ -227,7 +227,12 @@ impl Saturated {
         let (report, result) = mpsc::channel();
         let reaper_pid = reaper.pid;
         let supervisor = std::thread::spawn(move || {
-            let outcome = serve(reaper_pid, &proc, &serving_listener, Some(&serving_sender));
+            let outcome = serve(
+                Some(reaper_pid),
+                &proc,
+                &serving_listener,
+                Some(&serving_sender),
+            );
             let _ = report.send(outcome);
         });
         // POLLIN disappearing proves the production loop dequeued the notification.

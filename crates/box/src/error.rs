@@ -218,6 +218,11 @@ pub(crate) enum RelayError {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigError {
     #[error(
+        "container-agent requires Linux ARM64, one agent, and no hosted tool or MCP declarations"
+    )]
+    ContainerAgentConfiguration,
+
+    #[error(
         "experimental feature `{feature}` requires a supported macOS or Linux ARM64 build with `native-filesystem-policy`"
     )]
     ExperimentalFeatureUnavailable { feature: &'static str },
