@@ -62,7 +62,10 @@ pub(crate) use aws::{
     sign_request,
 };
 pub(crate) use command::CommandSource;
-pub(crate) use credsd::{CREDSD_SCHEME, CredsdClient, resolve_credsd_socket};
+pub(crate) use credsd::{
+    ACCESS_TOKEN_TYPE, CREDSD_SCHEME, CredsdClient, SESSION_CREDENTIALS_TYPE, credsd_access_token,
+    resolve_credsd_socket,
+};
 pub(crate) use env::{EnvSource, SCHEME as ENV_SCHEME};
 pub(crate) use file::{FileSource, SCHEME as FILE_SCHEME};
 pub(crate) use op::OnePasswordSource;

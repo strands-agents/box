@@ -30,6 +30,12 @@ const DEFAULT_PHANTOM_PREFIX: &str = "strands_box_";
 pub(crate) const SIGNING_PLACEHOLDER_VARIABLES: [&str; 2] =
     ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"];
 
+/// The `secret.type` of a `credsd://` reference whose AWS credentials sign in the boundary.
+pub(crate) const SECRET_TYPE_AWS: &str = "aws";
+
+/// The `secret.type` of a `credsd://` reference whose token the workload presents as a placeholder.
+pub(crate) const SECRET_TYPE_TOKEN: &str = "token";
+
 /// The longest a `secret.phantom_prefix` may be; keep in step with `credentials::check_phantom_prefix`.
 const PHANTOM_PREFIX_MAX_LEN: usize = 64;
 
@@ -98,18 +104,33 @@ fn routes_for_pairs(
     Ok(bindings)
 }
 
+/// The distinct `credsd://` environments a box reads, by how its routes read them.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct CredsdEnvironments<'a> {
+    /// Each environment a signed route reads, in declaration order.
+    pub(crate) signed: Vec<&'a str>,
+    /// Each environment a token route reads, in declaration order.
+    pub(crate) tokens: Vec<&'a str>,
+}
+
 /// Every distinct `credsd://` environment the given entries name, in declaration order.
-fn credsd_environments_of<'a>(entries: impl IntoIterator<Item = &'a EgressEntry>) -> Vec<&'a str> {
-    let mut environments: Vec<&str> = Vec::new();
+fn credsd_environments_of<'a>(
+    entries: impl IntoIterator<Item = &'a EgressEntry>,
+) -> CredsdEnvironments<'a> {
+    let mut environments = CredsdEnvironments::default();
     for entry in entries {
         let Some(secret) = &entry.secret else {
             continue;
         };
-        if let Some((SecretScheme::Credsd, environment)) = secret.deliverable()
-            && !environment.is_empty()
-            && !environments.contains(&environment)
-        {
-            environments.push(environment);
+        let (list, environment) = match secret.deliverable() {
+            Some((SecretScheme::Credsd, environment)) => (&mut environments.signed, environment),
+            Some((SecretScheme::CredsdToken, environment)) => {
+                (&mut environments.tokens, environment)
+            }
+            _ => continue,
+        };
+        if !environment.is_empty() && !list.contains(&environment) {
+            list.push(environment);
         }
     }
     environments
@@ -123,8 +144,37 @@ fn credsd_environments_of<'a>(entries: impl IntoIterator<Item = &'a EgressEntry>
 pub(crate) fn credsd_environments<'a>(
     egress: &'a BTreeMap<String, EgressEntry>,
     remote_mcp: &'a BTreeMap<String, EgressEntry>,
-) -> Vec<&'a str> {
+) -> CredsdEnvironments<'a> {
     credsd_environments_of(egress.values().chain(remote_mcp.values()))
+}
+
+/// The table of each `credsd://` route that declares no `secret.type`, in declaration order. Such a
+/// route signs with AWS credentials, and the run warns that it should name the type.
+pub(crate) fn untyped_credsd_routes(
+    egress: &BTreeMap<String, EgressEntry>,
+    remote_mcp: &BTreeMap<String, EgressEntry>,
+) -> Vec<(String, String)> {
+    union_pairs(egress, remote_mcp)
+        .into_iter()
+        .filter_map(|(origin, name, entry)| {
+            let secret = entry.secret.as_ref()?;
+            (secret.kind.is_none()
+                && matches!(secret.deliverable(), Some((SecretScheme::Credsd, _))))
+            .then(|| (origin.table(name), secret.reference.clone()))
+        })
+        .collect()
+}
+
+/// Whether any egress or remote-MCP secret carries a `secret.type` key.
+pub(super) fn holds_secret_type(
+    egress: &BTreeMap<String, EgressEntry>,
+    remote_mcp: &BTreeMap<String, EgressEntry>,
+) -> bool {
+    egress
+        .values()
+        .chain(remote_mcp.values())
+        .flat_map(EgressEntry::secrets)
+        .any(|secret| secret.kind.is_some())
 }
 
 #[cfg(test)]
@@ -242,7 +292,7 @@ fn validate_against_sources(
                     "secret scheme {scheme:?} has no `[secret-source.{scheme}]` table: declare \
                      the secret source that reads it, or use env://NAME for a credential the \
                      workload presents as a placeholder, aws://profile for one signed in the \
-                     boundary, or credsd://<environment> for a credsd-vended credential"
+                     boundary, or credsd://<credential> for a credsd-vended credential"
                 ));
             }
         }
@@ -272,6 +322,9 @@ fn validate_pairs(
     // prefix it asked for. Every route that names one variable shares one phantom, and one variable
     // holds one secret.
     let mut variables: BTreeMap<&str, (Origin, &str, &str, &str)> = BTreeMap::new();
+    // Which entry first read each credsd token, and the placeholder variable it named. The box reads
+    // one token once, so every route that names it holds its placeholder in one variable, or none.
+    let mut tokens: BTreeMap<&str, (Origin, &str, Option<&str>)> = BTreeMap::new();
     // The first signed route, which fills each signing variable with a placeholder.
     let signed = entries
         .iter()
@@ -358,6 +411,32 @@ fn validate_pairs(
             variables
                 .entry(variable)
                 .or_insert((origin, name, secret.reference.as_str(), prefix));
+        }
+        if let Some(secret) = &entry.secret
+            && matches!(secret.deliverable(), Some((SecretScheme::CredsdToken, _)))
+        {
+            let variable = secret.env.as_deref();
+            match tokens.get(secret.reference.as_str()) {
+                Some(&(earlier_origin, earlier, earlier_variable))
+                    if earlier_variable != variable =>
+                {
+                    return Err(ConfigError::Credential {
+                        host: label.to_string(),
+                        reason: format!(
+                            "`{}` and `{}` both read {} as a token with a different secret.env; \
+                             the box reads one token once and holds it behind one placeholder, so \
+                             give both the same secret.env, or leave it out of both",
+                            origin.table(name),
+                            earlier_origin.table(earlier),
+                            secret.reference,
+                        ),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    tokens.insert(secret.reference.as_str(), (origin, name, variable));
+                }
+            }
         }
         // A remote MCP server's name is its `context.input.server`, which a rule reads to gate its
         // tool calls. It must be present and nameable: empty leaves it nameless, and a control
@@ -557,6 +636,15 @@ impl EgressRoute {
     /// absence of a name.
     pub(crate) fn signs(&self) -> bool {
         matches!(self.placement, Placement::SignedInBoundary)
+    }
+
+    /// The credential of an opaque route that holds no placeholder in the workload, such as a credsd
+    /// token with `secret.inject = "always"` and no `secret.env`, or `None` for every other route.
+    /// Its phantom is minted and placed nowhere, and the routes that name one credential share one
+    /// vault, so the box reads the credential once.
+    pub(crate) fn credential_without_placeholder(&self) -> Option<&Locator> {
+        (matches!(self.mode, RouteMode::Opaque) && self.provisioned_name.is_none() && !self.signs())
+            .then_some(&self.locator)
     }
 
     #[cfg(test)]
@@ -764,9 +852,12 @@ enum SecretScheme {
     Env,
     /// `aws://profile`: signed in the boundary, so nothing is placed.
     Aws,
-    /// `credsd://environment`: a credsd credential. It signs in the boundary; the daemon's
-    /// `material.type` picks the signer per request, and the entry names no credential type.
+    /// `credsd://credential` with no `secret.type`, or `secret.type = "aws"`: credsd AWS
+    /// credentials, signed in the boundary, so nothing is placed.
     Credsd,
+    /// `credsd://credential` with `secret.type = "token"`: a credsd access token the box reads once
+    /// at start, which the workload presents as a placeholder.
+    CredsdToken,
     /// A scheme that a `[secret-source.<scheme>]` table can declare: a host program reads the
     /// secret, and the workload presents a placeholder.
     Declared,
@@ -815,6 +906,12 @@ pub(crate) struct EgressSecret {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) phantom_prefix: Option<String>,
 
+    /// The credential type a `credsd://` reference reads: `aws`, signed in the boundary, or `token`,
+    /// attached at one location behind a placeholder. Refused with every other scheme, which sets
+    /// the type itself.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub(crate) kind: Option<String>,
+
     /// The explicit SigV4 scope for an `aws://` backend `auth`, as `aws.service` and `aws.region`.
     /// Required on an `aws://` backend auth (its gateway or custom-domain host carries no derivable
     /// scope) and refused everywhere else, so Box never guesses a vendor's host shape.
@@ -840,6 +937,9 @@ impl EgressSecret {
         let scheme = match scheme {
             "env" => SecretScheme::Env,
             AWS_SCHEME => SecretScheme::Aws,
+            CREDSD_SCHEME if self.kind.as_deref() == Some(SECRET_TYPE_TOKEN) => {
+                SecretScheme::CredsdToken
+            }
             CREDSD_SCHEME => SecretScheme::Credsd,
             other if declarable(other) => SecretScheme::Declared,
             _ => return None,
@@ -861,7 +961,9 @@ impl EgressSecret {
     fn placeholder_variable(&self) -> Option<(SecretScheme, &str)> {
         match self.deliverable()? {
             (SecretScheme::Env, name) => Some((SecretScheme::Env, name)),
-            (SecretScheme::Declared, _) => Some((SecretScheme::Declared, self.env.as_deref()?)),
+            (scheme @ (SecretScheme::Declared | SecretScheme::CredsdToken), _) => {
+                Some((scheme, self.env.as_deref()?))
+            }
             _ => None,
         }
     }
@@ -870,7 +972,10 @@ impl EgressSecret {
     fn mints_a_phantom(&self) -> bool {
         matches!(
             self.deliverable(),
-            Some((SecretScheme::Env | SecretScheme::Declared, _))
+            Some((
+                SecretScheme::Env | SecretScheme::Declared | SecretScheme::CredsdToken,
+                _
+            ))
         )
     }
 
@@ -1203,7 +1308,10 @@ impl EgressEntry {
             // The box never reads the value of a re-routed destination secret, so a host program
             // has nothing to read for it.
             if let Some(secret) = &self.secret
-                && matches!(secret.deliverable(), Some((SecretScheme::Declared, _)))
+                && matches!(
+                    secret.deliverable(),
+                    Some((SecretScheme::Declared | SecretScheme::CredsdToken, _))
+                )
             {
                 return refuse(
                     "a destination secret beside a backend must be env://: the box provisions a \
@@ -1249,7 +1357,10 @@ impl EgressEntry {
                 // covers the bytes the backend receives
                 // (docs/design/decisions.md#where-a-re-route-signs-a-backend-auth-of-aws). A
                 // `credsd://` backend auth stays refused (out of scope).
-                if matches!(auth.deliverable(), Some((SecretScheme::Credsd, _))) {
+                if matches!(
+                    auth.deliverable(),
+                    Some((SecretScheme::Credsd | SecretScheme::CredsdToken, _))
+                ) {
                     return refuse(
                         "a backend auth may not be credsd:// (out of scope): use an env:// token or \
                          an aws:// profile signed over the backend host",
@@ -1364,6 +1475,16 @@ impl EgressEntry {
                      or write {name:?}"
                 ))
             }
+            (Some((SecretScheme::CredsdToken, _)), None)
+                if secret.inject.as_deref() != Some(INJECT_ALWAYS) =>
+            {
+                refuse(
+                    "a credsd:// token route with no secret.env leaves the workload no \
+                     placeholder to present, so the box would refuse each request: set \
+                     secret.inject = \"always\" to attach the token to every request to the \
+                     destinations, or name the placeholder variable with secret.env",
+                )
+            }
             (Some((SecretScheme::Aws | SecretScheme::Credsd, _)), Some(_)) => refuse(
                 "a signed AWS secret (aws:// or a credsd:// source) takes no secret.env: the \
                  box places the signing placeholders under the AWS variable names",
@@ -1466,19 +1587,34 @@ fn validate_secret(secret: &EgressSecret, label: &str) -> Result<(), ConfigError
         return refuse(&format!(
             "secret scheme {scheme:?} is not one the box can deliver: use env://NAME for a \
              credential the workload presents as a placeholder, aws://profile for one signed \
-             in the boundary, or credsd://<environment> for a credsd-vended credential"
+             in the boundary, or credsd://<credential> for a credsd-vended credential"
         ));
     }
 
-    // A `credsd://` source names a daemon environment and no credential type: the box infers the
-    // type from the `credential/get` response's `material.type` per request. The box
-    // carries no `secret.type` key, so `deny_unknown_fields` refuses one on any scheme.
-    if let Some((SecretScheme::Credsd, environment)) = secret.deliverable()
+    // A `credsd://` reference does not say what the daemon serves, so `secret.type` names it. The
+    // type is fixed here, before the box contacts the daemon, because a token route mints a
+    // placeholder at open and a signed route does not. Every other scheme sets its own type.
+    if let Some(kind) = &secret.kind {
+        if !matches!(
+            secret.deliverable(),
+            Some((SecretScheme::Credsd | SecretScheme::CredsdToken, _))
+        ) {
+            return refuse(
+                "secret.type belongs only with a credsd:// reference: every other scheme sets \
+                 the type of its credential",
+            );
+        }
+        if kind != SECRET_TYPE_AWS && kind != SECRET_TYPE_TOKEN {
+            return refuse(&format!(
+                "secret.type {kind:?} is not one of \"aws\" or \"token\""
+            ));
+        }
+    }
+    if let Some((SecretScheme::Credsd | SecretScheme::CredsdToken, environment)) =
+        secret.deliverable()
         && environment.is_empty()
     {
-        return refuse(
-            "a credsd:// reference must name an environment, as in credsd://prod-inference",
-        );
+        return refuse("a credsd:// reference must name a credential, as in credsd://github");
     }
 
     // A signature spans several headers, so naming one header for it describes something the
@@ -2471,7 +2607,7 @@ mod tests {
                         "invalid credential entry for host \"api.test\": secret scheme \
                          {scheme:?} is not one the box can deliver: use env://NAME for a \
                          credential the workload presents as a placeholder, aws://profile for \
-                         one signed in the boundary, or credsd://<environment> for a \
+                         one signed in the boundary, or credsd://<credential> for a \
                          credsd-vended credential"
                     )
                 );
@@ -2491,7 +2627,7 @@ mod tests {
                      has no `[secret-source.{scheme}]` table: declare the secret source that \
                      reads it, or use env://NAME for a credential the workload presents as a \
                      placeholder, aws://profile for one signed in the boundary, or \
-                     credsd://<environment> for a credsd-vended credential"
+                     credsd://<credential> for a credsd-vended credential"
                 )
             );
         }
@@ -2672,6 +2808,7 @@ mod tests {
                     param: None,
                     inject: None,
                     phantom_prefix: None,
+                    kind: None,
                     aws: None,
                 }),
                 backends: Vec::new(),
@@ -2881,6 +3018,7 @@ mod tests {
             param: None,
             inject: None,
             phantom_prefix: None,
+            kind: None,
             aws: None,
         };
         let entry = |host: &str, protocol: Protocol, item: &str| EgressEntry {
@@ -3029,7 +3167,7 @@ mod tests {
             "invalid credential entry for host \"api.github.com\": secret scheme \"op\" has no \
              `[secret-source.op]` table: declare the secret source that reads it, or use \
              env://NAME for a credential the workload presents as a placeholder, aws://profile \
-             for one signed in the boundary, or credsd://<environment> for a credsd-vended \
+             for one signed in the boundary, or credsd://<credential> for a credsd-vended \
              credential"
         );
         assert_eq!(
@@ -3089,6 +3227,7 @@ mod tests {
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        kind: None,
                         aws: None,
                     }),
                     backends: Vec::new(),
@@ -3324,7 +3463,7 @@ mod tests {
         unsafe { std::env::remove_var(name) };
     }
 
-    // --- credsd source: type inferred from the daemon, no secret.type key ---
+    // --- credsd source: secret.type names aws or token, and a missing one signs ---
 
     /// A credsd signed route provisions nothing in the workload environment.
     #[test]
@@ -3344,8 +3483,8 @@ mod tests {
         );
     }
 
-    /// A `credsd://` source is accepted and opens a signed route with no declared type.
-    /// The daemon's `material.type` picks the signer per request, so the box needs no type key.
+    /// A `credsd://` source with no declared type is accepted and opens a signed route, as it did
+    /// before `secret.type` existed.
     #[test]
     fn a_credsd_source_is_inferred_and_signs() {
         let entries = load(
@@ -3366,23 +3505,327 @@ mod tests {
             .expect("a credsd entry maps to a signed route");
     }
 
-    /// `secret.type` is not a key the box carries, so `deny_unknown_fields` refuses it as an
-    /// unknown field on every scheme — the type comes from the daemon, never from config.
+    /// `secret.type` belongs only with `credsd://`: every other scheme sets its own type.
     #[test]
-    fn a_secret_type_key_is_rejected_on_every_scheme() {
-        for reference in ["credsd://prod", "env://TOKEN", "aws://prod"] {
+    fn a_secret_type_is_refused_beside_every_other_scheme() {
+        for reference in ["env://TOKEN", "aws://prod"] {
             let text = format!(
                 "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = {reference:?}\nsecret.type = \"aws\"\n"
             );
-            let error = match toml::from_str::<Fixture>(&text) {
-                Ok(_) => panic!("{reference}: secret.type must be refused as an unknown key"),
-                Err(error) => error,
-            };
+            let error = load(&text).expect_err("secret.type is refused here");
             assert!(
-                error.to_string().contains("type"),
-                "{reference}: the refusal names the unknown key: {error}"
+                error
+                    .to_string()
+                    .contains("secret.type belongs only with a credsd://"),
+                "{reference}: {error}"
             );
         }
+    }
+
+    /// `secret.type` takes `aws` or `token` and nothing else.
+    #[test]
+    fn a_secret_type_other_than_aws_or_token_is_refused() {
+        let error = load(
+            r#"
+            [egress.a]
+            destinations = ["api.test"]
+            secret.ref = "credsd://prod"
+            secret.type = "session_credentials"
+            "#,
+        )
+        .expect_err("the daemon's own word is not a box type");
+        assert!(
+            error
+                .to_string()
+                .contains(r#"is not one of "aws" or "token""#),
+            "{error}"
+        );
+    }
+
+    /// `secret.type = "aws"` is the untyped credsd route: it signs, and it still refuses placement.
+    #[test]
+    fn a_credsd_aws_type_signs_and_refuses_placement() {
+        let entries = load(
+            r#"
+            [egress.a]
+            destinations = ["bedrock-runtime.us-west-2.amazonaws.com"]
+            secret.ref = "credsd://prod"
+            secret.type = "aws"
+            "#,
+        )
+        .expect("an aws credsd route is valid");
+        assert!(routes_for(&entries).expect("bindings build")[0].signs());
+        let error = load(
+            r#"
+            [egress.a]
+            destinations = ["bedrock-runtime.us-west-2.amazonaws.com"]
+            secret.ref = "credsd://prod"
+            secret.type = "aws"
+            secret.placement = "basic_auth"
+            "#,
+        )
+        .expect_err("a signed route takes no placement");
+        assert!(
+            error
+                .to_string()
+                .contains("takes no header, prefix, placement"),
+            "{error}"
+        );
+    }
+
+    /// A credsd token route takes the placement keys of an `env://` route and maps to an opaque
+    /// route with a phantom, not to a signed one.
+    #[test]
+    fn a_credsd_token_route_takes_placement_and_opens_an_opaque_route() {
+        let entries = load(
+            r#"
+            [egress.github]
+            destinations = ["github.com"]
+            secret.ref = "credsd://github"
+            secret.type = "token"
+            secret.placement = "basic_auth"
+            secret.inject = "always"
+            "#,
+        )
+        .expect("a token route takes the placement keys");
+        let route = &routes_for(&entries).expect("bindings build")[0];
+        assert!(!route.signs(), "a token route is attached at one location");
+        assert_eq!(
+            route.provisioned_name(),
+            None,
+            "with no secret.env, the workload holds no placeholder"
+        );
+        assert_eq!(route.phantom(), PhantomCheck::Advisory);
+        route
+            .to_route_spec()
+            .expect("a token route maps to an opaque route");
+        assert_eq!(
+            credsd_environments(&entries, &BTreeMap::new()),
+            CredsdEnvironments {
+                signed: Vec::new(),
+                tokens: vec!["github"],
+            }
+        );
+    }
+
+    /// A credsd token route takes `header`, `prefix`, `param` and `phantom_prefix` as an `env://`
+    /// route does, and each lands in its route.
+    #[test]
+    fn a_credsd_token_route_takes_every_placement_key_of_an_env_route() {
+        let entries = load(
+            r#"
+            [egress.header]
+            destinations = ["api.example.com"]
+            secret.ref = "credsd://github"
+            secret.type = "token"
+            secret.header = "x-api-key"
+            secret.prefix = "token "
+            secret.phantom_prefix = "ghp_"
+            secret.inject = "always"
+
+            [egress.query]
+            destinations = ["query.example.com"]
+            secret.ref = "credsd://github"
+            secret.type = "token"
+            secret.placement = "query_param"
+            secret.param = "access_token"
+            secret.inject = "always"
+            "#,
+        )
+        .expect("a token route takes the placement keys of an env:// route");
+        let header = &entries["header"].secret.as_ref().expect("secret");
+        assert_eq!(
+            EgressEntry::placement(header),
+            Placement::Header {
+                name: "x-api-key".to_string(),
+                prefix: "token ".to_string(),
+            }
+        );
+        let query = &entries["query"].secret.as_ref().expect("secret");
+        assert_eq!(
+            EgressEntry::placement(query),
+            Placement::QueryParam {
+                name: "access_token".to_string(),
+            }
+        );
+        let routes = routes_for(&entries).expect("bindings build");
+        let prefixed = routes
+            .iter()
+            .find(|route| route.host() == "api.example.com")
+            .expect("the header route");
+        assert_eq!(prefixed.phantom_prefix(), Some("ghp_"));
+        for route in &routes {
+            route.to_route_spec().expect("each maps to an opaque route");
+        }
+    }
+
+    /// A remote MCP server takes a credsd token as an egress route does: the preflight lists its
+    /// environment as a token one, and it opens an opaque route, not a signed one.
+    #[test]
+    fn a_remote_mcp_server_takes_a_credsd_token() {
+        let remote_mcp = load(
+            r#"
+            [egress.tools]
+            protocol = "mcp"
+            destinations = ["mcp.example.com"]
+            secret.ref = "credsd://tools"
+            secret.type = "token"
+            secret.inject = "always"
+            "#,
+        )
+        .expect("a remote MCP server takes a token route");
+        let egress = BTreeMap::new();
+        let environments = credsd_environments(&egress, &remote_mcp);
+        assert_eq!(environments.tokens, ["tools"]);
+        assert!(environments.signed.is_empty());
+        let routes = routes_for_and_remote(&BTreeMap::new(), &remote_mcp, &DeclaredSources::none())
+            .expect("bindings build");
+        assert!(
+            !routes[0].signs(),
+            "a token route is attached at one location"
+        );
+        assert!(untyped_credsd_routes(&BTreeMap::new(), &remote_mcp).is_empty());
+    }
+
+    /// A token route with no `secret.env` gives the workload no placeholder, so it must attach on
+    /// every request; the default phantom check would refuse each one.
+    #[test]
+    fn a_credsd_token_route_with_no_placeholder_needs_inject_always() {
+        let error = load(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+            secret.ref = "credsd://github"
+            secret.type = "token"
+            "#,
+        )
+        .expect_err("no placeholder and a phantom check refuses every request");
+        let message = error.to_string();
+        assert!(
+            message.contains(r#"secret.inject = "always""#) && message.contains("secret.env"),
+            "{message}"
+        );
+    }
+
+    /// A token route with `secret.env` provisions its placeholder there, and the operator need not
+    /// set that variable, because the box reads the token from credsd.
+    #[test]
+    fn a_credsd_token_route_provisions_its_placeholder_variable() {
+        let entries = load_with(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+            secret.ref = "credsd://github"
+            secret.type = "token"
+            secret.env = "STRANDS_BOX_CREDSD_TOKEN_TEST_UNSET"
+            "#,
+            &declared(),
+        )
+        .expect("a token route with a placeholder variable is valid");
+        let route = &super::routes_for(&entries, &declared()).expect("bindings build")[0];
+        assert_eq!(
+            route.provisioned_name(),
+            Some("STRANDS_BOX_CREDSD_TOKEN_TEST_UNSET")
+        );
+        assert_eq!(route.phantom(), PhantomCheck::Strict);
+    }
+
+    /// Two routes that read one credsd token name one placeholder variable, or none, because the box
+    /// reads the token once and holds it behind one placeholder.
+    #[test]
+    fn one_credsd_token_under_two_placeholder_variables_is_refused() {
+        let route = |name: &str, host: &str, env: &str| {
+            format!(
+                "[egress.{name}]\ndestinations = [\"{host}\"]\nsecret.ref = \"credsd://github\"\n\
+                 secret.type = \"token\"\nsecret.inject = \"always\"\n{env}\n"
+            )
+        };
+        let refused = load_with(
+            &format!(
+                "{}{}",
+                route("a", "api.github.com", "secret.env = \"GH_TOKEN\""),
+                route("b", "uploads.github.com", "")
+            ),
+            &declared(),
+        )
+        .expect_err("one token, two placeholder variables")
+        .to_string();
+        assert!(
+            refused.contains("both read credsd://github as a token with a different secret.env"),
+            "{refused}"
+        );
+        load_with(
+            &format!(
+                "{}{}",
+                route("a", "api.github.com", "secret.env = \"GH_TOKEN\""),
+                route("b", "uploads.github.com", "secret.env = \"GH_TOKEN\"")
+            ),
+            &declared(),
+        )
+        .expect("one token under one variable is valid");
+    }
+
+    /// A credsd token is refused as a backend `auth` and as a re-routed destination secret, as an
+    /// AWS credsd source is.
+    #[test]
+    fn a_credsd_token_is_refused_beside_a_backend() {
+        let auth = load(
+            r#"
+            [egress.a]
+            destinations = ["api.example.com"]
+            [[egress.a.backends]]
+            url = "https://gateway.example.com"
+            auth.ref = "credsd://github"
+            auth.type = "token"
+            auth.inject = "always"
+            "#,
+        );
+        assert!(
+            auth.is_err_and(|error| error.to_string().contains("may not be credsd://")),
+            "a backend auth stays out of scope"
+        );
+        let own = load(
+            r#"
+            [egress.a]
+            destinations = ["api.example.com"]
+            secret.ref = "credsd://github"
+            secret.type = "token"
+            secret.inject = "always"
+            [[egress.a.backends]]
+            url = "https://gateway.example.com"
+            "#,
+        )
+        .expect_err("a re-routed destination secret is phantom-only");
+        assert!(own.to_string().contains("must be env://"), "{own}");
+    }
+
+    /// Only a credsd route that names no type warns, and each names its table and reference.
+    #[test]
+    fn only_an_untyped_credsd_route_warns() {
+        let entries = load(
+            r#"
+            [egress.untyped]
+            destinations = ["bedrock-runtime.us-west-2.amazonaws.com"]
+            secret.ref = "credsd://prod"
+
+            [egress.typed]
+            destinations = ["bedrock-runtime.us-east-1.amazonaws.com"]
+            secret.ref = "credsd://prod"
+            secret.type = "aws"
+
+            [egress.token]
+            destinations = ["api.github.com"]
+            secret.ref = "credsd://github"
+            secret.type = "token"
+            secret.inject = "always"
+            "#,
+        )
+        .expect("valid");
+        assert_eq!(
+            untyped_credsd_routes(&entries, &BTreeMap::new()),
+            [("[egress.untyped]".to_string(), "credsd://prod".to_string())]
+        );
+        assert!(holds_secret_type(&entries, &BTreeMap::new()));
     }
 
     /// A `credsd://` reference with an empty environment is refused.
@@ -3396,7 +3839,10 @@ mod tests {
             "#,
         )
         .expect_err("an empty environment names nothing");
-        assert!(error.to_string().contains("environment"), "{error}");
+        assert!(
+            error.to_string().contains("must name a credential"),
+            "{error}"
+        );
     }
 
     /// An `env://` entry with no other keys defaults to a bearer `Authorization` header.
@@ -3446,7 +3892,7 @@ mod tests {
         .expect("valid");
 
         assert_eq!(
-            credsd_environments(&entries, &BTreeMap::new()),
+            credsd_environments(&entries, &BTreeMap::new()).signed,
             vec!["prod-inference", "staging"],
             "each credsd environment appears once, in declaration order, and env:// is ignored"
         );
@@ -3477,11 +3923,11 @@ mod tests {
         .expect("valid");
 
         assert!(
-            credsd_environments(&egress, &BTreeMap::new()).is_empty(),
+            credsd_environments(&egress, &BTreeMap::new()) == CredsdEnvironments::default(),
             "the credsd source is not in egress, so egress alone names no environment"
         );
         assert_eq!(
-            credsd_environments(&egress, &remote_mcp),
+            credsd_environments(&egress, &remote_mcp).signed,
             vec!["prod-inference"],
             "walking both maps covers a credsd source declared only on a remote MCP server"
         );
@@ -3498,7 +3944,10 @@ mod tests {
             "#,
         )
         .expect("valid");
-        assert!(credsd_environments(&entries, &BTreeMap::new()).is_empty());
+        assert_eq!(
+            credsd_environments(&entries, &BTreeMap::new()),
+            CredsdEnvironments::default()
+        );
     }
 
     /// A credsd credential signs in-boundary, so it refuses header/prefix/placement/param.

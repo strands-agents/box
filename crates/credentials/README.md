@@ -111,6 +111,13 @@ through one. See [Declared secret sources](#declared-secret-sources).
 | `aws://profile` | Structured AWS session credentials for SigV4 signing, resolved as the named profile through the AWS SDK (static keys, credential_process, assume-role, or web identity). Not a single secret, so `Backend::resolve` rejects it. | hard |
 | `aws://` (no profile) | Structured AWS session credentials from the AWS SDK default credential provider chain (the host's ambient identity), driven on a worker thread and cached. Not a single secret, so `Backend::resolve` rejects it. | hard |
 | `SCHEME://NAME` or `SCHEME://NAME#FIELD`, for a declared `SCHEME` | The stdout of the declared program, or one string field of it. Only `Backend::declared` resolves it. | hard: a program cannot signal "absent" |
+| `credsd://credential` on `RouteSpec::signed_aws` | Structured AWS session credentials from one `credential/get` of that credential to the credsd daemon, on each request. Not a single secret, so `Backend::resolve` rejects it. | hard |
+| `credsd://credential` on `RouteSpec::opaque` | The credential's `access_token`, read with one `credential/get` when the vault opens and held for the run. A `token_type` other than `Bearer` is refused. A token with an expiry warns at open, because the vault does not refresh it. | hard |
+
+`credsd_preflight(socket, signed, tokens)` checks the daemon before a workload starts: its
+protocol version, and with one `credential/list`, that each named credential exists and is
+`session_credentials` for a `signed` name or `access_token` for a `tokens` one. The client
+addresses credsd by credential name, as credsd 0.2 requires; it sends no `environment` member.
 
 A soft outcome means the vault comes up and the route appears in `skipped()`. A hard one aborts
 the open. A present value is always judged on content, so an empty, whitespace-only, non-UTF-8,
@@ -274,14 +281,22 @@ instead of `*`.
 
 ## Live daemon test
 
-The `credsd_e2e` tests use local socket fixtures. One optional test checks a running
-credsd daemon. Configure a test environment that permits the test process to list
-credentials, then run:
+The `credsd_e2e` tests use local socket fixtures. Two optional tests check a running credsd
+daemon. For a signed route, name an AWS credential the daemon serves this test process:
 
 ```sh
-CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_ENVIRONMENT=test-environment \
+CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_CREDENTIAL=aws-credential \
   cargo test -p strands-box-credentials --all-features --test end_to_end \
-  credsd_e2e::a_live_daemon_maps_an_unknown_environment_to_a_hard_failure -- --exact --nocapture
+  credsd_e2e::a_live_daemon_maps_an_unknown_credential_to_a_hard_failure -- --exact --nocapture
+```
+
+For a token route, store a token with `creds bootstrap --credential <name> static-secret`, then
+name it and its value:
+
+```sh
+CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_TOKEN_CREDENTIAL=github CREDSD_TEST_TOKEN=<token> \
+  cargo test -p strands-box-credentials --all-features --test end_to_end \
+  credsd_e2e::a_live_daemon_serves_a_token_route -- --exact --nocapture
 ```
 
 The test checks daemon health and caller access to the configured environment before

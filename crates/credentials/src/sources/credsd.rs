@@ -2,10 +2,11 @@
 //! plus the two read methods the startup preflight needs.
 //!
 //! `credsd` speaks line-delimited JSON-RPC 2.0. [`CredsdClient::get`] sends one `credential/get`
-//! request carrying only the `environment` field and returns the tagged [`CredentialResult`];
+//! request carrying only the `credential` field and returns the tagged [`CredentialResult`];
 //! [`CredsdClient::health`] and [`CredsdClient::list`] send `system/health` and `credential/list`
 //! over the same request path. The client calls no bootstrap and no login method, and it reads no
-//! AWS field — the AWS delivery adapter in [`super::aws`] is the one component that does.
+//! material field: the AWS delivery adapter in [`super::aws`] and [`credsd_access_token`] are the two
+//! components that do.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{CredentialError, Result};
+use crate::{CredentialError, Result, Secret};
 
 /// The per-request credential fetch.
 const GET_METHOD: &str = "credential/get";
@@ -42,11 +43,17 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// request hot path across many under-timeout reads.
 const RESPONSE_DEADLINE: Duration = Duration::from_secs(10);
 
-/// The URI scheme a `credsd://<environment>` reference carries.
+/// The URI scheme a `credsd://<credential>` reference carries.
 pub(crate) const CREDSD_SCHEME: &str = "credsd";
 
 /// The material tag an AWS credential carries.
 pub(crate) const SESSION_CREDENTIALS_TYPE: &str = "session_credentials";
+
+/// The material tag a bearer token for a non-AWS API carries.
+pub(crate) const ACCESS_TOKEN_TYPE: &str = "access_token";
+
+/// The one `token_type` the box can attach: a plain bearer token, with no per-request proof.
+const BEARER_TOKEN_TYPE: &str = "Bearer";
 
 /// The per-user tail beneath `HOME` for the macOS user-scoped install's socket (signed `.pkg` or
 /// `credsd install --user`).
@@ -140,10 +147,9 @@ impl CredsdClient {
     /// error names the environment and never the returned material.
     pub(crate) fn get(&self, environment: &str) -> Result<CredentialResult> {
         let context = environment_context(environment);
-        let request = build_request(
-            GET_METHOD,
-            serde_json::json!({ "environment": environment }),
-        );
+        // credsd 0.2 serves a credential by name and refuses an `environment` member; a daemon
+        // that still knows environments serves a named credential too.
+        let request = build_request(GET_METHOD, serde_json::json!({ "credential": environment }));
         let stream = self.send(&request, &context)?;
         let line = read_response(&stream, &context)?;
         parse_response(&line, environment)
@@ -159,22 +165,22 @@ impl CredsdClient {
         parse_health(&line)
     }
 
-    /// Count the credentials of one `environment` with one `credential/list`.
+    /// The name and kind of each credential the daemon serves this caller, with one
+    /// `credential/list`.
     ///
-    /// Sends only the `environment` field and returns how many credentials the environment holds; the
-    /// preflight uses this to confirm the environment is configured, and reads no session state. An
-    /// absent environment is `ENVIRONMENT_NOT_FOUND`, which [`map_error`] classifies as a credential
-    /// failure naming the environment.
-    pub(crate) fn list(&self, environment: &str) -> Result<usize> {
-        let context = environment_context(environment);
-        let request = build_request(
-            LIST_METHOD,
-            serde_json::json!({ "environment": environment }),
-        );
-        let stream = self.send(&request, &context)?;
-        let line = read_response(&stream, &context)?;
-        let result: ListResult = parse_response(&line, environment)?;
-        Ok(result.credentials.len())
+    /// Sends no params: credsd 0.2 lists every credential of the caller and refuses an
+    /// `environment` member. The preflight uses the list to confirm each named credential exists
+    /// and has the kind its route reads. It reads no session state.
+    pub(crate) fn list(&self) -> Result<Vec<(String, String)>> {
+        let request = build_request(LIST_METHOD, serde_json::json!({}));
+        let stream = self.send(&request, LIST_METHOD)?;
+        let line = read_response(&stream, LIST_METHOD)?;
+        let result: ListResult = parse_response(&line, LIST_METHOD)?;
+        Ok(result
+            .credentials
+            .into_iter()
+            .map(|entry| (entry.credential, entry.kind))
+            .collect())
     }
 
     /// Connect, set the read and write timeouts, and write one request line, returning the open
@@ -210,7 +216,7 @@ impl CredsdClient {
 
 /// The error-message label for a request that names an environment.
 fn environment_context(environment: &str) -> String {
-    format!("environment {environment:?}")
+    format!("credential {environment:?}")
 }
 
 /// Build one request line for `method` carrying `params`.
@@ -299,7 +305,7 @@ fn parse_response<R: serde::de::DeserializeOwned>(buffer: &[u8], environment: &s
     let response: RpcResponse<R> =
         serde_json::from_slice(first_line(buffer)).map_err(|_source| {
             CredentialError::Credential(format!(
-                "credsd returned a malformed response for environment {environment:?}"
+                "credsd returned a malformed response for credential {environment:?}"
             ))
         })?;
     if let Some(error) = response.error {
@@ -309,12 +315,12 @@ fn parse_response<R: serde::de::DeserializeOwned>(buffer: &[u8], environment: &s
     // mismatched response must never sign with another environment's material.
     if response.id != Some(REQUEST_ID) {
         return Err(CredentialError::Credential(format!(
-            "credsd returned a response with an unexpected id for environment {environment:?}"
+            "credsd returned a response with an unexpected id for credential {environment:?}"
         )));
     }
     response.result.ok_or_else(|| {
         CredentialError::Credential(format!(
-            "credsd returned neither a result nor an error for environment {environment:?}"
+            "credsd returned neither a result nor an error for credential {environment:?}"
         ))
     })
 }
@@ -349,42 +355,102 @@ fn map_error(error: &RpcError, environment: &str) -> CredentialError {
         Some("ENVIRONMENT_NOT_FOUND") => CredentialError::Credential(format!(
             "credsd has no environment {environment:?}, or this box is not authorized for it"
         )),
+        Some("CREDENTIAL_NOT_FOUND") => CredentialError::Credential(format!(
+            "credsd has no credential {environment:?}, or this box is not authorized for it"
+        )),
         Some("REAUTH_REQUIRED") => CredentialError::Credential(format!(
-            "credsd needs re-authentication for environment {environment:?}; run `creds login`"
+            "credsd needs re-authentication for credential {environment:?}; run `creds login`"
         )),
         Some("WRONG_CREDENTIAL_TYPE") => CredentialError::Credential(format!(
-            "credsd environment {environment:?} does not project to session credentials"
+            "credsd credential {environment:?} does not project to session credentials"
         )),
         Some("PROVIDER_UNAVAILABLE") => CredentialError::KeystoreAccess(format!(
-            "the credsd provider is unavailable for environment {environment:?}"
+            "the credsd provider is unavailable for credential {environment:?}"
         )),
         Some("INTERNAL") => CredentialError::KeystoreAccess(format!(
-            "credsd reported an internal error for environment {environment:?}"
+            "credsd reported an internal error for credential {environment:?}"
         )),
         Some(_) => CredentialError::KeystoreAccess(format!(
-            "credsd reported an unrecognised failure for environment {environment:?}"
+            "credsd reported an unrecognised failure for credential {environment:?}"
         )),
         None => CredentialError::Credential(format!(
-            "credsd rejected the request for environment {environment:?} (protocol code {code})",
+            "credsd rejected the request for credential {environment:?} (protocol code {code})",
             code = error.code
         )),
     }
 }
 
-/// One `credential/get` result. Only the material is read here; `credential`, `expires_at`, and
+/// One `credential/get` result. The material and its expiry are read here; `credential` and
 /// `provenance` are audit-only and ignored.
 #[derive(Deserialize)]
 pub(crate) struct CredentialResult {
     /// The credential material, tagged on `type`.
     pub(crate) material: Material,
+    /// When the material stops working, as the daemon wrote it, or `None` for one that never expires.
+    #[serde(default)]
+    pub(crate) expires_at: Option<String>,
 }
 
 impl std::fmt::Debug for CredentialResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CredentialResult")
             .field("material", &self.material)
+            .field("expires_at", &self.expires_at)
             .finish()
     }
+}
+
+/// A credsd access token, read once for an opaque route.
+pub(crate) struct AccessToken {
+    /// The token, validated as an attachable secret.
+    pub(crate) token: Secret,
+    /// When the token stops working, as the daemon wrote it, or `None` for one that never expires.
+    pub(crate) expires_at: Option<String>,
+}
+
+impl std::fmt::Debug for AccessToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccessToken")
+            .field("token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// Fetch the access token of one `credsd` environment for an opaque route.
+///
+/// The token delivery adapter, beside the AWS one in [`super::aws`]. A material tag other than
+/// `access_token`, a `token_type` other than `Bearer`, or an empty or unusable token is a hard
+/// credential failure that names the environment and never the material.
+pub(crate) fn credsd_access_token(client: &CredsdClient, environment: &str) -> Result<AccessToken> {
+    access_token_from(client.get(environment)?, environment)
+}
+
+/// Map a `credsd` result onto an [`AccessToken`], asserting the material tag and the token type.
+fn access_token_from(result: CredentialResult, environment: &str) -> Result<AccessToken> {
+    let CredentialResult {
+        mut material,
+        expires_at,
+    } = result;
+    if material.kind != ACCESS_TOKEN_TYPE {
+        return Err(CredentialError::Credential(format!(
+            "credsd credential {environment:?} returned {kind:?} material, but a token route \
+             needs {ACCESS_TOKEN_TYPE}",
+            kind = material.kind
+        )));
+    }
+    // A DPoP-bound token needs a proof the box cannot make, so attaching it as a bearer token would
+    // send a request the API refuses.
+    if material.token_type != BEARER_TOKEN_TYPE {
+        return Err(CredentialError::Credential(format!(
+            "credsd credential {environment:?} returned a {token_type:?} token, and the box \
+             attaches only {BEARER_TOKEN_TYPE} tokens",
+            token_type = material.token_type
+        )));
+    }
+    let raw = Zeroizing::new(std::mem::take(&mut material.token.0));
+    let token = Secret::new(raw, &format!("{CREDSD_SCHEME}://{environment}"))?;
+    Ok(AccessToken { token, expires_at })
 }
 
 /// The tagged credential material. The AWS delivery adapter branches on [`kind`](Self::kind),
@@ -404,14 +470,41 @@ pub(crate) struct Material {
     /// AWS session token, present for `session_credentials`.
     #[serde(default)]
     pub(crate) session_token: String,
+    /// The bearer token, present for `access_token`. Wiped on drop by its own type, so a result
+    /// whose later fields fail to parse leaves no unwiped copy.
+    #[serde(default)]
+    pub(crate) token: WipedString,
+    /// The OAuth2 token type, such as `Bearer`, present for `access_token`. Not secret.
+    #[serde(default)]
+    pub(crate) token_type: String,
 }
 
 impl zeroize::Zeroize for Material {
     fn zeroize(&mut self) {
-        // The tag is non-secret routing data; every credential field is wiped.
+        // The tag and the token type are non-secret routing data; every credential field is wiped.
         self.access_key_id.zeroize();
         self.secret_access_key.zeroize();
         self.session_token.zeroize();
+        self.token.0.zeroize();
+    }
+}
+
+/// A deserialized secret field that is wiped on drop, also when the object around it fails to
+/// parse before the object exists.
+#[derive(Default)]
+pub(crate) struct WipedString(pub(crate) String);
+
+impl<'de> Deserialize<'de> for WipedString {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self)
+    }
+}
+
+impl Drop for WipedString {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 
@@ -429,6 +522,8 @@ impl std::fmt::Debug for Material {
             .field("access_key_id", &"[REDACTED]")
             .field("secret_access_key", &"[REDACTED]")
             .field("session_token", &"[REDACTED]")
+            .field("token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
             .finish()
     }
 }
@@ -451,13 +546,23 @@ struct HealthResult {
     protocol: u32,
 }
 
-/// The `credential/list` result. The preflight reads only how many credentials the environment
-/// holds, so each entry deserializes to `IgnoredAny`: name, kind, and session status are discarded,
-/// because the environment being configured is the only thing the check needs.
+/// The `credential/list` result. The preflight reads each credential's name and kind: source, status
+/// and tags are discarded.
 #[derive(Debug, Deserialize)]
 struct ListResult {
     #[serde(default)]
-    credentials: Vec<serde::de::IgnoredAny>,
+    credentials: Vec<ListEntry>,
+}
+
+/// One `credential/list` entry, read for its name and kind.
+#[derive(Debug, Deserialize)]
+struct ListEntry {
+    /// The credential's name, which a `credsd://<credential>` reference names.
+    #[serde(default)]
+    credential: String,
+    /// The credential's kind, such as `session_credentials` or `access_token`.
+    #[serde(default)]
+    kind: String,
 }
 
 /// A JSON-RPC error object.
@@ -485,18 +590,22 @@ mod tests {
 
     // --- request shape -------------------------------------------------------
 
-    /// The `environment` request builder used by `get` and `list`.
-    fn build_environment_request(method: &str, environment: &str) -> String {
-        build_request(method, serde_json::json!({ "environment": environment }))
+    /// The request `get` sends for `credential`.
+    fn build_credential_request(method: &str, credential: &str) -> String {
+        build_request(method, serde_json::json!({ "credential": credential }))
     }
 
-    /// The request carries the environment in the `environment` field and calls `credential/get`.
+    /// The request names the credential in the `credential` field and calls `credential/get`.
     #[test]
-    fn the_request_names_the_environment_and_the_get_method() {
-        let request = build_environment_request(GET_METHOD, "prod-inference");
+    fn the_request_names_the_credential_and_the_get_method() {
+        let request = build_credential_request(GET_METHOD, "prod-inference");
         let value: serde_json::Value = serde_json::from_str(request.trim_end()).unwrap();
         assert_eq!(value["method"], "credential/get");
-        assert_eq!(value["params"]["environment"], "prod-inference");
+        assert_eq!(value["params"]["credential"], "prod-inference");
+        assert!(
+            value["params"].get("environment").is_none(),
+            "credsd 0.2 refuses it"
+        );
         assert_eq!(value["jsonrpc"], "2.0");
         assert!(request.ends_with('\n'), "the transport is line-delimited");
     }
@@ -504,7 +613,7 @@ mod tests {
     /// The request sends no `profile`, `scope`, or `claim`.
     #[test]
     fn the_request_omits_profile_scope_and_claim() {
-        let request = build_environment_request(GET_METHOD, "dev");
+        let request = build_credential_request(GET_METHOD, "dev");
         let value: serde_json::Value = serde_json::from_str(request.trim_end()).unwrap();
         let params = &value["params"];
         assert!(params.get("profile").is_none(), "no legacy profile field");
@@ -515,14 +624,14 @@ mod tests {
     /// A special-character environment is JSON-escaped rather than breaking the line.
     #[test]
     fn the_request_escapes_the_environment() {
-        let request = build_environment_request(GET_METHOD, "a\"b\nc");
+        let request = build_credential_request(GET_METHOD, "a\"b\nc");
         assert_eq!(
             request.matches('\n').count(),
             1,
             "only the terminator is a raw newline"
         );
         let value: serde_json::Value = serde_json::from_str(request.trim_end()).unwrap();
-        assert_eq!(value["params"]["environment"], "a\"b\nc");
+        assert_eq!(value["params"]["credential"], "a\"b\nc");
     }
 
     // --- response parsing ----------------------------------------------------
@@ -540,6 +649,82 @@ mod tests {
         assert_eq!(result.material.access_key_id.as_str(), "ASIAEXAMPLE");
         assert_eq!(result.material.secret_access_key.as_str(), "secretkey");
         assert_eq!(result.material.session_token.as_str(), "token");
+    }
+
+    /// A `credential/get` result carrying `access_token` material of `token_type`.
+    fn token_result(token: &str, token_type: &str, expires_at: &str) -> CredentialResult {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"result":{{"credential":"gh","material":{{"type":"access_token","token":"{token}","token_type":"{token_type}"}},"expires_at":{expires_at}}}}}"#
+        );
+        parse_response::<CredentialResult>(line.as_bytes(), "github").expect("the result parses")
+    }
+
+    /// An `access_token` result maps to its token, and keeps the expiry the daemon wrote.
+    #[test]
+    fn an_access_token_result_maps_to_its_token_and_expiry() {
+        let token = access_token_from(
+            token_result("ghp_example", "Bearer", r#""2027-01-01T00:00:00Z""#),
+            "github",
+        )
+        .expect("a bearer access token maps");
+        assert_eq!(token.token.as_str(), "ghp_example");
+        assert_eq!(token.expires_at.as_deref(), Some("2027-01-01T00:00:00Z"));
+
+        let never = access_token_from(token_result("ghp_example", "Bearer", "null"), "github")
+            .expect("a token with no expiry maps");
+        assert_eq!(never.expires_at, None, "null means the token never expires");
+    }
+
+    /// Neither the parsed material nor the token the adapter returns prints the token in `Debug`.
+    #[test]
+    fn token_material_prints_no_token() {
+        let result = token_result("ghp_debug_example", "Bearer", "null");
+        let printed = format!("{result:?}");
+        assert!(!printed.contains("ghp_debug_example"), "{printed}");
+        assert!(
+            printed.contains("Bearer"),
+            "the token type is not secret: {printed}"
+        );
+        let token = access_token_from(result, "github").expect("a bearer token maps");
+        let printed = format!("{token:?}");
+        assert!(!printed.contains("ghp_debug_example"), "{printed}");
+    }
+
+    /// The token adapter refuses AWS material, naming the environment and both kinds.
+    #[test]
+    fn the_token_adapter_refuses_session_credentials() {
+        let result = parse_response::<CredentialResult>(&ok_response(), "github").unwrap();
+        let error = access_token_from(result, "github").expect_err("AWS material is no token");
+        let message = error.to_string();
+        assert!(matches!(error, CredentialError::Credential(_)));
+        assert!(
+            message.contains("\"github\"")
+                && message.contains("session_credentials")
+                && message.contains("access_token"),
+            "{message}"
+        );
+        assert!(!message.contains("secretkey"), "no material: {message}");
+    }
+
+    /// A token that is not a plain bearer token, such as a DPoP-bound one, is refused: the box makes
+    /// no per-request proof.
+    #[test]
+    fn a_token_that_is_not_bearer_is_refused() {
+        let error = access_token_from(token_result("ghp_example", "DPoP", "null"), "github")
+            .expect_err("a DPoP token cannot be attached");
+        let message = error.to_string();
+        assert!(
+            message.contains("DPoP") && message.contains("Bearer"),
+            "{message}"
+        );
+        assert!(!message.contains("ghp_example"), "no material: {message}");
+    }
+
+    /// An empty token is refused as unusable rather than attached.
+    #[test]
+    fn an_empty_access_token_is_refused() {
+        access_token_from(token_result("", "Bearer", "null"), "github")
+            .expect_err("an empty token is unusable");
     }
 
     /// Bytes after the first newline (a second framed line, or padding) are ignored: only the first
@@ -768,7 +953,7 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_slice(request.trim_ascii_end()).expect("the request is one JSON line");
         assert_eq!(value["method"], "credential/get");
-        assert_eq!(value["params"]["environment"], "dev");
+        assert_eq!(value["params"]["credential"], "dev");
 
         handle.join().expect("the daemon thread joins");
         let _ = std::fs::remove_file(&path);
@@ -905,46 +1090,38 @@ mod tests {
 
     // --- credential/list -----------------------------------------------------
 
-    /// `list` sends `credential/list` for the environment and returns the credential count, ignoring
-    /// each entry's session status (the daemon's `no_session` here does not matter).
+    /// `list` sends `credential/list` with no params, which credsd 0.2 requires, and returns each
+    /// credential's name and kind, ignoring its session status.
     #[test]
-    fn list_sends_the_environment_and_returns_the_count() {
+    fn list_sends_no_params_and_returns_each_name_and_kind() {
         let path = socket_path();
         let (rx, handle) = fake_daemon(
             path.as_path(),
-            br#"{"jsonrpc":"2.0","id":1,"result":{"credentials":[{"environment":"dev","credential":"login","kind":"session_credentials","status":"no_session"}]}}
+            br#"{"jsonrpc":"2.0","id":1,"result":{"credentials":[{"credential":"dev","kind":"session_credentials","source":"aws_login","status":"no_session","tags":{}}]}}
 "#
             .to_vec(),
         );
 
-        let count = CredsdClient::new(path.clone())
-            .list("dev")
+        let listed = CredsdClient::new(path.clone())
+            .list()
             .expect("the fake daemon answers credential/list");
-        assert_eq!(count, 1);
+        assert_eq!(
+            listed,
+            [("dev".to_string(), "session_credentials".to_string())]
+        );
 
         let request = rx.recv().expect("the daemon recorded the request");
         let value: serde_json::Value =
             serde_json::from_slice(request.trim_ascii_end()).expect("one JSON line");
         assert_eq!(value["method"], "credential/list");
-        assert_eq!(value["params"]["environment"], "dev");
+        assert_eq!(
+            value["params"],
+            serde_json::json!({}),
+            "credsd 0.2 refuses an environment member"
+        );
 
         handle.join().expect("the daemon thread joins");
         let _ = std::fs::remove_file(&path);
-    }
-
-    /// A `credential/list` request carries only the environment — no `scope`, no `claim` — the same
-    /// discipline `credential/get` keeps.
-    #[test]
-    fn the_list_request_omits_scope_and_claim() {
-        let request = build_environment_request(LIST_METHOD, "dev");
-        let value: serde_json::Value = serde_json::from_str(request.trim_end()).unwrap();
-        assert_eq!(value["method"], "credential/list");
-        assert_eq!(value["params"]["environment"], "dev");
-        assert!(
-            value["params"].get("scope").is_none(),
-            "scope is reserved, not sent"
-        );
-        assert!(value["params"].get("claim").is_none(), "no claim field");
     }
 
     /// `ENVIRONMENT_NOT_FOUND` on a list reuses the get path's mapping: a credential failure naming

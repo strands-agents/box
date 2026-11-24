@@ -605,6 +605,7 @@ impl RunContract {
                     &self.file.gateway,
                     &telemetry,
                     holds_secret_source_keys(&self.file.secret_source, &egress, &remote_mcp),
+                    egress::holds_secret_type(&egress, &remote_mcp),
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 file_attributes: self.file.file_attributes,
@@ -819,6 +820,9 @@ fn is_true(value: &bool) -> bool {
 /// The record version of a record whose telemetry targets name `mcp_tool_calls`, so an older build
 /// refuses the box rather than resuming it with those records dropped.
 const TOOL_CALLS_RECORD_VERSION: u32 = 40;
+/// The record version of a record whose egress or remote MCP secret names a `secret.type`, so an
+/// older build refuses the box rather than signing a token route's reference as AWS.
+const SECRET_TYPE_RECORD_VERSION: u32 = 41;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -884,9 +888,12 @@ fn record_version<'a>(
     gateway: &Gateway,
     targets: &BTreeMap<String, telemetry::TelemetryEntry>,
     secret_source_keys: bool,
+    secret_type: bool,
 ) -> u32 {
     let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
-    if telemetry::names_tool_calls(targets) {
+    if secret_type {
+        SECRET_TYPE_RECORD_VERSION
+    } else if telemetry::names_tool_calls(targets) {
         TOOL_CALLS_RECORD_VERSION
     } else if secret_source_keys {
         SECRET_SOURCE_RECORD_VERSION
@@ -1213,6 +1220,7 @@ impl Record {
             DENY_WRITE_RECORD_VERSION,
             SECRET_SOURCE_RECORD_VERSION,
             TOOL_CALLS_RECORD_VERSION,
+            SECRET_TYPE_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1248,6 +1256,7 @@ impl Record {
             &record.gateway,
             &record.telemetry,
             holds_secret_source_keys(&record.secret_source, &record.egress, &record.remote_mcp),
+            egress::holds_secret_type(&record.egress, &record.remote_mcp),
         );
         if record.version != expected {
             return Err(ConfigError::RecordVersion {
@@ -1806,6 +1815,7 @@ mod tests {
                             &Gateway::default(),
                             &stored.telemetry,
                             false,
+                            false,
                         ),
                         expected_version
                     );
@@ -1861,6 +1871,7 @@ mod tests {
                 has_backend(&stored.egress, &stored.remote_mcp),
                 &Gateway::default(),
                 &stored.telemetry,
+                false,
                 false,
             ),
             MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
@@ -2279,6 +2290,7 @@ native-filesystem-policy = false
                                     false,
                                     &Gateway::default(),
                                     &BTreeMap::new(),
+                                    false,
                                     false,
                                 ),
                                 27
@@ -3189,6 +3201,7 @@ native-filesystem-policy = false
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        kind: None,
                         aws: None,
                     }),
                 },
@@ -3415,6 +3428,7 @@ env = {}
                     telemetry::TelemetryEntry::file("/tmp/records.jsonl", Some(include)),
                 )]),
                 false,
+                false,
             )
         };
         assert_eq!(version(true), TOOL_CALLS_RECORD_VERSION);
@@ -3424,7 +3438,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, TOOL_CALLS_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, SECRET_TYPE_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -3714,6 +3728,7 @@ env = {}
                             param: None,
                             inject: None,
                             phantom_prefix: None,
+                            kind: None,
                             aws: None,
                         }),
                     },
@@ -3733,6 +3748,7 @@ env = {}
                             param: None,
                             inject: None,
                             phantom_prefix: None,
+                            kind: None,
                             aws: None,
                         }),
                     },
@@ -3767,6 +3783,7 @@ env = {}
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        kind: None,
                         aws: None,
                     }),
                 },
@@ -3824,6 +3841,7 @@ env = {}
                     param: None,
                     inject: None,
                     phantom_prefix: None,
+                    kind: None,
                     aws: None,
                 }),
             },
@@ -4804,7 +4822,7 @@ command = ["mcp-server-fetch"]
 
         // credsd preflight: the credsd source is visible over the union of both maps.
         assert_eq!(
-            egress::credsd_environments(&record.egress, &record.remote_mcp),
+            egress::credsd_environments(&record.egress, &record.remote_mcp).signed,
             vec!["prod-inference"],
             "the preflight must see a credsd source declared only on a remote MCP server"
         );
@@ -5148,6 +5166,43 @@ command = ["mcp-server-fetch"]
         assert_eq!(placeholders, [Some("GH_TOKEN"), Some("TOOLS_TOKEN")]);
     }
 
+    /// **A `secret.type` key needs its own record version**, above every other, so an older build
+    /// refuses the box rather than signing a token route's reference as AWS. A credsd route with no
+    /// type keeps the version an earlier build stored.
+    #[test]
+    fn a_secret_type_key_stores_its_own_record_version() {
+        let route = |kind: &str| {
+            format!(
+                "monty = false\n[egress.github]\ndestinations = [\"api.github.com\"]\n\
+                 secret.ref = \"credsd://github\"\nsecret.inject = \"always\"\n{kind}"
+            )
+        };
+        let untyped = pinned_record(
+            "[egress.bedrock]\ndestinations = [\"bedrock-runtime.us-west-2.amazonaws.com\"]\n\
+             secret.ref = \"credsd://prod\"\n",
+        );
+        assert_eq!(untyped.version, RECORD_VERSION);
+        let stored = pinned_record(&route("secret.type = \"token\"\n"));
+        assert_eq!(stored.version, SECRET_TYPE_RECORD_VERSION);
+        assert_eq!(SECRET_TYPE_RECORD_VERSION, 41);
+        let text = stored.to_toml().unwrap();
+        assert!(text.contains("type = \"token\""), "{text}");
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+        let mut forged = stored.clone();
+        forged.version = MONTY_OFF_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&forged.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                expected: SECRET_TYPE_RECORD_VERSION,
+                ..
+            })
+        ));
+    }
+
     /// **A `secret.env` key alone needs the secret source record version**, and a configuration
     /// without one keeps the version that an earlier build stored.
     #[test]
@@ -5274,6 +5329,7 @@ command = ["mcp-server-fetch"]
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        kind: None,
                         aws: None,
                     }),
                 },
@@ -5358,6 +5414,7 @@ command = ["mcp-server-fetch"]
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        kind: None,
                         aws: None,
                     }),
                 },
@@ -5397,7 +5454,7 @@ command = ["mcp-server-fetch"]
             "invalid credential entry for host \"api.example.com\": secret scheme \"op\" has \
              no `[secret-source.op]` table: declare the secret source that reads it, or use \
              env://NAME for a credential the workload presents as a placeholder, aws://profile \
-             for one signed in the boundary, or credsd://<environment> for a credsd-vended \
+             for one signed in the boundary, or credsd://<credential> for a credsd-vended \
              credential"
         );
     }

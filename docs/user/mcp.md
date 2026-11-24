@@ -329,14 +329,15 @@ to the server in both modes.
 |---|---|---|---|
 | `type` | string | required | `"http"`. |
 | `destinations` | string array | required | Destinations for MCP identification and optional credential routing. Entries accept a host, `host:port`, or a host with a path prefix. A `*.` wildcard entry supports credential routing only. MCP identification uses the explicit host; see [remote destination matching](#remote-destination-matching). |
-| `secret.ref` | string | none | The credential the gateway attaches to each request to the server: `env://NAME`, `aws://PROFILE`, a bare `aws://` for the AWS default credential chain, or a reference in a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table declares. |
+| `secret.ref` | string | none | The credential the gateway attaches to each request to the server: `env://NAME`, `aws://PROFILE`, a bare `aws://` for the AWS default credential chain, `credsd://CREDENTIAL` for a credential that the credsd daemon serves, or a reference in a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table declares. |
+| `secret.type` | string | `aws`, with a warning | For a `credsd://` reference only: `aws` signs each request with SigV4, and `token` attaches the credential's access token. See [Credential sources](egress.md#credential-sources). |
 | `secret.env` | string | `NAME` for `env://NAME` | Experimental: needs `secret-sources = true` in [`[experimental-features]`](config.md#experimental-features). The variable that holds the placeholder in the workload. Required for a reference in a declared scheme. |
 | `secret.header` | string | `Authorization` | The header the credential goes in. |
 | `secret.prefix` | string | `Bearer ` on `Authorization` | The text before the credential. |
 | `secret.placement` | string | `header` | `header`, `basic_auth`, or `query_param`. |
 | `secret.param` | string | none | The query parameter's name, for `placement = "query_param"`. |
-| `secret.inject` | string | `phantom` | For `env://` and a declared scheme: `phantom` attaches the credential to a request that carries the placeholder, and `always` attaches it to every request to the destinations. |
-| `secret.phantom_prefix` | string | `strands_box_` | For `env://` and a declared scheme: the start of the placeholder value. |
+| `secret.inject` | string | `phantom` | For `env://`, a declared scheme, and a credsd token: `phantom` attaches the credential to a request that carries the placeholder, and `always` attaches it to every request to the destinations. |
+| `secret.phantom_prefix` | string | `strands_box_` | For `env://`, a declared scheme, and a credsd token: the start of the placeholder value. |
 | `backends` | table array | none | A backend to re-route the server's requests to. At most one. See [Backends](#backends). |
 
 With `secret.ref = "env://NAME"`, `box run` reads `NAME` from its own environment. The agent gets

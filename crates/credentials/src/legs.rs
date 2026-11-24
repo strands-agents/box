@@ -196,7 +196,7 @@ impl Vault {
         AwsSource::with_provider(self.aws_provider(), self.ambient_policy()).resolve(config)
     }
 
-    /// Resolve a `credsd://<environment>` locator to AWS session credentials.
+    /// Resolve a `credsd://<credential>` locator to AWS session credentials.
     ///
     /// A `credsd` route always names an environment, so there is no unscoped case and no ambient
     /// fallback — the acquisition carries no warning.
@@ -204,7 +204,7 @@ impl Vault {
         let environment = credsd_environment(config)?;
         let socket = self.credsd_socket().ok_or_else(|| {
             CredentialError::KeystoreAccess(format!(
-                "no credsd socket was resolved for environment {environment:?}"
+                "no credsd socket was resolved for credential {environment:?}"
             ))
         })?;
         let client = CredsdClient::new(socket.to_path_buf());
@@ -216,13 +216,13 @@ impl Vault {
     }
 }
 
-/// The environment a `credsd://<environment>` locator names.
-fn credsd_environment(config: &Locator) -> Result<&str> {
+/// The environment a `credsd://<credential>` locator names.
+pub(crate) fn credsd_environment(config: &Locator) -> Result<&str> {
     match config {
         Locator::Uri(uri) => {
             let (scheme, environment) = uri.split_once("://").ok_or_else(|| {
                 CredentialError::Credential(format!(
-                    "malformed credsd credential reference {uri:?} (expected `credsd://<environment>`)"
+                    "malformed credsd credential reference {uri:?} (expected `credsd://<credential>`)"
                 ))
             })?;
             if scheme != CREDSD_SCHEME {
@@ -232,7 +232,7 @@ fn credsd_environment(config: &Locator) -> Result<&str> {
             }
             if environment.is_empty() {
                 return Err(CredentialError::Credential(
-                    "a credsd:// reference names no environment".to_string(),
+                    "a credsd:// reference names no credential".to_string(),
                 ));
             }
             Ok(environment)

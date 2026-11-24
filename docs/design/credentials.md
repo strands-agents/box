@@ -137,6 +137,17 @@ The vault rejects empty secrets, whitespace-only secrets, and secrets containing
 when it reads them. Every source must pass this check. See [an unusable secret value is
 unrepresentable](./decisions.md#an-unusable-secret-value-is-unrepresentable).
 
+A `credsd://CREDENTIAL` route reads one credsd credential, by name, over the daemon's Unix socket,
+and `secret.type` says what kind it is. The type is fixed when the configuration loads, before Box contacts
+the daemon, because the two kinds open different routes. An `aws` route is a signed route, and it
+fetches session credentials on each request, as `aws://` does. A `token` route is an opaque route,
+like `env://`: Box reads the access token once, when the vault opens, and holds it for the run, as
+it holds the secret of a declared source. Box does not refresh the token, so a token that expires
+stops working until the next run, and Box warns at startup when the token names an expiry. Every
+route that names one token shares one read. Before either read, the credential preflight checks
+that credsd lists each named credential with the kind its routes name. A route with no
+`secret.type` is an `aws` route, and Box warns that it should name the type.
+
 ## At startup
 
 Box prepares every route before the workload starts. A problem stops `box run` with an error that

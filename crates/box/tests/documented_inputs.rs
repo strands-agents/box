@@ -145,9 +145,11 @@ fn every_documented_credential_key_exists_in_the_entry() {
         }
         checked += 1;
         // `secret.ref` is the file's spelling; `reference` is the Rust field, because `ref` is a
-        // keyword. The doc is the operator's contract, so the doc's spelling is what maps.
+        // keyword. `secret.type` maps to `kind` for the same reason. The doc is the operator's
+        // contract, so the doc's spelling is what maps.
         let found = match claimed.split_once('.') {
             Some(("secret", "ref")) => nested.iter().any(|name| name == "reference"),
+            Some(("secret", "type")) => nested.iter().any(|name| name == "kind"),
             Some(("secret", field)) => nested.iter().any(|name| name == field),
             // A backend table's own field (`backends.url`), or its `auth`, which reuses the secret
             // vocabulary (`backends.auth.ref` → `reference`, `backends.auth.<field>`).

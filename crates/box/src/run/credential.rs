@@ -10,6 +10,7 @@ use crate::error::{BoxError, Internal};
 use crate::record::config::Record;
 use crate::record::config::egress::{
     EgressEntry, EgressRoute, SIGNING_PLACEHOLDER_VARIABLES, credsd_environments,
+    untyped_credsd_routes,
 };
 use crate::record::config::telemetry::TelemetryEntry;
 use crate::run::secret_sources::RouteSecrets;
@@ -17,8 +18,9 @@ use crate::run::secret_sources::RouteSecrets;
 /// Validate every declared `credsd` credential before the workload starts.
 ///
 /// A box that names no `credsd` source contacts no daemon. Otherwise this confirms the daemon is
-/// reachable and speaks the protocol, and that each named environment holds a usable session; any
-/// gap is a hard failure that stops the run before it spawns the workload.
+/// reachable and speaks the protocol, and that each named environment is configured and serves the
+/// kind its routes read; any gap is a hard failure that stops the run before it spawns the workload.
+/// It also warns once for each `credsd://` route that names no `secret.type`.
 /// Every map is passed by construction: remote MCP is stored in its own map (`record.remote_mcp`),
 /// and telemetry in another, so a credsd source declared only on a `[mcp.<name>] type = "http"`
 /// server or a `[telemetry.<label>]` target is covered here rather than deferred to the first
@@ -28,18 +30,27 @@ pub(crate) fn preflight_credsd(
     remote_mcp: &BTreeMap<String, EgressEntry>,
     telemetry: &BTreeMap<String, TelemetryEntry>,
 ) -> Result<(), BoxError> {
+    // A `credsd://` route with no `secret.type` signs as AWS, as it did before the key existed. A
+    // later release requires the key, so each such route warns once per run.
+    for (table, reference) in untyped_credsd_routes(egress, remote_mcp) {
+        eprintln!(
+            "strands-box: warning: {table} reads {reference} with no secret.type, so the box \
+             signs it with AWS credentials; set secret.type = \"aws\", or \"token\" for a token. \
+             A later release requires secret.type."
+        );
+    }
     let mut environments = credsd_environments(egress, remote_mcp);
     for environment in crate::record::config::telemetry::credsd_environments(telemetry) {
-        if !environments.contains(&environment) {
-            environments.push(environment);
+        if !environments.signed.contains(&environment) {
+            environments.signed.push(environment);
         }
     }
-    if environments.is_empty() {
+    if environments.signed.is_empty() && environments.tokens.is_empty() {
         return Ok(());
     }
     // The socket resolves as the per-request fetch resolves it: no vault path is set at run
     // today, so both pass `None` and fall to `CREDSD_SOCKET`, else the platform default.
-    credentials::credsd_preflight(None, &environments)?;
+    credentials::credsd_preflight(None, &environments.signed, &environments.tokens)?;
     Ok(())
 }
 
@@ -68,15 +79,23 @@ const SIGNING_PLACEHOLDERS: [(&str, &str); 2] = [
     ),
 ];
 
-/// The bindings that share one vault: every binding provisioned under one variable, or one binding
-/// that provisions none.
+/// The bindings that share one vault: every binding provisioned under one variable, every binding of
+/// one credential that the workload holds no placeholder for, or one binding that provisions none.
 fn credential_groups(bindings: &[EgressRoute]) -> Vec<Vec<&EgressRoute>> {
     let mut groups: Vec<Vec<&EgressRoute>> = Vec::new();
     for binding in bindings {
-        let shared = binding.provisioned_name().and_then(|name| {
-            groups
-                .iter_mut()
-                .find(|group| group[0].provisioned_name() == Some(name))
+        // Routes share a vault when they name one placeholder variable, or one credential that the
+        // workload holds no placeholder for, so the box reads that credential once.
+        let shared = groups.iter_mut().find(|group| {
+            match (binding.provisioned_name(), group[0].provisioned_name()) {
+                (Some(name), Some(other)) => name == other,
+                (None, None) => binding
+                    .credential_without_placeholder()
+                    .is_some_and(|locator| {
+                        group[0].credential_without_placeholder() == Some(locator)
+                    }),
+                _ => false,
+            }
         });
         match shared {
             Some(group) => group.push(binding),
@@ -219,9 +238,14 @@ fn workspace(bindings: &[EgressRoute], backend: &Backend) -> Result<Projection, 
             // box-owned token has this shape, but it opens through `backend_capabilities`, not here
             // (`to_bindings` skips a backend entry), so no route reaches this arm in practice.
             (None, []) => {}
+            // A credential the workload holds no placeholder for, such as a credsd token with
+            // `secret.inject = "always"` and no `secret.env`: its phantom is placed nowhere, and the
+            // gateway attaches the credential to every request to the destinations.
+            (None, _) if binding.credential_without_placeholder().is_some() => {}
             // A minted phantom this crate cannot deliver. Unreachable today: `validate` admits
             // only a secret that names a variable (`env://`, or a declared scheme with
-            // `secret.env`) and a signed secret (which mints none), so the two
+            // `secret.env`), a credsd token that the arm above places nowhere, and a signed secret
+            // (which mints none), so the two
             (None, phantoms) => {
                 return Err(Internal::CredentialProjection(format!(
                     "credential for {} minted {} phantom binding(s) the box cannot place: a \
@@ -263,6 +287,25 @@ mod tests {
     /// `HOME`-free fixture: the credential vault reads no layout, only the locator.
     fn target(toml: &str) -> EgressEntry {
         toml::from_str(toml).expect("the fixture must be a well-formed credential entry")
+    }
+
+    /// A credsd token that the workload holds no placeholder for opens one vault for all its
+    /// destinations, so the box reads the token once, and a second credential gets its own.
+    #[test]
+    fn one_credential_without_a_placeholder_shares_one_vault() {
+        let token = target(
+            "destinations = [\"api.github.com\", \"uploads.github.com\"]\n\
+             secret.ref = \"credsd://github\"\nsecret.type = \"token\"\nsecret.inject = \"always\"\n",
+        );
+        let other = target(
+            "destinations = [\"api.example.com\"]\n\
+             secret.ref = \"credsd://other\"\nsecret.type = \"token\"\nsecret.inject = \"always\"\n",
+        );
+        let mut routes = token.to_bindings().expect("bindings build");
+        routes.extend(other.to_bindings().expect("bindings build"));
+        let groups = credential_groups(&routes);
+        let sizes: Vec<usize> = groups.iter().map(Vec::len).collect();
+        assert_eq!(sizes, [2, 1], "one vault for each credential");
     }
 
     /// A resolved binding mints exactly one phantom, and both copies agree.

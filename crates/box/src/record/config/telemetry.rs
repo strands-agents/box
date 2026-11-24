@@ -294,7 +294,7 @@ impl TelemetryEntry {
 #[serde(deny_unknown_fields)]
 pub(crate) struct TelemetrySecret {
     /// The secret to attach, as a URI: `env://NAME`, `secret://NAME`, `aws://PROFILE`,
-    /// `credsd://ENVIRONMENT`, or a reference in a declared scheme.
+    /// `credsd://CREDENTIAL`, or a reference in a declared scheme.
     #[serde(rename = "ref")]
     pub(crate) reference: String,
 
@@ -410,7 +410,7 @@ fn telemetry_secret_uri(reference: &str, sources: &DeclaredSources) -> Result<St
     } else {
         return Err(format!(
             "`secret.ref` names no scheme this box reads; write `{ENV_SCHEME}NAME`, \
-             `{TELEMETRY_ALIAS_SCHEME}NAME`, `aws://profile`, `credsd://environment`, or a \
+             `{TELEMETRY_ALIAS_SCHEME}NAME`, `aws://profile`, `credsd://credential`, or a \
              reference in a scheme that a `[secret-source.<scheme>]` table declares, never the \
              value itself. The value is deliberately not echoed here, in case it is one"
         ));
@@ -619,7 +619,7 @@ fn expanded(entry: &TelemetryEntry) -> Result<TelemetryEntry, String> {
             {
                 return Err(format!(
                     "a `{}` target is signed with SigV4, so `secret.ref` names `aws://profile` or \
-                     `credsd://environment`",
+                     `credsd://credential`",
                     kind.spelling()
                 ));
             }
@@ -1170,7 +1170,7 @@ mod tests {
             assert_eq!(
                 refusal,
                 "`secret.ref` names no scheme this box reads; write `env://NAME`, \
-                 `secret://NAME`, `aws://profile`, `credsd://environment`, or a reference in a \
+                 `secret://NAME`, `aws://profile`, `credsd://credential`, or a reference in a \
                  scheme that a `[secret-source.<scheme>]` table declares, never the value \
                  itself. The value is deliberately not echoed here, in case it is one"
             );
@@ -1252,6 +1252,21 @@ mod tests {
             "invalid `[telemetry.otlp]` target: the variable OP_SERVICE_ACCOUNT_TOKEN is a \
              credential of the secret source `op` (its `pass-secret-env` names it), so no env:// or secret:// \
              reference can read it"
+        );
+    }
+
+    /// **A telemetry target takes no `secret.type`**: a `credsd://` telemetry secret always signs
+    /// with AWS credentials, so a token type is refused as an unknown key.
+    #[test]
+    fn a_telemetry_target_takes_no_secret_type() {
+        let error = toml::from_str::<TelemetryEntry>(
+            "kind = \"cloudwatch_traces\"\nregion = \"us-west-2\"\n\
+             secret.ref = \"credsd://box-e2e\"\nsecret.type = \"token\"\n",
+        )
+        .expect_err("a telemetry secret has no type key");
+        assert!(
+            error.to_string().contains("unknown field `type`"),
+            "{error}"
         );
     }
 

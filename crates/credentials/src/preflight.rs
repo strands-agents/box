@@ -3,21 +3,24 @@
 
 use std::path::Path;
 
-use crate::sources::{CredsdClient, resolve_credsd_socket};
+use crate::sources::{
+    ACCESS_TOKEN_TYPE, CredsdClient, SESSION_CREDENTIALS_TYPE, resolve_credsd_socket,
+};
 use crate::{CredentialError, Result};
 
 /// The credsd wire protocol this box speaks.
 const REQUIRED_PROTOCOL_VERSION: u32 = 1;
 
-/// Validate every declared `credsd` environment before the workload starts.
+/// Validate every declared `credsd` credential before the workload starts.
 ///
-/// With no environments this is a no-op and never contacts the daemon. Otherwise it sends one
-/// `system/health`, then one `credential/list` per distinct environment, and confirms each
-/// environment is configured — it reads no session state. The socket resolves exactly as the
-/// per-request fetch resolves it. Every failure is hard, and the message names the environment
-/// or the socket and never any credential material.
-pub fn credsd_preflight(socket: Option<&Path>, environments: &[&str]) -> Result<()> {
-    if environments.is_empty() {
+/// `signed` names each credential a signed AWS route reads, and `tokens` each credential a token
+/// route reads. With neither, this is a no-op and never contacts the daemon. Otherwise it sends one
+/// `system/health` and one `credential/list`, and confirms each named credential exists and has the
+/// kind its routes read. It reads no session state. The socket resolves exactly as the per-request
+/// fetch resolves it. Every failure is hard, and the message names the credential or the socket and
+/// never any credential material.
+pub fn credsd_preflight(socket: Option<&Path>, signed: &[&str], tokens: &[&str]) -> Result<()> {
+    if signed.is_empty() && tokens.is_empty() {
         return Ok(());
     }
 
@@ -32,27 +35,41 @@ pub fn credsd_preflight(socket: Option<&Path>, environments: &[&str]) -> Result<
         )));
     }
 
-    let mut checked: Vec<&str> = Vec::new();
-    for &environment in environments {
-        if checked.contains(&environment) {
-            continue;
-        }
-        checked.push(environment);
-        check_environment(&client, environment)?;
+    let listed = client.list()?;
+    let uses = signed
+        .iter()
+        .map(|credential| (*credential, SESSION_CREDENTIALS_TYPE))
+        .chain(
+            tokens
+                .iter()
+                .map(|credential| (*credential, ACCESS_TOKEN_TYPE)),
+        );
+    for (credential, expected) in uses {
+        check_credential(&listed, credential, expected)?;
     }
     Ok(())
 }
 
-/// Confirm one environment is configured.
+/// Confirm that `listed` holds `credential` with the `expected` kind.
 ///
-/// The check confirms the environment exists and holds at least one credential. It reads no session
-/// state: `credsd` serves valid cached credentials while the login session reads spent, so a session
-/// check would refuse a run whose per-request `credential/get` would in fact succeed.
-fn check_environment(client: &CredsdClient, environment: &str) -> Result<()> {
-    if client.list(environment)? == 0 {
+/// It reads no session state: `credsd` serves valid cached credentials while the login session
+/// reads spent, so a session check would refuse a run whose per-request `credential/get` would in
+/// fact succeed.
+fn check_credential(listed: &[(String, String)], credential: &str, expected: &str) -> Result<()> {
+    let Some((_, kind)) = listed.iter().find(|(name, _)| name == credential) else {
         return Err(CredentialError::Credential(format!(
-            "credsd has no credential for environment {environment:?}, or this box is not \
-             authorized for it"
+            "credsd has no credential {credential:?}, or this box is not authorized for it"
+        )));
+    };
+    if kind != expected {
+        let fix = if expected == SESSION_CREDENTIALS_TYPE {
+            "set secret.type = \"token\" on a route that reads a token"
+        } else {
+            "set secret.type = \"aws\" on a route that signs with AWS credentials"
+        };
+        return Err(CredentialError::Credential(format!(
+            "credsd credential {credential:?} is {kind:?}, but a route that reads it expects \
+             {expected:?}; {fix}"
         )));
     }
     Ok(())
@@ -111,7 +128,12 @@ mod tests {
     /// A `credential/list` reply carrying one credential. Its status is `no_session` — the check
     /// ignores session state, so a configured environment passes whatever its status reads.
     fn list_reply() -> String {
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"credentials\":[{\"environment\":\"dev\",\"credential\":\"login\",\"kind\":\"session_credentials\",\"status\":\"no_session\"}]}}\n".to_string()
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"credentials\":[{\"credential\":\"dev\",\"kind\":\"session_credentials\",\"source\":\"aws_login\",\"status\":\"no_session\",\"tags\":{}}]}}\n".to_string()
+    }
+
+    /// A `credential/list` reply whose one credential is an access token.
+    fn token_list_reply() -> String {
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"credentials\":[{\"credential\":\"github\",\"kind\":\"access_token\",\"source\":\"static_secret\",\"status\":\"active\",\"tags\":{}}]}}\n".to_string()
     }
 
     /// A `credential/list` reply with an empty credential set.
@@ -119,24 +141,19 @@ mod tests {
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"credentials\":[]}}\n".to_string()
     }
 
-    /// An `ENVIRONMENT_NOT_FOUND` error reply.
-    fn not_found_reply() -> String {
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"x\",\"data\":{\"code\":\"ENVIRONMENT_NOT_FOUND\"}}}\n".to_string()
-    }
-
     /// With no declared environment the preflight never contacts the daemon. The socket is
     /// never bound, so a contact attempt would fail — Ok proves it made none.
     #[test]
     fn no_environments_never_contacts_the_daemon() {
         let unbound = socket_path();
-        credsd_preflight(Some(&unbound), &[]).expect("no environments is a no-op");
+        credsd_preflight(Some(&unbound), &[], &[]).expect("no environments is a no-op");
     }
 
     /// An unreachable daemon fails, and the message names the socket path.
     #[test]
     fn an_unreachable_daemon_fails_naming_the_socket() {
         let unbound = socket_path();
-        let error = credsd_preflight(Some(&unbound), &["dev"])
+        let error = credsd_preflight(Some(&unbound), &["dev"], &[])
             .expect_err("nothing is listening on the socket");
         assert!(matches!(error, CredentialError::KeystoreAccess(_)));
         assert!(
@@ -153,7 +170,8 @@ mod tests {
             "system/health" => health_reply(2),
             _ => list_reply(),
         });
-        let error = credsd_preflight(Some(&path), &["dev"]).expect_err("version 2 is incompatible");
+        let error =
+            credsd_preflight(Some(&path), &["dev"], &[]).expect_err("version 2 is incompatible");
         assert!(matches!(error, CredentialError::KeystoreAccess(_)));
         let message = error.to_string();
         assert!(
@@ -163,22 +181,22 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// An absent environment fails with a credential error naming the environment.
+    /// A credential the daemon does not list fails with a credential error naming it.
     #[test]
-    fn an_absent_environment_fails_naming_it() {
+    fn an_absent_credential_fails_naming_it() {
         let path = socket_path();
         spawn_daemon(path.as_path(), |method| match method {
             "system/health" => health_reply(1),
-            _ => not_found_reply(),
+            _ => list_reply(),
         });
-        let error = credsd_preflight(Some(&path), &["prod-inference"])
-            .expect_err("the environment is absent");
+        let error = credsd_preflight(Some(&path), &["prod-inference"], &[])
+            .expect_err("the credential is absent");
         assert!(matches!(error, CredentialError::Credential(_)));
         assert!(error.to_string().contains("prod-inference"), "{error}");
         let _ = std::fs::remove_file(&path);
     }
 
-    /// An environment the daemon lists with no credential is treated as absent.
+    /// A daemon that lists no credential holds none of the named ones.
     #[test]
     fn an_empty_credential_set_fails() {
         let path = socket_path();
@@ -186,8 +204,8 @@ mod tests {
             "system/health" => health_reply(1),
             _ => empty_list_reply(),
         });
-        let error =
-            credsd_preflight(Some(&path), &["dev"]).expect_err("an empty set is not available");
+        let error = credsd_preflight(Some(&path), &["dev"], &[])
+            .expect_err("an empty set is not available");
         assert!(matches!(error, CredentialError::Credential(_)));
         assert!(error.to_string().contains("dev"), "{error}");
         let _ = std::fs::remove_file(&path);
@@ -203,7 +221,70 @@ mod tests {
             "system/health" => health_reply(1),
             _ => list_reply(),
         });
-        credsd_preflight(Some(&path), &["dev", "dev"]).expect("a configured environment passes");
+        credsd_preflight(Some(&path), &["dev", "dev"], &[])
+            .expect("a configured environment passes");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A token route's environment passes when its first credential is an access token.
+    #[test]
+    fn a_token_environment_that_serves_a_token_passes() {
+        let path = socket_path();
+        let lists = std::sync::Arc::new(AtomicU32::new(0));
+        let counted = lists.clone();
+        spawn_daemon(path.as_path(), move |method| match method {
+            "system/health" => health_reply(1),
+            _ => {
+                counted.fetch_add(1, Ordering::SeqCst);
+                token_list_reply()
+            }
+        });
+        credsd_preflight(Some(&path), &[], &["github"]).expect("the kinds agree");
+        assert_eq!(
+            lists.load(Ordering::SeqCst),
+            1,
+            "a token environment alone is still listed and checked"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A token route's environment that serves AWS credentials stops the run, naming the environment,
+    /// both kinds, and the key to fix.
+    #[test]
+    fn a_token_environment_that_serves_aws_credentials_fails() {
+        let path = socket_path();
+        spawn_daemon(path.as_path(), |method| match method {
+            "system/health" => health_reply(1),
+            _ => list_reply(),
+        });
+        let error = credsd_preflight(Some(&path), &[], &["dev"]).expect_err("the kinds disagree");
+        let message = error.to_string();
+        assert!(matches!(error, CredentialError::Credential(_)));
+        assert!(
+            message.contains("\"dev\"")
+                && message.contains("session_credentials")
+                && message.contains("access_token")
+                && message.contains("secret.type = \"aws\""),
+            "{message}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A signed route's environment that serves a token stops the run and names `secret.type =
+    /// "token"`, which is what an operator who left the key out needs.
+    #[test]
+    fn a_signed_environment_that_serves_a_token_names_the_token_type() {
+        let path = socket_path();
+        spawn_daemon(path.as_path(), |method| match method {
+            "system/health" => health_reply(1),
+            _ => token_list_reply(),
+        });
+        let error =
+            credsd_preflight(Some(&path), &["github"], &[]).expect_err("the kinds disagree");
+        assert!(
+            error.to_string().contains("secret.type = \"token\""),
+            "{error}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

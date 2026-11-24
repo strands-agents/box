@@ -240,6 +240,7 @@ A box whose agent, tool, or local MCP server declares a [`deny_write`](config.md
 A [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table, or a `secret.env` key on a route or a
 remote MCP server, requires record version 39.
 A [telemetry target](telemetry.md#include) that names `mcp_tool_calls` requires record version 40.
+A `secret.type` key on a route or a remote MCP server requires record version 41.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 
