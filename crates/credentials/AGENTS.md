@@ -275,6 +275,8 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   because a fallback to a credential of the wrong identity is the defect. A guest whose wall clock
   comes back stale and is stepped forward later serves the old credential until the step; the
   detector relies on a current wall clock after the restore, as measured above.
+  On a host with no counter, a clone resumed less than 2 s after its source paused leaves no clock
+  gap and keeps the source's credential until the expiry buffer.
   A wall clock that moved back behind the resolve also resolves again, but keeps the cached
   credential as a fallback. While the clock stays behind, each request resolves, and with a failing
   chain each waits up to `RESOLVE_TIMEOUT` for the fallback. Slow traffic does not resolve per

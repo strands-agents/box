@@ -22,6 +22,7 @@ pub(in crate::sources) fn current() -> Option<u32> {
 #[cfg(target_os = "linux")]
 mod linux {
     use std::os::fd::AsRawFd;
+    use std::os::unix::fs::FileTypeExt;
     use std::path::Path;
     use std::ptr::NonNull;
 
@@ -39,9 +40,14 @@ mod linux {
     unsafe impl Sync for Counter {}
 
     impl Counter {
-        /// Map the first four bytes of `path`, or `None` when it is absent or cannot be mapped.
+        /// Map the first four bytes of `path`, or `None` when it is absent, shorter than four bytes,
+        /// or cannot be mapped.
         pub(super) fn map(path: &Path) -> Option<Self> {
             let file = std::fs::File::open(path).ok()?;
+            let metadata = file.metadata().ok()?;
+            if !metadata.file_type().is_char_device() && metadata.len() < LENGTH as u64 {
+                return None;
+            }
             // SAFETY: a fresh read-only shared mapping of an open descriptor; the result is checked
             // against `MAP_FAILED` before use, and the mapping outlives the descriptor.
             let address = unsafe {
@@ -89,6 +95,15 @@ mod linux {
             file.flush().expect("flush");
             assert_eq!(counter.read(), 2, "the mapping shows the new generation");
 
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn a_short_counter_file_maps_to_none() {
+            let path =
+                std::env::temp_dir().join(format!("box-generation-short-{}", std::process::id()));
+            std::fs::write(&path, [1u8, 0]).expect("write a short counter file");
+            assert!(Counter::map(&path).is_none());
             let _ = std::fs::remove_file(&path);
         }
 
