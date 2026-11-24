@@ -564,7 +564,7 @@ fn a_load_time_warning_reaches_stderr_with_the_program_path_hint() {
     let control = run_in(home.path(), &workspace, &[]);
     let quiet = String::from_utf8_lossy(&control.stderr);
     assert!(
-        !quiet.contains("strands-box: warning"),
+        !quiet.contains("policy: warning[P01"),
         "a policy with no finding must earn no warning: {quiet}"
     );
     assert!(

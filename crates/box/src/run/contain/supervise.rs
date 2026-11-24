@@ -1077,18 +1077,52 @@ fn trampoline_message(stderr: &[u8]) -> Option<String> {
     // Containment's MissingReads caps its reason at 6000 bytes, leaving room for error framing.
     const MAXIMUM_CHARACTERS: usize = 8192;
     let text = String::from_utf8_lossy(stderr);
-    let start = text
+    let starts: Vec<usize> = text
         .match_indices(PREFIX)
         .filter(|(offset, _)| *offset == 0 || text.as_bytes()[offset - 1] == b'\n')
-        .last()
-        .map(|(offset, _)| offset);
+        .map(|(offset, _)| offset)
+        .collect();
+    // A supervisor that reads end-of-file after a failed setup can write last, so the setup
+    // failure's own message wins over a later trampoline line.
+    let setup_failure = |start: &&usize| {
+        matches!(
+            ::diagnostics::parse(text[**start..].lines().next().unwrap_or_default()),
+            ::diagnostics::Line::Message(message)
+                if message.code == Some(::diagnostics::Code::H0401)
+        )
+    };
+    let start = starts
+        .iter()
+        .rev()
+        .find(setup_failure)
+        .or(starts.last())
+        .copied();
     let message = match start {
-        // The detail is the text after the trampoline's severity and code, when it names them.
-        Some(start) => match ::diagnostics::parse(&text[start..]) {
-            ::diagnostics::Line::Message(message) => message.text,
-            _ => &text[start + PREFIX.len()..],
+        // The detail is the text after the trampoline's severity and code, with the indented lines
+        // that belong to it.
+        Some(start) => {
+            let block = &text[start..];
+            let line = block.lines().next().unwrap_or_default();
+            match ::diagnostics::parse(line) {
+                ::diagnostics::Line::Message(message) => {
+                    // The message text is the end of its first line.
+                    let first = &block[line.len() - message.text.len()..];
+                    let end = first
+                        .match_indices('\n')
+                        .map(|(offset, _)| offset + 1)
+                        .find(|next| {
+                            first[*next..]
+                                .chars()
+                                .next()
+                                .is_some_and(|c| c != ' ' && c != '\t')
+                        })
+                        .unwrap_or(first.len());
+                    &first[..end]
+                }
+                _ => &block[PREFIX.len()..],
+            }
+            .trim()
         }
-        .trim(),
         None => text
             .lines()
             .rev()
@@ -1394,6 +1428,39 @@ mod tests {
                 "containment apply failed: '/usr/bin/app' needs the shared library 'libnope.so.1'"
             ),
             "the detail leaves out the trampoline's severity and code"
+        );
+    }
+
+    /// **A setup failure keeps its reason when the query supervisor writes after it.**
+    #[test]
+    fn a_setup_failure_wins_over_a_later_supervisor_line() {
+        use ::diagnostics::{Code, Kind, Source, text};
+        let setup = text(
+            Source::ContainTrampoline,
+            Kind::Coded(Code::H0401),
+            format_args!(
+                "apply failed: 2 dependencies lack read access\nDependency: /vendor/codec"
+            ),
+        );
+        let supervisor = text(
+            Source::ContainTrampoline,
+            Kind::Coded(Code::H0502),
+            format_args!("filesystem query supervisor failed: unexpected end of file"),
+        );
+        for stderr in [
+            format!("{setup}{supervisor}"),
+            format!("{supervisor}{setup}"),
+        ] {
+            assert_eq!(
+                trampoline_message(stderr.as_bytes()).as_deref(),
+                Some("apply failed: 2 dependencies lack read access\n  Dependency: /vendor/codec"),
+                "{stderr}"
+            );
+        }
+        assert_eq!(
+            trampoline_message(supervisor.as_bytes()).as_deref(),
+            Some("filesystem query supervisor failed: unexpected end of file"),
+            "with no setup failure the last trampoline line is the reason"
         );
     }
 

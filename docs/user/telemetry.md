@@ -397,7 +397,8 @@ A telemetry error stops the run before the workload starts, so the agent never r
 the reason on stderr and exits `1`.
 
 Exit `1` alone does not prove that Box refused, because a workload is free to exit `1` as well. The
-message does: Box prefixes every line it prints with `strands-box:`.
+message does: a telemetry refusal reads `telemetry: error[T0103]: ...`. See
+[message codes](message-codes.md).
 
 | What the operator sees | Cause |
 |---|---|

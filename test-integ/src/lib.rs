@@ -162,7 +162,7 @@ fn box_never_ran_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"(?m)^(error: the following required arguments|Usage: strands-box|strands-box: error(\[[A-Z][0-9]{4}\])?:|strands-box (spawn|wait) error:|workload exited before the ready marker|strands-box-contain-trampoline: error(\[H0401\])?:|containment setup failed)",
+            r"(?m)^(error: the following required arguments|Usage: strands-box|(strands-box|policy|telemetry): error(\[[A-Z][0-9]{4}\])?:|strands-box (spawn|wait) error:|workload exited before the ready marker|strands-box-contain-trampoline: error(\[H0401\])?:|containment setup failed)",
         )
         .expect("valid box-never-ran regex")
     })

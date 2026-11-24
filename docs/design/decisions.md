@@ -690,7 +690,7 @@ stdin. Plugin hooks remain broken because most of them exec a script.
 Every Box Core message reaches stderr through `diagnostics::diag!` as
 `<source>: <severity>[<code>]: <text>`, and clippy refuses any other stderr write in Core crates.
 Each kind of message has one code, decided where its text is built, and the registry sets its
-severity. The one exception is an internal failure the reader can only report, which carries no
+source and severity. The one exception is an internal failure the reader can only report, which carries no
 code. The format is a convention on a stream the workload's processes share, not an
 authenticated channel.
 

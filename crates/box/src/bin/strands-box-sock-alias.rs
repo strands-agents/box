@@ -687,7 +687,7 @@ fn read_script(script: &Path) -> io::Result<String> {
     let text = std::fs::read_to_string(script).map_err(|error| {
         io::Error::new(
             error.kind(),
-            format!("read Shell script {}: {error}", script.display()),
+            UsageRefused(format!("read Shell script {}: {error}", script.display())),
         )
     })?;
     if text.len() > MAX_SCRIPT_BYTES {
@@ -1400,6 +1400,15 @@ mod tests {
         let error = working_directory(None, None, Ok(PathBuf::from("relative")))
             .expect_err("a relative working directory must be refused");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(is_usage(&error), "{error}");
+    }
+
+    /// A script that cannot be read is the caller's mistake, not a failure to reach the box.
+    #[test]
+    fn an_unreadable_script_is_a_usage_mistake() {
+        let error = read_script(Path::new("/nonexistent/missing.sh"))
+            .expect_err("a missing script must be refused");
+        assert!(error.to_string().contains("missing.sh"), "{error}");
         assert!(is_usage(&error), "{error}");
     }
 

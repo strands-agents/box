@@ -19,8 +19,9 @@ pub use registry::Code;
 /// Write one message to stderr, with `into` to a writer, or with `text` into a `String`.
 ///
 /// The first argument is a code (`P0201`), a severity for an uncoded message (`error`, `warning`,
-/// `note`), or a braced expression that yields a [`Kind`]. The rest is a `format!` string. The
-/// calling crate names its voice with `const DIAGNOSTIC_SOURCE: diagnostics::Source` at its root.
+/// `note`), or a braced expression that yields a [`Kind`]. The rest is a `format!` string. A coded
+/// message names its code's source; an uncoded one names the calling crate's voice, set with
+/// `const DIAGNOSTIC_SOURCE: diagnostics::Source` at its root.
 // `crate::DIAGNOSTIC_SOURCE` names the calling crate's voice on purpose.
 #[allow(clippy::crate_in_macro_def)]
 #[macro_export]

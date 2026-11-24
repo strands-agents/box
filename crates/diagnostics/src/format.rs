@@ -182,6 +182,15 @@ mod tests {
             ),
             "policy: warning[P0201]: dogwood evaluation failed: x; denying\n"
         );
+        assert!(
+            render(
+                Source::StrandsBox,
+                Kind::Coded(Code::P0201),
+                format_args!("printed by another crate")
+            )
+            .starts_with("policy: warning[P0201]: "),
+            "a coded message names its code's source, not the printing crate's"
+        );
         assert_eq!(
             render(
                 Source::StrandsBox,
