@@ -719,12 +719,17 @@ caller would have to handle.
 `would_deny` before treating it as a permit the policy gave.
 
 <a id="no-connection-is-opaque-to-the-boundary"></a>
-### The gateway terminates every connection, so no tunnel is opaque
+### The gateway terminates every connection, and copies bytes only for a decided WebSocket
 
 An interceptor must see each request and each response effect, so the gateway always terminates TLS.
-Box no longer supports opaque tunnelling, splicing, or raw byte copying. A connection whose
-plaintext the boundary cannot read cannot raise `http:request` and would bypass that authorization.
-The box cannot reach a plaintext or non-HTTP upstream over `CONNECT`.
+Box does not support opaque tunnelling or splicing. A connection whose plaintext the boundary cannot
+read cannot raise `http:request` and would bypass that authorization. The one stream that the gateway
+copies as raw bytes is a WebSocket, after `websocket:connect` permits its handshake and the server
+answers `101`. Policy decides nothing after the `101`, and the gateway reads no frame, so it redacts
+no credential in a message. A decision for each message lost, because it cost policy time on every
+message and no customer asked for a rule on single messages. The cost is
+that a permit on a handshake admits the whole WebSocket, so the box can reach a non-HTTP stream
+inside one. Over `CONNECT`, the box cannot reach a plaintext or non-HTTP upstream in any other way.
 
 <a id="the-ssrf-and-metadata-floor-is-compiled-beneath-policy"></a>
 ### Cloud-metadata protection is policy, and the gateway holds no destination list
