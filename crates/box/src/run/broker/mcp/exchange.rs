@@ -1708,6 +1708,70 @@ done"#
     }
 
     #[test]
+    fn a_tool_whose_schema_does_not_generate_is_refused_and_the_rest_of_the_server_works() {
+        let (runtime, local) = local_runtime();
+        runtime.block_on(local.run_until(async {
+            let fixture = fixture(PERMIT_ALL_MCP);
+            let log = tempfile::NamedTempFile::new().expect("frame log");
+            let (mut program, mut output) = exchange(
+                listing_server(
+                    log.path(),
+                    r##"[{"name":"Search","inputSchema":{"type":"object","properties":{"value":{"type":"string"}}}},{"name":"create_account","inputSchema":{"type":"object","properties":{"account":{"$ref":"#/$defs/create-account"}},"$defs":{"create-account":{"type":"object"}}}}]"##,
+                    ":",
+                ),
+                &fixture,
+            )
+            .await;
+            initialize(&program, &mut output).await;
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+            )
+            .await;
+            let reply = next_output(&mut output).await;
+            assert_eq!(reply["id"], 2);
+            assert_eq!(
+                reply["result"]["tools"].as_array().map(Vec::len),
+                Some(2),
+                "the list reaches the client as the server sent it: {reply}"
+            );
+            assert_eq!(
+                fixture.registry.require_listed("issues-mcp", "Search"),
+                Ok(())
+            );
+            assert_eq!(
+                fixture
+                    .registry
+                    .require_listed("issues-mcp", "create_account"),
+                Err(policy::CatalogRefusal::NotListed)
+            );
+            assert!(fixture.registry.admit_open("issues-mcp").is_ok());
+
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "create_account", "arguments": {}}}),
+            )
+            .await;
+            let refusal = next_output(&mut output).await;
+            assert_eq!(refusal["id"], 3);
+            assert!(
+                refusal["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("not in the accepted MCP catalog")),
+                "{refusal}"
+            );
+            assert!(
+                !read_log(log.path())
+                    .iter()
+                    .any(|frame| frame["method"] == "tools/call"),
+                "the refused call never reaches the server"
+            );
+            program.stop_and_wait().await.expect("stop the exchange");
+        }));
+    }
+
+    #[test]
     fn a_list_the_server_never_answers_fails_discovery_at_its_deadline() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {

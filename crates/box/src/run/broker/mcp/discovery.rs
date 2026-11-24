@@ -335,10 +335,9 @@ impl DiscoveryRegistry {
         let server = catalog_server(&catalog);
         #[cfg(test)]
         self.run_staging_hook(&server);
-        let tools = catalog.tool_count();
         let staged = self.stage_with_test_faults(catalog);
         let outcome = match staged {
-            Ok(CatalogStage::Accepted { .. }) => {
+            Ok(CatalogStage::Accepted { tools }) => {
                 self.coordinator.control(
                     telemetry::ControlRecord::completed(
                         telemetry::ControlOperation::SchemaInstalled,

@@ -4,7 +4,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
 
-use policy::{event_schema_source, generate_mcp_schema};
+use policy::{event_schema_source, generate_mcp_schema_with_omissions};
 
 use crate::error::{BoxError, McpSchemaError};
 use crate::record::config::egress::EgressSecret;
@@ -62,8 +62,7 @@ pub(crate) async fn generate_schema(
                 server: server.name.clone(),
                 source,
             })?;
-        let schema = generate_mcp_schema(&server.name, &response.to_string())
-            .map_err(McpSchemaError::from)?;
+        let schema = generate_left_out_warned(&server.name, &response.to_string())?;
         generated.push((server.name.clone(), schema));
     }
 
@@ -81,8 +80,7 @@ pub(crate) async fn generate_schema(
                 server: server.name.clone(),
                 source,
             })?;
-        let schema = generate_mcp_schema(&server.name, &response.to_string())
-            .map_err(McpSchemaError::from)?;
+        let schema = generate_left_out_warned(&server.name, &response.to_string())?;
         generated.push((server.name.clone(), schema));
     }
 
@@ -106,6 +104,16 @@ pub(crate) async fn generate_schema(
     println!("Generated {}", action_path.display());
     println!("Generated {}", event_path.display());
     Ok(ExitCode::SUCCESS)
+}
+
+/// The schema of `server`, after a warning for each tool it leaves out.
+fn generate_left_out_warned(server: &str, tools_list: &str) -> Result<String, McpSchemaError> {
+    let (schema, omitted) =
+        generate_mcp_schema_with_omissions(server, tools_list).map_err(McpSchemaError::from)?;
+    for tool in omitted {
+        eprintln!("strands-box: warning: {tool}");
+    }
+    Ok(schema)
 }
 
 /// What `used` makes of the secret of `server`, which is read through `secrets` and wiped after.

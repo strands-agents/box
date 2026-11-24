@@ -451,16 +451,24 @@ impl ToolCatalogs {
                 }
             }
         }
-        let fragment = match crate::generate_mcp_schema(&server, &catalog.merged.to_string()) {
-            Ok(fragment) => fragment,
-            Err(error) => {
-                return Ok(self.reject(
-                    &server,
-                    DiscoveryFailure::SchemaGeneration,
-                    error.to_string(),
-                ));
-            }
-        };
+        let (fragment, omitted) =
+            match crate::generate_mcp_schema_with_omissions(&server, &catalog.merged.to_string()) {
+                Ok(generated) => generated,
+                Err(error) => {
+                    return Ok(self.reject(
+                        &server,
+                        DiscoveryFailure::SchemaGeneration,
+                        error.to_string(),
+                    ));
+                }
+            };
+        // A tool whose schema does not generate is left out, so its calls are refused as unlisted.
+        let tools: BTreeSet<String> = catalog
+            .tools
+            .iter()
+            .filter(|tool| !omitted.iter().any(|omitted| &omitted.tool == *tool))
+            .cloned()
+            .collect();
         let retained = catalog.bytes.saturating_add(fragment.len());
         {
             let inner = self.lock();
@@ -492,7 +500,7 @@ impl ToolCatalogs {
                 .and_then(|entry| entry.accepted.as_mut())
                 .map(|accepted| {
                     let previous = accepted.tools.clone();
-                    accepted.tools.retain(|tool| catalog.tools.contains(tool));
+                    accepted.tools.retain(|tool| tools.contains(tool));
                     previous
                 })
         };
@@ -523,7 +531,7 @@ impl ToolCatalogs {
                     .retained_bytes
                     .saturating_sub(released)
                     .saturating_add(retained);
-                let tools = catalog.tools.len();
+                let accepted_tools = tools.len();
                 let entry = inner
                     .servers
                     .get_mut(&server)
@@ -532,12 +540,18 @@ impl ToolCatalogs {
                     entry.restages += 1;
                 }
                 entry.accepted = Some(AcceptedCatalog {
-                    tools: catalog.tools,
+                    tools,
                     identity: catalog.identity,
                     bytes: retained,
                 });
                 entry.state = ServerDiscovery::Ready;
-                Ok(CatalogStage::Accepted { tools })
+                drop(inner);
+                for tool in &omitted {
+                    eprintln!("strands-box: warning: {tool}");
+                }
+                Ok(CatalogStage::Accepted {
+                    tools: accepted_tools,
+                })
             }
             Err(Ok(reason)) => Ok(self.reject(&server, DiscoveryFailure::PolicyStaging, reason)),
             Err(Err(error)) => Err(error),
@@ -773,6 +787,29 @@ mod tests {
         assert_eq!(fixture.catalogs.require_listed("demo", "read"), Ok(()));
         assert_eq!(
             fixture.catalogs.require_listed("demo", "write"),
+            Err(CatalogRefusal::NotListed)
+        );
+        assert_eq!(fixture.catalogs.state("demo"), Some(ServerDiscovery::Ready));
+    }
+
+    #[test]
+    fn a_tool_whose_schema_does_not_generate_is_left_out_of_the_accepted_catalog() {
+        let fixture = fixture(McpServerKind::Stdio);
+        let response = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "read", "inputSchema": {"type": "object",
+                "properties": {"value": {"type": "string"}}}},
+            {"name": "create_account", "inputSchema": {"type": "object",
+                "properties": {"account": {"$ref": "#/$defs/create-account"}},
+                "$defs": {"create-account": {"type": "object"}}}}
+        ]}});
+        let catalog = complete(&fixture.catalogs, "a", &response);
+        assert_eq!(
+            fixture.catalogs.stage(catalog).expect("staging runs"),
+            CatalogStage::Accepted { tools: 1 }
+        );
+        assert_eq!(fixture.catalogs.require_listed("demo", "read"), Ok(()));
+        assert_eq!(
+            fixture.catalogs.require_listed("demo", "create_account"),
             Err(CatalogRefusal::NotListed)
         );
         assert_eq!(fixture.catalogs.state("demo"), Some(ServerDiscovery::Ready));

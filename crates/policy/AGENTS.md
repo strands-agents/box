@@ -37,13 +37,14 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `ListPage`, `MAXIMUM_LIST_BYTES`, `MAXIMUM_LIST_PAGES`, `McpServerKind`, `ServerDiscovery`,
   `ToolCatalogs`, `Finding`, `Location`, `PolicyCheck`, `RuleRef`, `Decision`, `DenyReason`,
   `PolicyAttribution`, `RuleId`, `event_schema_source`, `PolicyDiagnostic`, `PolicyError`,
-  `PolicyStagingError`, `McpSchemaError`, `compose_action_schema`, `generate_mcp_schema`,
+  `PolicyStagingError`, `McpSchemaError`, `OmittedTool`, `compose_action_schema`,
+  `generate_mcp_schema`, `generate_mcp_schema_with_omissions`,
   `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `McpReply`,
   `Outcome`, `PendingToolResponse`, `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`,
   `EffectivePolicy`, `Policy`, `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`,
   `FsOperation`, `Principal`, `Request`, `RequestId`, `GovernedBox`, `Operator`, `PolicyWarning`,
   `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`,
-  `HistoryFlusher`, `HistoryFlushSnapshot`. That is 63 names with `--all-features` and 54 by
+  `HistoryFlusher`, `HistoryFlushSnapshot`. That is 65 names with `--all-features` and 56 by
   default; recompute it when you touch the façade. The two history-flush types require
   `experimental-idle-flush`.
   `ReplyReader` is exported for the box, which reads every remote `tools/call` reply for its
@@ -155,6 +156,15 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   outputs, and an input costs twice an output because both legs record it. `generate_mcp_schema` drops an
   `outputSchema` that does not generate, so one tool's unreadable output never costs the server its
   catalog (`mcp_schema::tests::an_output_schema_cedar_cannot_read_drops_only_that_tools_output`).
+  `generate_mcp_schema_with_omissions`, which `ToolCatalogs::stage` and `policy generate-schema`
+  call, goes one step further for a tool whose input does not generate: it leaves the tool out, so
+  the catalog refuses its calls as unlisted and a rule that names it degrades
+  (`tests/runtime_mcp_policy_staging.rs::a_rule_on_a_left_out_tool_degrades_it_and_the_rest_of_the_server_works`).
+  Never keep such a tool with untyped arguments instead: a guarded `forbid` on an argument would
+  load and never fire. It tries each tool alone against a stub of `Box::Agent` and `Box::Resource`,
+  because a composition with the whole Box schema costs about 4 ms a tool, and the tools that pass
+  then compose with the Box schema together. Measured on Linux aarch64, release: 3,000 tools with
+  500 bad ones stage in 4.0 s, and the 2,500 good ones alone in 2.1 s.
   The workload can still make its own http reply unreadable (an output over 16 MiB, or a server
   that compresses anyway), so only a precondition on `output.structured` is sound; a `forbid`
   keyed on an earlier output can be avoided.

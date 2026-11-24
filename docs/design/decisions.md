@@ -635,7 +635,11 @@ only when its first request names no cursor and each later request names the cur
 previous page returned on the same connection. Box holds the reply to the last page until it stages
 the schema. The client therefore cannot see a tool before Box enforces its rules. A list that does
 not change the catalog commits nothing. A list that changes it replaces it, and a refused list keeps
-a stdio server's accepted catalog. We replaced discovery that made Box page the server itself. That
+a stdio server's accepted catalog. A tool whose schema doesn't generate, or doesn't compose with the
+Box schema, on its own is left out of the catalog with a warning, so its calls are refused and the
+server's other tools stay usable. Refusing the whole server was rejected, because one tool that the
+operator can't change cost every tool on it. We replaced discovery that made Box page the server
+itself. That
 approach made the broker an MCP client and required two discovery models. If the client stops
 paging, Box never stages the server and refuses its tool calls. A server the MCP client never lists
 stays undiscovered, and a terminal server failure stops a later open from starting another process

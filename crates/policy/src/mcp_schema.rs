@@ -3,6 +3,7 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
+    fmt,
 };
 
 use cedar_policy::{Schema, SchemaFragment};
@@ -115,11 +116,7 @@ pub fn generate_mcp_schema(server: &str, tools_list: &str) -> Result<String, Mcp
 /// `outputSchema` when none fails alone; `None` when no tool declares one.
 fn without_unreadable_outputs(server: &str, tools_list: &str) -> Option<String> {
     let mut response = serde_json::from_str::<serde_json::Value>(tools_list).ok()?;
-    let pointer = if response.pointer("/result/tools").is_some() {
-        "/result/tools"
-    } else {
-        "/tools"
-    };
+    let pointer = tools_pointer(&response);
     let tools = response
         .pointer_mut(pointer)
         .and_then(serde_json::Value::as_array_mut)?;
@@ -147,6 +144,137 @@ fn without_unreadable_outputs(server: &str, tools_list: &str) -> Option<String> 
         }
     }
     removed.then(|| response.to_string())
+}
+
+/// One MCP tool that Box leaves out of its server's schema, because the tool's own schema does not
+/// generate or does not compose with the Box schema.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OmittedTool {
+    /// The declared server name.
+    pub server: String,
+    /// The tool name, as the server lists it.
+    pub tool: String,
+    /// Why the tool's schema does not generate or compose.
+    pub reason: String,
+}
+
+impl fmt::Display for OmittedTool {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "MCP server {:?} tool {:?} is left out, and its calls are refused: {}",
+            self.server, self.tool, self.reason
+        )
+    }
+}
+
+/// [`generate_mcp_schema`], leaving out each tool whose schema does not generate and compose with
+/// the Box schema alone, or refusing the server with the whole list's error when nothing or
+/// everything fails alone or the remaining tools still fail together.
+pub fn generate_mcp_schema_with_omissions(
+    server: &str,
+    tools_list: &str,
+) -> Result<(String, Vec<OmittedTool>), McpSchemaError> {
+    let error = match composable_mcp_schema(server, tools_list) {
+        Ok(schema) => return Ok((schema, Vec::new())),
+        Err(error) => error,
+    };
+    let Ok(mut response) = serde_json::from_str::<serde_json::Value>(tools_list) else {
+        return Err(error);
+    };
+    let pointer = tools_pointer(&response);
+    let Some(tools) = response
+        .pointer_mut(pointer)
+        .and_then(serde_json::Value::as_array_mut)
+        .map(std::mem::take)
+    else {
+        return Err(error);
+    };
+    let mut kept = Vec::with_capacity(tools.len());
+    let mut omitted = Vec::new();
+    for tool in tools {
+        let Some(name) = tool.get("name").and_then(serde_json::Value::as_str) else {
+            return Err(error);
+        };
+        let name = name.to_string();
+        let slot = response
+            .pointer_mut(pointer)
+            .expect("the tools array was just read");
+        *slot = serde_json::Value::Array(vec![tool]);
+        let alone = tool_schema_alone(server, &response.to_string());
+        let slot = response
+            .pointer_mut(pointer)
+            .expect("the tools array was just written");
+        let tool = std::mem::take(slot);
+        let serde_json::Value::Array(mut tool) = tool else {
+            unreachable!("the slot holds the array written above")
+        };
+        let tool = tool.pop().expect("the array holds the one tool");
+        match alone {
+            Ok(_) => kept.push(tool),
+            Err(refusal) => omitted.push(OmittedTool {
+                server: server.to_string(),
+                tool: name,
+                reason: refusal_reason(&refusal),
+            }),
+        }
+    }
+    if omitted.is_empty() || kept.is_empty() {
+        return Err(error);
+    }
+    *response
+        .pointer_mut(pointer)
+        .expect("the tools array was just read") = serde_json::Value::Array(kept);
+    let schema = composable_mcp_schema(server, &response.to_string()).map_err(|_| error)?;
+    Ok((schema, omitted))
+}
+
+/// [`generate_mcp_schema`], refused unless the schema also composes with the Box schema.
+fn composable_mcp_schema(server: &str, tools_list: &str) -> Result<String, McpSchemaError> {
+    let schema = generate_mcp_schema(server, tools_list)?;
+    validate_mcp_schema_composition(&[(server, schema.as_str())])?;
+    Ok(schema)
+}
+
+/// Whether the schema of a one-tool list generates and composes with `Box::Agent` and
+/// `Box::Resource`, the only Box types a server schema names.
+fn tool_schema_alone(server: &str, tools_list: &str) -> Result<(), McpSchemaError> {
+    const BOX_ENTITIES: &str = "namespace Box { entity Agent; entity Resource; }";
+    let schema = generate_mcp_schema(server, tools_list)?;
+    let composition = |source: &str| McpSchemaError::Composition {
+        reason: source.to_string(),
+    };
+    let fragments = [BOX_ENTITIES, schema.as_str()]
+        .into_iter()
+        .map(|source| {
+            SchemaFragment::from_cedarschema_str(source)
+                .map(|(fragment, _)| fragment)
+                .map_err(|error| composition(&error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Schema::from_schema_fragments(fragments).map_err(|error| composition(&error.to_string()))?;
+    Ok(())
+}
+
+/// The JSON Pointer to the tools array of a tools/list response or result.
+fn tools_pointer(response: &serde_json::Value) -> &'static str {
+    if response.pointer("/result/tools").is_some() {
+        "/result/tools"
+    } else {
+        "/tools"
+    }
+}
+
+/// The refusal of `error` without the server name that [`OmittedTool`] already states.
+fn refusal_reason(error: &McpSchemaError) -> String {
+    match error {
+        McpSchemaError::Description { reason, .. }
+        | McpSchemaError::Generate { reason, .. }
+        | McpSchemaError::Render { reason, .. }
+        | McpSchemaError::Composition { reason } => reason.clone(),
+        McpSchemaError::GeneratedShape { reason, .. } => (*reason).to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// [`generate_mcp_schema`] for one tools/list response, with no retry.
@@ -1330,6 +1458,127 @@ mod tests {
                 "the unreadable output is dropped: {unreadable}\n{schema}"
             );
         }
+    }
+
+    /// The four tools of #637: `get_zone` generates, and each other one fails in its own way.
+    const ONE_GOOD_THREE_BAD: &str = r##"{"result":{"tools":[
+        {"name":"get_zone","inputSchema":{"type":"object",
+            "properties":{"zone_id":{"type":"string"}}}},
+        {"name":"create_account","inputSchema":{"type":"object",
+            "properties":{"account":{"$ref":"#/$defs/create-account"}},
+            "$defs":{"create-account":{"type":"object"}}}},
+        {"name":"bulk_write","inputSchema":{"type":"object",
+            "$defs":{"rows":{"type":"array","items":{"type":"object"}}}}},
+        {"name":"validate_rule","inputSchema":{"type":"object",
+            "$defs":{"Group":{"type":"array","items":{"$ref":"#/$defs/Group"}}}}}
+    ]}}"##;
+
+    fn omitted_names(omitted: &[OmittedTool]) -> Vec<&str> {
+        omitted.iter().map(|tool| tool.tool.as_str()).collect()
+    }
+
+    #[test]
+    fn a_tool_whose_schema_does_not_generate_is_left_out_and_the_rest_compose() {
+        assert!(
+            generate_mcp_schema("repro", ONE_GOOD_THREE_BAD)
+                .and_then(|schema| validate_mcp_schema_composition(&[("repro", &schema)]))
+                .is_err(),
+            "the whole list does not generate and compose"
+        );
+        let (schema, omitted) = generate_mcp_schema_with_omissions("repro", ONE_GOOD_THREE_BAD)
+            .expect("the server generates without its bad tools");
+        assert_eq!(
+            omitted_names(&omitted),
+            ["create_account", "bulk_write", "validate_rule"]
+        );
+        assert!(schema.contains(r#"action "get_zone""#), "{schema}");
+        for tool in ["create_account", "bulk_write", "validate_rule"] {
+            assert!(!schema.contains(&format!("action \"{tool}\"")), "{schema}");
+        }
+        validate_mcp_schema_composition(&[("repro", &schema)])
+            .expect("the schema composes with the Box schema");
+    }
+
+    #[test]
+    fn each_left_out_tool_names_its_server_tool_and_reason() {
+        let (_, omitted) = generate_mcp_schema_with_omissions("repro", ONE_GOOD_THREE_BAD)
+            .expect("the server generates without its bad tools");
+        assert_eq!(
+            omitted[0].to_string(),
+            "MCP server \"repro\" tool \"create_account\" is left out, and its calls are \
+             refused: unexpected token `-`"
+        );
+        assert!(
+            omitted[2]
+                .reason
+                .contains("cycle in common type references"),
+            "a tool that fails only against the Box schema is left out too: {:?}",
+            omitted[2]
+        );
+    }
+
+    #[test]
+    fn a_list_that_generates_leaves_out_nothing_and_keeps_its_schema() {
+        let (schema, omitted) =
+            generate_mcp_schema_with_omissions("Tool", TOOLS).expect("the schema generates");
+        assert!(omitted.is_empty());
+        assert_eq!(
+            schema,
+            generate_mcp_schema("Tool", TOOLS).expect("the schema generates")
+        );
+    }
+
+    #[test]
+    fn a_server_definition_stays_available_to_a_tool_tried_alone() {
+        let tools = r##"{"result":{
+            "$defs":{"Zone":{"type":"object","properties":{"id":{"type":"string"}}}},
+            "tools":[
+                {"name":"get_zone","inputSchema":{"type":"object",
+                    "properties":{"zone":{"$ref":"#/$defs/Zone"}}}},
+                {"name":"create_account","inputSchema":{"type":"object",
+                    "$defs":{"create-account":{}}}}
+            ]}}"##;
+        let (schema, omitted) = generate_mcp_schema_with_omissions("repro", tools)
+            .expect("the server generates without its bad tool");
+        assert_eq!(omitted_names(&omitted), ["create_account"]);
+        assert!(schema.contains(r#"action "get_zone""#), "{schema}");
+    }
+
+    #[test]
+    fn a_server_is_still_refused_when_every_tool_fails_alone() {
+        let tools = r#"{"result":{"tools":[
+            {"name":"a","inputSchema":{"type":"object","$defs":{"a-b":{}}}},
+            {"name":"b","inputSchema":{"type":"object","$defs":{"c-d":{}}}}
+        ]}}"#;
+        let strict = generate_mcp_schema("repro", tools)
+            .expect_err("the strict schema is refused")
+            .to_string();
+        let lenient = generate_mcp_schema_with_omissions("repro", tools)
+            .expect_err("the server is still refused")
+            .to_string();
+        assert_eq!(lenient, strict);
+    }
+
+    #[test]
+    fn a_server_is_still_refused_when_the_kept_tools_do_not_generate_together() {
+        let tools = r#"{"result":{"tools":[
+            {"name":"bad","inputSchema":{"type":"object","$defs":{"a-b":{}}}},
+            {"name":"zone-id","inputSchema":{"type":"object"}},
+            {"name":"zone_id","inputSchema":{"type":"object"}}
+        ]}}"#;
+        for alone in ["zone-id", "zone_id"] {
+            let list = format!(
+                r#"{{"result":{{"tools":[{{"name":"{alone}","inputSchema":{{"type":"object"}}}}]}}}}"#
+            );
+            generate_mcp_schema("repro", &list).expect("each kept tool generates alone");
+        }
+        let strict = generate_mcp_schema("repro", tools)
+            .expect_err("the strict schema is refused")
+            .to_string();
+        let lenient = generate_mcp_schema_with_omissions("repro", tools)
+            .expect_err("the kept tools still clash, so the server is refused")
+            .to_string();
+        assert_eq!(lenient, strict);
     }
 
     const TOOLS: &str = r#"
