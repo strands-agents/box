@@ -98,6 +98,8 @@ pub(crate) struct Trampoline {
     ))]
     launch_gate: Option<LaunchGate>,
     setup_status: SetupStatusPipe,
+    /// The background read of the setup status, once [`Trampoline::watch_launch`] started it.
+    launch: Option<std::thread::JoinHandle<Result<Option<SetupStage>, TrampolineError>>>,
 }
 
 impl Trampoline {
@@ -141,6 +143,7 @@ impl Trampoline {
                 reader,
                 writer: None,
             },
+            launch: None,
         })
     }
 
@@ -152,9 +155,41 @@ impl Trampoline {
         }
     }
 
+    /// Read the setup status in the background, and call `launched` once the workload's `exec`
+    /// succeeded. The status pipe reaches its end at that `exec`, because its writer is
+    /// close-on-exec, so this reports the launch as it happens rather than when the workload exits.
+    /// A containment or `exec` failure never calls `launched`. [`Trampoline::setup_failure`] then
+    /// returns this same read.
+    #[cfg(unix)]
+    pub(crate) fn watch_launch(
+        &mut self,
+        launched: impl FnOnce() + Send + 'static,
+    ) -> Result<(), TrampolineError> {
+        let mut reader = self
+            .setup_status
+            .reader
+            .try_clone()
+            .map_err(|source| TrampolineError::StatusRead { source })?;
+        // The box's own copy of the writer would hold the pipe open past the `exec`.
+        self.close_setup_writer();
+        self.launch = Some(std::thread::spawn(move || {
+            let result = read_setup_failure(&mut reader);
+            if matches!(result, Ok(None)) {
+                launched();
+            }
+            result
+        }));
+        Ok(())
+    }
+
     /// The stage containment failed at, or `None` when it never failed.
     pub(crate) fn setup_failure(&mut self) -> Result<Option<SetupStage>, TrampolineError> {
-        self.setup_status.read_failure()
+        match self.launch.take() {
+            Some(launch) => launch
+                .join()
+                .unwrap_or(Err(TrampolineError::SetupIncomplete)),
+            None => self.setup_status.read_failure(),
+        }
     }
 }
 
@@ -256,6 +291,7 @@ pub(crate) fn command(
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             bootstrap: Some(prepared.bootstrap),
             setup_status,
+            launch: None,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
                 all(target_os = "linux", feature = "native-filesystem-policy")
@@ -857,24 +893,7 @@ impl SetupStatusPipe {
 
     #[cfg(unix)]
     fn read_failure(&mut self) -> Result<Option<SetupStage>, TrampolineError> {
-        let mut complete = false;
-        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
-        let mut reaper_ready = !cfg!(target_os = "linux");
-        loop {
-            let mut byte = [0u8; 1];
-            let read = match self.reader.read(&mut byte) {
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                result => result.map_err(|source| TrampolineError::StatusRead { source })?,
-            };
-            match (read, byte[0]) {
-                (0, _) if complete && reaper_ready => return Ok(None),
-                (0, _) => return Err(TrampolineError::SetupIncomplete),
-                (_, SETUP_COMPLETE_BYTE) if !complete => complete = true,
-                #[cfg(target_os = "linux")]
-                (_, REAPER_READY_BYTE) if !reaper_ready => reaper_ready = true,
-                (_, stage) => return SetupStage::decode(stage).map(Some),
-            }
-        }
+        read_setup_failure(&mut self.reader)
     }
 
     #[cfg(not(unix))]
@@ -882,6 +901,29 @@ impl SetupStatusPipe {
         Err(TrampolineError::UnsupportedPlatform {
             os: std::env::consts::OS,
         })
+    }
+}
+
+/// The stage containment failed at, read from the setup-status pipe to its end.
+#[cfg(unix)]
+fn read_setup_failure(reader: &mut File) -> Result<Option<SetupStage>, TrampolineError> {
+    let mut complete = false;
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut reaper_ready = !cfg!(target_os = "linux");
+    loop {
+        let mut byte = [0u8; 1];
+        let read = match reader.read(&mut byte) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result.map_err(|source| TrampolineError::StatusRead { source })?,
+        };
+        match (read, byte[0]) {
+            (0, _) if complete && reaper_ready => return Ok(None),
+            (0, _) => return Err(TrampolineError::SetupIncomplete),
+            (_, SETUP_COMPLETE_BYTE) if !complete => complete = true,
+            #[cfg(target_os = "linux")]
+            (_, REAPER_READY_BYTE) if !reaper_ready => reaper_ready = true,
+            (_, stage) => return SetupStage::decode(stage).map(Some),
+        }
     }
 }
 

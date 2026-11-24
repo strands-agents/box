@@ -452,12 +452,16 @@ pub(crate) struct Contained {
 impl Contained {
     /// Spawn the workload in its own process group, holding the foreground
     /// terminal so job control and Ctrl-C behave as they would outside the box.
+    ///
+    /// `launched` runs once the workload's `exec` succeeded inside its containment. A containment
+    /// or `exec` failure never calls it.
     pub(crate) async fn spawn(
         boundary: Boundary,
         layout: &BoxRoot,
         hosted: crate::run::hosted::HostedBox,
         terminal: Option<std::fs::File>,
         signals: Option<Signals>,
+        launched: impl FnOnce() + Send + 'static,
     ) -> Result<Self, BoxError> {
         Self::spawn_with(
             boundary,
@@ -467,6 +471,7 @@ impl Contained {
             true,
             terminal,
             signals,
+            launched,
         )
         .await
     }
@@ -506,6 +511,7 @@ impl Contained {
     }
 
     /// The one spawn body. `stdio` supplies stdin and stdout; stderr is always inherited.
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_with(
         boundary: Boundary,
         layout: &BoxRoot,
@@ -514,6 +520,7 @@ impl Contained {
         claim_terminal: bool,
         terminal: Option<std::fs::File>,
         signals: Option<Signals>,
+        launched: impl FnOnce() + Send + 'static,
     ) -> Result<Self, BoxError> {
         // The relay's control socket must exist before the trampoline is spawned,
         // because the trampoline sends its listening descriptor over it during
@@ -585,7 +592,7 @@ impl Contained {
             }
             None => (stdio(), stdio(), stderr),
         };
-        let (mut group, trampoline) = spawn_registered(
+        let (mut group, mut trampoline) = spawn_registered(
             &boundary,
             layout,
             |command| {
@@ -685,6 +692,18 @@ impl Contained {
                 .into());
             }
         };
+
+        // The one reader of the setup status, started once per spawn.
+        #[cfg(unix)]
+        if let Err(error) = trampoline.watch_launch(launched) {
+            let _ = group.stop().await;
+            if let Some(mut terminal) = terminal {
+                let _ = terminal.restore();
+            }
+            return Err(error.into());
+        }
+        #[cfg(not(unix))]
+        drop(launched);
 
         Ok(Self {
             group,
