@@ -96,8 +96,8 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
    - Alias names and derivation: `SHELL_ALIAS_NAMES`, `PYTHON_ALIAS_NAMES`, `public/bin/`,
      `public/run/*.sock`, and the rule that an alias derives its socket from its own path. A
      harness resolves these off `PATH` by name.
-   - Policy vocabulary: action names (`fs:*`, `net:connect`, `http:request`, `shell:exec`,
-     `shell:spawn`, `mcp:call`), the
+   - Policy vocabulary: action names (every `action` in
+     `crates/policy/schema/actions.cedarschema`), the
      attributes a rule may read, what `when temporal { … }` observes. An operator's policy file is
      their source code; a renamed action silently stops matching.
    - Mechanism-crate façades: the `pub use` sets in `containment`, `credentials`, `policy`,
