@@ -70,8 +70,8 @@ on:
         default: false
         type: boolean
       native_filesystem_policy:
-        # Compile native policy into the CLI's ARM64 packages. Dry run only.
-        description: 'Experimental native filesystem policy (dry run only; ARM64)'
+        # Compile native policy into the CLI's macOS and Linux packages. Dry run only.
+        description: 'Experimental native filesystem policy (dry run only)'
         required: false
         default: false
         type: boolean

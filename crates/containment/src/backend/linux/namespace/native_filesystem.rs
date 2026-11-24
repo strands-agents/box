@@ -24,6 +24,18 @@ pub(super) const OPERATIONS: &[libc::c_long] = &[
     libc::SYS_mkdirat,
     libc::SYS_symlinkat,
     libc::SYS_truncate,
+    #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+    libc::SYS_open,
+    #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+    libc::SYS_mkdir,
+    #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+    libc::SYS_unlink,
+    #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+    libc::SYS_rmdir,
+    #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+    libc::SYS_rename,
+    #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+    libc::SYS_symlink,
 ];
 
 pub(super) fn handoff(

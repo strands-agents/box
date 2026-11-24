@@ -2,7 +2,8 @@
 #![cfg(all(
     box_native_kernel_tests,
     target_os = "linux",
-    target_arch = "aarch64",
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    target_pointer_width = "64",
     feature = "native-filesystem-policy",
     feature = "test-support"
 ))]
@@ -14,6 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn exercise(operation: &str, deny: bool, directory: bool, link: bool) {
+    let workload_operation = operation;
+    let operation = operation.strip_prefix('L').unwrap_or(operation);
+    let operation = operation.strip_prefix('R').unwrap_or(operation);
     let parent = PathBuf::from(
         std::env::var_os("NATIVE_TEST_ROOT")
             .unwrap_or_else(|| std::env::temp_dir().into_os_string()),
@@ -40,7 +44,7 @@ fn exercise(operation: &str, deny: bool, directory: bool, link: bool) {
     let q = |path: &Path| toml::Value::String(path.display().to_string()).to_string();
     let args = vec![
         staged.display().to_string(),
-        operation.into(),
+        workload_operation.into(),
         source.display().to_string(),
         if operation == "symlink" {
             "target".into()
@@ -122,6 +126,43 @@ fn exercise(operation: &str, deny: bool, directory: bool, link: bool) {
         "\"outcome\":\"completed\""
     };
     assert!(stderr.contains(expected), "{stderr}");
+    if workload_operation.starts_with('L') {
+        assert_eq!(
+            output.stdout,
+            if deny {
+                b"NATIVE_DENIED\n".as_slice()
+            } else {
+                b"NATIVE_ALLOWED\n".as_slice()
+            }
+        );
+        let events: Vec<serde_json::Value> = stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("NATIVE_RESEARCH_EVENT="))
+            .map(|line| serde_json::from_str(line).expect("native policy event"))
+            .collect();
+        assert_eq!(events.len(), 1, "{stderr}");
+        let event = &events[0];
+        assert_eq!(
+            event["outcome"],
+            if deny { "denied" } else { "completed" },
+            "{event}"
+        );
+        let operations: &[&str] = match operation {
+            "jmkdir" => &["CreateDir"],
+            "krmdir" => &["RemoveDir"],
+            "symlink" => &["Symlink"],
+            "delete" => &["RemoveFile"],
+            "move" if !deny => &["Rename", "ReadContent", "Rename"],
+            "move" => &["Rename"],
+            _ => panic!("unexpected legacy operation: {operation}"),
+        };
+        let decisions = event["decisions"].as_array().expect("policy decisions");
+        assert_eq!(decisions.len(), operations.len(), "{event}");
+        for (decision, operation) in decisions.iter().zip(operations) {
+            assert_eq!(decision["operation"], *operation, "{event}");
+            assert_eq!(decision["allow"], !deny, "{event}");
+        }
+    }
 }
 #[test]
 fn creating_a_directory_uses_the_workload_umask() {
@@ -586,4 +627,56 @@ fn rename_refuses_an_existing_directory_before_policy_and_preserves_both_entries
         true,
         EntryExpectation::Unsupported("replacing an existing directory is not supported"),
     );
+}
+
+#[cfg(target_arch = "x86_64")]
+mod legacy {
+    fn exercise(operation: &str, deny: bool, directory: bool, link: bool) {
+        for prefix in ["L", "LR"] {
+            let operation = format!("{prefix}{}", &operation[1..]);
+            super::exercise(&operation, deny, directory, link);
+        }
+    }
+
+    #[test]
+    fn mkdir_obeys_policy_and_preserves_the_workload_umask() {
+        for deny in [false, true] {
+            exercise("Ljmkdir", deny, false, false);
+        }
+    }
+
+    #[test]
+    fn rmdir_obeys_policy_and_preserves_a_denied_directory() {
+        for deny in [false, true] {
+            exercise("Lkrmdir", deny, true, false);
+        }
+    }
+
+    #[test]
+    fn symlink_obeys_policy_and_keeps_the_relative_target() {
+        for deny in [false, true] {
+            exercise("Lsymlink", deny, false, false);
+        }
+    }
+
+    #[test]
+    fn unlink_obeys_policy_for_a_link_and_preserves_its_target() {
+        for deny in [false, true] {
+            exercise("Ldelete", deny, false, true);
+        }
+    }
+
+    #[test]
+    fn rename_obeys_policy_for_a_link_and_preserves_its_target() {
+        for deny in [false, true] {
+            exercise("Lmove", deny, false, true);
+        }
+    }
+
+    #[test]
+    fn rename_obeys_policy_for_a_directory() {
+        for deny in [false, true] {
+            exercise("Lmove", deny, true, false);
+        }
+    }
 }

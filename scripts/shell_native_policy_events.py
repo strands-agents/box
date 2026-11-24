@@ -10,6 +10,7 @@ from pathlib import Path
 import platform
 import shutil
 import signal
+import struct
 import subprocess
 import tempfile
 
@@ -385,8 +386,9 @@ def differences(case, shell, native):
 
 
 def run(target, output):
-    require(platform.system() == "Linux" and platform.machine() == "aarch64",
-            "Unsupported: this suite requires ARM64 Linux and actual kernel enforcement")
+    require(platform.system() == "Linux" and platform.machine() in ("aarch64", "x86_64")
+            and struct.calcsize("P") == 8,
+            "Unsupported: this suite requires ARM64 or x86-64 Linux and actual kernel enforcement")
     require(os.getuid() != 0, "Run as the operator; the launcher grants only loader capabilities")
     output.mkdir(parents=True, exist_ok=False)
     binaries = build(target, output)

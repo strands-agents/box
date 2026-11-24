@@ -22,6 +22,139 @@ pub(super) struct Request {
     pub data: Data,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PathArgument {
+    pub directory: i32,
+    pub argument: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Operation {
+    Open {
+        path: PathArgument,
+        flags: u64,
+        mode: u64,
+    },
+    Truncate {
+        path: PathArgument,
+        length: u64,
+    },
+    Remove {
+        path: PathArgument,
+        flags: u64,
+    },
+    Rename {
+        source: PathArgument,
+        destination: PathArgument,
+        flags: u64,
+    },
+    Mkdir {
+        path: PathArgument,
+        mode: u64,
+    },
+    Symlink {
+        path: PathArgument,
+    },
+}
+
+impl Operation {
+    pub(super) fn is_file(self) -> bool {
+        match self {
+            Self::Open { flags, .. } => {
+                flags & libc::O_CREAT as u64 == 0 || flags & libc::O_PATH as u64 != 0
+            }
+            Self::Truncate { .. } => true,
+            _ => false,
+        }
+    }
+}
+
+impl Request {
+    pub(super) fn operation(&self) -> Option<Operation> {
+        let args = self.data.args;
+        let at = |directory: usize, argument| PathArgument {
+            directory: args[directory] as i32,
+            argument,
+        };
+        let current = |argument| PathArgument {
+            directory: libc::AT_FDCWD,
+            argument,
+        };
+        Some(match self.data.number as libc::c_long {
+            libc::SYS_openat => Operation::Open {
+                path: at(0, 1),
+                flags: args[2],
+                mode: args[3],
+            },
+            libc::SYS_truncate => Operation::Truncate {
+                path: current(0),
+                length: args[1],
+            },
+            libc::SYS_unlinkat => Operation::Remove {
+                path: at(0, 1),
+                flags: args[2],
+            },
+            libc::SYS_renameat | libc::SYS_renameat2 => Operation::Rename {
+                source: at(0, 1),
+                destination: at(2, 3),
+                flags: if self.data.number as libc::c_long == libc::SYS_renameat2 {
+                    args[4]
+                } else {
+                    0
+                },
+            },
+            libc::SYS_mkdirat => Operation::Mkdir {
+                path: at(0, 1),
+                mode: args[2],
+            },
+            libc::SYS_symlinkat => Operation::Symlink { path: at(1, 2) },
+            #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+            libc::SYS_open => Operation::Open {
+                path: current(0),
+                flags: args[1],
+                mode: args[2],
+            },
+            #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+            libc::SYS_mkdir => Operation::Mkdir {
+                path: current(0),
+                mode: args[1],
+            },
+            #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+            libc::SYS_unlink => Operation::Remove {
+                path: current(0),
+                flags: 0,
+            },
+            #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+            libc::SYS_rmdir => Operation::Remove {
+                path: current(0),
+                flags: libc::AT_REMOVEDIR as u64,
+            },
+            #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+            libc::SYS_rename => Operation::Rename {
+                source: current(0),
+                destination: current(1),
+                flags: 0,
+            },
+            #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+            libc::SYS_symlink => Operation::Symlink { path: current(1) },
+            _ => return None,
+        })
+    }
+}
+
+fn native_architecture(arch: u32) -> bool {
+    if !cfg!(target_pointer_width = "64") {
+        return false;
+    }
+    let machine = match std::env::consts::ARCH {
+        "aarch64" => libc::EM_AARCH64,
+        "x86_64" => libc::EM_X86_64,
+        _ => return false,
+    };
+    // Linux audit.h combines the ELF machine with the 64-bit and little-endian flags.
+    arch == (u32::from(machine) | 0xc000_0000)
+}
+
 #[repr(C)]
 #[derive(Default)]
 struct Response {
@@ -258,16 +391,8 @@ pub(super) fn receive_forwarded(socket: &mut UnixStream) -> io::Result<Request> 
     }
     if request.pid == 0
         || request.flags != 0
-        || ![
-            libc::SYS_openat,
-            libc::SYS_unlinkat,
-            libc::SYS_renameat,
-            libc::SYS_renameat2,
-            libc::SYS_mkdirat,
-            libc::SYS_symlinkat,
-            libc::SYS_truncate,
-        ]
-        .contains(&(request.data.number as libc::c_long))
+        || !native_architecture(request.data.arch)
+        || request.operation().is_none()
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -400,6 +525,33 @@ pub(super) fn read_path(request: &Request, argument: usize) -> io::Result<Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn native_arch() -> u32 {
+        match std::env::consts::ARCH {
+            "aarch64" => 0xc000_00b7,
+            "x86_64" => 0xc000_003e,
+            _ => panic!("native test architecture is unsupported"),
+        }
+    }
+
+    fn forwarded(number: i32, arch: u32, args: [u64; 6]) -> io::Result<Request> {
+        use std::io::Write as _;
+        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut frame = [0_u8; 80];
+        frame[..8].copy_from_slice(&91_u64.to_le_bytes());
+        frame[8..12].copy_from_slice(&42_u32.to_le_bytes());
+        frame[16..20].copy_from_slice(&number.to_le_bytes());
+        frame[20..24].copy_from_slice(&arch.to_le_bytes());
+        frame[24..32].copy_from_slice(&71_u64.to_le_bytes());
+        for (i, argument) in args.iter().enumerate() {
+            frame[32 + 8 * i..40 + 8 * i].copy_from_slice(&argument.to_le_bytes());
+        }
+        sender.write_all(&frame).unwrap();
+        receive_forwarded(&mut receiver)
+    }
 
     #[test]
     fn refused_handoff_closes_received_descriptors() {
@@ -617,6 +769,7 @@ mod tests {
         let mut frame = [0_u8; 80];
         frame[8..12].copy_from_slice(&42_u32.to_le_bytes());
         frame[16..20].copy_from_slice(&(libc::SYS_openat as i32).to_le_bytes());
+        frame[20..24].copy_from_slice(&native_arch().to_le_bytes());
         for id in [7_u64, 8] {
             frame[..8].copy_from_slice(&id.to_le_bytes());
             frame[32..40].copy_from_slice(&123_u64.to_le_bytes());
@@ -654,6 +807,7 @@ mod tests {
         let mut frame = [0_u8; 80];
         frame[8..12].copy_from_slice(&42_u32.to_le_bytes());
         frame[16..20].copy_from_slice(&(libc::SYS_statfs as i32).to_le_bytes());
+        frame[20..24].copy_from_slice(&native_arch().to_le_bytes());
         sender.write_all(&frame).unwrap();
         assert_eq!(
             receive_forwarded(&mut receiver).err().unwrap().kind(),
@@ -664,5 +818,168 @@ mod tests {
             receive_forwarded(&mut receiver).err().unwrap().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn forwarding_refuses_other_architectures_and_compatibility_numbers() {
+        let other = if cfg!(target_arch = "aarch64") {
+            0xc000_003e
+        } else {
+            0xc000_00b7
+        };
+        for arch in [0, 0x4000_0003, native_arch() & !0x8000_0000, other] {
+            assert_eq!(
+                forwarded(libc::SYS_openat as i32, arch, [0; 6])
+                    .err()
+                    .unwrap()
+                    .kind(),
+                io::ErrorKind::InvalidData,
+                "architecture {arch:#x}"
+            );
+        }
+        for number in [
+            -1,
+            libc::SYS_openat as i32 | 0x4000_0000,
+            libc::SYS_statfs as i32,
+        ] {
+            assert_eq!(
+                forwarded(number, native_arch(), [0; 6])
+                    .err()
+                    .unwrap()
+                    .kind(),
+                io::ErrorKind::InvalidData,
+                "syscall {number:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn forwarding_preserves_native_open_flags_modes_and_request_identity() {
+        let args = [
+            u64::MAX,
+            101,
+            (libc::O_CREAT | libc::O_CLOEXEC) as u64,
+            0o600,
+            17,
+            19,
+        ];
+        let request = forwarded(libc::SYS_openat as i32, native_arch(), args).unwrap();
+        assert_eq!(request.id, 91);
+        assert_eq!(request.pid, 42);
+        assert_eq!(request.data.instruction, 71);
+        assert_eq!(request.data.arch, native_arch());
+        assert_eq!(request.data.args, args);
+        assert_eq!(
+            request.operation(),
+            Some(Operation::Open {
+                path: PathArgument {
+                    directory: -1,
+                    argument: 1
+                },
+                flags: (libc::O_CREAT | libc::O_CLOEXEC) as u64,
+                mode: 0o600,
+            })
+        );
+        assert!(!request.operation().unwrap().is_file());
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+    #[test]
+    fn legacy_open_dispatch_uses_its_flags_and_ignores_the_unused_mode() {
+        for (flags, mode, file) in [
+            (libc::O_RDONLY, u64::MAX, true),
+            (
+                libc::O_WRONLY | libc::O_TRUNC | libc::O_CLOEXEC,
+                u64::MAX,
+                true,
+            ),
+            (
+                libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
+                0o640,
+                false,
+            ),
+            (libc::O_PATH | libc::O_CREAT, 0, true),
+        ] {
+            let args = [101, flags as u64, mode, 0o7777, 103, 107];
+            let request = forwarded(libc::SYS_open as i32, native_arch(), args).unwrap();
+            assert_eq!(
+                request.operation(),
+                Some(Operation::Open {
+                    path: PathArgument {
+                        directory: libc::AT_FDCWD,
+                        argument: 0
+                    },
+                    flags: flags as u64,
+                    mode,
+                })
+            );
+            assert_eq!(request.operation().unwrap().is_file(), file);
+            assert_eq!(request.data.number, libc::SYS_open as i32);
+            assert_eq!(request.data.args, args);
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+    #[test]
+    fn legacy_entry_decoding_preserves_path_roles_and_implicit_flags() {
+        let current = |argument| PathArgument {
+            directory: libc::AT_FDCWD,
+            argument,
+        };
+        for (number, args, expected) in [
+            (
+                libc::SYS_mkdir,
+                [101, 0o750, 0o7777, 103, 107, 109],
+                Operation::Mkdir {
+                    path: current(0),
+                    mode: 0o750,
+                },
+            ),
+            (
+                libc::SYS_unlink,
+                [101, u64::MAX, libc::AT_REMOVEDIR as u64, 103, 107, 109],
+                Operation::Remove {
+                    path: current(0),
+                    flags: 0,
+                },
+            ),
+            (
+                libc::SYS_rmdir,
+                [101, u64::MAX, 0, 103, 107, 109],
+                Operation::Remove {
+                    path: current(0),
+                    flags: libc::AT_REMOVEDIR as u64,
+                },
+            ),
+            (
+                libc::SYS_rename,
+                [101, 103, 107, 109, u64::MAX, 113],
+                Operation::Rename {
+                    source: current(0),
+                    destination: current(1),
+                    flags: 0,
+                },
+            ),
+            (
+                libc::SYS_symlink,
+                [101, 103, 107, 109, 113, 127],
+                Operation::Symlink { path: current(1) },
+            ),
+        ] {
+            let request = forwarded(number as i32, native_arch(), args).unwrap();
+            assert_eq!(request.operation(), Some(expected), "syscall {number}");
+            assert!(!request.operation().unwrap().is_file());
+            assert_eq!(request.data.number, number as i32);
+            assert_eq!(request.data.args, args);
+        }
+        for number in [libc::SYS_creat, libc::SYS_chmod, libc::SYS_link] {
+            assert_eq!(
+                forwarded(number as i32, native_arch(), [0; 6])
+                    .err()
+                    .unwrap()
+                    .kind(),
+                io::ErrorKind::InvalidData,
+            );
+        }
     }
 }

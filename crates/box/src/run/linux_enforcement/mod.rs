@@ -232,11 +232,9 @@ impl Registration {
                             if state.stopped.load(Ordering::Acquire) {
                                 break;
                             }
-                            let response = if (request.data.number == libc::SYS_openat as i32
-                                && (request.data.args[2] & libc::O_CREAT as u64 == 0
-                                    || request.data.args[2] & libc::O_PATH as u64 != 0))
-                                || request.data.number == libc::SYS_truncate as i32
-                            {
+                            let operation =
+                                request.operation().ok_or("unexpected native operation")?;
+                            let response = if operation.is_file() {
                                 broker::file_request(
                                     &state.resolver,
                                     &state.engine,

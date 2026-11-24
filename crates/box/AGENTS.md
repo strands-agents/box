@@ -95,14 +95,16 @@ now, because `run` takes one `--config` path and searches nowhere. **That direct
 - **Linux startup requires no environment opt-in.** The command line and the library's `run`
   and `generate_policy_schema` calls perform normal configuration validation.
   `EXPERIMENTAL_X86_SUPPORT` and `EXPERIMENTAL_LINUX_SUPPORT` have no effect. Preserve process
-  hardening and containment controls. On x86-64, Box still refuses configurations that enable
-  `native-filesystem-policy`.
+  hardening and containment controls. Linux ARM64 and x86-64 can select native filesystem policy
+  when the Cargo feature is compiled; the runtime kernel and capability requirements still apply.
   See the [startup decision](../../docs/design/decisions.md#linux-x86-startup-requires-explicit-consent).
   `linux_startup::linux_commands_validate_configuration_regardless_of_x86_opt_in`,
   `linux_startup::linux_workload_runs_without_startup_opt_ins`, and
   `box_library::linux_library_ignores_retired_x86_opt_in` cover startup without the retired gate.
-  `linux_startup::x86_native_policy_is_refused_before_state_or_schema_creation` preserves the
-  separate native filesystem policy refusal.
+  `linux_startup::native_policy_without_compiled_support_is_refused_before_state_or_schema_creation`
+  preserves the build-feature refusal, and
+  `linux_startup::native_policy_schema_accepts_supported_linux_architectures` checks configuration
+  acceptance without starting native enforcement.
 - **No stringly-typed catch-all error.** A new failure gets a variant on the owning phase's
   enum, never a `format!` into a general one.
 

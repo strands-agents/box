@@ -15,7 +15,10 @@ fn main() {
         && std::env::var_os("CARGO_FEATURE_NATIVE_FILESYSTEM_POLICY").is_some()
     {
         compile_linux_guard();
-        if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
+        if matches!(
+            std::env::var("CARGO_CFG_TARGET_ARCH").as_deref(),
+            Ok("aarch64" | "x86_64")
+        ) && std::env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref() == Ok("64")
             && std::env::var_os("CARGO_FEATURE_TEST_SUPPORT").is_some()
         {
             compile_linux_test_workloads();

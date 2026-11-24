@@ -5,7 +5,7 @@ the broker and forwarding tests isolate particular kernel interactions.
 
 ## Native workload suites
 
-Run native tests on a Linux system with the required kernel hooks and loader capabilities. Use ARM64 Linux for the C workload fixtures.
+Run native tests on a Linux system with the required kernel hooks and loader capabilities. The C workload fixtures support ARM64 and x86-64 Linux.
 
 ```sh
 RUSTFLAGS="--cfg box_native_kernel_tests" cargo build -p strands-box -p strands-box-containment --all-features
@@ -145,7 +145,7 @@ The comparison suite runs equivalent file operations through Strands Shell and d
 It checks the stored Dogwood events, policy decisions, command output, and final filesystem contents for each adapter.
 A passing run confirms the checked expectations for each adapter; it does not claim identical event streams.
 
-Use ARM64 Linux with the [native interception prerequisites](../user/native-filesystem-policy.md#linux-arm64-requirements),
+Use ARM64 or x86-64 Linux with the [native interception prerequisites](../user/native-filesystem-policy.md#linux-arm64-requirements),
 Python 3.9 or later, the repository's Rust toolchain, and a C compiler.
 Run as an ordinary user with passwordless access to `sudo setpriv` for `CAP_BPF` and `CAP_PERFMON`.
 These capabilities let the trusted Box process load its kernel checks.

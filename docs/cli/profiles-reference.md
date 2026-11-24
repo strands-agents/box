@@ -573,9 +573,8 @@ tools, and its local MCP servers make directly, on top of their filesystem grant
 
 - On macOS: macOS 27 or later, and a `box` built with the macOS 27 SDK or later, with a valid
   signature and Apple's Endpoint Security entitlement.
-- On Linux: an ARM64 machine with the required kernel support, and the `CAP_BPF` and
-  `CAP_PERFMON` capabilities for `box`, which a normal install does not give it. Linux x86-64
-  refuses selection.
+- On Linux: an ARM64 or x86-64 machine with the required kernel support, and the `CAP_BPF` and
+  `CAP_PERFMON` capabilities for `box`, which a normal install does not give it.
 
 See the
 [prerequisites in Box's own guide](../user/native-filesystem-policy.md)
