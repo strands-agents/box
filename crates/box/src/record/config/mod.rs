@@ -742,8 +742,8 @@ pub(crate) struct Record {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) remote_mcp: BTreeMap<String, EgressEntry>,
 
-    /// The MCP servers this box declares, from `box.toml`'s `[mcp.<name>]` tables. See the box
-    /// contract in `box/AGENTS.md`.
+    /// The MCP servers declared by `box.toml`'s `[mcp.<name>]` tables, described in
+    /// `crates/box/README.md#the-interface`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) mcp: Vec<crate::record::config::mcp::McpServer>,
 
