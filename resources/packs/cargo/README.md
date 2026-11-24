@@ -56,7 +56,8 @@ says. Check that file before you run `cargo` outside the box.
 
 A `build.rs` or a proc macro can change cargo's `CARGO_HOME` in storage, and every project of the
 profile then builds with what it changed. The agent cannot run a program that `cargo install` puts
-there.
+there, and cannot read a crate's source there, such as a file that a compiler note names. To read
+the sources, run `cargo vendor` to copy them into the project.
 
 In the box, rustup's home is cargo's own folder in the profile's storage,
 `~/.strands/box/storage/<profile>/default/tool/cargo/rustup`. It links to your own toolchains and

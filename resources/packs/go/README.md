@@ -68,3 +68,6 @@ GONOSUMDB = "github.com/your-org/*"
   `~/.strands/box/storage/<profile>/default/tool/go`.
 - The agent cannot run a program that `go install` puts in GOPATH, because GOPATH is in go's own
   storage.
+- The agent cannot read a module's source in the module cache, such as a file that a compile error
+  or a panic names. `go doc` runs as go and reads it. To read the files directly, run
+  `go mod vendor` to copy the modules into the project.
