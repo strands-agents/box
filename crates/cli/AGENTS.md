@@ -42,6 +42,7 @@ Paths below are relative to `docs/cli/` unless stated otherwise.
 | Profile keys and rules shared with packs | `profiles-reference.md` |
 | Pack-only keys | `packs-reference.md` |
 | Plugin keys and rules | `plugins-reference.md` |
+| Route credential sources, setup, and what the agent receives | `credentials.md`; the `secret.ref` row stays in `profiles-reference.md`. Box Core's signed-route rules, AWS credential chain, and credsd socket stay in `docs/user/egress.md`. |
 | Commands, flags, `BOX_*`, exit status | `cli.md` |
 | Installation and installer variables | `install.md` |
 | Files under `~/.strands/box` | `files.md` |
