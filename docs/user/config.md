@@ -1384,7 +1384,7 @@ started reads with `jq`.
 | `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, `metrics`, or `mcp_tool_calls`. `trace` names the agent's own spans and the box's control-plane records. `logs` includes unmatched MCP routing diagnostics. `mcp_tool_calls` names each MCP tool call's arguments and output in clear text, and how it ended. **Absent means every signal except `mcp_tool_calls`**, which a target receives only when it names it. An empty list is refused, and so is a repeated word. |
 | `accepts` | string array | For `otlp`: which OTLP payloads the endpoint takes, from `traces`, `logs`, and `metrics`. Absent means all three. The box sends no batch of a payload the list leaves out. |
 | `headers` | table | For `otlp`: fixed headers sent on every request. A header that carries a credential or a signature is refused here. |
-| `secret.ref` | string | `env://NAME`, `secret://NAME`, `aws://PROFILE`, `credsd://NAME`, or a reference in a [declared scheme](#secret-sourcescheme). `aws://` and `credsd://` sign each request with SigV4. A literal value is refused. The box attaches this secret itself, so the target takes no `secret.env`. |
+| `secret.ref` | string | `env://NAME`, `secret://NAME`, `aws://PROFILE`, `credsd://CREDENTIAL`, or a reference in a [declared scheme](#secret-sourcescheme). `aws://` and `credsd://` sign each request with SigV4. A literal value is refused. The box attaches this secret itself, so the target takes no `secret.env`. |
 | `secret.placement` | string | For `otlp`: `header` (default) or `basic_auth`. `basic_auth` sends a `user:password` secret as `Authorization: Basic`. |
 | `secret.header` | string | For `otlp`: the header the secret lands in. Defaults to `Authorization`. |
 | `secret.prefix` | string | For `otlp`: text before the secret in the header. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |
@@ -1439,8 +1439,8 @@ target it stands for. For a vendor Box does not know, write `kind = "otlp"` with
 `headers`, and `secret` yourself.
 
 A secret needs an `https://` destination unless the destination is loopback. Box checks each
-`aws://` and `credsd://` telemetry credential before the workload starts, so a profile that cannot
-sign or a daemon that does not answer stops the run.
+`aws://` and `credsd://` telemetry credential before the workload starts. A profile that can't
+sign, a daemon that doesn't answer, or a credential the daemon doesn't list stops the run.
 
 When the run ends, Box prints one stderr line if an export to a configured target failed, or if the
 final export did not finish in time. Set `STRANDS_BOX_TELEMETRY_DEBUG` to any non-empty value in the

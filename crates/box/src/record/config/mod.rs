@@ -4981,7 +4981,7 @@ command = ["mcp-server-fetch"]
 
     /// Regression guard for the egress/remote-MCP field split. A remote MCP server declared ONLY in
     /// `[mcp.<name>] type = "http"` lands in `record.remote_mcp`, not `record.egress`, so EVERY
-    /// consumer of the split data must read both maps: the credsd preflight (`credsd_environments`),
+    /// consumer of the split data must read both maps: the credsd preflight (`credsd_credentials`),
     /// the gateway host set (`mcp_servers`), and the routes/credentials (`egress_routes`). Each of
     /// these was — or could regress to — a `record.egress`-only reader that silently drops remote MCP,
     /// which a review of this change found twice. If any consumer goes egress-only again, this fails.
@@ -5004,7 +5004,7 @@ command = ["mcp-server-fetch"]
 
         // credsd preflight: the credsd source is visible over the union of both maps.
         assert_eq!(
-            egress::credsd_environments(&record.egress, &record.remote_mcp).signed,
+            egress::credsd_credentials(&record.egress, &record.remote_mcp),
             vec!["prod-inference"],
             "the preflight must see a credsd source declared only on a remote MCP server"
         );

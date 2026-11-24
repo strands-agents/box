@@ -281,28 +281,19 @@ instead of `*`.
 
 ## Live daemon test
 
-The `credsd_e2e` tests use local socket fixtures. Two optional tests check a running credsd
-daemon. For a signed route, name an AWS credential the daemon serves this test process:
+The `credsd_e2e` tests use local socket fixtures. One optional test checks a running
+credsd daemon. Give the test process a credential that it can list, then run:
 
 ```sh
-CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_CREDENTIAL=aws-credential \
+CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_CREDENTIAL=test-credential \
   cargo test -p strands-box-credentials --all-features --test end_to_end \
   credsd_e2e::a_live_daemon_maps_an_unknown_credential_to_a_hard_failure -- --exact --nocapture
 ```
 
-For a token route, store a token with `creds bootstrap --credential <name> static-secret`, then
-name it and its value:
-
-```sh
-CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_TOKEN_CREDENTIAL=github CREDSD_TEST_TOKEN=<token> \
-  cargo test -p strands-box-credentials --all-features --test end_to_end \
-  credsd_e2e::a_live_daemon_serves_a_token_route -- --exact --nocapture
-```
-
-The test checks daemon health and caller access to the configured environment before
-requesting an unknown environment. It requires the specific unknown-environment error.
-A connection failure cannot satisfy that assertion. The configured environment is used
+The test checks daemon health and that the daemon lists the configured credential. Then it
+requests a credential that does not exist. It requires the specific unknown-credential error.
+A connection failure cannot satisfy that assertion. The configured credential is used
 only for the credential-list check, not for credential acquisition.
 
-An explicit socket or test environment makes setup failures fatal. Without either
+An explicit socket or test credential makes setup failures fatal. Without either
 setting, the test reports a skip. A skipped test does not prove daemon compatibility.

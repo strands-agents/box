@@ -9,8 +9,7 @@ use credentials::{Backend, Vault, VaultConfig};
 use crate::error::{BoxError, Internal};
 use crate::record::config::Record;
 use crate::record::config::egress::{
-    EgressEntry, EgressRoute, SIGNING_PLACEHOLDER_VARIABLES, credsd_environments,
-    untyped_credsd_routes,
+    EgressEntry, EgressRoute, SIGNING_PLACEHOLDER_VARIABLES, credsd_credentials,
 };
 use crate::record::config::telemetry::TelemetryEntry;
 use crate::run::secret_sources::RouteSecrets;
@@ -18,9 +17,8 @@ use crate::run::secret_sources::RouteSecrets;
 /// Validate every declared `credsd` credential before the workload starts.
 ///
 /// A box that names no `credsd` source contacts no daemon. Otherwise this confirms the daemon is
-/// reachable and speaks the protocol, and that each named environment is configured and serves the
-/// kind its routes read; any gap is a hard failure that stops the run before it spawns the workload.
-/// It also warns once for each `credsd://` route that names no `secret.type`.
+/// reachable and speaks the protocol, and that it lists each named credential; any
+/// gap is a hard failure that stops the run before it spawns the workload.
 /// Every map is passed by construction: remote MCP is stored in its own map (`record.remote_mcp`),
 /// and telemetry in another, so a credsd source declared only on a `[mcp.<name>] type = "http"`
 /// server or a `[telemetry.<label>]` target is covered here rather than deferred to the first
@@ -30,27 +28,18 @@ pub(crate) fn preflight_credsd(
     remote_mcp: &BTreeMap<String, EgressEntry>,
     telemetry: &BTreeMap<String, TelemetryEntry>,
 ) -> Result<(), BoxError> {
-    // A `credsd://` route with no `secret.type` signs as AWS, as it did before the key existed. A
-    // later release requires the key, so each such route warns once per run.
-    for (table, reference) in untyped_credsd_routes(egress, remote_mcp) {
-        eprintln!(
-            "strands-box: warning: {table} reads {reference} with no secret.type, so the box \
-             signs it with AWS credentials; set secret.type = \"aws\", or \"token\" for a token. \
-             A later release requires secret.type."
-        );
-    }
-    let mut environments = credsd_environments(egress, remote_mcp);
-    for environment in crate::record::config::telemetry::credsd_environments(telemetry) {
-        if !environments.signed.contains(&environment) {
-            environments.signed.push(environment);
+    let mut names = credsd_credentials(egress, remote_mcp);
+    for name in crate::record::config::telemetry::credsd_credentials(telemetry) {
+        if !names.contains(&name) {
+            names.push(name);
         }
     }
-    if environments.signed.is_empty() && environments.tokens.is_empty() {
+    if names.is_empty() {
         return Ok(());
     }
     // The socket resolves as the per-request fetch resolves it: no vault path is set at run
     // today, so both pass `None` and fall to `CREDSD_SOCKET`, else the platform default.
-    credentials::credsd_preflight(None, &environments.signed, &environments.tokens)?;
+    credentials::credsd_preflight(None, &names)?;
     Ok(())
 }
 
