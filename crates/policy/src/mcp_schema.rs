@@ -1147,8 +1147,14 @@ fn make_definitions_generable_in(response: &mut serde_json::Value) -> Definition
         renamed |= [&tool_scope, &input_scope]
             .iter()
             .any(|scope| !scope.renamed.is_empty());
-        if let Some(definitions) = tool.definitions.as_deref_mut() {
-            renamed |= rewrite_definition_references(definitions, &[&tool_scope, &server_scope]);
+        if let Some(definitions) = tool
+            .definitions
+            .as_deref_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for definition in definitions.values_mut() {
+                renamed |= rewrite_definition_references(definition, &[&tool_scope, &server_scope]);
+            }
         }
         if let Some(input) = tool.input.as_deref_mut() {
             renamed |=
@@ -1170,8 +1176,13 @@ fn make_definitions_generable_in(response: &mut serde_json::Value) -> Definition
             restructured |= make_definition_cycles_opaque(definitions);
         }
     }
-    if let Some(definitions) = server.as_deref_mut() {
-        renamed |= rewrite_definition_references(definitions, &[&server_scope]);
+    if let Some(definitions) = server
+        .as_deref_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for definition in definitions.values_mut() {
+            renamed |= rewrite_definition_references(definition, &[&server_scope]);
+        }
     }
     if let Some(definitions) = server.and_then(serde_json::Value::as_object_mut) {
         restructured |= give_array_elements_definitions(definitions, &mut names);
@@ -1281,7 +1292,8 @@ fn schema_definitions(
     schema.get_mut("$defs")?.as_object_mut()
 }
 
-/// The definition name each `#/$defs/` reference in a value names.
+/// The definition name each `#/$defs/` reference in a value names, read everywhere and not only
+/// where [`rewrite_definition_references`] looks, so a new name avoids more names, never fewer.
 fn collect_reference_names(value: &serde_json::Value, names: &mut BTreeSet<String>) {
     match value {
         serde_json::Value::Object(object) => {
@@ -1357,8 +1369,9 @@ impl DefinitionScope {
     }
 }
 
-/// Point each `#/$defs/` reference in `value` at the name of the definition it resolves to in
-/// `scopes`, innermost first, reading it decoded only when it names no definition as written.
+/// Point each `#/$defs/` reference in a schema, and below it under `properties`, `$defs` and
+/// [`SCHEMA_KEYWORDS`], at the definition it resolves to in `scopes`, innermost first, reading it
+/// decoded only when it names no definition as written.
 fn rewrite_definition_references(
     value: &mut serde_json::Value,
     scopes: &[&DefinitionScope],
@@ -1376,8 +1389,20 @@ fn rewrite_definition_references(
                 *reference = format!("#/$defs/{target}");
                 changed = true;
             }
-            for child in object.values_mut() {
-                changed |= rewrite_definition_references(child, scopes);
+            for (key, child) in object.iter_mut() {
+                match key.as_str() {
+                    "properties" | "$defs" => {
+                        if let serde_json::Value::Object(schemas) = child {
+                            for schema in schemas.values_mut() {
+                                changed |= rewrite_definition_references(schema, scopes);
+                            }
+                        }
+                    }
+                    _ if SCHEMA_KEYWORDS.contains(&key.as_str()) => {
+                        changed |= rewrite_definition_references(child, scopes);
+                    }
+                    _ => {}
+                }
             }
             changed
         }
@@ -3900,6 +3925,89 @@ namespace Box {
             ),
             "a reference that names a definition literally keeps naming it\n{generated}"
         );
+    }
+
+    #[test]
+    fn a_renamed_definition_name_in_a_data_value_or_an_ignored_keyword_stays_as_the_server_wrote_it()
+     {
+        let data = serde_json::json!({"$ref": "#/$defs/zone-record"});
+        let tools = |name: &str| {
+            let reference = format!("#/$defs/{name}");
+            serde_json::json!({"result": {
+                "tools": [{
+                    "name": "read",
+                    "inputSchema": {"type": "object", "properties": {
+                        "record": {"$ref": reference, "default": data, "examples": [data]},
+                        "fixed": {"type": "object", "const": data},
+                        "kind": {"type": "string", "enum": [data]},
+                        "combined": {"type": "object", "allOf": [data]}
+                    }},
+                    "outputSchema": {"type": "object", "properties": {
+                        "value": {"$ref": reference, "default": data}
+                    }}
+                }],
+                "$defs": {name: {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "default": data
+                }}
+            }})
+        };
+        let fixed = make_definitions_generable(&tools("zone-record").to_string()).into_owned();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fixed).expect("the fixed list parses"),
+            tools("zone_record")
+        );
+
+        let (generated, schema) = composed(&tools("zone-record"));
+        for condition in [
+            r#"context.input has record && context.input.record has name && context.input.record.name == "x""#,
+            r#"context has output && context.output has structured && context.output.structured has value
+               && context.output.structured.value has name && context.output.structured.value.name == "x""#,
+        ] {
+            assert!(
+                validates(&schema, READ, condition),
+                "{condition}\n{generated}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reference_below_each_keyword_the_parser_reads_follows_a_rename_and_the_data_beside_it_does_not()
+     {
+        let data = serde_json::json!({"$ref": "#/$defs/zone-record"});
+        let tools = |server: &str, local: &str| {
+            let real = serde_json::json!({"$ref": format!("#/$defs/{server}"), "default": data});
+            let record = serde_json::json!({"type": "object", "properties": {"inner": real}});
+            let input = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "default": real,
+                    "list": {"type": "array", "items": real, "default": [data]},
+                    "pair": {"type": "array", "prefixItems": [real], "items": false},
+                    "either": {"anyOf": [real, {"type": "string"}]},
+                    "one": {"oneOf": [real, {"type": "string"}]},
+                    "labels": {"type": "object", "additionalProperties": real},
+                    "local": {"$ref": format!("#/$defs/{local}"), "default": {"$ref": "#/$defs/local-record"}}
+                },
+                "$defs": {local: record}
+            });
+            serde_json::json!({"result": {
+                "tools": [
+                    {"name": "read", "inputSchema": input,
+                     "outputSchema": {"type": "object", "properties": {"value": real}, "$defs": {"own": record}}},
+                    {"name": "wrapped", "inputSchema": {"json": input}, "$defs": {"tool_record": record}}
+                ],
+                "$defs": {server: {"type": "object", "properties": {"name": {"type": "string"}}}}
+            }})
+        };
+        let fixed = make_definitions_generable(&tools("zone-record", "local-record").to_string())
+            .into_owned();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fixed).expect("the fixed list parses"),
+            tools("zone_record", "local_record")
+        );
+        composed(&tools("zone-record", "local-record"));
     }
 
     #[test]
