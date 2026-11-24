@@ -116,9 +116,10 @@ diagnostic text. `ProfileMissing`, and a `ProfilePath` whose file is not found, 
 map to `unknown`.
 `NotOnHost` does not distinguish the agent from another missing host input.
 
-The current invocation's `box_started` control record with outcome `ok` confirms that the Core
-box run started. It gives `box_launched: true` and `failure_reason: null`. Core emits this
-record after its initial preparation and before workload spawn. Later workload failures do not
+The current invocation's `workload_started` control record with outcome `ok` confirms the
+launch. It gives `box_launched: true` and `failure_reason: null`. Core writes this record once
+the workload's `exec` succeeded inside its sandbox. A run that Core refuses after `box_started`
+but before the workload starts gives `box_launched: null`. Later workload failures do not
 reverse the launch result. An error during Core's initial preparation can leave no lifecycle
 records.
 A nonzero Core exit does not establish a preparation failure.
@@ -159,7 +160,7 @@ new record. The reader retains partial lines appended after the boundary until t
 
 Lifecycle observation accepts only `strands-box.control` logs with the Core service and source
 attributes.
-It reads `box_started` and `workload_started` with outcome `ok`, and `box_stopped` with outcome
+It reads `workload_started` with outcome `ok`, and `box_stopped` with outcome
 `ok` or `refused`.
 Old records and relayed agent records cannot supply evidence for this invocation. Missing or
 unreadable records leave the corresponding observations unknown.

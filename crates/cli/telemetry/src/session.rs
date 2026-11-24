@@ -219,11 +219,6 @@ impl Observation {
 
     fn read(&mut self) {
         self.journal.read(|record| match record {
-            Record::BoxStarted => {
-                if matches!(self.launch, LaunchOutcome::Unknown) {
-                    self.launch = LaunchOutcome::Confirmed(None);
-                }
-            }
             Record::WorkloadStarted(started_at) => {
                 if !self.workload_started {
                     self.workload_started = true;
@@ -889,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn a_box_whose_workload_never_starts_sends_its_run_at_completion_without_latency() {
+    fn a_box_whose_workload_never_starts_sends_its_run_at_completion_without_launch_or_latency() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("records.jsonl");
         let (mut session, events) = capture(LaunchOutcome::Unknown);
@@ -904,7 +899,7 @@ mod tests {
         let event = events.try_recv().unwrap();
         assert_eq!(
             event["data"],
-            json!({"box_launched":true,"failure_reason":null,"startup_latency_ms":null})
+            json!({"box_launched":null,"failure_reason":null,"startup_latency_ms":null})
         );
         assert_empty_polling(&events);
         assert_shutdown(&events, &event, "nonzero", Some("refused"));
