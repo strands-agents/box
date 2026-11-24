@@ -1159,8 +1159,10 @@ the X-Ray traces endpoint. That X-Ray routes spans by them is measured, not docu
 agent runtime that sends each agent's spans to the runtime's own log group sets both headers in
 `OTEL_EXPORTER_OTLP_TRACES_HEADERS` beside `https://xray.<region>.amazonaws.com/v1/traces`. A boxed
 agent there, with `log_group` and `log_stream` set to those values, had its spans in that log group
-and in its `spans` stream; without them the spans went to `aws/spans`. If X-Ray stops reading the
-headers, a target that names them still loads and sends, and its spans go to `aws/spans`.
+and in its `spans` stream; without them the spans went to `aws/spans`. What X-Ray does with a group
+that is wrong or that it cannot write is not measured: in one such case the spans reached neither the
+named group nor `aws/spans`, so do not assume a fallback. A target that names a group still loads and
+sends whatever the endpoint then does with it.
 `a_cloudwatch_traces_target_routes_to_a_named_log_group` pins only the request the box builds.
 
 ## The lifecycle verbs are gone, and must not come back by halves
