@@ -130,7 +130,7 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   re-introduction-cost rule in
   [emit only what a consumer reads today](../../docs/design/decisions.md#the-policy-attribute-names-are-this-products-own):
   neither was read by any code, and each is about two lines to restore. The box still **propagates** a
-  caller's `tracestate` downstream, which `Correlation::apply_to` does from memory, so only the record
+  caller's `tracestate` downstream, which `Correlation::inject_http` does from memory, so only the record
   changed. Six box and telemetry assertions now pin the inverse — a caller sends a `tracestate` and
   the span records none of it.
   **`caused_by` uses `assert!` rather than `debug_assert!`, deliberately.** A mislabelled security

@@ -20,7 +20,6 @@ List each page in `docs/user/` and `docs/design/`, and each crate `README.md` th
 consumer. For each page, record its guide, its content type, and its area. Also read:
 
 - `docs/README.md` and the `README.md` of each guide, for the stated structure.
-- The "still to come" list in `docs/design/README.md`, for the planned design pages.
 
 ### Step 2: Find the gaps
 

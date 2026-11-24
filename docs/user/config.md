@@ -1391,7 +1391,7 @@ started reads with `jq`.
 | `secret.prefix` | string | For `otlp`: text before the secret in the header. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |
 | `project` | string | For `langsmith`: the project the spans go to. |
 | `region` | string | For a CloudWatch kind: the AWS region, such as `us-west-2`. Required. |
-| `log_group`, `log_stream` | string | For `cloudwatch_logs`: where the log records go. Both are required. |
+| `log_group`, `log_stream` | string | For `cloudwatch_logs`: where the log records go. Both are required. For `cloudwatch_traces`: the log group and stream the spans go to. Write both or neither. Absent, CloudWatch puts the spans in its default `aws/spans` log group. |
 
 A vendor kind sets the vendor's path, headers, payloads, and credential placement itself. Write
 only what is yours:
@@ -1425,7 +1425,7 @@ secret.ref = "aws://my-profile"
 | `langfuse` | spans, to `<destination>/api/public/otel`, with `x-langfuse-ingestion-version: 4` | Basic auth, from a `public-key:secret-key` secret |
 | `langsmith` | spans, to `<destination>/otel`, with `Langsmith-Project` when `project` is set | `x-api-key` |
 | `cloudwatch_logs` | log records, to `https://logs.<region>.amazonaws.com`, with `x-aws-log-group` and `x-aws-log-stream` | SigV4 for `logs`, from `aws://` or `credsd://` |
-| `cloudwatch_traces` | spans, to `https://xray.<region>.amazonaws.com` | SigV4 for `xray`, from `aws://` or `credsd://` |
+| `cloudwatch_traces` | spans, to `https://xray.<region>.amazonaws.com`, with `x-aws-log-group` and `x-aws-log-stream` when `log_group` and `log_stream` are set | SigV4 for `xray`, from `aws://` or `credsd://` |
 
 A `langfuse` or `langsmith` target also takes a reference in a
 [declared scheme](#secret-sourcescheme), such as
