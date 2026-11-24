@@ -793,7 +793,7 @@ struct LaunchedLeaf {
 impl LeafBox {
     /// Build the trampoline, spawn the contained child in its own process group, and — on Linux —
     /// start the netns relays held for the child's lifetime. `stdin`/`stdout`/`stderr` are the
-    /// child's stdio: the buffered run pipes stdout/stderr and nulls stdin; the streaming spawn
+    /// child's stdio: the buffered run pipes stdout/stderr, and pipes stdin or nulls it; the streaming spawn
     /// pipes stdin/stdout for the JSON-RPC session and nulls stderr.
     async fn launch_contained(
         boundary: &Boundary,
@@ -876,6 +876,7 @@ impl LeafBox {
     pub(crate) async fn run(
         boundary: Boundary,
         layout: &BoxRoot,
+        stdin: Option<std::os::fd::OwnedFd>,
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
             all(target_os = "linux", feature = "native-filesystem-policy")
@@ -883,7 +884,8 @@ impl LeafBox {
         registration: Option<crate::run::native_enforcement::Registration>,
     ) -> Result<CapturedLeaf, BoxError> {
         // Captured, so the bytes come back to the Shell and leave through its own streams. stdin is
-        // null: a leaf binary reads no stdin, and one that blocked would hold the Call to its deadline.
+        // the read end of the pipe the Shell feeds, or null when the command has none.
+        let child_stdin = stdin.map_or_else(Stdio::null, Stdio::from);
         let LaunchedLeaf {
             mut group,
             mut trampoline,
@@ -892,7 +894,7 @@ impl LeafBox {
         } = Self::launch_contained(
             &boundary,
             layout,
-            Stdio::null(),
+            child_stdin,
             Stdio::piped(),
             Stdio::piped(),
             #[cfg(any(
@@ -902,7 +904,6 @@ impl LeafBox {
             registration,
         )
         .await?;
-
         // The boundary keeps all launch inputs alive until the child exits.
         trampoline.close_setup_writer();
         let output = group.wait_with_output().await;

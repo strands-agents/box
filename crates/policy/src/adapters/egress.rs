@@ -218,6 +218,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                 body_bytes,
                 intercepted,
                 mcp,
+                websocket,
             } => {
                 // HTTP and MCP decisions are separate requests, even in one gateway exchange.
                 authorize(
@@ -231,9 +232,13 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                         path,
                         body_bytes: *body_bytes,
                         intercepted: *intercepted,
+                        websocket: *websocket,
                     },
                 )
-                .map_err(|reason| format!("http:request gate: {reason}"))
+                .map_err(|reason| {
+                    let action = crate::schema::http_action_id(*websocket);
+                    format!("{action} gate: {reason}")
+                })
                 .and_then(|request_id| {
                     self.mcp_gates(mcp)
                         .map(|mcp_grant| (Some(request_id), mcp_grant))
@@ -371,6 +376,7 @@ enum AttemptIdentity {
         intercepted: bool,
         /// Present when this request carried an `mcp:call`; drives the response-leg recording.
         mcp: Option<McpCallIdentity>,
+        websocket: bool,
     },
     /// An attempt kind this adapter does not map, and the release of a reply. Each is admitted
     /// only if the authorization arm above allowed it, and it records nothing.
@@ -397,6 +403,7 @@ impl AttemptIdentity {
                 path,
                 intercepted,
                 mcp,
+                websocket,
                 ..
             } => Self::Http {
                 host: (*host).to_string(),
@@ -404,6 +411,7 @@ impl AttemptIdentity {
                 method: (*method).to_string(),
                 path: (*path).to_string(),
                 intercepted: *intercepted,
+                websocket: *websocket,
                 // Record a response leg only for an actual tool/resource/prompt CALL — never for
                 // `List`/enumeration (tools/list, resources/list, prompts/list). Discovery drives
                 // those `List` frames through the gateway at startup; counting them would inflate a
@@ -749,6 +757,7 @@ impl LocalPolicyEffectPermit {
                     path,
                     intercepted,
                     mcp,
+                    websocket,
                 },
                 Some(delivery),
             ) => {
@@ -764,6 +773,7 @@ impl LocalPolicyEffectPermit {
                         delivery,
                         status: reply_status_of(outcome),
                         intercepted: *intercepted,
+                        websocket: *websocket,
                     },
                 );
                 // Record the `mcp:call::response` leg for a remote (http) MCP call, so temporal caps
@@ -1079,6 +1089,7 @@ mod tests {
             path: "/mcp",
             body_bytes: 32,
             intercepted: false,
+            websocket: false,
             mcp: Some(McpFrame::List { server, method }),
         }
     }
@@ -1096,6 +1107,7 @@ mod tests {
             path: "/mcp",
             body_bytes: 64,
             intercepted: false,
+            websocket: false,
             mcp: Some(McpFrame::ToolCall {
                 server,
                 tool,
@@ -2357,6 +2369,7 @@ mod tests {
                 path: "/v1/messages",
                 body_bytes: 42,
                 intercepted: true,
+                websocket: false,
                 mcp: None,
             })
             .expect("request is allowed")
@@ -2386,6 +2399,7 @@ mod tests {
             path: "/",
             body_bytes: 0,
             intercepted: true,
+            websocket: false,
             mcp: None,
         };
         let response = EgressEffectAttempt::ResponseRelease {
@@ -2476,6 +2490,7 @@ mod tests {
             path: "/",
             body_bytes: 0,
             intercepted: true,
+            websocket: false,
             mcp: None,
         };
         for _ in 0..3 {
@@ -2544,6 +2559,7 @@ mod tests {
             path: "/",
             body_bytes: 0,
             intercepted: true,
+            websocket: false,
             mcp: None,
         };
         for (source, admitted_after) in [(count_all, false), (count_errors, true)] {
@@ -2670,6 +2686,7 @@ mod tests {
             path: "/v1/messages",
             body_bytes,
             intercepted: true,
+            websocket: false,
             mcp: None,
         };
 
@@ -2701,6 +2718,7 @@ mod tests {
             path: "/v1/messages",
             body_bytes: 0,
             intercepted,
+            websocket: false,
             mcp: None,
         };
 
@@ -2740,6 +2758,7 @@ mod tests {
             path: "/v1/messages",
             body_bytes: 0,
             intercepted,
+            websocket: false,
             mcp: None,
         };
         let exchange = |fixture: &InterceptorFixture, intercepted| {

@@ -983,7 +983,27 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   Program. Input for a Program whose Shell no longer reads stdin is dropped. A `python3`/`python` alias forwards no stdin:
   `forwards_stdin` is false for its `Command::Words`, so it sends `InputEof` right after its `Run`
   and the Shell's own Python reads an empty input. An MCP alias relays its client's stdin through
-  `stream_mcp` instead, and a tool leaf still gets `Stdio::null()`.
+  `stream_mcp` instead.
+- **A host binary reads its command's stdin, and what it leaves unread is dropped.** Box's
+  `CommandFallback` makes the pipe: it gives the read end to the spawner as `HostSpawn::stdin`,
+  which `LeafBox::run` makes the leaf's stdin, and `StdinFeed` copies the command's `CommandInput`
+  into the write end while the binary runs. Strands Shell never returns a fallback command's stdin,
+  so dropping the unread bytes loses nothing. Keep these rules:
+  - An empty stdin is `/dev/null`, not an empty pipe: `rg` searches a pipe in place of its working
+    directory. `box_programs.rs::a_host_binary_whose_alias_has_no_stdin_gets_dev_null`.
+  - The feed runs beside the spawn, not before it, or a binary that fills stdout before it reads
+    deadlocks. `a_host_binary_that_writes_before_it_reads_gets_all_its_input`,
+    `host_spawn_stdin.rs::a_host_program_reads_stdin_larger_than_the_copy_buffer`.
+  - Only the input's end, or `BrokenPipe`, closes the pipe. A failed read or another write error
+    holds it open, so the binary never reads end of file on part of its input.
+    `a_stdin_that_fails_to_read_leaves_a_program_that_reads_none_its_own_status`.
+  - `tokio::pin!(feeding, spawning)` declares the spawn last, so a cancelled command drops it, and
+    kills the binary, before the feed closes the pipe. No test pins this order.
+  - The `select!` is `biased` toward the spawn, so a finished program reports its own status.
+
+  Caveats: the empty check is one read after one yield, so an end of input that reaches the broker
+  later still gives an empty pipe. On macOS, `std::io::pipe` sets close-on-exec after it creates the
+  pipe, so a leaf started in that window holds the write end until the trampoline closes it.
 - **The alias must send `InputEof`.** `forward` sends `Open` and `Run` (from `submission`), then each
   `Input` a Shell alias forwards, and **`InputEof`**, for every alias. The EOF frame is not optional. A harness invoking `zsh -c` often supplies nothing on stdin, so without the EOF
   the Program's stdin channel stays open and any command that pre-reads stdin blocks to its

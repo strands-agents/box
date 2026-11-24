@@ -132,7 +132,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - The request gate has no externally-constructible non-conformance case; see
   `tests/readme_examples.rs::a_conforming_request_reaches_a_catch_all_permit`.
 - A temporal predicate cannot name an action group, and offers no `or` and no wildcard, so write
-  one clause per granular action. The spellings are `shell:exec`, `http:request`, and `mcp:call`.
+  one clause per granular action. The spellings are `shell:exec`, `http:request`,
+  `websocket:connect`, and `mcp:call`.
   Do not reintroduce a group action.
 - Key a precondition on `::response`, because a `::request` predicate matches a denied attempt.
   Pinned by `tests/temporal_shell_e2e.rs::a_denied_attempt_satisfies_a_request_keyed_precondition`.
@@ -211,6 +212,11 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   does. One exchange records one such event, at reply time, with the delivered request bytes and
   the reply's `output.status`. Pinned by
   `tests/temporal_egress_budget.rs::a_reply_adds_nothing_to_an_outbound_budget`.
+- `websocket: true` on `Request::Http` and `Outcome::Http` selects `websocket:connect` in place of
+  `http:request`, as `operation` selects an `fs:*` action. Its input is the `http:request` input
+  without `body_bytes`, and its `::response` records the server's `output.status`. A rule on
+  `http:request` does not cover a handshake, and an outbound budget over `http:request::response`
+  counts no WebSocket bytes. Pinned by `tests/websocket_policy.rs`.
 - An outcome-only fact reaches history through the event kind (`response` vs `error`); every filesystem response also carries `output.result`.
 - Do not extend a durability, audit, atomicity, or performance claim past what the tests
   pin.
