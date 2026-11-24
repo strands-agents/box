@@ -126,7 +126,7 @@ secret.ref = "aws://my-profile"
 | `langfuse` | spans | `secret.ref`, and `destination` for a region or a self-hosted Langfuse |
 | `langsmith` | spans | `secret.ref`, and optionally `project` and `destination` |
 | `cloudwatch_logs` | log records | `region`, `log_group`, `log_stream`, and an `aws://` or `credsd://` `secret.ref` |
-| `cloudwatch_traces` | spans | `region`, and an `aws://` or `credsd://` `secret.ref` |
+| `cloudwatch_traces` | spans | `region`, an `aws://` or `credsd://` `secret.ref`, and optionally `log_group` and `log_stream` together |
 
 A vendor that takes only spans is sent no log or metric batch. That is the one exception to the rule
 that the workload's log records and metrics reach every target.
@@ -415,6 +415,7 @@ message does: Box prefixes every line it prints with `strands-box:`.
 | ``a `<kind>` target sets `<key>` itself, so leave it out`` | A vendor kind names a key it sets. |
 | `` `<key>` does not apply to a `<kind>` target `` | A key belongs to another kind. |
 | ``a `cloudwatch_logs` target needs `log_group` and `log_stream` `` | A CloudWatch Logs target names no group or stream. |
+| ``a `cloudwatch_traces` target names `log_group` and `log_stream` together, or neither`` | A CloudWatch traces target names one of the two without the other. |
 | ``needs `region`, an AWS region such as `us-west-2` `` | A CloudWatch target names no region, or an invalid one. |
 | `` `secret.ref` names no scheme this box reads `` | The reference is a literal value, or its scheme is not `env://`, `secret://`, `aws://`, `credsd://`, or a [declared scheme](config.md#secret-sourcescheme). A declared scheme with nothing after `://` is refused in the same way. |
 | `its destination is neither https nor loopback` | A credential would cross the network in the clear. |
