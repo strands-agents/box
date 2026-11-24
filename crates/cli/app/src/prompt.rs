@@ -1923,8 +1923,8 @@ mod tests {
                     }
                     assert!(!layout.menu.iter().any(|line| line.contains(" of 3")));
                     assert!(
-                        layout.section.len() + layout.menu.len() < height + 1,
-                        "the frame is taller than the terminal at {case}"
+                        layout.section.len() + layout.menu.len() < height,
+                        "the frame and its key hint are taller than the terminal at {case}"
                     );
                     title_rows.push(
                         layout

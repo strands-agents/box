@@ -88,9 +88,10 @@ impl Panel {
                 }
             }
         }
-        // The alternate screen keeps the cursor on its row, so home it or the first page starts
-        // wherever the shell prompt was.
-        panel.write("\x1b[?1049h\x1b[H")?;
+        // The alternate screen keeps the cursor on its row, and a terminal without one keeps the
+        // shell's output, so clear to the top or the first page starts wherever the prompt was.
+        panel.write("\x1b[?1049h")?;
+        panel.clear()?;
         Ok(panel)
     }
 
