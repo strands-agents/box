@@ -732,3 +732,151 @@ fn compiled_restriction_coverage_preserves_scope_and_write_protection() {
     assert!(write_tree.covers(&nested_write));
     assert!(!nested_write.covers(&write_tree));
 }
+
+#[test]
+fn metadata_and_ungranted_roots_replay_without_content_targets() {
+    for placement in ["none", "root", "child", "ancestor", "metadata-and-read"] {
+        let fixture = Fixture::new();
+        let root = fixture.root("storage");
+        let metadata = match placement {
+            "none" => Vec::new(),
+            "root" | "metadata-and-read" => vec![root.clone()],
+            "child" => vec![root.join("readonly")],
+            "ancestor" => vec![fixture.home.join("project")],
+            _ => unreachable!(),
+        };
+        let readable = placement == "metadata-and-read";
+        let lists = Filesystem {
+            metadata,
+            read: if readable {
+                vec![root.clone()]
+            } else {
+                Vec::new()
+            },
+            deny: if readable {
+                vec![root.join("private")]
+            } else {
+                Vec::new()
+            },
+            ..Filesystem::default()
+        };
+        let roots = std::slice::from_ref(&root);
+        let pending = fixture.generation(&lists, roots);
+        pending.with_policy(|_, masks, targets| {
+            assert_eq!(masks.len(), 1);
+            assert_eq!(masks[0].path, root);
+            assert!(targets.is_empty());
+        });
+        fixture.contents(&root);
+        let admitted = pending.recompile(roots, &fixture.context()).unwrap();
+        let checkpoint: FilesystemCheckpoint =
+            serde_json::from_str(&serde_json::to_string(&admitted.checkpoint()).unwrap()).unwrap();
+        assert!(checkpoint.matches(&lists, roots));
+        let repeated = checkpoint.compile(roots, &fixture.context()).unwrap();
+        let expected = super::super::super::direct_grants(&lists, &fixture.context()).unwrap();
+        for generation in [&admitted, &repeated] {
+            generation.with_policy(|reach, masks, targets| {
+                assert!(masks.is_empty(), "{placement}");
+                assert_eq!(reach.grants, expected.grants, "{placement}");
+                assert_eq!(reach.refusals, expected.refusals, "{placement}");
+                assert_eq!(reach.write_protections, expected.write_protections);
+                if readable {
+                    assert_eq!(reach.grants.len(), 2);
+                    assert_eq!(reach.refusals[0].path, root.join("private"));
+                }
+                let publishes = readable || (placement != "none" && !cfg!(target_os = "linux"));
+                assert_eq!(targets.len(), usize::from(publishes), "{placement}");
+                if publishes {
+                    assert_eq!(targets[0].path, root);
+                    assert_eq!(targets[0].roots.as_slice(), std::slice::from_ref(&root));
+                }
+            });
+        }
+    }
+}
+
+#[test]
+fn metadata_and_read_roots_replay_in_either_arrival_order() {
+    for metadata_first in [true, false] {
+        let fixture = Fixture::new();
+        let metadata = fixture.root("metadata");
+        let read = fixture.root("read");
+        let roots = [metadata.clone(), read.clone()];
+        let lists = Filesystem {
+            metadata: vec![metadata.clone()],
+            read: vec![read.clone()],
+            deny: vec![read.join("private")],
+            ..Filesystem::default()
+        };
+        let pending = fixture.generation(&lists, &roots);
+        let (first, second) = if metadata_first {
+            (&metadata, &read)
+        } else {
+            (&read, &metadata)
+        };
+        fixture.contents(first);
+        let partial = pending
+            .recompile(std::slice::from_ref(first), &fixture.context())
+            .unwrap();
+        partial.with_policy(|_, masks, targets| {
+            assert_eq!(masks.len(), 1);
+            assert_eq!(&masks[0].path, second);
+            let publishes = !metadata_first || !cfg!(target_os = "linux");
+            assert_eq!(targets.len(), usize::from(publishes));
+            if publishes {
+                assert_eq!(&targets[0].path, first);
+                assert_eq!(targets[0].roots.as_slice(), std::slice::from_ref(first));
+            }
+        });
+        let checkpoint: FilesystemCheckpoint =
+            serde_json::from_str(&serde_json::to_string(&partial.checkpoint()).unwrap()).unwrap();
+        assert!(checkpoint.matches(&lists, &roots));
+        fixture.contents(second);
+        let complete = checkpoint.compile(&roots, &fixture.context()).unwrap();
+        let expected = super::super::super::direct_grants(&lists, &fixture.context()).unwrap();
+        complete.with_policy(|reach, masks, targets| {
+            assert!(masks.is_empty());
+            assert_eq!(reach.grants, expected.grants);
+            assert_eq!(reach.refusals, expected.refusals);
+            assert_eq!(reach.write_protections, expected.write_protections);
+            assert_eq!(targets.len(), if cfg!(target_os = "linux") { 1 } else { 2 });
+            assert!(targets.iter().any(|target| target.path == read));
+            assert_eq!(
+                targets.iter().any(|target| target.path == metadata),
+                !cfg!(target_os = "linux")
+            );
+            for target in targets {
+                assert_eq!(target.roots.as_slice(), std::slice::from_ref(&target.path));
+            }
+        });
+    }
+}
+
+#[test]
+fn metadata_directory_scope_keeps_its_publication_target() {
+    let fixture = Fixture::new();
+    let root = fixture.root("storage");
+    fixture.contents(&root);
+    let lists = Filesystem {
+        metadata: vec![root.clone()],
+        ..Filesystem::default()
+    };
+    let roots = std::slice::from_ref(&root);
+    let plan = FilesystemPlan::new(&lists, roots, &fixture.context()).unwrap();
+    let mut reach = super::super::super::direct_grants(&lists, &fixture.context()).unwrap();
+    assert_eq!(reach.grants.len(), 1);
+    assert_eq!(reach.grants[0].operation, containment::Operation::Metadata);
+    assert_eq!(reach.grants[0].scope, Scope::Root);
+    // Authored metadata uses Root; implicit directory-only metadata must not be filtered.
+    for scope in [Scope::Root, Scope::Dir] {
+        reach.grants[0].scope = scope;
+        let targets = publication_targets(&plan, &reach, roots);
+        let publishes = scope == Scope::Dir || !cfg!(target_os = "linux");
+        assert_eq!(targets.len(), usize::from(publishes));
+        if publishes {
+            assert_eq!(targets[0].path, root);
+            assert_eq!(targets[0].kind, FilesystemTargetKind::Directory);
+            assert_eq!(targets[0].roots.as_slice(), std::slice::from_ref(&root));
+        }
+    }
+}
