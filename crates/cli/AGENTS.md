@@ -9,7 +9,8 @@ Treat Core's schema and library API as an external dependency even in this works
 ### When the CLI needs something Box Core lacks
 
 Follow the [product boundary](../../AGENTS.md#two-products): the Core change lands first in its
-own PR, reviewed by Core maintainers. CLI syntax can diverge from `box.toml`.
+own PR, reviewed by Core maintainers. The CLI team reviews changes to the CLI's paths.
+CLI syntax can diverge from `box.toml`.
 Ask Core for its lists and policy checks; copying them creates a second contract to maintain.
 
 ## Build and test traps
