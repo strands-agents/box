@@ -469,10 +469,10 @@ fn target_for(
     Ok(target)
 }
 
-/// The header CloudWatch Logs reads the log group from.
+/// The header a CloudWatch endpoint reads the log group from.
 const LOG_GROUP_HEADER: &str = "x-aws-log-group";
 
-/// The header CloudWatch Logs reads the log stream from.
+/// The header a CloudWatch endpoint reads the log stream from.
 const LOG_STREAM_HEADER: &str = "x-aws-log-stream";
 
 /// The longest log group or log stream name CloudWatch Logs accepts.
@@ -597,10 +597,6 @@ fn expanded(entry: &TelemetryEntry) -> Result<TelemetryEntry, String> {
                 ));
             }
             let logs = kind == TelemetryKind::CloudwatchLogs;
-            if !logs {
-                not_here("log_group", entry.log_group.is_some())?;
-                not_here("log_stream", entry.log_stream.is_some())?;
-            }
             let region = entry.region.as_deref().map(str::trim).unwrap_or_default();
             let region_is_valid = (1..=MAXIMUM_REGION).contains(&region.len())
                 && region
@@ -624,10 +620,12 @@ fn expanded(entry: &TelemetryEntry) -> Result<TelemetryEntry, String> {
                 ));
             }
             let mut headers = BTreeMap::new();
-            let (service, payload) = if logs {
+            if logs || entry.log_group.is_some() || entry.log_stream.is_some() {
                 let (group, stream) = log_names(entry)?;
                 headers.insert(LOG_GROUP_HEADER.to_string(), group);
                 headers.insert(LOG_STREAM_HEADER.to_string(), stream);
+            }
+            let (service, payload) = if logs {
                 ("logs", Payload::Logs)
             } else {
                 ("xray", Payload::Traces)
@@ -692,11 +690,16 @@ fn vendor_target(
     }
 }
 
-/// A `cloudwatch_logs` target's group and stream, checked against CloudWatch Logs' naming rules.
+/// A CloudWatch target's group and stream, checked against CloudWatch Logs' naming rules.
 fn log_names(entry: &TelemetryEntry) -> Result<(String, String), String> {
     let (Some(group), Some(stream)) = (entry.log_group.as_deref(), entry.log_stream.as_deref())
     else {
-        return Err("a `cloudwatch_logs` target needs `log_group` and `log_stream`".to_string());
+        return Err(if entry.kind == TelemetryKind::CloudwatchLogs {
+            "a `cloudwatch_logs` target needs `log_group` and `log_stream`".to_string()
+        } else {
+            "a `cloudwatch_traces` target names `log_group` and `log_stream` together, or neither"
+                .to_string()
+        });
     };
     let (group, stream) = (group.trim(), stream.trim());
     let group_is_valid = (1..=MAXIMUM_LOG_NAME).contains(&group.len())
@@ -1749,6 +1752,43 @@ secret.ref = "aws://runtime"
         );
     }
 
+    /// **A `cloudwatch_traces` target that names a log group and stream sends both as headers.**
+    #[test]
+    fn a_cloudwatch_traces_target_routes_to_a_named_log_group() {
+        let stored = checked(
+            &parsed(
+                "[telemetry.x]\nkind = \"cloudwatch_traces\"\nregion = \"us-west-2\"\n\
+                 log_group = \"/aws/agents/runtime-a\"\nlog_stream = \"spans\"\n\
+                 secret.ref = \"aws://p\"\n",
+            ),
+            Path::new("/var/lib/boxes/codex"),
+            &DeclaredSources::none(),
+        )
+        .expect("accepted");
+        let traces = &stored["x"];
+        assert_eq!(traces.destination, "https://xray.us-west-2.amazonaws.com");
+        assert_eq!(traces.accepts.as_deref(), Some(&[Payload::Traces][..]));
+        let headers = traces.headers.as_ref().expect("headers");
+        assert_eq!(
+            headers.get("x-aws-log-group").map(String::as_str),
+            Some("/aws/agents/runtime-a")
+        );
+        assert_eq!(
+            headers.get("x-aws-log-stream").map(String::as_str),
+            Some("spans")
+        );
+        assert_eq!(headers.len(), 2);
+        assert_eq!(
+            checked(
+                &stored,
+                Path::new("/var/lib/boxes/codex"),
+                &DeclaredSources::none()
+            )
+            .expect("accepted"),
+            stored
+        );
+    }
+
     /// **A vendor kind refuses every field it sets, and every field it lacks**, naming the field.
     #[test]
     fn a_vendor_kind_refuses_what_it_sets_or_lacks() {
@@ -1796,7 +1836,19 @@ secret.ref = "aws://runtime"
             ),
             (
                 "kind = \"cloudwatch_traces\"\nregion = \"us-west-2\"\nlog_group = \"g\"\nsecret.ref = \"aws://p\"\n",
-                "`log_group` does not apply",
+                "names `log_group` and `log_stream` together, or neither",
+            ),
+            (
+                "kind = \"cloudwatch_traces\"\nregion = \"us-west-2\"\nlog_stream = \"spans\"\nsecret.ref = \"aws://p\"\n",
+                "names `log_group` and `log_stream` together, or neither",
+            ),
+            (
+                "kind = \"cloudwatch_traces\"\nregion = \"us-west-2\"\nlog_group = \"a b\"\nlog_stream = \"spans\"\nsecret.ref = \"aws://p\"\n",
+                "not a CloudWatch Logs group name",
+            ),
+            (
+                "kind = \"cloudwatch_traces\"\nregion = \"us-west-2\"\nlog_group = \"g\"\nlog_stream = \"a*b\"\nsecret.ref = \"aws://p\"\n",
+                "not a CloudWatch Logs stream name",
             ),
             (
                 "kind = \"otlp\"\ndestination = \"https://example.com\"\nregion = \"us-west-2\"\n",
