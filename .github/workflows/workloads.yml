@@ -252,6 +252,12 @@ jobs:
           output-env-credentials: false
           output-credentials: true
 
+      # bedrock_key.py runs on aws-bedrock-token-generator, which needs Python 3.10 or later.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
       # The key goes to a file outside the folder the cells run in, and run_corpus.py reads it
       # through BOX_BEDROCK_KEY_FILE. bedrock_key.py masks the key in the log.
       - name: Mint the Bedrock key
@@ -263,7 +269,11 @@ jobs:
         run: |
           key="$RUNNER_TEMP/bedrock-key/key"
           mkdir -p "$(dirname "$key")"
-          python3 test-corpus/bedrock_key.py --region "$AWS_REGION" --expires 7200 --out "$key"
+          venv="$RUNNER_TEMP/bedrock-key/venv"
+          python3 -m venv "$venv"
+          "$venv/bin/pip" install --quiet --require-hashes --no-deps --only-binary :all: \
+            -r test-corpus/bedrock-key-requirements.txt
+          "$venv/bin/python" test-corpus/bedrock_key.py --region "$AWS_REGION" --expires 7200 --out "$key"
           echo "BOX_BEDROCK_KEY_FILE=$key" >> "$GITHUB_ENV"
 
       # A one-token call to each model the run uses, with the key alone. A refusal here means the
@@ -293,11 +303,6 @@ jobs:
 
       - name: Build Box and helpers
         run: cargo build --locked -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline
-
-      - name: Set up Python
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.12"
 
       - name: Set up Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -452,6 +457,12 @@ jobs:
           output-env-credentials: false
           output-credentials: true
 
+      # bedrock_key.py runs on aws-bedrock-token-generator, which needs Python 3.10 or later.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
       - name: Mint the Bedrock key
         if: env.MODEL == 'true'
         env:
@@ -461,7 +472,11 @@ jobs:
         run: |
           key="$RUNNER_TEMP/bedrock-key/key"
           mkdir -p "$(dirname "$key")"
-          python3 test-corpus/bedrock_key.py --region "$AWS_REGION" --expires 7200 --out "$key"
+          venv="$RUNNER_TEMP/bedrock-key/venv"
+          python3 -m venv "$venv"
+          "$venv/bin/pip" install --quiet --require-hashes --no-deps --only-binary :all: \
+            -r test-corpus/bedrock-key-requirements.txt
+          "$venv/bin/python" test-corpus/bedrock_key.py --region "$AWS_REGION" --expires 7200 --out "$key"
           echo "BOX_BEDROCK_KEY_FILE=$key" >> "$GITHUB_ENV"
 
       - name: Install Rust
@@ -469,11 +484,6 @@ jobs:
 
       - name: Build Box and helpers
         run: cargo build --locked -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline
-
-      - name: Set up Python
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.12"
 
       - name: Install Claude Code and Codex
         run: |
@@ -584,6 +594,12 @@ jobs:
           output-env-credentials: false
           output-credentials: true
 
+      # bedrock_key.py runs on aws-bedrock-token-generator, which needs Python 3.10 or later.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
       - name: Mint the Bedrock key
         if: env.GUIDE_KEY == 'yes'
         env:
@@ -593,7 +609,11 @@ jobs:
         run: |
           key="$RUNNER_TEMP/bedrock-key/key"
           mkdir -p "$(dirname "$key")"
-          python3 test-corpus/bedrock_key.py --region "$AWS_REGION" --expires 7200 --out "$key"
+          venv="$RUNNER_TEMP/bedrock-key/venv"
+          python3 -m venv "$venv"
+          "$venv/bin/pip" install --quiet --require-hashes --no-deps --only-binary :all: \
+            -r test-corpus/bedrock-key-requirements.txt
+          "$venv/bin/python" test-corpus/bedrock_key.py --region "$AWS_REGION" --expires 7200 --out "$key"
           echo "BOX_BEDROCK_KEY_FILE=$key" >> "$GITHUB_ENV"
 
       - name: Install Rust
@@ -603,11 +623,6 @@ jobs:
       - name: Build Box
         if: env.GUIDE_KEY == 'yes'
         run: cargo build --locked -p strands-box-cli --bin box
-
-      - name: Set up Python
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.12"
 
       - name: Install Claude Code
         if: env.GUIDE_KEY == 'yes'

@@ -1989,6 +1989,10 @@ first, and the pack moves to `resources/packs/` when `box` ships it to operators
 **Rejected.** Gate on the agent layer: a model takes another path on each run, so a changed result
 does not point at a pack change. Write each new pack in `resources/packs/`: a pack there joins
 `box profile create`'s `--tools` list, so every operator is offered a pack that only the corpus uses.
+Run the bench on each pull request that changes a pack: a run takes about 35 minutes of macOS
+runners, the same runners that pull request CI waits on.
 
 **Cost.** A green scripted cell proves only the commands that its script names. A model that runs
-another command can still meet a wall that only the agent layer finds.
+another command can still meet a wall that only the agent layer finds. Nothing runs the bench on a
+pull request, so the gate holds only when the author dispatches it on the branch. A regression it
+misses shows on the next scheduled run, after the change has merged.

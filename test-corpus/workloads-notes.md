@@ -152,10 +152,9 @@ What the role allows, and why:
   because a call to any other model is refused.
 - **`bedrock:CallWithBearerToken`**, which a call made with the key needs.
 
-`bedrock_key.py` uses only the standard library, so it runs on the runner's own Python before any
-setup step. It produces the same key as `aws-bedrock-token-generator` 1.1.0 byte for byte
-(`test_bedrock_key.py` pins two of that library's keys), and a key it minted from a real session
-called Opus 5.5, Sonnet 5.5 and Haiku 5.5 with no other credential.
+`bedrock_key.py` calls `aws-bedrock-token-generator`, which the mint step installs into its own
+virtual environment from `bedrock-key-requirements.txt`, with every package pinned to one wheel and
+its hash.
 
 The workflow reads no long-lived Bedrock secret: each run mints its own key, and the key stops
 working when the role session ends.
