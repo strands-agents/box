@@ -102,7 +102,16 @@ Box Core's Linux release archives use `linux-arm64` and `linux-x86_64` in their 
 The CLI's archives, compilation, and intermediate workflow artifacts retain the Rust targets `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu`.
 `SHA256SUMS.txt` contains a checksum for each published archive.
 After approval, the attest job attests every published asset, `SHA256SUMS.txt` included, with GitHub build provenance.
-Check an asset with `gh attestation verify <asset> --repo strands-agents/box`.
+Check an asset with:
+
+```sh
+gh attestation verify <asset> --repo strands-agents/box \
+  --signer-workflow strands-agents/box/.github/workflows/deploy-box-artifact.yml \
+  --source-ref refs/heads/main
+```
+
+Without `--signer-workflow` and `--source-ref`, the check accepts an attestation from any workflow on any branch of the repository.
+The attestation names the commit the workflow ran from, not the tagged commit. They differ when the `sha` input pins an older commit, so the tag names the source.
 Dry runs publish nothing, so they make no attestations.
 Box Core's build jobs display `Linux ARM64`, `Linux x86_64`, or `macOS ARM64`.
 

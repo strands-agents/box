@@ -922,9 +922,11 @@ jobs:
           echo "Approved to release $NEW_TAG at $RELEASE_SHA."
 
   # ── Attest the release assets ──────────────────────────────────────────
-  # Every asset, SHA256SUMS.txt included, gets a signed attestation that this workflow built it
-  # on this commit. `gh attestation verify` checks it, on Linux too, where there is no Apple
-  # signature. A job of its own, so the OIDC token never shares a job with contents: write.
+  # Every asset, SHA256SUMS.txt included, gets a signed attestation that this workflow, on the
+  # dispatched ref, built it. `gh attestation verify` checks it, on Linux too, where there is no
+  # Apple signature. The attestation names the dispatched commit, which differs from the tagged
+  # commit when the `sha` input pins an older one, so the tag names the source. A job of its own,
+  # so the OIDC token never shares a job with contents: write.
   attest:
     name: Attest release assets
     needs: [scan, approve-release, inspect]
@@ -1110,7 +1112,13 @@ jobs:
 
           The macOS archive contains \`Box.app\`, a \`box\` launcher, and helper links into its signed and notarized bundle. Keep that directory intact. Linux archives contain \`box\` beside its helpers. Each \`box-cli-\` archive contains the \`box\` command, both Box Core helpers, bundled packs, and \`release.json\`, and its macOS programs are signed and notarized. \`SHA256SUMS.txt\` contains each archive's checksum.
 
-          Each asset has a build provenance attestation from this workflow. To check one, run \`gh attestation verify <asset> --repo ${GITHUB_REPOSITORY}\`.
+          Each asset has a build provenance attestation from this workflow. To check one, run:
+
+          \`\`\`sh
+          gh attestation verify <asset> --repo ${GITHUB_REPOSITORY} \\
+            --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/deploy-box-artifact.yml \\
+            --source-ref refs/heads/main
+          \`\`\`
           EOF
 
       - name: Tag the pinned SHA
