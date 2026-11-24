@@ -116,14 +116,20 @@
 (allow file-map-executable (literal "/dev/null"))
 (allow file-map-executable (subpath "{ROOT}/project"))
 
-; Eight names and no more. Native Rust startup needs the page size, a runtime that sizes a
-; thread pool needs the processor count, and sysconf(_SC_ARG_MAX) reads kern.argmax. The other
-; five are what the uname interface reads. A runtime asks for these before it runs a line of the
-; workload's own code. Each names a public property of the host, and none is a secret.
+; Twelve names and no more. Native Rust startup needs the page size, a runtime that sizes a
+; thread pool needs the processor count, and sysconf(_SC_ARG_MAX) reads kern.argmax. torch's
+; cpuinfo library reads the physical and logical processor counts, the package count, and the
+; cache layout to size its own pool. The other five are what the uname interface reads. A runtime
+; asks for these before it runs a line of the workload's own code. Each names a public property
+; of the host, and none is a secret.
 (allow sysctl-read
+    (sysctl-name "hw.cacheconfig")
+    (sysctl-name "hw.logicalcpu_max")
     (sysctl-name "hw.machine")
     (sysctl-name "hw.ncpu")
+    (sysctl-name "hw.packages")
     (sysctl-name "hw.pagesize_compat")
+    (sysctl-name "hw.physicalcpu_max")
     (sysctl-name "kern.argmax")
     (sysctl-name "kern.hostname")
     (sysctl-name "kern.osrelease")

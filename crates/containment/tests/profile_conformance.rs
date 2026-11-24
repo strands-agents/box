@@ -368,12 +368,12 @@ fn renderer_only_replaces_the_checked_in_placeholders() {
     );
 }
 
-/// The profile reads eight named sysctls, and no ninth.
+/// The profile reads twelve named sysctls, and no thirteenth.
 ///
 /// Whole names rather than a prefix, because a prefix over `kern.` reaches `kern.procargs2`,
 /// which holds another process's argument vector.
 #[test]
-fn the_profile_reads_exactly_eight_named_sysctls() {
+fn the_profile_reads_exactly_twelve_named_sysctls() {
     let (_directory, config) = fixed_config();
     let profile = generate_seatbelt_profile(&config).expect("fixed profile");
     let rules = rules(&profile);
@@ -388,9 +388,13 @@ fn the_profile_reads_exactly_eight_named_sysctls() {
     assert_eq!(
         names,
         [
+            "hw.cacheconfig",
+            "hw.logicalcpu_max",
             "hw.machine",
             "hw.ncpu",
+            "hw.packages",
             "hw.pagesize_compat",
+            "hw.physicalcpu_max",
             "kern.argmax",
             "kern.hostname",
             "kern.osrelease",
@@ -1806,8 +1810,8 @@ fn the_rendered_profile_grants_exactly_these_operations_and_no_others() {
         "file-write-times",
         "file-read-metadata", // path-ancestors of the read-only root
         "file-read*",         // read-only root subtree
-        // One rule holds all eight names, so this stays one entry. The name set has its own
-        // test, `the_profile_reads_exactly_eight_named_sysctls`.
+        // One rule holds all twelve names, so this stays one entry. The name set has its own
+        // test, `the_profile_reads_exactly_twelve_named_sysctls`.
         "sysctl-read",
         "network-bind",
         "network-inbound",
