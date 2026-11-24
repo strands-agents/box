@@ -32,8 +32,7 @@ calls, and it is not operator-facing. `list`, `stop`, and `remove` are deleted w
 implemented — see "The lifecycle verbs are gone" below before adding one back.
 
 The three `record/` modules each answer one question. `config` is `box.toml`: the two wire records,
-plus one module per vocabulary. The modules are `process`, `filesystem`, `egress`, `env`, `mcp`,
-`secret_source`, and `telemetry`.
+plus one module per vocabulary. The module table in `record/config/mod.rs` lists them.
 `process` holds `ProcessSpec`, the one shape `[agent]` and each `[tool.<name>]` take, and the
 `Filesystem` that spec carries. `filesystem` translates the nine lists into containment cells.
 `layout` sites the filesystem. `config/mcp` is `box.toml`'s MCP
@@ -87,11 +86,13 @@ now, because `run` takes one `--config` path and searches nowhere. **That direct
   claiming otherwise. Both are known debt, not oversights.
 - **`error` holds the typed taxonomy**, one variant group per owner above. Every module needs
   it, so it must not live inside one of them.
-- **The composition stays thin.** `main.rs` declares the four modules and calls
-  `command::cli_main()`; `cli_main` parses argv, applies the hardening for `run`, builds a runtime,
+- **The composition stays thin.** `main.rs` declares the `cli` module, parses argv, and calls
+  `strands_box::run` or `strands_box::generate_policy_schema`; `command::execute` applies the
+  hardening for `run`, builds a runtime,
   and hands off to `dispatch`, which takes one verb per arm. A fifth step, or an inline
-  `insert`/`join`/`if let`, belongs in a phase. If either file grows, the phase boundary is
-  wrong.
+  `insert`/`join`/`if let`, belongs in a phase. `execute` does not meet that yet: it also prepares
+  the native filesystem setup on Linux, and it listens for signals and calls `on_ready` inline
+  when a caller supplies one. If `main.rs` or `command/mod.rs` grows, the phase boundary is wrong.
 - **Linux startup requires no environment opt-in.** The command line and the library's `run`
   and `generate_policy_schema` calls perform normal configuration validation.
   `EXPERIMENTAL_X86_SUPPORT` and `EXPERIMENTAL_LINUX_SUPPORT` have no effect. Preserve process
@@ -254,7 +255,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
 
   **`name` and `[agent]` are keys in the file, and the file is the only source of truth.** There is
   no `--name` flag: `box_dir` selects the box and the file names it, so a second selector could
-  disagree with the first. `run_config.rs::run_selects_a_box_by_its_configuration_alone` pins that
+  disagree with the first. `record::config::run_selects_a_box_by_its_configuration_alone` pins that
   `--name` is refused. A bare `run` executes the stored `[agent] command`, and a trailing argv
   **appends** to it, so the key states the invocation prefix and the line the operator typed states
   the rest. `run_config.rs::a_trailing_argv_appends_to_the_stored_command` is the pin. **The key is
@@ -271,8 +272,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   no grant: it widens what the workload's own `write` lists allow on macOS, so it is part of the
   workload input, and each process discloses it. `[gateway] upgrade_http` adds no grant either:
   policy decides each upgraded request on port 443, as it decides a `CONNECT` to that host. `[agent]` and each
-  `[tool.<label>]` hold one `ProcessSpec`, which is six fields — `command`, `workspace`, `env`,
-  `filesystem`, `native-filesystem-policy`, and `grammar`. Only a `[tool.<label>]` takes
+  `[tool.<label>]` hold one `ProcessSpec` (`record/config/process.rs`), and `ProcessSpec::validate`
+  owns which keys each table refuses. Only a `[tool.<label>]` takes
   `grammar`, behind `[experimental-features] tool-grammars`, and `[agent]` refuses it. `filesystem` holds the path lists: nine for `[agent]`, seven
   for a `[tool.<label>]`, which has no `metadata` or `exec` list: a leaf discovers metadata across the
   operator home ([a leaf discovers metadata](../../docs/design/decisions.md#a-leaf-discovers-existence-and-metadata-content-stays-gated))
@@ -982,16 +983,36 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   Program. Input for a Program whose Shell no longer reads stdin is dropped. A `python3`/`python` alias forwards no stdin:
   `forwards_stdin` is false for its `Command::Words`, so it sends `InputEof` right after its `Run`
   and the Shell's own Python reads an empty input. An MCP alias relays its client's stdin through
-  `stream_mcp` instead, and a tool leaf still gets `Stdio::null()`.
-- **The alias must send `StdinEof`.** `forward` sends `Open` and `Run` (from `submission`), then each
-  `Input` a Shell alias forwards, and **`StdinEof`**, for every alias. The EOF frame is not optional. A harness invoking `zsh -c` often supplies nothing on stdin, so without the EOF
+  `stream_mcp` instead.
+- **A host binary reads its command's stdin, and what it leaves unread is dropped.** Box's
+  `CommandFallback` makes the pipe: it gives the read end to the spawner as `HostSpawn::stdin`,
+  which `LeafBox::run` makes the leaf's stdin, and `StdinFeed` copies the command's `CommandInput`
+  into the write end while the binary runs. Strands Shell never returns a fallback command's stdin,
+  so dropping the unread bytes loses nothing. Keep these rules:
+  - An empty stdin is `/dev/null`, not an empty pipe: `rg` searches a pipe in place of its working
+    directory. `box_programs.rs::a_host_binary_whose_alias_has_no_stdin_gets_dev_null`.
+  - The feed runs beside the spawn, not before it, or a binary that fills stdout before it reads
+    deadlocks. `a_host_binary_that_writes_before_it_reads_gets_all_its_input`,
+    `host_spawn_stdin.rs::a_host_program_reads_stdin_larger_than_the_copy_buffer`.
+  - Only the input's end, or `BrokenPipe`, closes the pipe. A failed read or another write error
+    holds it open, so the binary never reads end of file on part of its input.
+    `a_stdin_that_fails_to_read_leaves_a_program_that_reads_none_its_own_status`.
+  - `tokio::pin!(feeding, spawning)` declares the spawn last, so a cancelled command drops it, and
+    kills the binary, before the feed closes the pipe. No test pins this order.
+  - The `select!` is `biased` toward the spawn, so a finished program reports its own status.
+
+  Caveats: the empty check is one read after one yield, so an end of input that reaches the broker
+  later still gives an empty pipe. On macOS, `std::io::pipe` sets close-on-exec after it creates the
+  pipe, so a leaf started in that window holds the write end until the trampoline closes it.
+- **The alias must send `InputEof`.** `forward` sends `Open` and `Run` (from `submission`), then each
+  `Input` a Shell alias forwards, and **`InputEof`**, for every alias. The EOF frame is not optional. A harness invoking `zsh -c` often supplies nothing on stdin, so without the EOF
   the Program's stdin channel stays open and any command that pre-reads stdin blocks to its
   deadline — the `lua` builtin does exactly that, so **every** `lua` call took 34–36s and came back
   as `the call exceeded its deadline`. Two things worth not repeating:
   - **`close_stdin` must drop the sender, not send an empty frame.** The Shell's `ChannelReader`
     reaches end-of-stream only on `Poll::Ready(None)` — every sender gone. A zero-length recv is a
     successful 0-byte read, so `read_to_string_limited` loops on it forever. `ProgramControl` holds
-    `Arc<Mutex<Option<Sender>>>` so one `StdinEof` closes the channel for every clone.
+    `Arc<Mutex<Option<Sender>>>` so one `InputEof` closes the channel for every clone.
   - **When a bisect says "not mine", check which variable actually moved.** The control that called
     this pre-existing varied the *Shell crate* while holding the box constant.
 - **A Call's output streams.** `Program::adopt` installs a `ChannelWriter` on `STDOUT` and
@@ -1015,10 +1036,10 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
 - **The reader never blocks on a Call.** `serve_transport` reads and dispatches; each `Call` moves
   its `ProgramSlot` into a task and hands it back through a completion channel. Five things hold
   this shape:
-  - **`Input` and `StdinEof` were blocked as well as `Signal`**, so a request/reply session
+  - **`Input` and `InputEof` were blocked as well as `Signal`**, so a request/reply session
     *deadlocked*: the `Input` carrying request 2 was not read until the Call ended, and the Call
     would not end until it saw request 2. `a_program_serves_a_request_reply_session` is the test.
-  - **A running Program stays reachable through `running`, keyed by id.** `Input`, `StdinEof`, and
+  - **A running Program stays reachable through `running`, keyed by id.** `Input`, `InputEof`, and
     `Signal` find it there while its slot is inside a task, which is why `control_for` consults both
     maps. Dropping that lookup reinstates the deadlock for `Input` only — the hardest version to
     notice, since `Signal` would still work.

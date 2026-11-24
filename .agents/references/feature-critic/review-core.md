@@ -85,18 +85,19 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
    - The four box inputs (policy, credentials, name, workload). A fifth input, or a key naming a
      host path, a working directory, an env overlay, a proxy port, or a mechanism value, is a
      BLOCKER against the box contract in `crates/box/AGENTS.md`.
-   - On-disk records: `Record`/`RECORD_VERSION`, `LiveRecord`/`LIVE_VERSION`: a field added,
+   - On-disk records: `Record`/`RECORD_VERSION`, `BoxLive`/`LIVE_VERSION`: a field added,
      removed, or retyped **without** a version bump is the worst case, since an old artifact then
      parses as if it were new. Confirm the bump; if the shape changed and the const did not, quote
      both lines.
    - Broker wire protocol: `run/broker/protocol.rs` `PROTOCOL_VERSION`: frame layout, message
-     kinds, the `Open`→`Call`→`StdinEof` sequence. Same bump rule. Note that the alias image is
+     kinds, the `Open`→`Call`→`InputEof` sequence. Same bump rule. Note that the alias image is
      materialized by `configure`, so a protocol change that does not say "re-run `configure`"
      ships a stale-alias failure.
    - Alias names and derivation: `SHELL_ALIAS_NAMES`, `PYTHON_ALIAS_NAMES`, `public/bin/`,
      `public/run/*.sock`, and the rule that an alias derives its socket from its own path. A
      harness resolves these off `PATH` by name.
-   - Policy vocabulary: action names (`shell:exec`, `fs:*`, `net:*`, `cred:inject`), the
+   - Policy vocabulary: action names (every `action` in
+     `crates/policy/schema/actions.cedarschema`), the
      attributes a rule may read, what `when temporal { … }` observes. An operator's policy file is
      their source code; a renamed action silently stops matching.
    - Mechanism-crate façades: the `pub use` sets in `containment`, `credentials`, `policy`,
@@ -317,7 +318,7 @@ First, before `BLOCKERS`:
 
 ```
 FREEZE   (always present for a crates/** diff, even when clean)
-- surfaces checked: CLI | box.toml | four inputs | Record/LiveRecord | wire protocol
+- surfaces checked: CLI | box.toml | four inputs | Record/BoxLive | wire protocol
   | alias names | policy vocabulary | crate façades | box library | workload env | operator-facing docs
 - interface changes: none  (or: path/to/file.rs:12 : <surface> <what moved>; approved by <KD/spec> | UNAPPROVED)
 - premise changes: none    (or: path/to/file.rs:34 : weakens <premise>; UNAPPROVED)

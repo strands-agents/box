@@ -81,6 +81,11 @@ impl Host {
     /// Run `args` in a pseudo-terminal, send each step's keys once the screen shows its text, and
     /// return the last screen.
     fn drive(&self, args: &[&str], steps: &[(&str, &str)], exit: i32) -> String {
+        self.drive_screen(args, steps, exit).0
+    }
+
+    /// Like [`Host::drive`], and whether the cursor is hidden when the command ends.
+    fn drive_screen(&self, args: &[&str], steps: &[(&str, &str)], exit: i32) -> (String, bool) {
         let size = libc::winsize {
             ws_row: 40,
             ws_col: 120,
@@ -129,7 +134,7 @@ impl Host {
                 let screen = parser.screen().contents();
                 assert_eq!(next, steps.len(), "{screen}");
                 assert_eq!(status.code(), Some(exit), "{screen}");
-                return screen;
+                return (screen, parser.screen().hide_cursor());
             }
             if Instant::now() >= deadline {
                 child.kill().unwrap();
@@ -300,4 +305,32 @@ fn edit_refuses_a_profile_without_a_starter() {
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     let words = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(words.contains("guided setup is not available"), "{stderr}");
+}
+
+#[test]
+fn the_cursor_is_shown_when_the_inline_wizard_is_cancelled() {
+    // `box run` with a starter and no saved profile draws the wizard without a panel.
+    let host = Host::new(true);
+    let (screen, hidden) = host.drive_screen(&["run", "helper"], &[("Save and run", "\x1b")], 1);
+    assert!(screen.contains("Cancelled"), "{screen}");
+    assert!(
+        !hidden,
+        "the cursor is hidden after the wizard ends: {screen}"
+    );
+}
+
+#[test]
+fn the_cursor_is_shown_when_a_confirm_is_cancelled() {
+    let host = Host::new(false);
+    host.create();
+    let (screen, hidden) = host.drive_screen(
+        &["profile", "delete", "helper"],
+        &[("Delete profile helper", "\x1b")],
+        1,
+    );
+    assert!(screen.contains("Nothing was removed"), "{screen}");
+    assert!(
+        !hidden,
+        "the cursor is hidden after the prompt ends: {screen}"
+    );
 }

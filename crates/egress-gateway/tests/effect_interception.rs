@@ -82,6 +82,7 @@ impl AttemptSnapshot {
                 path,
                 body_bytes,
                 intercepted: _,
+                websocket: _,
                 mcp: _,
             } => Self::HttpRequest {
                 host: (*host).to_string(),
@@ -1920,6 +1921,7 @@ fn attempt_schema_never_carries_body_or_header_content() {
         path: "/v1",
         body_bytes: 42,
         intercepted: true,
+        websocket: false,
         mcp: None,
     };
 
@@ -1939,6 +1941,7 @@ fn attempt_schema_never_carries_body_or_header_content() {
             path: "/mcp",
             body_bytes: 64,
             intercepted: false,
+            websocket: false,
             mcp: Some(McpFrame::ToolCall {
                 server: "prod",
                 tool,
