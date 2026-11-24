@@ -32,8 +32,7 @@ calls, and it is not operator-facing. `list`, `stop`, and `remove` are deleted w
 implemented — see "The lifecycle verbs are gone" below before adding one back.
 
 The three `record/` modules each answer one question. `config` is `box.toml`: the two wire records,
-plus one module per vocabulary. The modules are `process`, `filesystem`, `egress`, `env`,
-`gateway`, `grammar`, `ingress`, `limits`, `mcp`, `secret_source`, and `telemetry`.
+plus one module per vocabulary. The module table in `record/config/mod.rs` lists them.
 `process` holds `ProcessSpec`, the one shape `[agent]` and each `[tool.<name>]` take, and the
 `Filesystem` that spec carries. `filesystem` translates the nine lists into containment cells.
 `layout` sites the filesystem. `config/mcp` is `box.toml`'s MCP
@@ -91,8 +90,9 @@ now, because `run` takes one `--config` path and searches nowhere. **That direct
   `strands_box::run` or `strands_box::generate_policy_schema`; `command::execute` applies the
   hardening for `run`, builds a runtime,
   and hands off to `dispatch`, which takes one verb per arm. A fifth step, or an inline
-  `insert`/`join`/`if let`, belongs in a phase. If either file grows, the phase boundary is
-  wrong.
+  `insert`/`join`/`if let`, belongs in a phase. `execute` does not meet that yet: it also prepares
+  the native filesystem setup on Linux, and it listens for signals and calls `on_ready` inline
+  when a caller supplies one. If `main.rs` or `command/mod.rs` grows, the phase boundary is wrong.
 - **Linux startup requires no environment opt-in.** The command line and the library's `run`
   and `generate_policy_schema` calls perform normal configuration validation.
   `EXPERIMENTAL_X86_SUPPORT` and `EXPERIMENTAL_LINUX_SUPPORT` have no effect. Preserve process
@@ -272,8 +272,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   no grant: it widens what the workload's own `write` lists allow on macOS, so it is part of the
   workload input, and each process discloses it. `[gateway] upgrade_http` adds no grant either:
   policy decides each upgraded request on port 443, as it decides a `CONNECT` to that host. `[agent]` and each
-  `[tool.<label>]` hold one `ProcessSpec`, which is nine fields — `command`, `workspace`, `env`,
-  `filesystem`, `native-filesystem-policy`, `file-watching`, `network`, `grammar`, and `ingress`. Only a `[tool.<label>]` takes
+  `[tool.<label>]` hold one `ProcessSpec` (`record/config/process.rs`), and `ProcessSpec::validate`
+  owns which keys each table refuses. Only a `[tool.<label>]` takes
   `grammar`, behind `[experimental-features] tool-grammars`, and `[agent]` refuses it. `filesystem` holds the path lists: nine for `[agent]`, seven
   for a `[tool.<label>]`, which has no `metadata` or `exec` list: a leaf discovers metadata across the
   operator home ([a leaf discovers metadata](../../docs/design/decisions.md#a-leaf-discovers-existence-and-metadata-content-stays-gated))

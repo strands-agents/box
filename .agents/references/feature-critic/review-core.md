@@ -90,7 +90,7 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
      parses as if it were new. Confirm the bump; if the shape changed and the const did not, quote
      both lines.
    - Broker wire protocol: `run/broker/protocol.rs` `PROTOCOL_VERSION`: frame layout, message
-     kinds, the `Open`→`Call`→`StdinEof` sequence. Same bump rule. Note that the alias image is
+     kinds, the `Open`→`Call`→`InputEof` sequence. Same bump rule. Note that the alias image is
      materialized by `configure`, so a protocol change that does not say "re-run `configure`"
      ships a stale-alias failure.
    - Alias names and derivation: `SHELL_ALIAS_NAMES`, `PYTHON_ALIAS_NAMES`, `public/bin/`,
