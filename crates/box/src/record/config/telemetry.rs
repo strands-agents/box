@@ -92,7 +92,7 @@ const SIGNING_SCHEMES: [&str; 2] = [AWS_REFERENCE, CREDSD_REFERENCE];
 /// The scheme of a credential signed from an AWS profile.
 const AWS_REFERENCE: &str = "aws://";
 
-/// The scheme of a credential signed from a `credsd` environment.
+/// The scheme of a credential that credsd vends.
 const CREDSD_REFERENCE: &str = "credsd://";
 
 /// The user half a Basic-auth phantom is presented under. The vault reads only the password half.
@@ -294,7 +294,7 @@ impl TelemetryEntry {
 #[serde(deny_unknown_fields)]
 pub(crate) struct TelemetrySecret {
     /// The secret to attach, as a URI: `env://NAME`, `secret://NAME`, `aws://PROFILE`,
-    /// `credsd://ENVIRONMENT`, or a reference in a declared scheme.
+    /// `credsd://CREDENTIAL`, or a reference in a declared scheme.
     #[serde(rename = "ref")]
     pub(crate) reference: String,
 
@@ -410,7 +410,7 @@ fn telemetry_secret_uri(reference: &str, sources: &DeclaredSources) -> Result<St
     } else {
         return Err(format!(
             "`secret.ref` names no scheme this box reads; write `{ENV_SCHEME}NAME`, \
-             `{TELEMETRY_ALIAS_SCHEME}NAME`, `aws://profile`, `credsd://environment`, or a \
+             `{TELEMETRY_ALIAS_SCHEME}NAME`, `aws://profile`, `credsd://credential`, or a \
              reference in a scheme that a `[secret-source.<scheme>]` table declares, never the \
              value itself. The value is deliberately not echoed here, in case it is one"
         ));
@@ -619,7 +619,7 @@ fn expanded(entry: &TelemetryEntry) -> Result<TelemetryEntry, String> {
             {
                 return Err(format!(
                     "a `{}` target is signed with SigV4, so `secret.ref` names `aws://profile` or \
-                     `credsd://environment`",
+                     `credsd://credential`",
                     kind.spelling()
                 ));
             }
@@ -856,22 +856,22 @@ pub(crate) fn config_for(
     Ok(request)
 }
 
-/// Every distinct `credsd://` environment the telemetry targets sign with, in declaration order.
+/// Every distinct `credsd://` credential the telemetry targets sign with, in declaration order.
 /// The startup preflight checks these with the egress ones.
-pub(crate) fn credsd_environments(targets: &BTreeMap<String, TelemetryEntry>) -> Vec<&str> {
-    let mut environments: Vec<&str> = Vec::new();
+pub(crate) fn credsd_credentials(targets: &BTreeMap<String, TelemetryEntry>) -> Vec<&str> {
+    let mut credentials: Vec<&str> = Vec::new();
     for entry in targets.values() {
-        if let Some(environment) = entry
+        if let Some(credential) = entry
             .secret
             .as_ref()
             .and_then(|secret| secret.reference.trim().strip_prefix(CREDSD_REFERENCE))
-            && !environment.is_empty()
-            && !environments.contains(&environment)
+            && !credential.is_empty()
+            && !credentials.contains(&credential)
         {
-            environments.push(environment);
+            credentials.push(credential);
         }
     }
-    environments
+    credentials
 }
 
 /// Sign one request for each `aws://` target, and send none, so a profile that cannot sign stops
@@ -1170,7 +1170,7 @@ mod tests {
             assert_eq!(
                 refusal,
                 "`secret.ref` names no scheme this box reads; write `env://NAME`, \
-                 `secret://NAME`, `aws://profile`, `credsd://environment`, or a reference in a \
+                 `secret://NAME`, `aws://profile`, `credsd://credential`, or a reference in a \
                  scheme that a `[secret-source.<scheme>]` table declares, never the value \
                  itself. The value is deliberately not echoed here, in case it is one"
             );
@@ -1901,9 +1901,9 @@ secret.ref = "aws://runtime"
         assert!(refused.contains("cannot sign"), "{refused}");
     }
 
-    /// **The preflight sees each distinct `credsd://` environment a telemetry target signs with.**
+    /// **The preflight sees each distinct `credsd://` credential a telemetry target signs with.**
     #[test]
-    fn the_credsd_environments_are_the_distinct_signing_ones() {
+    fn the_credsd_credentials_are_the_distinct_signing_ones() {
         let target = |reference: &str| TelemetryEntry {
             kind: TelemetryKind::Otlp,
             destination: "https://xray.us-west-2.amazonaws.com".to_string(),
@@ -1928,7 +1928,7 @@ secret.ref = "aws://runtime"
             ("d".to_string(), target("aws://default")),
             ("e".to_string(), target("env://KEY")),
         ]);
-        assert_eq!(credsd_environments(&targets), ["prod", "dev"]);
+        assert_eq!(credsd_credentials(&targets), ["prod", "dev"]);
     }
 
     /// **A credential destination is a host with a port**: a name, an IPv4 address, or an IPv6

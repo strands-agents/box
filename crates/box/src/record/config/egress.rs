@@ -98,33 +98,33 @@ fn routes_for_pairs(
     Ok(bindings)
 }
 
-/// Every distinct `credsd://` environment the given entries name, in declaration order.
-fn credsd_environments_of<'a>(entries: impl IntoIterator<Item = &'a EgressEntry>) -> Vec<&'a str> {
-    let mut environments: Vec<&str> = Vec::new();
+/// Every distinct `credsd://` credential the given entries name, in declaration order.
+fn credsd_credentials_of<'a>(entries: impl IntoIterator<Item = &'a EgressEntry>) -> Vec<&'a str> {
+    let mut credentials: Vec<&str> = Vec::new();
     for entry in entries {
         let Some(secret) = &entry.secret else {
             continue;
         };
-        if let Some((SecretScheme::Credsd, environment)) = secret.deliverable()
-            && !environment.is_empty()
-            && !environments.contains(&environment)
+        if let Some((SecretScheme::Credsd, credential)) = secret.deliverable()
+            && !credential.is_empty()
+            && !credentials.contains(&credential)
         {
-            environments.push(environment);
+            credentials.push(credential);
         }
     }
-    environments
+    credentials
 }
 
-/// Every distinct `credsd://` environment a box names, across BOTH the operator's `[egress.*]`
+/// Every distinct `credsd://` credential a box names, across BOTH the operator's `[egress.*]`
 /// entries and the remote-MCP entries — they live in separate maps (`record.egress` /
 /// `record.remote_mcp`). Passing both is mandatory by construction, so a credsd source declared only
 /// on a `[mcp.<name>] type = "http"` server cannot slip past the startup preflight. The preflight
 /// validates these against the daemon before the workload runs; a box that names none needs no daemon.
-pub(crate) fn credsd_environments<'a>(
+pub(crate) fn credsd_credentials<'a>(
     egress: &'a BTreeMap<String, EgressEntry>,
     remote_mcp: &'a BTreeMap<String, EgressEntry>,
 ) -> Vec<&'a str> {
-    credsd_environments_of(egress.values().chain(remote_mcp.values()))
+    credsd_credentials_of(egress.values().chain(remote_mcp.values()))
 }
 
 #[cfg(test)]
@@ -242,7 +242,7 @@ fn validate_against_sources(
                     "secret scheme {scheme:?} has no `[secret-source.{scheme}]` table: declare \
                      the secret source that reads it, or use env://NAME for a credential the \
                      workload presents as a placeholder, aws://profile for one signed in the \
-                     boundary, or credsd://<environment> for a credsd-vended credential"
+                     boundary, or credsd://<credential> for a credsd-vended credential"
                 ));
             }
         }
@@ -764,7 +764,7 @@ enum SecretScheme {
     Env,
     /// `aws://profile`: signed in the boundary, so nothing is placed.
     Aws,
-    /// `credsd://environment`: a credsd credential. It signs in the boundary; the daemon's
+    /// `credsd://credential`: a credsd credential. It signs in the boundary; the daemon's
     /// `material.type` picks the signer per request, and the entry names no credential type.
     Credsd,
     /// A scheme that a `[secret-source.<scheme>]` table can declare: a host program reads the
@@ -1466,18 +1466,18 @@ fn validate_secret(secret: &EgressSecret, label: &str) -> Result<(), ConfigError
         return refuse(&format!(
             "secret scheme {scheme:?} is not one the box can deliver: use env://NAME for a \
              credential the workload presents as a placeholder, aws://profile for one signed \
-             in the boundary, or credsd://<environment> for a credsd-vended credential"
+             in the boundary, or credsd://<credential> for a credsd-vended credential"
         ));
     }
 
-    // A `credsd://` source names a daemon environment and no credential type: the box infers the
+    // A `credsd://` source names a daemon credential and no credential type: the box infers the
     // type from the `credential/get` response's `material.type` per request. The box
     // carries no `secret.type` key, so `deny_unknown_fields` refuses one on any scheme.
-    if let Some((SecretScheme::Credsd, environment)) = secret.deliverable()
-        && environment.is_empty()
+    if let Some((SecretScheme::Credsd, credential)) = secret.deliverable()
+        && credential.is_empty()
     {
         return refuse(
-            "a credsd:// reference must name an environment, as in credsd://prod-inference",
+            "a credsd:// reference must name a credential, as in credsd://prod-inference",
         );
     }
 
@@ -2471,7 +2471,7 @@ mod tests {
                         "invalid credential entry for host \"api.test\": secret scheme \
                          {scheme:?} is not one the box can deliver: use env://NAME for a \
                          credential the workload presents as a placeholder, aws://profile for \
-                         one signed in the boundary, or credsd://<environment> for a \
+                         one signed in the boundary, or credsd://<credential> for a \
                          credsd-vended credential"
                     )
                 );
@@ -2491,7 +2491,7 @@ mod tests {
                      has no `[secret-source.{scheme}]` table: declare the secret source that \
                      reads it, or use env://NAME for a credential the workload presents as a \
                      placeholder, aws://profile for one signed in the boundary, or \
-                     credsd://<environment> for a credsd-vended credential"
+                     credsd://<credential> for a credsd-vended credential"
                 )
             );
         }
@@ -3029,7 +3029,7 @@ mod tests {
             "invalid credential entry for host \"api.github.com\": secret scheme \"op\" has no \
              `[secret-source.op]` table: declare the secret source that reads it, or use \
              env://NAME for a credential the workload presents as a placeholder, aws://profile \
-             for one signed in the boundary, or credsd://<environment> for a credsd-vended \
+             for one signed in the boundary, or credsd://<credential> for a credsd-vended \
              credential"
         );
         assert_eq!(
@@ -3385,9 +3385,9 @@ mod tests {
         }
     }
 
-    /// A `credsd://` reference with an empty environment is refused.
+    /// A `credsd://` reference with an empty credential name is refused.
     #[test]
-    fn a_credsd_source_with_an_empty_environment_is_refused() {
+    fn a_credsd_source_with_an_empty_credential_is_refused() {
         let error = load(
             r#"
             [egress.a]
@@ -3395,8 +3395,13 @@ mod tests {
             secret.ref = "credsd://"
             "#,
         )
-        .expect_err("an empty environment names nothing");
-        assert!(error.to_string().contains("environment"), "{error}");
+        .expect_err("an empty credential names nothing");
+        assert!(
+            error
+                .to_string()
+                .contains("a credsd:// reference must name a credential"),
+            "{error}"
+        );
     }
 
     /// An `env://` entry with no other keys defaults to a bearer `Authorization` header.
@@ -3420,10 +3425,10 @@ mod tests {
         );
     }
 
-    /// The preflight's environment set is every distinct `credsd://` environment, in order — and it
-    /// ignores `env://` and `aws://` sources, which name no credsd environment.
+    /// The preflight's credential set is every distinct `credsd://` credential, in order — and it
+    /// ignores `env://` and `aws://` sources, which name no credsd credential.
     #[test]
-    fn credsd_environments_are_the_distinct_credsd_sources() {
+    fn credsd_credentials_are_the_distinct_credsd_sources() {
         let entries = load(
             r#"
             [egress.bedrock]
@@ -3446,18 +3451,18 @@ mod tests {
         .expect("valid");
 
         assert_eq!(
-            credsd_environments(&entries, &BTreeMap::new()),
+            credsd_credentials(&entries, &BTreeMap::new()),
             vec!["prod-inference", "staging"],
-            "each credsd environment appears once, in declaration order, and env:// is ignored"
+            "each credsd credential appears once, in declaration order, and env:// is ignored"
         );
     }
 
     /// A credsd source declared only on a remote MCP server lands in `record.remote_mcp`, not
-    /// `record.egress`. `credsd_environments` takes both maps by construction, so the source is still
+    /// `record.egress`. `credsd_credentials` takes both maps by construction, so the source is still
     /// covered — keying the preflight to egress alone (an earlier bug) deferred a down daemon to the
     /// first `mcp:call` instead of failing at box start.
     #[test]
-    fn credsd_environments_covers_the_remote_mcp_map() {
+    fn credsd_credentials_covers_the_remote_mcp_map() {
         let egress = load(
             r#"
             [egress.stripe]
@@ -3477,19 +3482,19 @@ mod tests {
         .expect("valid");
 
         assert!(
-            credsd_environments(&egress, &BTreeMap::new()).is_empty(),
-            "the credsd source is not in egress, so egress alone names no environment"
+            credsd_credentials(&egress, &BTreeMap::new()).is_empty(),
+            "the credsd source is not in egress, so egress alone names no credential"
         );
         assert_eq!(
-            credsd_environments(&egress, &remote_mcp),
+            credsd_credentials(&egress, &remote_mcp),
             vec!["prod-inference"],
             "walking both maps covers a credsd source declared only on a remote MCP server"
         );
     }
 
-    /// A box with no credsd source names no environment, so the preflight contacts no daemon.
+    /// A box with no credsd source names no credential, so the preflight contacts no daemon.
     #[test]
-    fn a_box_with_no_credsd_source_names_no_environment() {
+    fn a_box_with_no_credsd_source_names_no_credential() {
         let entries = load(
             r#"
             [egress.stripe]
@@ -3498,7 +3503,7 @@ mod tests {
             "#,
         )
         .expect("valid");
-        assert!(credsd_environments(&entries, &BTreeMap::new()).is_empty());
+        assert!(credsd_credentials(&entries, &BTreeMap::new()).is_empty());
     }
 
     /// A credsd credential signs in-boundary, so it refuses header/prefix/placement/param.

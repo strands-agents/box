@@ -4781,7 +4781,7 @@ command = ["mcp-server-fetch"]
 
     /// Regression guard for the egress/remote-MCP field split. A remote MCP server declared ONLY in
     /// `[mcp.<name>] type = "http"` lands in `record.remote_mcp`, not `record.egress`, so EVERY
-    /// consumer of the split data must read both maps: the credsd preflight (`credsd_environments`),
+    /// consumer of the split data must read both maps: the credsd preflight (`credsd_credentials`),
     /// the gateway host set (`mcp_servers`), and the routes/credentials (`egress_routes`). Each of
     /// these was — or could regress to — a `record.egress`-only reader that silently drops remote MCP,
     /// which a review of this change found twice. If any consumer goes egress-only again, this fails.
@@ -4804,7 +4804,7 @@ command = ["mcp-server-fetch"]
 
         // credsd preflight: the credsd source is visible over the union of both maps.
         assert_eq!(
-            egress::credsd_environments(&record.egress, &record.remote_mcp),
+            egress::credsd_credentials(&record.egress, &record.remote_mcp),
             vec!["prod-inference"],
             "the preflight must see a credsd source declared only on a remote MCP server"
         );
@@ -5397,7 +5397,7 @@ command = ["mcp-server-fetch"]
             "invalid credential entry for host \"api.example.com\": secret scheme \"op\" has \
              no `[secret-source.op]` table: declare the secret source that reads it, or use \
              env://NAME for a credential the workload presents as a placeholder, aws://profile \
-             for one signed in the boundary, or credsd://<environment> for a credsd-vended \
+             for one signed in the boundary, or credsd://<credential> for a credsd-vended \
              credential"
         );
     }

@@ -17,7 +17,7 @@
 //! | A vendor kind sends where the vendor takes it | `a_langfuse_kind_sends_spans_where_langfuse_takes_them` |
 //! | The debug variable prints a failed export and its cause | `the_debug_variable_prints_a_failed_export_and_its_cause` |
 //! | An `aws://` profile that cannot sign stops the run | `a_telemetry_profile_that_cannot_sign_stops_the_run` |
-//! | A `credsd://` environment with no daemon stops the run | `a_telemetry_credsd_environment_without_a_daemon_stops_the_run` |
+//! | A `credsd://` credential with no daemon stops the run | `a_telemetry_credsd_credential_without_a_daemon_stops_the_run` |
 //!
 //! **A probe of the workload's own environment must not go through the `zsh` alias.** That alias
 //! reaches the hosted Shell, which has its own synthesized environment, so `zsh -c 'env'` reports
@@ -1877,10 +1877,10 @@ fn a_telemetry_profile_that_cannot_sign_stops_the_run() {
     );
 }
 
-/// **A telemetry `credsd://` environment with no daemon stops the run before the workload starts.**
+/// **A telemetry `credsd://` credential with no daemon stops the run before the workload starts.**
 #[test]
-fn a_telemetry_credsd_environment_without_a_daemon_stops_the_run() {
-    needs_a_box!("a_telemetry_credsd_environment_without_a_daemon_stops_the_run");
+fn a_telemetry_credsd_credential_without_a_daemon_stops_the_run() {
+    needs_a_box!("a_telemetry_credsd_credential_without_a_daemon_stops_the_run");
     let missing = tempfile::tempdir().expect("tempdir");
     let (_, output) = Request::with_config(
         "telemetry-no-daemon",
