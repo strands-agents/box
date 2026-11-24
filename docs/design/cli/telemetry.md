@@ -117,10 +117,9 @@ map to `unknown`.
 `NotOnHost` does not distinguish the agent from another missing host input.
 
 The current invocation's `workload_started` control record with outcome `ok` confirms the
-launch. It gives `box_launched: true` and `failure_reason: null`. Core writes this record once
-the workload's `exec` succeeded inside its sandbox. A run that Core refuses after `box_started`
-but before the workload starts gives `box_launched: null`. Later workload failures do not
-reverse the launch result. An error during Core's initial preparation can leave no lifecycle
+launch. It gives `box_launched: true` and `failure_reason: null`.
+[Core's control-plane records](../../user/telemetry.md#a-control-plane-record) say when Core
+writes it. Later workload failures do not reverse the launch result. An error during Core's initial preparation can leave no lifecycle
 records.
 A nonzero Core exit does not establish a preparation failure.
 
@@ -141,7 +140,8 @@ preparation, it creates a `Session` with one invocation and the collected
 context. A preparation failure's run event goes out with shutdown, without waiting for launch
 evidence. Successful preparation waits for `workload_started` before it sends the run event. A
 run whose workload never starts sends it with shutdown.
-If observation ends without that evidence, the session emits `null` for all three run fields.
+If observation ends without that evidence, the session emits `null` for all three run fields,
+including when Core refused the run after `box_started`.
 Preparation failures also give `startup_latency_ms: null`. Every field is required; unavailable
 values serialize as `null`.
 Missing records alone do not establish that no box started.

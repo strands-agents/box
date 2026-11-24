@@ -31,9 +31,8 @@ struct Observation {
     journal: Journal,
     interval: DecisionInterval,
     next: Instant,
+    /// `Confirmed` once Core recorded that the workload started, which ends startup.
     launch: LaunchOutcome,
-    /// Whether Core recorded that the workload started, which ends startup.
-    workload_started: bool,
     core_outcome: Option<CoreOutcome>,
 }
 
@@ -188,7 +187,7 @@ fn capture(
                 if let Some(observation) = observation.as_mut() {
                     let polling = observation.tick(Instant::now());
                     let mut events = Vec::new();
-                    if !run_sent && observation.workload_started {
+                    if !run_sent && matches!(observation.launch, LaunchOutcome::Confirmed(_)) {
                         run_sent = true;
                         events.push(invocation.run_event(observation.launch));
                     }
@@ -212,7 +211,6 @@ impl Observation {
             interval: DecisionInterval::new(started, catalog),
             next: started + POLLING_INTERVAL,
             launch: LaunchOutcome::Unknown,
-            workload_started: false,
             core_outcome: None,
         }
     }
@@ -220,8 +218,7 @@ impl Observation {
     fn read(&mut self) {
         self.journal.read(|record| match record {
             Record::WorkloadStarted(started_at) => {
-                if !self.workload_started {
-                    self.workload_started = true;
+                if matches!(self.launch, LaunchOutcome::Unknown) {
                     self.launch = LaunchOutcome::Confirmed(started_at);
                 }
             }
