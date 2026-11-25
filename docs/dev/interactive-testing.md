@@ -97,7 +97,7 @@ not set. The shell of a coding agent often does not have it.
 ## Clean up
 
 Each agent run leaves a directory in `~/.strands/box/r/`. Remove only the runs that you started. Do not
-use `box clean --all` on the operator's `HOME`, because it also removes the operator's runs. A
+use `box profile clean --all` on the operator's `HOME`, because it also removes the operator's runs. A
 run's `box.toml` names its workspace, so match your temporary workspace:
 
 ```sh

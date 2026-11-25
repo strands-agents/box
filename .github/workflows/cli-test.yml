@@ -7,13 +7,14 @@ name: "CLI: Test"
 #
 # `suite` picks what runs:
 #   all     every job below.
-#   engine  the engine suite (crates/cli/app/tests/engine.rs) on macOS only.
+#   core    for a Box Core change: the Linux build and tests, whose tests call Box Core's
+#           library, and the engine suite (crates/cli/app/tests/engine.rs) on macOS.
 
 on:
   workflow_call:
     inputs:
       suite:
-        description: "all or engine."
+        description: "all or core."
         required: false
         type: string
         default: all
@@ -50,7 +51,7 @@ jobs:
           SUITE: ${{ inputs.suite }}
         run: |
           case "$SUITE" in
-            all|engine) ;;
+            all|core) ;;
             *) echo "::error::unknown suite: $SUITE"; exit 1 ;;
           esac
 
@@ -58,7 +59,6 @@ jobs:
     # A fixed name, so the check's name does not change with the runner label.
     name: Build, test, lint
     needs: check-suite
-    if: inputs.suite == 'all'
     permissions:
       contents: read
     runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-24.04' }}
@@ -87,10 +87,13 @@ jobs:
         with:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+      # rust-test-lint.yml lints the workspace for a Core change, so `core` skips the lint here.
       - name: Format
+        if: inputs.suite == 'all'
         run: cargo fmt --all --check
 
       - name: Clippy
+        if: inputs.suite == 'all'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Build
@@ -210,7 +213,7 @@ jobs:
             *.app/Contents/Developer) echo "developer folder: $developer_dir" ;;
             *) echo "::error::full Xcode is not selected: $developer_dir"; exit 1 ;;
           esac
-          if [ "$SUITE" = engine ]; then
+          if [ "$SUITE" = core ]; then
             cargo test -p strands-box-cli --all-features --test engine
           else
             cargo test -p strands-box-cli -p strands-box-cli-pack-tests -p strands-box-cli-profile -p strands-box-cli-telemetry --all-features

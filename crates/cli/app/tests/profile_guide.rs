@@ -747,3 +747,26 @@ fn each_planted_mistake_gives_the_message_that_the_error_table_holds() {
         assert!(error.contains(message), "{message}: {error}");
     }
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn show_from_the_home_folder_prints_the_profile_and_still_fails() {
+    let source = "[agent]\ncommand = [\"/usr/bin/true\"]\n";
+    let (_root, home) = fixture(source);
+    let result = Command::new(env!("CARGO_BIN_EXE_box"))
+        .args(["profile", "show", "test"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir(&home)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    assert_eq!(result.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("Saved settings") && stdout.contains(source),
+        "{stdout}"
+    );
+    assert!(stderr.contains("is your home folder"), "{stderr}");
+}

@@ -1,5 +1,8 @@
 //! Test-only workload that verifies the final descriptor table before and after re-exec.
 
+// A test probe's stderr is the probe's own output to its test, not a Box Core message.
+#![allow(clippy::print_stderr)]
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::process::CommandExt as _;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

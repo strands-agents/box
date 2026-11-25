@@ -1020,6 +1020,39 @@ The native filesystem broker mediates `renameat2` itself and answers any call wi
 `a_name_is_created_without_replacing_one_with_renameat2_under_the_filters` checks each flag under
 the filters, and runs tempfile's `persist_noclobber`.
 
+### Resetting ids to the ones a workload has
+
+On Amazon Linux 2023 (aarch64, glibc 2.34), GNU make 4.3 failed every recipe in a box with
+`make: echo: Operation not permitted`. make starts each recipe with `posix_spawn` and
+`POSIX_SPAWN_RESETIDS`, and glibc's child then calls `setresuid(-1, getuid(), -1)` and
+`setresgid(-1, getgid(), -1)`. The filter admitted only `setresuid(0, 0, 0)` and
+`setresgid(-1, -1, -1)`, so it answered `EPERM` and the spawn failed before `execve`.
+
+The user namespace maps one uid and one gid, both `0`, so every id the workload has is `0`. The
+permit admits each call whose three arguments are each `0` or `-1`, which leaves every id as it
+is. Any other id still gets `EPERM` from the filter, before the kernel would answer `EINVAL` for
+an unmapped id. `setuid` and `setgid` stay refused, so musl's `POSIX_SPAWN_RESETIDS`, which calls
+them, still fails. `a_workload_resets_its_own_ids_and_cannot_change_them` runs
+`posix_spawn` with the flag under the real trampoline, and checks each form.
+
+### Listing a file's extended attribute names
+
+On GitHub's Ubuntu 24.04 ARM64 runner, Box `78e752b0` refused `listxattr` with `EPERM`. A hatchling
+editable build under `uv sync` failed with `PermissionError: [Errno 1] Operation not permitted` from
+`os.listxattr` in `shutil._copyxattr`. hatchling moves the built wheel from the tool's temporary
+folder into the project with `shutil.move`, which falls back to `shutil.copy2` because the two are
+different mounts (`EXDEV`). `copy2` lists the source's attribute names, and Python treats only
+`ENOTSUP`, `ENODATA` and `EINVAL` as "none", so it raised the `EPERM`.
+
+The permit admits `listxattr`, `llistxattr` and `flistxattr`, which return the names of a file's
+extended attributes and no value. `getxattr`, `setxattr` and `removexattr` stay refused, so nothing
+reads or sets `security.capability`. A copy of a file that carries an attribute now succeeds without
+it: `copy2` ignores the `EPERM` from `getxattr` and `setxattr`, so the attribute is skipped and nothing
+says so. On an SELinux host every file carries `security.selinux`, so every such copy drops it. The
+names are of files the box already sees through its own mounts.
+`a_file_lists_its_attribute_names_but_reads_no_value_under_the_filters` runs the three calls and a
+`getxattr` under the filters.
+
 ### The host's top-level links into /usr
 
 On Amazon Linux 2023 and Ubuntu, `/bin` is a link to `usr/bin`. The view bound only the files its
@@ -1194,12 +1227,12 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
   metadata grant already accepted.
   `an_ungranted_path_outside_the_operator_home_still_answers_existence` is what stops it being
   described as closed.
-- **`cargo test --workspace` stops at the first failing binary, and `scripts/test-all.sh` passes no
-  `--no-fail-fast`.** So a pre-existing failure in `strands-box` hides every later crate, containment
-  included. Always add the flag. Three failures are pre-existing, each confirmed by reverting this
-  crate to its base commit: `box_shell.rs::the_shims_shell_has_no_network_path` (also flaky),
-  `mcp_schema_generation.rs::non_utf8_home_and_workspace_paths_keep_their_approved_identity`, and
-  `python_handler_e2e.rs::a_typescript_handler_is_not_refused_for_its_extension`, which needs Node 22.
+- **`cargo test --workspace` stops at the first failing binary unless it gets `--no-fail-fast`, which
+  `scripts/test-all.sh` passes.** Without the flag, a pre-existing failure in `strands-box` hides every
+  later crate, containment included. Always add the flag. Two failures are pre-existing, each
+  confirmed by reverting this crate to its base commit:
+  `box_shell.rs::the_shims_shell_has_no_network_path` (also flaky) and
+  `mcp_schema_generation.rs::non_utf8_home_and_workspace_paths_keep_their_approved_identity`.
 - **Write-xor-exec's third clause is not met on macOS, and the reason is the workload's own
   program.** The rule counts three things as executing: running a file, loading it as a library, and
   *running it through a permitted interpreter*. The first two are closed and measured — the exec

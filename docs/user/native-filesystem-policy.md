@@ -103,6 +103,10 @@ Later history-based rules cannot rely on observing those operations.
 Shell and network policy checks remain active.
 Kernel event delivery and trusted launcher setup can still add overhead.
 
+A nonempty [`filesystem.receive_mounts` array](config.md#incoming-mount-declarations) is incompatible
+with enabled native filesystem policy checks for the same process.
+Incoming mount forwarding is unavailable in this build; disabling native checks does not enable it.
+
 ## Coverage and limits
 
 ### macOS
@@ -218,6 +222,8 @@ no egress destination has a backend, `[gateway] upgrade_http` is empty, the box 
 every process leaves `file-watching` disabled, and each telemetry target uses only the settings
 an earlier build reads,
 configurations without process overrides retain version 21 when disabled and version 22 when enabled.
+These versions also require `linux-passthrough-mounts = false` and an empty `receive_mounts` array
+for every process.
 An explicit process override requires record version 23.
 Two stdio MCP servers that share a program require record version 24.
 Setting [`file-attributes`](config.md#file-attributes) to `true` requires record version 25.
@@ -240,6 +246,11 @@ A box whose agent, tool, or local MCP server declares a [`deny_write`](config.md
 A [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table, or a `secret.env` key on a route or a
 remote MCP server, requires record version 39.
 A [telemetry target](telemetry.md#include) that names `mcp_tool_calls` requires record version 40.
+A [`policy`](config.md#keys) table with `enforcement = "log_only"` requires record version 41.
+Record version 42 preserves the `linux-passthrough-mounts` setting and each process's
+[`receive_mounts` array](config.md#incoming-mount-declarations). A record requires this version
+when the flag is `true` or any such array is nonempty. Record-format support does not enable
+mount forwarding: this build rejects the corresponding run configuration before creating Box state.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 

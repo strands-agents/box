@@ -1,5 +1,8 @@
 //! Process protections and repeat-run refusal through the public library entry point.
 
+// Lines a test helper writes to stderr are test output, not Box Core messages.
+#![allow(clippy::print_stderr)]
+
 #[cfg(unix)]
 #[path = "support/bounded_output.rs"]
 mod bounded_output;
@@ -9,7 +12,7 @@ mod fixture;
 
 #[cfg(unix)]
 fn main() {
-    if reload_tests::dispatch() || decision_tests::dispatch() {
+    if reload_tests::dispatch() || decision_tests::dispatch() || terminal_tests::dispatch() {
         return;
     }
     #[cfg(target_os = "macos")]
@@ -150,7 +153,7 @@ fn main() {
     assert!(stderr.contains("missing.toml"), "{stderr}");
     assert!(
         stderr.lines().any(|line| {
-            line == "strands-box: refusing to run: this process already attempted to run a box"
+            line == "strands-box: error[B0106]: refusing to run: this process already attempted to run a box"
         }),
         "{stderr}"
     );
@@ -203,8 +206,10 @@ fn main() {
     linux_library_ignores_retired_x86_opt_in();
     #[cfg(target_os = "macos")]
     a_supplied_box_id_names_the_box_and_its_telemetry();
-    reload_tests::suite();
+    reload_tests::suite(false);
+    reload_tests::suite(true);
     decision_tests::suite();
+    terminal_tests::core_lines_reach_a_piped_stderr_while_a_library_terminal_runs();
 }
 
 /// **A caller-supplied box ID names a new box, its record, and its telemetry, and a configured box
@@ -270,7 +275,7 @@ fn a_supplied_box_id_names_the_box_and_its_telemetry() {
     let (ok, stderr) = run(&config, Some(supplied));
     assert!(ok, "{stderr}");
     assert!(
-        stderr.contains(&format!("strands-box: box {supplied} created")),
+        stderr.contains(&format!("strands-box: note[B0301]: box {supplied} created")),
         "{stderr}"
     );
     assert_eq!(stored(supplied), supplied);
@@ -556,13 +561,20 @@ mod reload_tests {
         let arguments: Vec<_> = std::env::args().collect();
         match arguments.get(1).map(String::as_str) {
             Some("--reload-workload") => workload(),
-            Some("--reload-run") => running_box(Path::new(&arguments[2]), Path::new(&arguments[3])),
+            Some("--reload-run") => running_box(
+                Path::new(&arguments[2]),
+                Path::new(&arguments[3]),
+                arguments.get(4).is_some_and(|mode| mode == "log-only"),
+            ),
             _ => return false,
         }
         true
     }
 
-    pub(super) fn suite() {
+    /// Reload a running box through every outcome, enforcing or in log-only mode. In log-only mode
+    /// each reload keeps the mode: the restricted policy's denial is let through and recorded
+    /// unenforced, and every `policy_installed` record states `log_only`.
+    pub(super) fn suite(log_only: bool) {
         if !fixture::namespace_launcher_is_usable() {
             eprintln!("skipping: live library reload requires a usable containment backend");
             return;
@@ -573,11 +585,20 @@ mod reload_tests {
             .unwrap()
             .into_temp_path();
         std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
-        let configured = fixture::Request::with_config(
-            "library-reload",
+        let request = fixture::Request::with_config(
+            if log_only {
+                "library-reload-log-only"
+            } else {
+                "library-reload"
+            },
             RESTRICTED,
             "[mcp.alpha-mcp]\ntype = \"stdio\"\ncommand = [\"echo\"]\n",
-        )
+        );
+        let configured = if log_only {
+            request.log_only()
+        } else {
+            request
+        }
         .expect();
         configured.write_command(executable.to_str().unwrap());
         std::fs::write(configured.workspace().join("target.txt"), "reload-target\n").unwrap();
@@ -586,6 +607,7 @@ mod reload_tests {
             .arg("--reload-run")
             .arg(configured.config())
             .arg(configured.box_home())
+            .arg(if log_only { "log-only" } else { "enforce" })
             .env("HOME", configured.operator_home())
             .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
             .env_remove("EXPERIMENTAL_X86_SUPPORT");
@@ -599,10 +621,41 @@ mod reload_tests {
             std::fs::read_to_string(configured.root().join("private/telemetry/records.jsonl"))
                 .unwrap();
         let mut reloads = Vec::new();
+        let mut modes = Vec::new();
+        let mut target_reads = Vec::new();
         for line in records.lines() {
             let batch: serde_json::Value = serde_json::from_str(line).unwrap();
             for resource in batch["resourceLogs"].as_array().into_iter().flatten() {
                 for scope in resource["scopeLogs"].as_array().into_iter().flatten() {
+                    if scope["scope"]["name"] == "strands-box.policy" {
+                        for record in scope["logRecords"].as_array().into_iter().flatten() {
+                            let attribute = |key: &str| {
+                                record["attributes"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .find(|attribute| attribute["key"] == key)
+                                    .map(|attribute| attribute["value"].clone())
+                            };
+                            let resource = attribute("strands.box.policy.resource");
+                            if resource
+                                .as_ref()
+                                .and_then(|value| value["stringValue"].as_str())
+                                .is_some_and(|resource| resource.ends_with("target.txt"))
+                            {
+                                target_reads.push((
+                                    attribute("strands.box.policy.verdict").unwrap()["stringValue"]
+                                        .as_str()
+                                        .unwrap()
+                                        .to_string(),
+                                    attribute("strands.box.policy.enforced")
+                                        .and_then(|value| value["boolValue"].as_bool())
+                                        .unwrap_or(true),
+                                ));
+                            }
+                        }
+                        continue;
+                    }
                     if scope["scope"]["name"] != "strands-box.control" {
                         continue;
                     }
@@ -621,6 +674,9 @@ mod reload_tests {
                         if matches!(subject, "library-policy.dw" | "<no authored policy>") {
                             let operation = read("strands.box.control.operation");
                             let outcome = read("strands.box.control.outcome");
+                            if operation == "policy_installed" {
+                                modes.push(read("strands.box.control.enforcement").to_string());
+                            }
                             reloads.push(format!("{operation} {outcome} {subject}"));
                         }
                     }
@@ -640,6 +696,27 @@ mod reload_tests {
                 "policy_installed ok <no authored policy>",
             ]
         );
+        let mode = if log_only { "log_only" } else { "enforce" };
+        assert!(
+            !modes.is_empty() && modes.iter().all(|stated| stated == mode),
+            "every policy_installed record states {mode}: {modes:?}"
+        );
+        // Steps 0 and 3 run under the restricted policy. Step 4's read, under no authored policy, is
+        // denied by the run's own check, which `change_policy` reads from the workload.
+        let denied: Vec<bool> = target_reads
+            .iter()
+            .filter(|(verdict, _)| verdict == "deny")
+            .map(|(_, enforced)| *enforced)
+            .collect();
+        if log_only {
+            assert_eq!(
+                denied,
+                [false, false],
+                "each restricted read is let through: {target_reads:?}"
+            );
+        } else {
+            assert_eq!(denied, [true, true], "{target_reads:?}");
+        }
     }
 
     fn sources(text: &str) -> [strands_box::Policy; 1] {
@@ -653,7 +730,7 @@ mod reload_tests {
         assert!(strands_box::reload(&[]).unwrap_err().is_not_running());
     }
 
-    fn running_box(config: &Path, home: &Path) {
+    fn running_box(config: &Path, home: &Path, log_only: bool) {
         assert_not_running();
         let original = std::fs::read(config.with_file_name("policy.dw")).unwrap();
         let code = std::thread::scope(|scope| {
@@ -663,7 +740,7 @@ mod reload_tests {
                 strands_box::RunOptions {
                     on_ready: Some(Box::new(|| {
                         assert_not_running();
-                        scope.spawn(|| change_policy(home));
+                        scope.spawn(move || change_policy(home, log_only));
                         Ok(())
                     })),
                     ..Default::default()
@@ -679,7 +756,10 @@ mod reload_tests {
         );
     }
 
-    fn change_policy(home: &Path) {
+    /// Reload through each step, and check each step's read against the mode: enforcing denies the
+    /// restricted policy's read, log-only mode lets it through, and no authored policy denies in
+    /// both.
+    fn change_policy(home: &Path, log_only: bool) {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             match strands_box::reload(&sources(RESTRICTED)) {
@@ -712,7 +792,15 @@ mod reload_tests {
                 _ => {}
             }
             std::fs::write(home.join(format!("request-{step}")), "").unwrap();
-            wait_for(&home.join(format!("response-{step}")));
+            let response = home.join(format!("response-{step}"));
+            wait_for(&response);
+            let expected = match step {
+                0 | 3 => log_only,
+                4 => false,
+                _ => true,
+            };
+            let read = std::fs::read_to_string(&response).unwrap();
+            assert_eq!(read == "allowed", expected, "step {step}: {read}");
         }
     }
 
@@ -720,23 +808,24 @@ mod reload_tests {
         let home = std::env::var_os("HOME").unwrap();
         let home = Path::new(&home);
         assert_not_running();
-        for (step, allowed) in [false, true, true, false, false].into_iter().enumerate() {
+        for step in 0..5 {
             wait_for(&home.join(format!("request-{step}")));
             let output = Command::new("bash")
                 .args(["-c", "cat target.txt"])
                 .output()
                 .unwrap();
             let stderr = String::from_utf8_lossy(&output.stderr);
-            assert_eq!(output.status.success(), allowed, "step {step}: {stderr}");
-            if allowed {
+            let answer = if output.status.success() {
                 assert_eq!(output.stdout, b"reload-target\n");
+                "allowed".to_string()
             } else {
                 assert!(
                     stderr.contains("policy denied") || stderr.contains("default-deny"),
                     "step {step} must fail at policy: {stderr}"
                 );
-            }
-            std::fs::write(home.join(format!("response-{step}")), "").unwrap();
+                format!("denied: {stderr}")
+            };
+            std::fs::write(home.join(format!("response-{step}")), answer).unwrap();
         }
     }
 
@@ -1009,6 +1098,187 @@ mod decision_tests {
                     std::thread::sleep(Duration::from_millis(10));
                 }
             }
+        }
+    }
+}
+
+/// **A library caller that gives the workload its own terminal and points stderr at a pipe reads
+/// Core's lines live and whole**, so nothing waits for the run to end or stops at 32 KiB.
+#[cfg(unix)]
+mod terminal_tests {
+    use super::fixture;
+    use std::fs::File;
+    use std::io::Read as _;
+    use std::os::fd::FromRawFd as _;
+    use std::os::unix::process::CommandExt as _;
+    use std::path::Path;
+    use std::process::{Command, ExitCode, Stdio};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    /// A URL longer than the 32 KiB Core holds while a terminal is its stderr.
+    const PATH_LENGTH: usize = 40_000;
+    const NEEDLE: &str = "monty fetch refused before transport (SSRF floor)";
+    const DISCARDED: &str = "further runtime diagnostics were discarded";
+
+    pub(super) fn dispatch() -> bool {
+        let arguments: Vec<_> = std::env::args().collect();
+        match arguments.get(1).map(String::as_str) {
+            Some("--terminal-workload") => workload(),
+            Some("--terminal-run") => running_box(Path::new(&arguments[2])),
+            _ => return false,
+        }
+        true
+    }
+
+    pub(super) fn core_lines_reach_a_piped_stderr_while_a_library_terminal_runs() {
+        if !fixture::namespace_launcher_is_usable() {
+            eprintln!("skipping: a library terminal run requires a usable containment backend");
+            return;
+        }
+        let executable = tempfile::Builder::new()
+            .prefix("box-terminal-probe-")
+            .tempfile_in(fixture::box_binary().parent().unwrap())
+            .unwrap()
+            .into_temp_path();
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let configured = fixture::Request::with_config(
+            "library-terminal",
+            "permit(principal, action, resource);",
+            "",
+        )
+        .expect();
+        configured.write_command(executable.to_str().unwrap());
+        let release = configured.box_home().join("release");
+        let mut child = Command::new(&executable)
+            .arg("--terminal-run")
+            .arg(configured.config())
+            .env("HOME", configured.operator_home())
+            .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+            .env_remove("EXPERIMENTAL_X86_SUPPORT")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        let (send, received) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut buffer = [0; 8192];
+            while let Ok(length) = stderr.read(&mut buffer) {
+                if length == 0 || send.send(buffer[..length].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let url = format!("http://localhost/{}", "a".repeat(PATH_LENGTH));
+        let mut bytes = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let live = loop {
+            let text = String::from_utf8_lossy(&bytes);
+            if text.contains(NEEDLE) && text.contains(&url) {
+                break true;
+            }
+            if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+                break false;
+            }
+            if let Ok(chunk) = received.recv_timeout(Duration::from_millis(20)) {
+                bytes.extend(chunk);
+            }
+        };
+        // The workload still waits for its release here, so a line seen above arrived live.
+        let running = child.try_wait().unwrap().is_none();
+        std::fs::write(&release, "").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = Command::new("/bin/kill")
+                    .args(["-KILL", "--", &format!("-{}", child.id())])
+                    .status();
+                break child.wait().unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        reader.join().unwrap();
+        bytes.extend(received.try_iter().flatten());
+        let text = String::from_utf8_lossy(&bytes);
+        let shown = || text.replace(&"a".repeat(PATH_LENGTH), "<the long path>");
+        assert!(
+            live && running,
+            "Core's line must reach the pipe whole before the workload exits:\n{}",
+            shown()
+        );
+        assert!(
+            status.success(),
+            "the library run must succeed:\n{}",
+            shown()
+        );
+        assert!(
+            bytes.len() > 32 * 1024,
+            "{} bytes:\n{}",
+            bytes.len(),
+            shown()
+        );
+        assert!(!text.contains(DISCARDED), "{}", shown());
+    }
+
+    /// The library caller: the workload's terminal is a pseudo-terminal this process holds, and
+    /// stderr is the pipe of the test.
+    fn running_box(config: &Path) {
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: openpty initializes the two descriptors and reads no size or settings.
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0, "{}", std::io::Error::last_os_error());
+        // SAFETY: each descriptor openpty returned is owned once.
+        let (mut master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
+        // The workload's terminal output is drained, so it never blocks on a full terminal.
+        std::thread::spawn(move || {
+            let mut buffer = [0; 8192];
+            while matches!(master.read(&mut buffer), Ok(length) if length > 0) {}
+        });
+        let code = strands_box::run(
+            config.into(),
+            vec!["--terminal-workload".into()],
+            strands_box::RunOptions {
+                terminal: Some(slave),
+                ..Default::default()
+            },
+        );
+        std::process::exit(if code == ExitCode::SUCCESS { 0 } else { 1 });
+    }
+
+    /// The workload: one Monty fetch the address floor refuses with a URL longer than 32 KiB, then
+    /// a wait for the test to release it.
+    fn workload() {
+        let script = format!(
+            "try:\n    fetch('http://localhost/' + 'a' * {PATH_LENGTH})\nexcept OSError:\n    pass\n"
+        );
+        let output = Command::new("python3")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let home = std::env::var_os("HOME").unwrap();
+        let release = Path::new(&home).join("release");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !release.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the test never released the workload"
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }

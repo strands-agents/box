@@ -132,33 +132,37 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
             &mut identifiers,
         );
     }
-    for delivery in [
-        Delivery::Completed { bytes: 5 },
-        Delivery::Partial { accepted_bytes: 3 },
-        Delivery::Indeterminate { accepted_bytes: 2 },
-        Delivery::Failed,
-    ] {
-        record_operation(
-            &engine,
-            Request::Http {
-                host: "api.example.com",
-                port: 443,
-                method: "POST",
-                path: "/upload",
-                body_bytes: 5,
-                intercepted: true,
-            },
-            Outcome::Http {
-                host: "api.example.com",
-                port: 443,
-                method: "POST",
-                path: "/upload",
-                delivery,
-                status: None,
-                intercepted: true,
-            },
-            &mut identifiers,
-        );
+    for websocket in [false, true] {
+        for delivery in [
+            Delivery::Completed { bytes: 5 },
+            Delivery::Partial { accepted_bytes: 3 },
+            Delivery::Indeterminate { accepted_bytes: 2 },
+            Delivery::Failed,
+        ] {
+            record_operation(
+                &engine,
+                Request::Http {
+                    host: "api.example.com",
+                    port: 443,
+                    method: "POST",
+                    path: "/upload",
+                    body_bytes: 5,
+                    intercepted: true,
+                    websocket,
+                },
+                Outcome::Http {
+                    host: "api.example.com",
+                    port: 443,
+                    method: "POST",
+                    path: "/upload",
+                    delivery,
+                    status: None,
+                    intercepted: true,
+                    websocket,
+                },
+                &mut identifiers,
+            );
+        }
     }
     let words = vec!["value".to_string()];
     record_operation(
@@ -261,6 +265,7 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
             path: "/upload",
             body_bytes: 5,
             intercepted: true,
+            websocket: false,
         },
     );
     assert!(
@@ -323,7 +328,10 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
                 // are completed responses, so those declared error kinds have no public producer.
                 "error" => {
                     signature.action().starts_with("fs:")
-                        || matches!(signature.action(), "net:connect" | "http:request")
+                        || matches!(
+                            signature.action(),
+                            "net:connect" | "http:request" | "websocket:connect"
+                        )
                 }
                 other => panic!("new event kind {other} needs producer coverage"),
             }

@@ -1,8 +1,3 @@
----
-reader: Someone who wants to change what the box lets the agent do, by reading or writing policy rules, and who needs to know which rules their packs and profile already give it.
-belongs: What a policy checks, where a run's rules come from (your rule files, the rules box writes from pack and profile settings, and Box Core's own checks), what's in policy.dw, and how to write a rule. Policy starters and the policy menu go to starters.md. Generated rule IDs and how box joins the files go to policies-reference.md. Rule syntax goes to Box Core's policy guide. A fix after an error goes to troubleshooting.md.
----
-
 # Policies
 
 A policy is the set of rules the box checks before the agent runs a command, reaches a host, or

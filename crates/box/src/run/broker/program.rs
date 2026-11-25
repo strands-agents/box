@@ -190,7 +190,7 @@ impl Program {
         match super::shell::deadline(self.timeout) {
             Ok(deadline) => self.shell.proc.deadline = deadline,
             Err(error) => {
-                Self::forward(&self.stderr, format!("strands-box: {error}\n")).await;
+                Self::forward(&self.stderr, ::diagnostics::diag!(text B1203, "{error}")).await;
                 return CallOutcome { status: 1 };
             }
         }

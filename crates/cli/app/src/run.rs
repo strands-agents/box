@@ -167,7 +167,7 @@ pub(crate) fn refuse_owned_name(box_home: &Path, name: &str) -> Result<(), Error
 /// Whether the profile file `owner` still declares `name`.
 fn still_owns(owner: &Path, name: &str) -> bool {
     std::fs::read_to_string(owner).is_ok_and(|text| {
-        Profile::parse(&text, owner)
+        Profile::parse(&text, owner, crate::VERSION)
             .map(|profile| profile.declared_name() == Some(name))
             .unwrap_or(true)
     })
@@ -502,6 +502,8 @@ pub struct Launcher {
 pub struct Launch {
     name: String,
     home: PathBuf,
+    /// The box home, when `BOX_HOME` moves it from `~/.strands/box`.
+    box_home: Option<PathBuf>,
     reused: bool,
     moved: Option<(PathBuf, PathBuf)>,
     profile_name: String,
@@ -600,15 +602,6 @@ impl HeldBoxes {
         }
         Ok(())
     }
-}
-
-/// What `box clean --all` removed and kept.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Cleaned {
-    /// How many run folders were removed.
-    pub removed: usize,
-    /// The running boxes that were kept.
-    pub running: Vec<String>,
 }
 
 impl Launcher {
@@ -750,7 +743,7 @@ impl Launcher {
         let file = std::fs::canonicalize(argument).map_err(unreadable)?;
         let text = std::fs::read_to_string(&file).map_err(unreadable)?;
         observe(text.as_bytes());
-        let profile = Profile::parse(&text, &file)?;
+        let profile = Profile::parse(&text, &file, crate::VERSION)?;
         let name = profile
             .declared_name()
             .ok_or_else(|| Error::ProfileFileUnnamed { path: file.clone() })?
@@ -804,7 +797,7 @@ impl Launcher {
 
     /// The operator's profiles.
     pub fn profiles(&self) -> Profiles {
-        Profiles::at(profiles_root(&self.host.box_home))
+        Profiles::at(profiles_root(&self.host.box_home), crate::VERSION)
     }
 
     /// The text of `box help agent`, which names the guide that ships with this `box`.
@@ -888,54 +881,6 @@ impl Launcher {
         Ok(names)
     }
 
-    /// Check that `id` names one of the run folders that `runs` lists, and that its box is not
-    /// running. Refuse it otherwise.
-    pub fn find_run(&self, id: &str) -> Result<(), Error> {
-        self.saved_box(id)?;
-        hold(&self.runs_root(), id).map(drop)
-    }
-
-    /// Remove the run folder `id`, a link without its target. Refuse a box that is still running,
-    /// and hold the lock until the folder is gone, so a box cannot start in it meanwhile.
-    pub fn remove_run(&self, id: &str) -> Result<(), Error> {
-        self.saved_box(id)?;
-        let held = hold(&self.runs_root(), id)?;
-        remove_held(&self.runs_root().join(id), &held)?;
-        Ok(())
-    }
-
-    /// Refuse `id` unless it names one of the run folders that `runs` lists.
-    fn saved_box(&self, id: &str) -> Result<(), Error> {
-        if self.runs()?.iter().any(|name| name == id) {
-            Ok(())
-        } else {
-            Err(Error::BoxUnknown {
-                id: id.to_string(),
-                root: self.runs_root(),
-            })
-        }
-    }
-
-    /// Remove every run folder whose box is not running. `cleaned` counts the removed folders and
-    /// names the running boxes that were kept, also when a removal fails.
-    pub fn remove_runs(&self, cleaned: &mut Cleaned) -> Result<(), Error> {
-        let root = self.runs_root();
-        for name in self.runs()? {
-            let held = match hold(&root, &name) {
-                Ok(held) => held,
-                Err(Error::BoxRunning { id }) => {
-                    cleaned.running.push(id);
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            if remove_held(&root.join(name), &held)? {
-                cleaned.removed += 1;
-            }
-        }
-        Ok(())
-    }
-
     /// The saved boxes of `profiles`, by ID, or every saved box when `profiles` is `None`. A box
     /// belongs to a profile when its ID is valid and its `profile-name` records `profile`,
     /// the same check that `box run --box-id` makes.
@@ -953,7 +898,7 @@ impl Launcher {
                 continue;
             }
             for profile in profiles {
-                if is_run_id(&id) && minted_by(&root.join(&id), profile)? {
+                if owned_by(&root, &id, profile)? {
                     owned.push(id);
                     break;
                 }
@@ -975,7 +920,7 @@ impl Launcher {
                 root,
             });
         }
-        if !minted_by(&root.join(id), profile)? {
+        if !owned_by(&root, id, profile)? {
             return Err(Error::CleanBoxNotOwned {
                 id: id.to_string(),
                 profile: profile.to_string(),
@@ -993,10 +938,9 @@ impl Launcher {
         let mut held = Vec::new();
         let mut running = Vec::new();
         for id in ids {
-            match hold(&root, id) {
-                Ok(lock) => held.push((root.join(id), lock)),
-                Err(Error::BoxRunning { id }) => running.push(id),
-                Err(error) => return Err(error),
+            match hold(&root, id)? {
+                Hold::Free(lock) => held.push((root.join(id), lock)),
+                Hold::Running => running.push(id.clone()),
             }
         }
         match running.as_slice() {
@@ -1343,6 +1287,8 @@ impl Launcher {
             Ok(Launch {
                 name: instance.name.clone(),
                 home: home.clone(),
+                box_home: (self.host.box_home != default_box_home(&self.host.home))
+                    .then(|| self.host.box_home.clone()),
                 reused,
                 moved,
                 profile_name: name.to_string(),
@@ -2160,7 +2106,7 @@ fn reusable_run(runs: &Path, profile: &str, id: &str) -> Result<Instance, Error>
             root: runs.to_path_buf(),
         });
     }
-    if !is_run_id(id) || !minted_by(&directory, profile)? {
+    if !owned_by(runs, id, profile)? {
         return Err(Error::BoxIdProfile {
             id: id.to_string(),
             profile: profile.to_string(),
@@ -2192,9 +2138,28 @@ fn recorded_workspace(config: &Path) -> Result<Option<PathBuf>, Error> {
     }))
 }
 
-/// Whether the run in `directory` was minted for `profile`: its profile record names it exactly.
-fn minted_by(directory: &Path, profile: &str) -> Result<bool, Error> {
-    let record = directory.join(PROFILE_RECORD);
+/// The profile name in a `profile-name` `record`: a nonempty name followed by one newline, as
+/// `box` writes it. `box runs list` shows this name.
+pub(crate) fn profile_of(record: &str) -> Option<&str> {
+    record
+        .strip_suffix('\n')
+        .filter(|profile| !profile.is_empty())
+}
+
+/// Whether a saved box `id` whose record holds `recorded` belongs to `profile`: `id` is a run ID
+/// and [`profile_of`] the record is exactly `profile`. `owned_by` and the `box runs list <name>`
+/// filter both decide with it.
+pub(crate) fn owns(id: &str, recorded: Option<&str>, profile: &str) -> bool {
+    is_run_id(id) && recorded == Some(profile)
+}
+
+/// Whether the saved box `id` in `runs` belongs to `profile`, by [`owns`]. It reads the box's
+/// `profile-name` record only when `id` is a run ID.
+pub(crate) fn owned_by(runs: &Path, id: &str, profile: &str) -> Result<bool, Error> {
+    if !is_run_id(id) {
+        return Ok(false);
+    }
+    let record = runs.join(id).join(PROFILE_RECORD);
     let mut file = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
@@ -2221,12 +2186,12 @@ fn minted_by(directory: &Path, profile: &str) -> Result<bool, Error> {
     let mut text = String::new();
     std::io::Read::read_to_string(&mut file, &mut text)
         .map_err(|source| io_error("read", &record, source))?;
-    Ok(text.strip_suffix('\n') == Some(profile))
+    Ok(owns(id, profile_of(&text), profile))
 }
 
 /// Hold the run folder `name` in `runs` with the lock that `claim` takes, so a box that is still
 /// running is refused. A link holds no box that `claim` accepts, so it needs no lock.
-fn hold(runs: &Path, name: &str) -> Result<Option<std::fs::File>, Error> {
+fn hold(runs: &Path, name: &str) -> Result<Hold, Error> {
     let directory = runs.join(name);
     let file = match std::fs::OpenOptions::new()
         .read(true)
@@ -2240,14 +2205,23 @@ fn hold(runs: &Path, name: &str) -> Result<Option<std::fs::File>, Error> {
                 Some(nix::libc::ELOOP | nix::libc::ENOTDIR)
             ) || error.kind() == std::io::ErrorKind::NotFound =>
         {
-            return Ok(None);
+            return Ok(Hold::Free(None));
         }
         Err(source) => return Err(io_error("open", &directory, source)),
     };
-    lock_run(file, &directory, || Error::BoxRunning {
-        id: name.to_string(),
-    })
-    .map(Some)
+    match file.try_lock() {
+        Ok(()) => Ok(Hold::Free(Some(file))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(Hold::Running),
+        Err(std::fs::TryLockError::Error(source)) => Err(io_error("lock", &directory, source)),
+    }
+}
+
+/// What [`hold`] found at a run folder.
+enum Hold {
+    /// No box runs there. It holds the folder's lock, or nothing for a link or a missing folder.
+    Free(Option<std::fs::File>),
+    /// A box holds the lock.
+    Running,
 }
 
 /// Remove the run folder `path` while `_held` holds its lock, so no box starts in it meanwhile.
@@ -2316,7 +2290,7 @@ pub(crate) fn mint(runs: &Path, profile: &str, base: &Path) -> Result<Instance, 
 }
 
 /// A new instance under `runs`: a name no other run holds, its directory, and its `box_dir`, and
-/// the lock on its directory, taken before the directory holds anything, so `box clean` keeps it.
+/// the lock on its directory, taken before the directory holds anything, so `box profile clean` refuses it.
 pub(crate) fn mint_claimed(
     runs: &Path,
     profile: &str,
@@ -2375,7 +2349,7 @@ pub(crate) fn mint_claimed(
     Err(io_error("create", &directory, source))
 }
 
-/// Lock the run folder that `mint_claimed` just created. `None` when `box clean` took it first:
+/// Lock the run folder that `mint_claimed` just created. `None` when `box profile clean` took it first:
 /// it holds the lock, or it removed the folder before the lock.
 fn lock_new(directory: &Path) -> Result<Option<std::fs::File>, Error> {
     let file = match std::fs::OpenOptions::new()
@@ -2500,6 +2474,67 @@ impl Launch {
         &self.journal
     }
 
+    /// A fresh run that failed before Box Core wrote any state, which `box` removes.
+    fn unused(&self, code: ExitCode) -> bool {
+        !self.reused
+            && code != ExitCode::SUCCESS
+            && self
+                .config
+                .with_file_name("box")
+                .read_dir()
+                .is_ok_and(|mut entries| entries.next().is_none())
+    }
+
+    fn reuse_instruction(&self) -> String {
+        format!("box: to reuse this box run: {}", self.reuse_command())
+    }
+
+    /// The `box runs history` command for this run, with `--deny` when `deny` is set. When
+    /// `BOX_HOME` moves the box home, the command sets it too, so it also works in a shell that
+    /// does not have it. A box home that a shell word cannot hold as typed is left out.
+    pub(crate) fn history_command(&self, deny: bool) -> String {
+        let box_home = self
+            .box_home
+            .as_deref()
+            .and_then(Path::to_str)
+            .filter(|path| banner::clean(path) == *path)
+            .map(|path| {
+                if path
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_./:-".contains(&byte))
+                {
+                    format!("BOX_HOME={path} ")
+                } else {
+                    format!("BOX_HOME='{}' ", path.replace('\'', "'\\''"))
+                }
+            })
+            .unwrap_or_default();
+        let deny = if deny { " --deny" } else { "" };
+        format!("{box_home}box runs history {}{deny}", self.name)
+    }
+
+    /// The command that runs this profile in this box again.
+    fn reuse_command(&self) -> String {
+        let argument = &self.policy.argument;
+        let id = self.name();
+        if banner::clean(argument) != *argument
+            || argument.contains('\\')
+            || self.profile.to_str().is_none()
+        {
+            format!("repeat your command with --box-id {id} before any --")
+        } else if argument
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_./:-".contains(&byte))
+        {
+            format!("box run {argument} --box-id {id}")
+        } else {
+            format!(
+                "box run '{}' --box-id {id}",
+                argument.replace('\'', "'\\''")
+            )
+        }
+    }
+
     fn report(&self) {
         let name = &self.profile_name;
         for (link, why) in self.not_copied() {
@@ -2559,9 +2594,9 @@ impl Launch {
                 "box: running profile {name} with box ID {id} (records: {})",
                 self.journal().display()
             );
-            eprintln!("box: to reuse this box run: box run {name} --box-id {id}");
+            eprintln!("{}", self.reuse_instruction());
         }
-        eprintln!("box: policy history: box runs history {id}");
+        eprintln!("box: policy history: {}", self.history_command(false));
     }
 
     /// The options every Box Core run of this launch starts from: its box ID, and defaults otherwise.
@@ -2622,8 +2657,7 @@ impl Launch {
                 self.run_options(),
             ))
         };
-        if !self.reused
-            && !result.as_ref().is_ok_and(|code| *code == ExitCode::SUCCESS)
+        if self.unused(*result.as_ref().unwrap_or(&ExitCode::FAILURE))
             && let Some(directory) = self.config.parent()
             && std::fs::remove_dir(directory.join("box")).is_ok()
             && let Err(error) = remove_if_present(directory)
@@ -2820,6 +2854,7 @@ mod tests {
             KEEP = "profile-value"
         "#,
             &home.join(".strands/box/profiles/test/profile.toml"),
+            crate::VERSION,
         )
         .unwrap();
         let make = |display| {

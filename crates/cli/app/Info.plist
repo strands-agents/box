@@ -4,7 +4,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.amazon.strands.box-cli</string>
+    <string>com.amazon.strands.box</string>
     <key>CFBundleName</key>
     <string>box</string>
     <key>CFBundleExecutable</key>

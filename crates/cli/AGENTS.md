@@ -23,6 +23,17 @@ to a command needs no migration. What the CLI must not do is **break the Box Cor
 Box Core accepts, and it calls Box Core's public library API. Treat Box Core's config schema and library surface
 as an external dependency, even though Box Core is in the same workspace.
 
+The CLI team reviews changes to the CLI's paths, and Box Core maintainers review Box Core's.
+
+### When the CLI needs something Box Core lacks
+
+- A Core change the CLI needs, such as a new `box.toml` key or a new library function, lands first
+  in its own pull request under Box Core's rules, and Box Core maintainers review it. The CLI pull
+  request that uses it follows. A CLI pull request does not change Box Core's contract.
+- The CLI's syntax is its own: it is written for the people who use `box`, and it can diverge from
+  `box.toml`. Do not reuse a `box.toml` name or shape in a profile or pack only to match Box Core,
+  and do not ask for a Box Core key only to make CLI syntax simpler.
+
 ## How the CLI depends on Box Core
 
 Box Core has a library target, so the CLI links the `strands-box` crate (`crates/box`) by path.
@@ -139,7 +150,7 @@ not a draft, and each night. A pull request merges only when the `CI Gate` job p
 every other CI job, and it fails on a draft. On a pull request, the `detect-changes` job's path
 filters skip the jobs that its files cannot affect: a docs-only pull request runs only Prose,
 Packaging tests, and the gate, a CLI-only pull request skips Box Core's unit tests and containment
-suite, and a Box Core change also runs the CLI's engine suite. When a CLI check starts to read a
+suite, and a Box Core change also runs the CLI's Linux tests and its engine suite. When a CLI check starts to read a
 new file, add the file to the `cli` filter. A path that no filter and no entry in the `other` skip
 list matches runs every check.
 
@@ -210,6 +221,7 @@ default, an accepted-value set, or a precedence order.
 | What a profile is and decides, where it lives, and how to change one | `docs/cli/profiles.md`, with an example for each change. `docs/cli/profiles-reference.md` is the key reference. |
 | What a pack is, its kinds, and how to write one | `docs/cli/packs.md`. `docs/cli/packs-reference.md` is the key reference. |
 | What a plugin is, how to use one, and how to write one | `docs/cli/plugins.md`. `docs/cli/plugins-reference.md` is the reference for the `plugin.toml` keys and the plugin rules. |
+| Where a route's key comes from: each `secret.ref` source (`env://`, `aws://`, `credsd://`, a plugin's scheme), what the agent gets, and how to set one up | `docs/cli/credentials.md`. The `secret.ref` row stays in `docs/cli/profiles-reference.md`, and Box Core's `docs/user/egress.md` owns the signed-route rules, the AWS credential chain, and the credsd socket. |
 | The `starter.toml` keys and the policy starter keys (`policy.toml`) | `docs/cli/starters-reference.md` |
 | What a policy checks, where a run's rules come from (rule files, generated rules, Box Core's checks), and how to write a rule | `docs/cli/policies.md`. Box Core's policy guide owns the rule syntax. |
 | How `box` joins a run's policy, and the `@id` of each generated rule | `docs/cli/policies-reference.md` |

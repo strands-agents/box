@@ -152,8 +152,8 @@ wired feature.
 Run `build`, `test`,
 `clippy --all-targets`, and `fmt --check`, each with `--all-features`, then the doc gate with
 `RUSTDOCFLAGS="-D warnings --document-private-items"`; the default gate misses a dangling intra-doc
-link when this surface shrinks. Build and test the three consumers: `strands-box-egress-gateway`,
-`strands-box`, and `strands-box-containment`. The last is a
+link when this surface shrinks. Build and test the four consumers: `strands-box-egress-gateway`,
+`strands-box`, `strands-box-telemetry`, and `strands-box-containment`. The last is a
 `[dev-dependencies]` entry, so `cargo build` misses it. Run the required artifact critics. Modify
 `Cargo.lock` only for a dependency this crate added.
 
@@ -251,6 +251,47 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   expired does not displace a still-valid cached one.
   `cache_does_not_serve_a_cached_credential_that_expired_during_a_failed_refresh` and
   `cache_keeps_a_valid_credential_over_an_expired_fresh_resolve` pin both.
+- **A credential resolved before a snapshot restore is dropped, not served.** A restored or cloned
+  virtual machine keeps the process memory of the snapshot, so the cache holds a credential that is
+  still valid but belongs to the identity of the machine that took the snapshot. The cache records
+  the host state at each resolve (`Resolution`) and, before it serves a cached credential, asks
+  `restored_since`. A restore drops the slot, so a failed resolve after it is a hard error and never
+  falls back to the old identity. Two detectors run, in order:
+  1. The Linux generation counter `/dev/sysgenid` (`vm_generation::current`). The device is opened
+     and mapped once, and each check reads the first four bytes of the mapping as a little-endian
+     `u32` with one volatile load. A `read()` on the device blocks until the next change, so do not
+     read it. AWS-LC maps and loads the same device in the same way. When the counter is present, it
+     alone decides.
+  2. With no counter, a clock jump: the wall clock ran ahead of the monotonic clock by more than
+     `CLOCK_JUMP_TOLERANCE` (2 s) since the resolve. The monotonic clock stops while the machine is
+     suspended or snapshotted, and the wall clock is current after the restore. In an AgentCore
+     Runtime snapshot environment the monotonic clock resumed at its snapshot value and the gap was
+     42 s to 354 s. `Moment::now` measures the monotonic clock from the first reading in the process.
+  The clock signal has false positives, and each one drops a valid credential: a Linux suspend, a
+  macOS sleep (the macOS monotonic clock stops during sleep), an NTP step forward of more than 2 s,
+  and on macOS the drift between the unslewed monotonic clock and the slewed wall clock, which
+  crosses 2 s over about 12 h at 46 ppm. Each costs one resolve, and the request fails hard only when
+  that resolve fails, for example while the network comes back after a wake. That cost is accepted,
+  because a fallback to a credential of the wrong identity is the defect. A guest whose wall clock
+  comes back stale and is stepped forward later serves the old credential until the step; the
+  detector relies on a current wall clock after the restore, as measured above.
+  On a host with no counter, a clone resumed less than 2 s after its source paused leaves no clock
+  gap and keeps the source's credential until the expiry buffer.
+  A wall clock that moved back behind the resolve also resolves again, but keeps the cached
+  credential as a fallback. While the clock stays behind, each request resolves, and with a failing
+  chain each waits up to `RESOLVE_TIMEOUT` for the fallback. Slow traffic does not resolve per
+  request: outside the expiry buffer and with no restore, the cache serves.
+  `cache_resolves_once_again_when_the_generation_changes`,
+  `cache_does_not_fall_back_to_a_credential_resolved_before_a_restore`,
+  `cache_resolves_again_when_the_wall_clock_jumps_ahead_of_the_monotonic_clock`,
+  `cache_serves_the_cached_credential_within_the_clock_jump_tolerance`, and
+  `cache_resolves_once_for_slow_traffic_outside_the_expiry_buffer` pin it.
+- **The shared HTTP client keeps no idle connection** (`pool_max_idle_per_host(0)`). A pooled
+  connection to instance metadata or STS from before a restore is dead or belongs to the old network,
+  and the pool's idle timeout runs on the monotonic clock, which stopped across the snapshot, so the
+  pool would offer it as fresh. A resolve is rare, so a new connection for each one costs little. No
+  offline test pins this or the worker's use of `vm_generation::current`; the end-to-end restore run
+  covers both.
 - **The region is resolved from the environment then a profile, never instance metadata**, and
   pinned on the provider so the rebuild never runs the SDK region chain (which would reach IMDS on a
   host with no configured region). The bare form resolves the region once from env then the *default*
@@ -273,7 +314,14 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   broken chain fails at `box run` rather than on the first request. Only when a bare route exists and
   `ambient_policy != Deny`; a named-profile-only or `credsd://` vault does no resolve at open, so a
   box that never signs a bare route forces no credentials to exist. The resolve primes the shared
-  cache and emits the one prepare-step audit record.
+  cache and emits the one prepare-step audit record. It is also where the vault prints the one
+  ambient-identity warning (`warn_at_open`), one line for each bare route, naming its destination. `sign_aws` warns no more: each sign keeps its audit
+  record, and a repeated warning told the operator nothing new.
+  `sign_aws_warns_on_bare_and_not_on_scoped` and `many_bare_signs_leave_one_ambient_warning` pin
+  one warning at open and none per sign; `each_bare_route_names_its_host_at_open` pins one line per
+  bare route. A destination warns once for the process (`first_warning`), because a box opens more
+  than one vault for one destination: a telemetry target's `preflight_aws` opens a second.
+  `a_destination_warns_once_across_vaults` pins it, and each warning test uses its own destination.
 - Build the per-request resolve from the vault's retained `ambient_policy` via
   `AwsSource::with_provider(self.aws_provider(), …)`, never `AwsSource::new()`, or
   `require_scoped_aws_profile` is unreachable.
@@ -298,7 +346,7 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
 - `env://` refuses every `DENYLIST` name (`src/sources/env.rs`), case-insensitively and hard, so a
   manifest cannot exfiltrate ambient credentials or process-injection state. It is a floor, not a
   catalogue. A bare `aws://` default chain reads those `AWS_*` names on purpose, through the SDK.
-- Do not merge `DENYLIST` with `reserved_workload_environment` (`box/src/define/config.rs`), which
+- Do not merge `DENYLIST` with `reserved_workload_environment` (`box/src/record/config/env.rs`), which
   governs what a credential may claim in the workload environment and refuses at `create`.
 - `op://` has no soft tier; `op read` cannot signal absence, so every failure is hard. A declared
   source has none for the same reason.

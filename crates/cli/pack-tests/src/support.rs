@@ -6,7 +6,7 @@ pub(crate) use strands_box_cli::test_support::{
     Trees, box_toml, brew_program, codex_settings, macos_cargo, no_agent, operator_pack, pack,
     profiles_root, resolution, resources, run_folder, script_with, strings, text, tool, trial,
 };
-pub(crate) use strands_box_cli::{Error, FakeHost, Trial, Trialed};
+pub(crate) use strands_box_cli::{Error, FakeHost, Terminal, Trial, Trialed};
 pub(crate) use strands_box_cli_profile::fixtures::{binary, executable, script, write};
 pub(crate) use strands_box_cli_profile::host::resolved;
 pub(crate) use strands_box_cli_profile::lang::storage_root;
@@ -78,3 +78,48 @@ file takes effect in this session: the banner says UPDATE READY, and the user pr
 Without the banner, and for a change to the profile's startup settings (its packs, tools, folders,
 or egress routes), the user starts a new run.
 ";
+
+/// Assert that `path` is `<storage>/tool/<tool>/<dir>` in the profile's storage, which names no
+/// project, that the tool can read and write it, and that no entry of the agent's filesystem table
+/// reaches it or a folder above it.
+pub(crate) fn assert_in_tool_storage(generated: &Trialed, host: &FakeHost, path: &str, end: &str) {
+    let storage = storage_root(&host.home().join(".strands/box"), "claude");
+    assert_eq!(
+        path,
+        text(&storage.join(end.trim_start_matches('/'))),
+        "one folder for every project of the profile"
+    );
+    assert!(!path.starts_with(&text(&host.project())), "{path}");
+    let tool_name = end
+        .trim_start_matches("/tool/")
+        .split('/')
+        .next()
+        .expect("a tool");
+    let filesystem = &tool(generated, tool_name)["filesystem"];
+    assert!(
+        strings(&filesystem["read"]).iter().any(|read| read == path),
+        "{filesystem}"
+    );
+    assert!(
+        strings(&filesystem["write"])
+            .iter()
+            .any(|write| write == path),
+        "{filesystem}"
+    );
+    let file: toml::Value = toml::from_str(generated.box_toml()).expect("TOML");
+    let agent = file["agent"]["filesystem"]
+        .as_table()
+        .expect("the agent's filesystem table");
+    for (list, entries) in agent {
+        for entry in entries.as_array().into_iter().flatten() {
+            let entry = entry
+                .as_str()
+                .or_else(|| entry.get("path").and_then(toml::Value::as_str))
+                .unwrap_or_default();
+            assert!(
+                entry.is_empty() || !Path::new(path).starts_with(entry),
+                "the agent's `{list}` entry {entry} reaches {path}"
+            );
+        }
+    }
+}

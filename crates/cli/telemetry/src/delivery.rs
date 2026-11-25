@@ -48,9 +48,14 @@ fn destination(test_transport: bool, configured: Option<&str>) -> Option<String>
 }
 
 impl Delivery {
-    pub(crate) fn new(endpoint: String, request_timeout: Duration) -> Option<Self> {
+    pub(crate) fn new(
+        endpoint: String,
+        request_timeout: Duration,
+        user_agent: &str,
+    ) -> Option<Self> {
         let builder = || {
             let builder = reqwest::blocking::Client::builder()
+                .user_agent(user_agent)
                 .timeout(request_timeout)
                 .connect_timeout(request_timeout)
                 .redirect(reqwest::redirect::Policy::none())
@@ -202,7 +207,7 @@ mod tests {
         }
 
         fn delivery(&self, timeout: Duration) -> Delivery {
-            Delivery::new(self.endpoint.clone(), timeout).unwrap()
+            Delivery::new(self.endpoint.clone(), timeout, "box/1.2.3").unwrap()
         }
     }
 
@@ -324,7 +329,7 @@ mod tests {
     #[test]
     fn final_sends_use_a_new_connection_and_sends_during_the_run_reuse_one() {
         let (endpoint, requests) = keep_alive_server();
-        let delivery = Delivery::new(endpoint, Duration::from_secs(2)).unwrap();
+        let delivery = Delivery::new(endpoint, Duration::from_secs(2), "box/1.2.3").unwrap();
         let invocation = invocation();
         let next = || requests.recv_timeout(Duration::from_secs(2)).unwrap();
         let body = |events: &[Event]| -> serde_json::Value {
