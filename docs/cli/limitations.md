@@ -374,9 +374,10 @@ instructions, and skills, the packages and temporary files of your MCP servers, 
 keep for themselves.
 
 So if an agent in one project follows instructions it read in a file there, such as a dependency's
-README, and writes them into the shared `CLAUDE.md`, a hook, or its memory, the next box of that
-profile in another project loads them. From there, it can change what that project's tools and
-servers run. The change stays inside your boxes: `box` never writes back to your own `~/.claude`.
+README, and writes them into the profile's shared instructions, such as Claude Code's `CLAUDE.md`, a
+hook, or its memory, the next box of that profile in another project loads them. From there, it can
+change what that project's tools and servers run. The change stays inside your boxes: `box` never
+writes back to your agent's own folder on your machine, such as `~/.claude`.
 
 Think of a profile as one zone of trust. Each profile has its own storage, so nothing one keeps
 reaches another. Use a separate profile, such as `claude-untrusted`, for work you don't want mixed
