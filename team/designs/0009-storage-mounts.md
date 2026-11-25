@@ -104,16 +104,13 @@ Box cannot inspect storage that has not arrived or check every later mount. Depl
 
 ## 4. Proposed configuration
 
-Box Core builds sandboxes. Its proposed `box.toml` setting, `[experimental-features] linux-passthrough-mounts`, enables this Linux-only feature. Each agent, tool, or local MCP server lists the paths it needs in its own `filesystem.receive_mounts` array. Listing a path does not grant access; the permission lists do that.
+Box Core builds sandboxes. On Linux ARM64 and x86-64, mount forwarding is available by default without an experimental feature flag. Each agent, tool, or local MCP server lists the paths it needs in its own `filesystem.receive_mounts` array in `box.toml`. Listing a path does not grant access; the permission lists do that.
 
 `receive_mounts` selects paths where the sandbox receives externally attached filesystems after startup. It does not tell Box to create or mount a filesystem. Linux propagation settings such as `rslave` remain implementation details, not public configuration options.
 
 This is a configuration excerpt, not a complete runnable file. Current releases do not support it.
 
 ```toml
-[experimental-features]
-linux-passthrough-mounts = true
-
 # Allow the agent to read, write, and run files in both directories.
 [agent.filesystem]
 receive_mounts = ["/mnt/data", "/mnt/shared"]
@@ -128,7 +125,9 @@ read = ["/mnt/data"]
 write = ["/mnt/data"]
 ```
 
-A local MCP server uses `[mcp.<name>.filesystem]`. Each sandbox has its own list; it inherits no other sandbox's mounts or grants. Different sandboxes may select the same path, as the example shows. An empty or omitted list enables no forwarding.
+A local MCP server uses `[mcp.<name>.filesystem]`. Each sandbox has its own list; it inherits no other sandbox's mounts or grants. Different sandboxes may select the same path, as the example shows. On Linux, an empty or omitted list enables no forwarding; default availability does not forward unlisted mounts.
+
+On macOS, Box rejects startup if `receive_mounts` appears in any agent, tool, or local MCP server filesystem configuration, even as an empty list. The error identifies the unsupported setting and explains that macOS mount forwarding is not implemented. Omitting the setting preserves existing startup behavior. The macOS implementation strategy remains undecided.
 
 Box CLI profiles must pass these settings to Core. No separate configuration file or named mount groups are added. The CLI's existing `[storage]` feature for persistent directories remains separate.
 
@@ -138,7 +137,7 @@ The earlier prototype used `linux-storage-mounts` for a different permission con
 
 Box rejects startup when:
 
-1. Mount forwarding is requested without the feature flag or on an unsupported platform.
+1. `receive_mounts` is present on macOS or another unsupported platform, including an empty list. Box rejects the configuration before starting the agent, tools, or local MCP servers.
 2. A mount path is relative, malformed, `/`, or conflicts with a protected path. Within one sandbox's list, duplicate or overlapping paths are also rejected.
 3. The permission lists fail the rules in section 3. Existing path and alias checks still apply; a text-prefix comparison is insufficient.
 4. Box lacks the permissions or connected receiving mounts needed to forward the selected storage without exposing unlisted paths.
@@ -226,12 +225,12 @@ This demonstrates selective kernel propagation through an intermediate namespace
 
 Use four implementation pull requests. Each includes tests and documentation for the behavior it adds.
 
-1. **Configuration and validation.** Add Core settings, CLI profile support, startup errors, and disclosure of selected paths. Test valid and invalid settings for every sandbox type, missing paths, parent/child restrictions, protected aliases, disabled flags, and unsupported platforms. Do not enable the feature until its implementation exists.
+1. **Configuration and validation.** Add Core settings, CLI profile support, startup errors, and disclosure of selected paths. Test valid and invalid settings for every sandbox type, missing paths, parent/child restrictions, and protected aliases. Verify Linux use without an experimental flag and no forwarding for empty or omitted lists. Verify that macOS rejects every explicit `receive_mounts` field, including an empty list and fields on uninvoked tools or local MCP servers; omission must preserve existing behavior. Configuration-only commits must reject mount forwarding until the implementation exists; the completed Linux implementation requires no feature flag.
 2. **Linux mount connections.** Build selective one-way connections during startup and drop mount-changing privileges before running sandboxed code. Test Linux ARM64 and x86-64, pausing and resuming sandboxed processes, same and separate user namespaces, broken connections, mounts over the selected path and beneath it, existing nested receiving mounts, ordinary directories without a dedicated connected mount, multiple paths, unlisted siblings, read-only and `noexec` source mounts, reverse isolation, and existing sandbox restrictions.
 3. **All Box processes.** Integrate the agent, tools, local MCP servers, Shell, and Monty. Test actual file operations as the agent and tool users, processes started before and after attachment, multiple sandboxes, protected aliases, hosted policy denials, and cleanup after failed startup. Add runnable examples.
 4. **Runtime tests and operator guide.** Start Box before snapshot and open storage on the first invocation without sleeps or retries. Verify that each sandbox receives only its selected storage paths. Confirm that Box's mount connections survive snapshot restoration and that setup needs no additional host privileges. Test already-open files and working directories, the maximum number of mounts Runtime supports, each claimed storage provider, source permission denials, and mount failures. Record the Box revision, Linux kernel version, Runtime deployment settings, and event times. Publish reproducible setup instructions; claim support only for tested environments.
 
-Both Linux ARM64 and x86-64 are required for the first release. macOS is follow-up work and must reject the Linux-only feature meanwhile. Use Runtime's supported mount limits in Runtime tests; larger local tests do not expand those limits.
+Both Linux ARM64 and x86-64 are required for the first release, with mount forwarding available by default for explicitly selected paths. macOS support is deferred until its implementation strategy is decided; startup must reject any explicit `receive_mounts` configuration meanwhile. Use Runtime's supported mount limits in Runtime tests; larger local tests do not expand those limits.
 
 Where practical, repeat a denied operation against equivalent unrestricted storage and confirm it succeeds. This checks that the denial came from the restriction being tested.
 
@@ -255,10 +254,10 @@ Box can build its ordinary restricted view from storage that already exists. Thi
 
 Separate checks on each file operation might preserve finer rules with direct propagation. That requires proof across the supported architectures, file operations, and hosted access routes. This proposal does not assume those checks are available or sufficient.
 
-## 9. Decisions still needed
+## 9. Decisions and remaining review
 
 1. **Permission contract:** accept whole-directory access for this feature, or use the helper when finer Box restrictions are required? This draft recommends direct propagation with incompatible settings rejected.
-2. **Configuration:** approve `linux-passthrough-mounts` with per-sandbox `receive_mounts` lists and explicit grants? The old experimental flag must not silently change meaning.
+2. **Platform behavior — decided:** make mount forwarding available by default on Linux ARM64 and x86-64, without an experimental flag. Retain per-sandbox `receive_mounts` lists and explicit grants. Reject macOS startup if the setting is present, including an empty list; the macOS implementation strategy remains open. The old prototype flag must not silently change meaning.
 
 References:
 
@@ -270,7 +269,7 @@ References:
 
 ## 10. Team discussion and feedback
 
-The team agreed to measure direct propagation and review an explicit permission contract. It did not approve the interface, weaker enforcement of existing grants, or a release date.
+The team agreed to measure direct propagation and review an explicit permission contract. That discussion did not approve the interface, weaker enforcement of existing grants, or a release date. Section 9 records the subsequent platform decision separately.
 
 | Topic | What the team raised | How this draft responds |
 | --- | --- | --- |
@@ -279,7 +278,7 @@ The team agreed to measure direct propagation and review an explicit permission 
 | Integration | Direct propagation was reopened as an alternative to the watcher and helper. Its fit with Runtime needed evidence. | Set up forwarding before snapshot. Retain the helper and delayed Box startup as alternatives. |
 | Performance | A 5–10 ms added-latency target was discussed without agreed measurement boundaries, percentiles, or failure limits. | Measure the relevant events in comparable deployments. The target is not a service commitment. |
 | Clarity | Earlier feedback requested the startup use case and full lifecycle, and described this as extending live rule reloading to filesystems. | Separate startup, mount arrival, and invocation. Clarify that mounts change; the `box.toml` rules are not reloaded during a run. |
-| Delivery | Possible launch exclusion concerned remote-storage support, not Box overall. Later delivery was discussed without a final decision or date. | Keep the feature experimental. Separate design approval, implementation, Runtime testing, and release decisions. |
+| Delivery | Possible launch exclusion concerned remote-storage support, not Box overall. Later delivery was discussed without a final decision or date. | The subsequent platform decision removes the experimental flag on Linux and requires startup rejection on macOS. Keep design approval, implementation, Runtime testing, and release decisions separate. |
 
 The kernel inspection and local test in section 6 happened after the review. They are evidence for further work, not team approval or proof that the feature works in Runtime.
 
