@@ -15,8 +15,8 @@ state, and one selects the workload:
 
 | Input | Kind | Spelled | What it decides |
 |---|---|---|---|
-| Policy | authority | `policy` in the config file | Which effects this box may cause, decided per request. Scoped to this box |
-| Credentials | authority | `[egress.<name>]` in the config file | Which secret is attached once a request is permitted |
+| Policy | authority | `policy` in the config file | Which effects this box may cause, decided per request. Scoped to this box. In log-only mode a denial is recorded and the effect goes ahead |
+| Credentials | authority | `[egress.<name>]` in the config file | Which secret is attached once a request is permitted, which in log-only mode includes a request the policy would deny |
 | Identity and state | state | `name` in the config file, and `RunOptions::box_id` for a library caller | Which box this is, and where it keeps its persistent state |
 | Workload | selection | `[agent] command` in the config file, and `run`'s trailing argv | Which process runs |
 
@@ -130,14 +130,26 @@ event metadata, the host-wide event count, and each volume's history identifier.
 also delete any volume's event history. Box prints these limitations at startup. See
 [file watching](../../docs/user/config.md#file-watching).
 
-`filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
-`exec`, and `deny` — and also takes `deny_write`, which keeps an existing directory inside a
-`write` directory read-only. A tool and a local MCP server take `deny_write` too.
+`filesystem` holds nine permission lists: `read`, `write`, `read_file`, `write_file`, `list`,
+`metadata`, `exec`, `deny`, and `deny_write`. The `deny_write` list keeps an existing directory
+inside a `write` directory read-only. A tool and a local MCP server take `deny_write` too.
 They give this process's own filesystem calls direct reach, because an
 unmodified coding agent's `Read`, `Write` and `Edit` issue those calls and containment refuses every
 one. A directory entry is recursive, and a file entry is exact. `write` does not imply `read`. Linux
 is the residual: a writable bind reads there, and the startup disclosure says so on that entry's
 line.
+
+In `box.toml`, the separate `filesystem.receive_mounts` array selects paths where the agent, a tool,
+or a local MCP server would receive externally attached filesystems. Each process has its own
+array, and listing a path grants no filesystem access. Linux requires no additional experimental
+setting, but this build still rejects nonempty arrays because incoming mount forwarding is
+unavailable. On Linux, an empty or omitted array leaves ordinary filesystem behavior unchanged.
+
+On macOS, any `receive_mounts` key rejects configuration loading, including an explicit empty
+array. Omit the key on macOS. Both platform refusals happen before Box creates state or starts a
+workload. The removed `[experimental-features] linux-storage-mounts` key is also an error, including
+when `false`. See [incoming mount declarations](../../docs/user/config.md#incoming-mount-declarations)
+for the per-process path checks.
 
 Without experimental native filesystem policy, no `fs:*` decision records these operations, so the box prints each grant
 on stderr when it starts. A grant that would expose the box's own directory is refused, which
@@ -477,6 +489,8 @@ Refused, each at startup with the destination named:
 | `destinations = ["*.*"]` | A misplaced wildcard names no destination. |
 | `destinations = [""]` | A destination must name a host. |
 | `destinations = ["api.test:0"]` | The port must be 1–65535. |
+| `destinations = [".api.test"]`, `["api..test"]`, `["bücher.example"]`, or `["10.5"]` | No connecting host can equal it, and a resolver reads a name that ends in a number as an IPv4 address. Write the host without an empty label, and an internationalized name in its punycode (`xn--`) form. A trailing dot is removed at load, so `api.test.` loads as `api.test`. |
+| A `[mcp.x] type = "http"` destination `*.example.com` | The gateway recognizes a remote MCP server by its exact host. |
 | `secret.ref = ""` | A destination alone is a reachability claim. |
 | `secret.ref = "STRIPE_KEY"` | A bare name is not a URI. |
 | `secret.ref = "env://PATH"` | The box sets that variable itself. |
@@ -488,6 +502,7 @@ Refused, each at startup with the destination named:
 | A signed (`aws://`/`credsd://`) `secret` beside a backend | A re-routed destination secret is phantom-only, so it must be `env://`; a signed secret mints no phantom to strip. |
 | Two `[[egress.x.backends]]` tables | At most one backend per destination in this version. |
 | A backend `url` with a query or fragment | A backend is an origin plus an optional path prefix; merging a query or sending a fragment is request rewriting. |
+| A backend `url` host that another entry re-routes or declares as a remote MCP server | The box dials a backend directly, so the dial would skip that re-route or the server's `mcp:call` decisions. |
 | A backend entry whose destination is not one exact host (a path, a wildcard, or several destinations) | A re-route is matched per connection (host and port), and the box presents the backend host on the wire, so anything but one exact host would bypass the backend or reach it with the agent's host lost. |
 | A signed (`aws://`/`credsd://`) `backends.auth` | A re-route rewrites the `Host`, which invalidates a SigV4 signature. |
 | A `backends.auth` on an `http` backend | A credential does not ride a plaintext upstream. |

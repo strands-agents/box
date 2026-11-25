@@ -1268,7 +1268,10 @@ fn record_response_leg(
         record.completed(reply, output);
     }
     coarse.and(tool).map_err(|error| {
-        eprintln!("[broker] failed to record mcp:call response leg: {error}");
+        ::diagnostics::diag!(
+            P0301,
+            "[broker] failed to record mcp:call response leg: {error}"
+        );
         io::Error::other(format!("failed to record MCP response: {error}"))
     })
 }
@@ -1305,7 +1308,10 @@ async fn forward_list_reply(
         }
         Err(failure) => failure,
     };
-    eprintln!("strands-box: warning: MCP server {server:?} catalog capture failed: {failure}");
+    ::diagnostics::diag!(
+        B0401,
+        "MCP server {server:?} catalog capture failed: {failure}"
+    );
     let release = exchange.registry.delivery();
     emit_list_failure(exchange, &server, failure, &list.id, release).await
 }

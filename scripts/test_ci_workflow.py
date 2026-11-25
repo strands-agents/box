@@ -178,6 +178,17 @@ class SuiteStepTests(unittest.TestCase):
         self.assertEqual(order, sorted(order))
 
 
+    def test_endpoint_override_is_checked_without_the_apps_test_transport_feature(self):
+        name = "Test telemetry endpoint without test transport"
+        for job_name in ["build-test-lint", "macos"]:
+            with self.subTest(job=job_name):
+                self.assertEqual(self.step_if(name, job_name=job_name), self.ALL)
+                self.assertEqual(
+                    step_run(CLI_TEST, job_name, name).split(),
+                    ["cargo", "test", "--locked", "-p", "strands-box-cli-telemetry",
+                     "--no-default-features", "--test", "endpoint_override"],
+                )
+
 class LaunchCommandTests(unittest.TestCase):
     """The macOS job runs the corpus's launch checks and its runner's unit tests."""
 

@@ -206,6 +206,7 @@ fn record(text: &str) -> Record {
     }
     let tables: Tables = toml::from_str(text).expect("the test tables parse");
     Record {
+        enforcement: Default::default(),
         version: RECORD_VERSION,
         experimental_features: Default::default(),
         file_attributes: false,
@@ -267,9 +268,9 @@ fn the_check_names_each_declared_source_and_its_program() {
     assert_eq!(
         lines,
         format!(
-            "strands-box: [secret-source.op]: reads each op:// secret with /bin/sh, which runs \
+            "strands-box: note[B0203]: [secret-source.op]: reads each op:// secret with /bin/sh, which runs \
              outside every sandbox\n\
-             strands-box: [secret-source.vault]: reads each vault:// secret with {}/to\\u{{1b}}ol, \
+             strands-box: note[B0203]: [secret-source.vault]: reads each vault:// secret with {}/to\\u{{1b}}ol, \
              which runs outside every sandbox\n",
             program.path().display()
         )
@@ -376,7 +377,7 @@ fn the_check_of_a_record_gives_the_sources_that_read_each_of_its_secrets() {
         SecretSources::check_for_tests(&record, &mut lines).expect("the program is checked");
     assert_eq!(
         String::from_utf8(lines).expect("the lines are UTF-8"),
-        "strands-box: [secret-source.op]: reads each op:// secret with /bin/sh, which runs \
+        "strands-box: note[B0203]: [secret-source.op]: reads each op:// secret with /bin/sh, which runs \
          outside every sandbox\n"
     );
     assert_eq!(program.runs(), 0, "the check starts no program");
@@ -607,7 +608,7 @@ fn a_failed_fetch_names_its_entry_and_stops_the_later_reads() {
                 fetched("[egress.github] secret.ref", "op", false),
             ],
             // The words of the program reach the operator, and no record or refusal holds them.
-            "strands-box: [egress.github] secret.ref: credential error: the secret source \
+            "strands-box: error[B0113]: [egress.github] secret.ref: credential error: the secret source \
              \"op\" (\"/bin/sh\") for op://[REDACTED] exited unsuccessfully (exit status: 1): \
              no item BoxTest in the vault Personal\n"
                 .to_string(),
@@ -652,7 +653,9 @@ fn a_reference_that_the_runner_refuses_names_its_entry() {
             ),
             (
                 vec![fetched("[telemetry.vendor] secret.ref", scheme, false)],
-                format!("strands-box: [telemetry.vendor] secret.ref: credential error: {reason}\n"),
+                format!(
+                    "strands-box: error[B0113]: [telemetry.vendor] secret.ref: credential error: {reason}\n"
+                ),
                 Some(format!(
                     "`[telemetry.vendor] secret.ref` names a secret that the secret source \
                      `{scheme}` (/bin/sh) did not return, so the box does not start"
@@ -695,7 +698,7 @@ fn a_program_path_that_names_another_file_after_the_check_stops_the_fetch() {
     assert_eq!(
         diagnostics,
         format!(
-            "strands-box: [egress.github] secret.ref: credential error: the secret source \
+            "strands-box: error[B0113]: [egress.github] secret.ref: credential error: the secret source \
              \"op\" ({link:?}) for op://[REDACTED] did not start: its program file changed \
              after the box checked it\n"
         )
@@ -777,7 +780,7 @@ fn a_write_grant_over_a_source_program_is_refused_and_starts_no_program() {
     std::os::unix::fs::symlink(SHELL, &link).expect("the link is made");
     let table = program.table("op", &link);
     let line = format!(
-        "strands-box: [secret-source.op]: reads each op:// secret with {}, which runs outside \
+        "strands-box: note[B0203]: [secret-source.op]: reads each op:// secret with {}, which runs outside \
          every sandbox\n",
         link.display()
     );
@@ -834,12 +837,12 @@ fn an_absent_path_of_a_source_is_skipped_and_named_with_no_process_table() {
         quoted(&socket)
     );
     let line = format!(
-        "strands-box: [secret-source.op]: reads each op:// secret with {SHELL}, which runs \
+        "strands-box: note[B0203]: [secret-source.op]: reads each op:// secret with {SHELL}, which runs \
          outside every sandbox\n"
     );
     let skipped = |list: &str, path: &Path| {
         format!(
-            "strands-box: [secret-source.op]: `{list}` entry {:?} names {}, which does not \
+            "strands-box: note[B0203]: [secret-source.op]: `{list}` entry {:?} names {}, which does not \
              exist when the box starts, so no sandbox denies it in this run\n",
             path.display().to_string(),
             path.display()

@@ -54,7 +54,7 @@ wl_checks() {
     wl_check budget-no-loop 0 "$refusals refusal(s) by $WL_BUDGET_RULE, wanted 1 to 9"
   fi
   wl_assert_same_box "$run/box-state.1.json" "$run/box-state.2.json"
-  wl_assert_no_line box-not-recreated "$run/stderr.2.log" 'strands-box: box .* (created|updated)'
+  wl_assert_no_line box-not-recreated "$run/stderr.2.log" 'strands-box: note\[B0301\]: box .* (created|updated)'
   wl_assert_disclosure_stable disclosure-stable "$run/stderr.1.log" "$run/stderr.2.log"
   wl_assert_runs_valid run-valid-each
   wl_note_codex_arg0 "$run/turns.jsonl"

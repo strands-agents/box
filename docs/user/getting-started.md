@@ -331,9 +331,9 @@ The box prints what the agent can touch, then the CLI opens a chat. The start of
 looks like this:
 
 ```text
-strands-box: box box-4a4cdb2b114ab6ce created · config my-box/box.toml
-strands-box: starting workload
-strands-box: [agent] runs /opt/homebrew/Cellar/node/26.5.0/bin/node with no policy decision over these paths:
+strands-box: note[B0301]: box box-4a4cdb2b114ab6ce created · config my-box/box.toml
+strands-box: note[B0302]: starting workload
+strands-box: note[B0201]: [agent] runs /opt/homebrew/Cellar/node/26.5.0/bin/node with no policy decision over these paths:
   read        /opt/homebrew/lib/node_modules/@strands-agents/cli
   read        /Users/you/box-tutorial/strands-home
   write       /Users/you/box-tutorial/strands-home

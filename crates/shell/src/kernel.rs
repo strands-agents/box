@@ -407,7 +407,7 @@ impl Permit {
             Err(error) => EffectResult::Failed(error.kind()),
         };
         if let Err(error) = self.record(result).await {
-            eprintln!("strands-box: recording a metadata outcome failed: {error}");
+            diagnostics::diag!(P0301, "recording a metadata outcome failed: {error}");
         }
     }
 
@@ -419,7 +419,7 @@ impl Permit {
             EffectResult::Failed(io::ErrorKind::NotFound)
         };
         if let Err(error) = self.record(result).await {
-            eprintln!("strands-box: recording a metadata outcome failed: {error}");
+            diagnostics::diag!(P0301, "recording a metadata outcome failed: {error}");
         }
     }
 }

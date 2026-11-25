@@ -49,7 +49,12 @@ use crate::run::lock::{BoxLive, Lock};
 use crate::run::secret_sources::RouteSecrets;
 use crate::run::telemetry;
 
-type RunningPolicy = (Arc<PolicyEngine>, Arc<telemetry::Collector>);
+/// The running engine, its collector, and how its verdicts apply, which a reload keeps.
+type RunningPolicy = (
+    Arc<PolicyEngine>,
+    Arc<telemetry::Collector>,
+    crate::record::config::Enforcement,
+);
 
 static RUNNING_POLICY: Mutex<Option<RunningPolicy>> = Mutex::new(None);
 
@@ -57,14 +62,15 @@ pub(crate) fn reload(sources: &[policy::Policy]) -> Result<(), BoxError> {
     let running = RUNNING_POLICY
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (policy, collector) = running.as_ref().ok_or(DaemonError::NotRunning)?;
+    let (policy, collector, enforcement) = running.as_ref().ok_or(DaemonError::NotRunning)?;
     let result = policy.reload(sources).map_err(BoxError::from);
     let subject = telemetry::policy_subject(sources);
     collector.control(match &result {
         Ok(()) => telemetry::ControlRecord::completed(
             telemetry::ControlOperation::PolicyInstalled,
             &subject,
-        ),
+        )
+        .enforcing(enforcement.as_str()),
         Err(error) => telemetry::ControlRecord::refused(
             telemetry::ControlOperation::PolicyRefused,
             &subject,
@@ -629,7 +635,7 @@ impl McpLeafLauncher {
         &self,
         boundary: Boundary,
     ) -> Result<crate::run::contain::supervise::StreamingLeaf, BoxError> {
-        eprintln!("{}", boundary.disclosure());
+        boundary.disclose();
         crate::run::contain::supervise::LeafBox::spawn_streaming(
             boundary,
             &self.layout,
@@ -740,22 +746,30 @@ impl HostedBox {
             .map(|monitor| monitor.registration())
     }
 
+    /// Open this box's one policy engine, applying its verdicts as `enforcement` says from the
+    /// first decision on.
     pub(crate) fn prepare_policy(
         root: &BoxRoot,
         operator: &policy::Operator,
         sources: Vec<policy::Policy>,
         grammars: policy::ToolGrammars,
+        enforcement: crate::record::config::Enforcement,
     ) -> Result<PolicyEngine, BoxError> {
         let database_path = root.dogwood_database();
         let database = root.open_dogwood_database()?;
-        Ok(PolicyEngine::open_staged_file_with_grammars(
+        let engine = PolicyEngine::open_staged_file_with_grammars(
             operator,
             sources,
             grammars,
             database,
             database_path,
         )?
-        .observed_by(Arc::new(telemetry::PolicyDecisionObserver)))
+        .observed_by(Arc::new(telemetry::PolicyDecisionObserver));
+        Ok(if enforcement.is_log_only() {
+            engine.log_only()
+        } else {
+            engine
+        })
     }
 
     /// `policy`, bound to every `[tool.<name>]` in `record` at the program file `commands` opened
@@ -967,13 +981,15 @@ impl HostedBox {
         )
         .map_err(BoxError::from)?;
         if let Some(roots) = proxy.upstream_host_roots() {
-            eprintln!(
-                "strands-box: the egress gateway also trusts {} root certificates from this \
+            ::diagnostics::diag!(
+                B0204,
+                "the egress gateway also trusts {} root certificates from this \
                  host's trust store for upstream servers ({} ignored)",
-                roots.added, roots.ignored
+                roots.added,
+                roots.ignored
             );
             for error in &roots.errors {
-                eprintln!("strands-box: warning: reading the host's trust store: {error}");
+                ::diagnostics::diag!(B0205, "reading the host's trust store: {error}");
             }
         }
         let proxy_port = proxy
@@ -1119,7 +1135,8 @@ impl HostedBox {
         let published = PublishedRecord(root.clone());
         *RUNNING_POLICY
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some((policy, Arc::clone(&collector)));
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some((policy, Arc::clone(&collector), record.enforcement));
         Ok(Self {
             discovery: Some(discovery),
             broker: Some(broker),
@@ -1157,6 +1174,7 @@ impl HostedBox {
             &policy::Operator::unanchored(),
             sources,
             policy::ToolGrammars::default(),
+            crate::record::config::Enforcement::Enforce,
         )
         .map(Arc::new)
     }
@@ -1185,10 +1203,14 @@ impl HostedBox {
         drop(self._proxy.take());
         #[cfg(feature = "experimental-idle-flush")]
         let history = match self._history_flusher.take() {
-            Some(flusher) if native.is_ok() && !std::thread::panicking() => {
-                flusher.shutdown().map(|_| ()).map_err(BoxError::from)
-            }
-            Some(flusher) => flusher.stop().map(|_| ()).map_err(BoxError::from),
+            Some(flusher) if native.is_ok() && !std::thread::panicking() => flusher
+                .shutdown()
+                .map(|_| ())
+                .map_err(|error| crate::error::Internal::HistoryFlush(error).into()),
+            Some(flusher) => flusher
+                .stop()
+                .map(|_| ())
+                .map_err(|error| crate::error::Internal::HistoryFlush(error).into()),
             None => Ok(()),
         };
         #[cfg(not(feature = "experimental-idle-flush"))]
@@ -1298,7 +1320,7 @@ fn program_finds_command(
 impl Drop for HostedBox {
     fn drop(&mut self) {
         if let Err(error) = self.shutdown() {
-            eprintln!("strands-box: shutdown failed: {error}");
+            ::diagnostics::diag!(B1001, "shutdown failed: {error}");
         }
     }
 }
@@ -1311,8 +1333,9 @@ pub(crate) fn with_shutdown<T>(
     match (outcome, shutdown) {
         (result, Ok(())) => result,
         (Ok(_), Err(error)) => Err(error),
-        (Err(outcome), Err(shutdown)) => Err(crate::error::SuperviseError::Control {
-            reason: format!("{outcome}; shutdown also failed: {shutdown}"),
+        (Err(outcome), Err(shutdown)) => Err(crate::error::SuperviseError::AlsoShutdown {
+            outcome: Box::new(outcome),
+            shutdown: Box::new(shutdown),
         }
         .into()),
     }
@@ -1323,10 +1346,10 @@ async fn history_failed(snapshot: impl Fn() -> policy::HistoryFlushSnapshot) -> 
     loop {
         let state = snapshot();
         if let Some(error) = state.last_error {
-            return policy::PolicyError::Evaluation(format!(
+            return crate::error::Internal::HistoryFlush(policy::PolicyError::Evaluation(format!(
                 "history flush failed {} time(s): {error}",
                 state.failures
-            ))
+            )))
             .into();
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1401,6 +1424,7 @@ mod tests {
     /// A record declaring every server named, so each gets an alias.
     fn record_with_mcp(root: &BoxRoot, mcp: Vec<crate::record::config::mcp::McpServer>) -> Record {
         Record {
+            enforcement: Default::default(),
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
@@ -1483,6 +1507,7 @@ mod tests {
                 text: text.to_string(),
             }],
             grammars,
+            crate::record::config::Enforcement::Enforce,
         )
         .expect("the policy opens");
         HostedBox::bind_tool_grammars(engine, record, commands, search_path)
@@ -2214,6 +2239,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             &policy::Operator::unanchored(),
             sources,
             policy::ToolGrammars::default(),
+            crate::record::config::Enforcement::Enforce,
         )
         .map(Arc::new)
         .expect("the staged authority opens");
@@ -2611,6 +2637,7 @@ when temporal {
             &policy::Operator::unanchored(),
             Vec::new(),
             policy::ToolGrammars::default(),
+            crate::record::config::Enforcement::Enforce,
         )
         .map(Arc::new)
         .expect("an empty authority opens");
@@ -3614,6 +3641,7 @@ while :; do :; done"#
         };
         let agent = spec(&["/bin/sh"]);
         Record {
+            enforcement: Default::default(),
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,

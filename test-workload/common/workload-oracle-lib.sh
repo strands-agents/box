@@ -159,11 +159,11 @@ wl_disclosure() {
 import sys
 inside = False
 for line in open(sys.argv[1], errors="replace"):
-    if line.startswith("strands-box: [agent] runs "):
+    if line.startswith("strands-box: note[B0201]: [agent] runs "):
         inside = True
     if inside:
         sys.stdout.write(line)
-        if line.startswith("strands-box: [agent] HOME="):
+        if line.startswith("strands-box: note[B0201]: [agent] HOME="):
             break
 PY
 }

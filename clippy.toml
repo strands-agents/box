@@ -1,0 +1,8 @@
+# Box Core writes every stderr message through `diagnostics::diag!`, so each line has one format
+# (docs/user/message-codes.md). `print_stderr` in each Core crate's `[lints.clippy]` refuses
+# `eprintln!`; this refuses the raw handle. `crates/cli/clippy.toml` keeps the CLI out of both.
+allow-print-in-tests = true
+disallowed-methods = [
+    { path = "std::io::stderr", reason = "write a message with diagnostics::diag!, or pass diagnostics::stderr() to a writer that does" },
+    { path = "tokio::io::stderr", reason = "write a message with diagnostics::diag!", allow-invalid = true },
+]

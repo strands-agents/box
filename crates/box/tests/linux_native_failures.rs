@@ -228,12 +228,10 @@ fn selected_native_checks_refuse_without_loader_capabilities() {
     assert!(!run.wait().success());
     assert_eq!(run.line(), "EOF");
     run.unchanged();
-    assert!(
-        run.stderr
-            .lock()
-            .unwrap()
-            .contains("requires CAP_BPF and CAP_PERFMON")
-    );
+    assert!(run.stderr.lock().unwrap().contains(
+        "strands-box: error[B0108]: workload process control failed: native filesystem \
+                 interception requires CAP_BPF and CAP_PERFMON"
+    ));
 }
 
 #[test]

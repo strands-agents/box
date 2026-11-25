@@ -52,6 +52,10 @@ pub(crate) struct EffectiveDecision {
     cause: DecisionCause,
     attribution: Vec<PolicyAttribution>,
     subject: Option<telemetry::Subject>,
+    /// Whether Box applied the verdict; `false` for a denial log-only mode let through.
+    enforced: bool,
+    /// Each rule log-only mode let through across the attempt's legs and gates.
+    would_deny: Vec<String>,
 }
 
 /// What determined an effective decision.
@@ -74,6 +78,8 @@ pub(crate) struct ObservedDecision {
     action: String,
     resource: String,
     decision: Decision,
+    /// Each rule log-only mode let through across the attempt, on the observation that decides it.
+    would_deny: Vec<String>,
 }
 
 impl ObservedDecision {
@@ -128,6 +134,24 @@ impl EffectiveDecision {
         decision: &Decision,
     ) -> Self {
         match decision {
+            // A denial log-only mode let through keeps the policy's verdict, marked unenforced.
+            Decision::Allow {
+                rule,
+                would_deny: Some(reason),
+                ..
+            } => Self {
+                correlation: telemetry::Correlation::current(),
+                subject: None,
+                action: action.into(),
+                resource: resource.into(),
+                rule: EffectiveRule::Policy(rule.clone()),
+                verdict: EffectiveVerdict::Deny,
+                reason: Some(deny_reason(reason).to_string()),
+                cause: decision_cause(reason),
+                attribution: decision.attribution().to_vec(),
+                enforced: false,
+                would_deny: would_deny_ids([decision]),
+            },
             Decision::Allow { rule, .. } => Self {
                 correlation: telemetry::Correlation::current(),
                 subject: None,
@@ -138,6 +162,8 @@ impl EffectiveDecision {
                 reason: None,
                 cause: DecisionCause::Permitted,
                 attribution: decision.attribution().to_vec(),
+                enforced: true,
+                would_deny: Vec::new(),
             },
             Decision::Deny { reason, rule, .. } => Self {
                 correlation: telemetry::Correlation::current(),
@@ -149,6 +175,8 @@ impl EffectiveDecision {
                 reason: Some(deny_reason(reason).to_string()),
                 cause: decision_cause(reason),
                 attribution: decision.attribution().to_vec(),
+                enforced: true,
+                would_deny: Vec::new(),
             },
         }
     }
@@ -169,6 +197,8 @@ impl EffectiveDecision {
             reason: None,
             cause: DecisionCause::Enforcement,
             attribution: Vec::new(),
+            enforced: true,
+            would_deny: Vec::new(),
         }
     }
 
@@ -189,6 +219,8 @@ impl EffectiveDecision {
             reason: Some(reason.into()),
             cause: DecisionCause::Enforcement,
             attribution: Vec::new(),
+            enforced: true,
+            would_deny: Vec::new(),
         }
     }
 
@@ -199,10 +231,15 @@ impl EffectiveDecision {
         gate: &'static str,
         determined: Option<&ObservedDecision>,
     ) -> Self {
-        match determined.filter(|observed| observed.decision.is_allow()) {
+        let decision = match determined.filter(|observed| observed.decision.is_allow()) {
             Some(observed) => Self::from_policy(action, resource, &observed.decision),
             None => Self::enforcement_permit(action, resource, gate),
-        }
+        };
+        decision.with_would_deny(
+            determined
+                .into_iter()
+                .flat_map(|observed| observed.would_deny.clone()),
+        )
     }
 
     /// A gate's denial, reported as the policy verdict beneath it when the gate kept one.
@@ -213,10 +250,38 @@ impl EffectiveDecision {
         reason: impl Into<String>,
         determined: Option<&ObservedDecision>,
     ) -> Self {
-        match determined.filter(|observed| !observed.decision.is_allow()) {
+        let decision = match determined.filter(|observed| !observed.decision.is_allow()) {
             Some(observed) => Self::from_policy(action, resource, &observed.decision),
             None => Self::enforcement_deny(action, resource, gate, reason),
+        };
+        decision.with_would_deny(
+            determined
+                .into_iter()
+                .flat_map(|observed| observed.would_deny.clone()),
+        )
+    }
+
+    /// One check of a native filesystem operation the kernel refused overall: the gate's refusal,
+    /// naming in `would_deny` the rule of a check log-only mode let through.
+    pub(crate) fn refused_check(
+        action: impl Into<String>,
+        resource: impl Into<String>,
+        decision: &Decision,
+        gate: &'static str,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self::enforcement_deny(action, resource, gate, reason)
+            .with_would_deny(would_deny_ids([decision]))
+    }
+
+    /// Name every rule log-only mode let through across the attempt, when there are any; a
+    /// decision keeps its own when `rules` names none.
+    pub(crate) fn with_would_deny(mut self, rules: impl IntoIterator<Item = String>) -> Self {
+        let rules: Vec<String> = rules.into_iter().collect();
+        if !rules.is_empty() {
+            self.would_deny = rules;
         }
+        self
     }
 
     /// State what this decision was about, under the standard names.
@@ -241,6 +306,8 @@ impl EffectiveDecision {
             reason: None,
             cause: DecisionCause::Enforcement,
             attribution: Vec::new(),
+            enforced: true,
+            would_deny: Vec::new(),
         }
     }
 
@@ -262,6 +329,16 @@ impl EffectiveDecision {
             Some(subject) => record.about(subject),
             None => record,
         };
+        let record = if self.enforced {
+            record
+        } else {
+            record.not_enforced()
+        };
+        let record = if self.would_deny.is_empty() {
+            record
+        } else {
+            record.with_would_deny(self.would_deny)
+        };
         record
             .correlated(self.correlation)
             .caused_by(self.cause)
@@ -279,6 +356,16 @@ impl EffectiveDecision {
     #[cfg(test)]
     pub(crate) fn cause(&self) -> DecisionCause {
         self.cause
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enforced(&self) -> bool {
+        self.enforced
+    }
+
+    #[cfg(test)]
+    pub(crate) fn would_deny(&self) -> &[String] {
+        &self.would_deny
     }
 
     #[cfg(test)]
@@ -309,6 +396,7 @@ impl DecisionObserver for PolicyDecisionObserver {
                     action: action.to_string(),
                     resource: resource.to_string(),
                     decision: decision.clone(),
+                    would_deny: Vec::new(),
                 });
             }
         });
@@ -332,9 +420,15 @@ impl ObservationCapture {
     }
 
     /// The deciding verdict: an adapter asking about several legs stops at the first denial, and
-    /// the last permit stands when every leg allowed.
+    /// the last permit stands when every leg allowed. In log-only mode a let-through denial does
+    /// not stop the legs, so it decides, unless a later leg's real denial stopped the attempt.
     pub(crate) fn last(self) -> Option<ObservedDecision> {
-        self.finish().pop()
+        let observations = self.finish();
+        let index = deciding_index(&observations)?;
+        let would_deny = would_deny_ids(observations.iter().map(|observed| &observed.decision));
+        let mut deciding = observations.into_iter().nth(index)?;
+        deciding.would_deny = would_deny;
+        Some(deciding)
     }
 
     fn finish(mut self) -> Vec<ObservedDecision> {
@@ -720,8 +814,9 @@ fn ordinary_egress_decision(
     refusal: Option<String>,
     observations: &[ObservedDecision],
 ) -> EffectiveDecision {
-    let determined = observations.last();
-    match refusal {
+    let determined = deciding(observations);
+    let would_deny = would_deny_ids(observations.iter().map(|observed| &observed.decision));
+    let decision = match refusal {
         Some(refusal) => EffectiveDecision::gate_deny(
             identity.action(),
             identity.resource(),
@@ -735,7 +830,53 @@ fn ordinary_egress_decision(
             "egress",
             determined,
         ),
+    };
+    decision.with_would_deny(would_deny)
+}
+
+/// The verdict that decides an attempt over `observations`: the first denial log-only mode let
+/// through, since in log-only mode a denial does not stop the later gates, else the last verdict.
+fn deciding(observations: &[ObservedDecision]) -> Option<&ObservedDecision> {
+    observations.get(deciding_index(observations)?)
+}
+
+/// Each rule that would have denied one of `decisions` and that log-only mode let through, in the
+/// order decided, named as its record names it.
+pub(crate) fn would_deny_ids<'a>(decisions: impl IntoIterator<Item = &'a Decision>) -> Vec<String> {
+    let mut rules: Vec<String> = Vec::new();
+    for decision in decisions {
+        let Decision::Allow {
+            rule,
+            attribution,
+            would_deny: Some(_),
+            ..
+        } = decision
+        else {
+            continue;
+        };
+        let named = attribution
+            .first()
+            .map_or_else(|| rule.as_str().to_string(), policy_identifier);
+        if !rules.contains(&named) {
+            rules.push(named);
+        }
     }
+    rules
+}
+
+/// Which of `observations` decides the attempt: a real denial in the last leg stopped it, so that
+/// leg; otherwise the first denial log-only mode let through; otherwise the last verdict.
+fn deciding_index(observations: &[ObservedDecision]) -> Option<usize> {
+    let last = observations.len().checked_sub(1)?;
+    if !observations[last].decision.is_allow() {
+        return Some(last);
+    }
+    Some(
+        observations
+            .iter()
+            .position(|observed| observed.decision.would_deny().is_some())
+            .unwrap_or(last),
+    )
 }
 
 fn remote_mcp_decision(
@@ -743,6 +884,27 @@ fn remote_mcp_decision(
     refusal: Option<String>,
     observations: &[ObservedDecision],
 ) -> EffectiveDecision {
+    remote_mcp_record(frame, refusal, observations).with_would_deny(would_deny_ids(
+        observations.iter().map(|observed| &observed.decision),
+    ))
+}
+
+fn remote_mcp_record(
+    frame: &McpFrame<'_>,
+    refusal: Option<String>,
+    observations: &[ObservedDecision],
+) -> EffectiveDecision {
+    if refusal.is_none()
+        && let Some(flipped) = observations
+            .iter()
+            .find(|observed| observed.decision.would_deny().is_some())
+    {
+        return EffectiveDecision::from_policy(
+            &flipped.action,
+            &flipped.resource,
+            &flipped.decision,
+        );
+    }
     let last = observations.last();
     if refusal.is_none() {
         if matches!(
@@ -838,6 +1000,8 @@ pub(crate) struct DecisionRecorder {
     collector: Option<Arc<Collector>>,
     decisions: Option<Arc<super::decisions::PolicyDecisionSender>>,
     correlation: Option<telemetry::Correlation>,
+    /// Whether this run has recorded a denial that was not enforced, shared by every copy.
+    flipped: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     recorded: Arc<std::sync::Mutex<Vec<EffectiveDecision>>>,
 }
@@ -852,6 +1016,7 @@ impl DecisionRecorder {
             collector: Some(collector),
             decisions: decisions.map(Arc::new),
             correlation: None,
+            flipped: Arc::default(),
             #[cfg(test)]
             recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
@@ -862,6 +1027,7 @@ impl DecisionRecorder {
             collector: self.collector.clone(),
             decisions: self.decisions.clone(),
             correlation: Some(correlation),
+            flipped: Arc::clone(&self.flipped),
             #[cfg(test)]
             recorded: Arc::clone(&self.recorded),
         })
@@ -882,7 +1048,12 @@ impl DecisionRecorder {
         if let Ok(mut recorded) = self.recorded.lock() {
             recorded.push(decision.clone());
         }
-        let record = decision.into_record();
+        let enforced = decision.enforced;
+        let mut record = decision.into_record();
+        // After the first denial Box let through, the run can drift from what enforcing would do.
+        if !enforced && !self.flipped.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            record = record.first_flip();
+        }
         if let Some(decisions) = &self.decisions {
             decisions.send(&record);
         }
@@ -944,6 +1115,7 @@ impl DecisionRecorder {
             collector: None,
             decisions: None,
             correlation: None,
+            flipped: Arc::default(),
             recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
@@ -1100,6 +1272,7 @@ mod tests {
         let recorder = DecisionRecorder {
             collector: None,
             decisions: Some(Arc::new(sender)),
+            flipped: Arc::default(),
             correlation: None,
             recorded: Arc::new(Mutex::new(Vec::new())),
         };
@@ -1122,6 +1295,227 @@ mod tests {
                 decision.cause.as_str()
             ),
             (false, "net:connect", "enforcement:egress", "enforcement")
+        );
+    }
+
+    /// **A native check log-only mode let through, in an operation the kernel refused overall, is
+    /// the gate's refusal that still names the rule in `would_deny`**, so a trial loses no rule and
+    /// no record says a log-only policy blocked something; a real permit is the gate's refusal.
+    #[test]
+    fn a_refused_native_check_keeps_the_rule_log_only_let_through() {
+        let flipped = connect_decision(
+            r#"permit(principal, action, resource);
+               @id("no-connect")
+               forbid(principal, action == Box::Action::"net:connect", resource);"#,
+            true,
+        );
+        let refused = EffectiveDecision::refused_check(
+            r#"Box::Action::"fs:write""#,
+            "/w/a",
+            &flipped,
+            "native-filesystem-policy",
+            "refused",
+        );
+        assert_eq!(refused.parts().3, EffectiveVerdict::Deny);
+        assert_eq!(
+            refused.cause(),
+            DecisionCause::Enforcement,
+            "the kernel refused it, not the log-only policy"
+        );
+        assert!(refused.enforced);
+        assert_eq!(
+            refused.would_deny,
+            ["no-connect"],
+            "the rule is still named"
+        );
+
+        let permit = connect_decision("permit(principal, action, resource);", false);
+        let gate = EffectiveDecision::refused_check(
+            r#"Box::Action::"fs:write""#,
+            "/w/a",
+            &permit,
+            "native-filesystem-policy",
+            "refused",
+        );
+        assert_eq!(gate.cause(), DecisionCause::Enforcement);
+    }
+
+    /// **A real block after a let-through leg names that leg's rule**, on a record Box applied: it
+    /// carries `would_deny` and no `enforced = false`, so a trial still finds the rule.
+    #[test]
+    fn a_real_block_after_a_let_through_leg_still_names_its_rule() {
+        let flipped = connect_decision(
+            r#"permit(principal, action, resource);
+               @id("no-connect")
+               forbid(principal, action == Box::Action::"net:connect", resource);"#,
+            true,
+        );
+        let capture = ObservationCapture::begin();
+        PolicyDecisionObserver.observed(r#"Box::Action::"fs:read""#, "/w/a", &flipped);
+        let deciding = capture.last().expect("a verdict was observed");
+        let blocked = EffectiveDecision::gate_deny(
+            r#"Box::Action::"fs:read""#,
+            "/w/a",
+            "floor",
+            "refused",
+            Some(&deciding),
+        );
+        assert!(blocked.enforced);
+        assert_eq!(blocked.would_deny, ["no-connect"]);
+        let record = blocked.into_record();
+        assert!(record.enforced());
+        assert_eq!(record.would_deny(), ["no-connect"]);
+    }
+
+    /// One `net:connect` decided by an engine over `policy`, in log-only mode when `log_only` holds.
+    ///
+    /// An empty `policy` stands for one that permits no connection, since an engine with no policy
+    /// at all never lets a denial through.
+    fn connect_decision(policy: &str, log_only: bool) -> Decision {
+        let history = tempfile::tempdir().expect("history directory");
+        let text = if policy.is_empty() {
+            r#"permit(principal, action == Box::Action::"fs:read", resource);"#
+        } else {
+            policy
+        };
+        let sources = vec![Policy {
+            origin: PathBuf::from("policy.dw"),
+            text: text.to_string(),
+        }];
+        let engine = PolicyEngine::open(sources, &history.path().join("dogwood.redb"))
+            .expect("policy opens");
+        let engine = if log_only { engine.log_only() } else { engine };
+        engine
+            .decide(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                &policy::Request::Connect {
+                    host: "example.com",
+                    ip: None,
+                    port: 443,
+                },
+            )
+            .0
+    }
+
+    /// A denial log-only mode let through is recorded as the policy's denial, unenforced, and only
+    /// the run's first one is its first flip, across every per-request copy of the recorder.
+    #[test]
+    fn a_let_through_denial_is_recorded_unenforced_and_the_first_is_the_first_flip() {
+        let (sender, receiver) = crate::policy_decisions(8);
+        let recorder = DecisionRecorder {
+            collector: None,
+            decisions: Some(Arc::new(sender)),
+            flipped: Arc::default(),
+            correlation: None,
+            recorded: Arc::new(Mutex::new(Vec::new())),
+        };
+        let flipped = connect_decision("", true);
+        assert!(flipped.would_deny().is_some(), "{flipped:?}");
+        for _ in 0..2 {
+            recorder
+                .for_request(telemetry::Correlation::current())
+                .record(EffectiveDecision::from_policy(
+                    r#"Box::Action::"net:connect""#,
+                    "example.com:443",
+                    &flipped,
+                ));
+        }
+        recorder.record(EffectiveDecision::enforcement_deny(
+            r#"Box::Action::"net:connect""#,
+            "example.com:443",
+            "egress",
+            "refused",
+        ));
+        let decisions: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+        let shape: Vec<_> = decisions
+            .iter()
+            .map(|decision| {
+                (
+                    decision.permitted,
+                    decision.cause.as_str(),
+                    decision.enforcement,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (
+                    false,
+                    "no_match",
+                    crate::DecisionEnforcement::LetThrough { first: true }
+                ),
+                (
+                    false,
+                    "no_match",
+                    crate::DecisionEnforcement::LetThrough { first: false }
+                ),
+                (false, "enforcement", crate::DecisionEnforcement::Applied),
+            ]
+        );
+    }
+
+    /// In log-only mode a denied leg does not stop the next, so the first leg log-only mode let
+    /// through decides the record, not the last permit.
+    #[test]
+    fn the_first_let_through_leg_decides_the_record() {
+        let permit = connect_decision("permit(principal, action, resource);", false);
+        let flipped = connect_decision("", true);
+        assert_eq!(permit.would_deny(), None);
+        let capture = ObservationCapture::begin();
+        for decision in [&permit, &flipped, &permit] {
+            PolicyDecisionObserver.observed(r#"Box::Action::"fs:read""#, "/w/a", decision);
+        }
+        let deciding = capture.last().expect("a verdict was observed");
+        assert_eq!(&deciding.decision, &flipped);
+
+        let capture = ObservationCapture::begin();
+        for decision in [&permit, &permit] {
+            PolicyDecisionObserver.observed(r#"Box::Action::"fs:read""#, "/w/a", decision);
+        }
+        assert_eq!(
+            capture.last().map(|observed| observed.decision),
+            Some(permit.clone()),
+            "with no let-through leg, the last verdict still decides"
+        );
+
+        // Every leg log-only mode let through is named, in order, on the deciding observation.
+        let forbidden = connect_decision(
+            r#"permit(principal, action, resource);
+               @id("no-connect")
+               forbid(principal, action == Box::Action::"net:connect", resource);"#,
+            true,
+        );
+        assert!(forbidden.would_deny().is_some(), "{forbidden:?}");
+        let capture = ObservationCapture::begin();
+        for decision in [&forbidden, &permit, &flipped] {
+            PolicyDecisionObserver.observed(r#"Box::Action::"fs:read""#, "/w/a", decision);
+        }
+        let deciding = capture.last().expect("a verdict was observed");
+        assert_eq!(deciding.would_deny, ["no-connect", "<default-deny>"]);
+        let record = EffectiveDecision::gate_permit(
+            r#"Box::Action::"fs:read""#,
+            "/w/a",
+            "shell",
+            Some(&deciding),
+        );
+        assert_eq!(record.would_deny, ["no-connect", "<default-deny>"]);
+
+        // A later leg's real denial stopped the attempt, so that denial decides the record.
+        let denied = connect_decision(
+            r#"permit(principal, action == Box::Action::"fs:read", resource);"#,
+            false,
+        );
+        assert!(!denied.is_allow(), "{denied:?}");
+        let capture = ObservationCapture::begin();
+        for decision in [&flipped, &denied] {
+            PolicyDecisionObserver.observed(r#"Box::Action::"fs:read""#, "/w/a", decision);
+        }
+        assert_eq!(
+            capture.last().map(|observed| observed.decision),
+            Some(denied),
+            "a real denial in the last leg is what stopped the attempt"
         );
     }
 
@@ -1558,6 +1952,172 @@ mod tests {
         assert_eq!(verdict, EffectiveVerdict::Deny);
     }
 
+    /// **In log-only mode the gateway sends a request the policy denies, and the record keeps the
+    /// denial.** The request leg is permitted to the gateway, so it emits an allow, and the record
+    /// still says `deny`, unenforced, with the policy's own class.
+    #[test]
+    fn a_log_only_request_leg_goes_ahead_and_records_the_denial() {
+        let history = tempfile::tempdir().expect("history directory");
+        let policy = PolicyEngine::open(
+            vec![Policy {
+                origin: PathBuf::from("policy.dw"),
+                text: r#"permit(principal, action == Box::Action::"net:connect", resource);"#
+                    .to_string(),
+            }],
+            &history.path().join("dogwood.redb"),
+        )
+        .expect("policy opens")
+        .observed_by(Arc::new(PolicyDecisionObserver))
+        .log_only();
+        let recorder = DecisionRecorder::discarding();
+        let interceptor = EgressDecisionInterceptor::over(
+            EgressPolicyInterceptor::into_handle(
+                Arc::new(policy),
+                Principal::agent(),
+                GovernedBox::assigned("test-box"),
+            ),
+            Arc::clone(&recorder),
+        );
+        let emitter = EgressDecisionRecorder::over(Arc::clone(&recorder));
+
+        interceptor
+            .intercept(&EgressEffectAttempt::HttpRequest {
+                host: "api.example.com",
+                port: 443,
+                method: "DELETE",
+                path: "/v1/items/7",
+                body_bytes: 0,
+                intercepted: true,
+                websocket: false,
+                mcp: None,
+            })
+            .expect("log-only mode lets the request through")
+            .mark_indeterminate();
+        emitter.emit(EgressDecision {
+            host: "api.example.com".to_string(),
+            port: 443,
+            method: "DELETE".to_string(),
+            path: "/v1/items/7".to_string(),
+            decision: AuditDecision::Allow,
+            reason: String::new(),
+            correlation: RequestId::new("request"),
+        });
+
+        let recorded = recorder.recorded();
+        let [request] = recorded.as_slice() else {
+            panic!("one decision: {recorded:?}");
+        };
+        let (action, _, _, verdict, reason) = request.parts();
+        assert_eq!(action, r#"Box::Action::"http:request""#);
+        assert_eq!(verdict, EffectiveVerdict::Deny);
+        assert_eq!(reason, Some("no permit matched"));
+        assert_eq!(request.cause(), DecisionCause::NoMatch);
+        assert!(
+            !request.enforced,
+            "the gateway sent it, so the denial was not enforced"
+        );
+    }
+
+    /// **In log-only mode the gateway completes a WebSocket handshake the policy denies, and the
+    /// record keeps the denial as `websocket:connect`, unenforced**, the same as a request leg.
+    #[test]
+    fn a_log_only_websocket_handshake_goes_ahead_and_records_the_denial() {
+        let history = tempfile::tempdir().expect("history directory");
+        let policy = PolicyEngine::open(
+            vec![Policy {
+                origin: PathBuf::from("policy.dw"),
+                text: r#"permit(principal, action == Box::Action::"net:connect", resource);
+@id("no-realtime")
+forbid(principal, action == Box::Action::"websocket:connect", resource);"#
+                    .to_string(),
+            }],
+            &history.path().join("dogwood.redb"),
+        )
+        .expect("policy opens")
+        .observed_by(Arc::new(PolicyDecisionObserver))
+        .log_only();
+        let recorder = DecisionRecorder::discarding();
+        let interceptor = EgressDecisionInterceptor::over(
+            EgressPolicyInterceptor::into_handle(
+                Arc::new(policy),
+                Principal::agent(),
+                GovernedBox::assigned("test-box"),
+            ),
+            Arc::clone(&recorder),
+        );
+        let emitter = EgressDecisionRecorder::over(Arc::clone(&recorder));
+
+        interceptor
+            .intercept(&EgressEffectAttempt::HttpRequest {
+                host: "api.example.com",
+                port: 443,
+                method: "GET",
+                path: "/v1/realtime",
+                body_bytes: 0,
+                intercepted: true,
+                websocket: true,
+                mcp: None,
+            })
+            .expect("log-only mode lets the handshake through")
+            .mark_indeterminate();
+        emitter.emit(EgressDecision {
+            host: "api.example.com".to_string(),
+            port: 443,
+            method: "GET".to_string(),
+            path: "/v1/realtime".to_string(),
+            decision: AuditDecision::Allow,
+            reason: String::new(),
+            correlation: RequestId::new("handshake"),
+        });
+
+        let recorded = recorder.recorded();
+        let [handshake] = recorded.as_slice() else {
+            panic!("one decision: {recorded:?}");
+        };
+        let (action, resource, _, verdict, _) = handshake.parts();
+        assert_eq!(action, r#"Box::Action::"websocket:connect""#);
+        assert_eq!(resource, "api.example.com:443/v1/realtime");
+        assert_eq!(verdict, EffectiveVerdict::Deny);
+        assert_eq!(handshake.cause(), DecisionCause::Forbidden);
+        assert!(
+            !handshake.enforced,
+            "the gateway completed it, so the denial was not enforced"
+        );
+        assert_eq!(handshake.would_deny, ["no-realtime"]);
+    }
+
+    /// **Over http, the first gate log-only mode let through is what the record keeps**, not the
+    /// per-tool permit after it.
+    #[test]
+    fn a_remote_call_records_its_first_let_through_gate() {
+        let flipped = connect_decision("", true);
+        let permit = connect_decision("permit(principal, action, resource);", false);
+        let observed = |action: &str, decision: &Decision| ObservedDecision {
+            action: action.to_string(),
+            resource: "demo/add".to_string(),
+            decision: decision.clone(),
+            would_deny: Vec::new(),
+        };
+        let effective = remote_mcp_decision(
+            &McpFrame::ToolCall {
+                server: "demo",
+                tool: "add",
+                arguments: "{}",
+            },
+            None,
+            &[
+                observed(r#"Box::Action::"http:request""#, &permit),
+                observed(r#"Box::Action::"mcp:call""#, &flipped),
+                observed(r#"demo::Action::"add""#, &permit),
+            ],
+        );
+        let (action, _, _, verdict, _) = effective.parts();
+        assert_eq!(action, r#"Box::Action::"mcp:call""#);
+        assert_eq!(verdict, EffectiveVerdict::Deny);
+        assert_eq!(effective.cause(), DecisionCause::NoMatch);
+        assert!(!effective.enforced);
+    }
+
     /// **One exchange's verdict never reaches another exchange's record.** The captured verdict is
     /// held in one slot, so an emitted decision naming a different exchange must fall back to the
     /// gateway's own label rather than take what is waiting there.
@@ -1691,6 +2251,7 @@ mod tests {
             action: r#"Box::Action::"fs:read""#.to_string(),
             resource: "~/secret".to_string(),
             decision: decision.clone(),
+            would_deny: Vec::new(),
         };
 
         // A floor denial over a policy permit.

@@ -19,6 +19,7 @@ name = "strands-box-sock-alias"
 path = "src/bin/strands-box-sock-alias.rs"
 
 [dependencies]
+diagnostics = { package = "strands-box-diagnostics", path = "../diagnostics" }
 async-trait = "0.1"
 containment = { package = "strands-box-containment", path = "../containment" }
 credentials = { package = "strands-box-credentials", path = "../credentials" }
@@ -201,3 +202,6 @@ tokio = { version = "1", features = ["test-util"] }
 
 [lints.rust]
 unused_must_use = "deny"
+
+[lints.clippy]
+print_stderr = "warn"

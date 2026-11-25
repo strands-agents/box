@@ -51,6 +51,8 @@ fn launch(root: &Path, config: &ContainmentConfig, args: &[&str]) -> Output {
         .unwrap()
 }
 
+// A `skipping:` line is test-harness output.
+#[allow(clippy::print_stderr)]
 fn supported() -> bool {
     if cfg!(all(
         target_os = "linux",

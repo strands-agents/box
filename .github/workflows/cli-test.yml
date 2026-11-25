@@ -103,6 +103,11 @@ jobs:
       - name: Test
         run: cargo test -p strands-box-cli -p strands-box-cli-pack-tests -p strands-box-cli-profile -p strands-box-cli-telemetry --all-features
 
+      # Test the ordinary library separately: the app's dev dependency enables test-transport.
+      - name: Test telemetry endpoint without test transport
+        if: ${{ !cancelled() && inputs.suite == 'all' }}
+        run: cargo test --locked -p strands-box-cli-telemetry --no-default-features --test endpoint_override
+
   # Every macOS check in one job, so a pull request waits for one macOS runner. The corpus and
   # launch checks run the build without test-support. The host tests and the engine suite run last,
   # because they rebuild box with it.
@@ -299,6 +304,10 @@ jobs:
           else
             cargo test -p strands-box-cli -p strands-box-cli-pack-tests -p strands-box-cli-profile -p strands-box-cli-telemetry --all-features
           fi
+
+      - name: Test telemetry endpoint without test transport
+        if: ${{ !cancelled() && inputs.suite == 'all' }}
+        run: cargo test --locked -p strands-box-cli-telemetry --no-default-features --test endpoint_override
 
   # The macOS package, built as the release builds it, then run on each supported macOS.
   package:

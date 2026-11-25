@@ -684,6 +684,21 @@ and raises `shell:exec`, and each file it touches raises its own `fs:*`. The ali
 command such as `cat` or `jq`, or with a program that the Shell starts in its own sandbox. Plugin
 hooks remain broken because most of them exec a script.
 
+<a id="core-writes-stderr-only-through-diag-and-codes-each-kind"></a>
+### Box Core writes stderr only through `diag!`, and codes each kind of message but internal failures
+
+Every Box Core message reaches stderr through `diagnostics::diag!` as
+`<source>: <severity>[<code>]: <text>`, and clippy refuses any other stderr write in Core crates.
+Each kind of message, one cause the reader can act on rather than one error type, has one code;
+the registry sets its source and severity. An internal failure the reader can only report has no
+code. The format is a convention on a shared stream, not an authenticated channel.
+
+**Rejected.** Codes only for messages a reader acts on today: an uncoded kind cannot be
+explained later.
+
+**Cost.** Each new kind of message needs a code and a row on `message-codes.md`. A reader must not
+treat a coded line as proof that Box wrote it.
+
 ## Policy
 
 <a id="the-authored-policy-is-the-only-decision-authority"></a>
@@ -2835,14 +2850,16 @@ prints the count once, on one stderr line, when the run ends. Each failed export
 line, with its cause, only when `STRANDS_BOX_TELEMETRY_DEBUG` is set, because a vendor that is down
 would print a line on each export interval. A relayed agent span does not take part in the shutdown
 drain, so a shutdown can lose one in flight; a refusal cannot be lost that way. A record that the SDK's own
-queue refuses is not counted. Every exit runs the same drain. A box that fails before its workload
+queue refuses is counted and reported, but not kept. Every exit runs the same drain. A box that fails before its workload
 starts therefore still records its stop.
 
 <a id="the-effective-decision-is-the-canonical-record"></a>
 ### The effective decision from the enforcement point is the canonical record
 
 The enforcement point submits one record after all policy gates and deny-only floors finish. It
-records a permit before starting the effect, or a denial before returning the refusal. The box does
+records a permit before starting the effect, or a denial before returning the refusal; in
+[log-only mode](#log-only-mode-turns-only-a-recorded-policy-denial-into-an-allow) a policy denial
+it let through is recorded as a denial, marked unenforced, before the effect starts. The box does
 not record the raw engine verdict, because a floor can refuse what policy permitted and a bootstrap
 pass can permit what policy denied. The record names every policy that determined it, in
 `strands.box.policy.determining.ids`, and a cause in `strands.box.policy.cause`, one of `permitted`,

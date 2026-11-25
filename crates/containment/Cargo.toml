@@ -16,6 +16,7 @@ native-filesystem-policy = []
 test-support = []
 
 [dependencies]
+diagnostics = { package = "strands-box-diagnostics", path = "../diagnostics" }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -131,3 +132,6 @@ required-features = ["test-support"]
 
 [lints.rust]
 unused_must_use = "deny"
+
+[lints.clippy]
+print_stderr = "warn"

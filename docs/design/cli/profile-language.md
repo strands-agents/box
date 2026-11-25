@@ -1012,8 +1012,9 @@ packs do something that the sections above do not show:
   key.
 - [`@box/pi`](../../../resources/packs/pi/pack.toml) is started by node. A `[tool.pi]` table finds
   the script that npm installs, and the agent's command names it by `tool.pi.root`.
-- `@box/go` keeps GOPATH and its caches in the project, and `@box/uv` its cache and the Pythons it
-  downloads.
+- `@box/go`, `@box/cargo`, and `@box/npm` keep their download caches in their own
+  [tool storage](#tool-storage). `@box/uv` keeps its cache and the Pythons it downloads in the
+  project.
 - `@box/npx`, `@box/uvx`, `@box/pnpx`, and `@box/bunx` also start MCP servers
   ([Launcher packs](#launcher-packs)).
 

@@ -187,6 +187,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "tempfile",
+ "test-common",
  "toml",
 ]
 
@@ -212,6 +213,13 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys",
+]
+
+[[package]]
+name = "test-common"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
