@@ -7,7 +7,7 @@ use crate::error::ConfigError;
 use super::ExperimentalFeatures;
 use super::process::{ProcessSpec, validate_path_spelling};
 
-pub(super) fn validate_paths(paths: &[PathBuf], table: &str) -> Result<(), ConfigError> {
+pub(crate) fn validate_paths(paths: &[PathBuf], table: &str) -> Result<(), ConfigError> {
     let refuse = |reason| ConfigError::Process {
         table: table.into(),
         reason,
@@ -34,7 +34,7 @@ pub(super) fn validate_paths(paths: &[PathBuf], table: &str) -> Result<(), Confi
     Ok(())
 }
 
-pub(super) fn validate_selection(
+pub(crate) fn validate_selection(
     spec: &ProcessSpec,
     table: &str,
     features: &ExperimentalFeatures,

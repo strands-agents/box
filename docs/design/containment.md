@@ -350,7 +350,7 @@ connection. This implementation pins and verifies each selected mount by its own
 A shared parent alone cannot satisfy that check. This is a planner requirement, not a Linux
 limitation on receiving mounts beneath an ordinary directory. The internal planner requires
 covering writable and executable grants and rejects intersecting protected paths; these checks
-do not replace the complete per-process permission checks needed before public activation.
+do not replace Core's per-process permission checks.
 
 During setup, this path keeps sources attached, binds the selected subtrees into the sandbox,
 and makes unrelated mounts private. A bind makes the same filesystem visible at another path;
@@ -367,9 +367,35 @@ ordinary grants and selected storage.
 Future mounts retain the trusted publisher's
 options and contents: Box does not add read-only, `noexec`, `nosuid`, or `nodev` restrictions to
 those arrivals. These options respectively block writes, executable file mappings, privilege
-gains through executable file attributes, and device-node use. Complete per-process permission
-validation and the handoff of each approved source remain separate work. The normal planner
+gains through executable file attributes, and device-node use. Core's per-process checks
+are described below; the handoff of each approved source remains separate work. The normal planner
 passes an empty selection, so this internal path does not change normal launches.
+
+### Core validation of incoming mount selections
+
+Core has an internal checker for the directories in one process's `filesystem.receive_mounts`
+selection. It runs during run-wide judgment and again when translating an agent, configured tool,
+or local MCP server's launch. The agent must grant the whole directory read, write, and execute
+access. A tool or local MCP server must grant read and write access; its existing execution rules
+already cover those grants. A covering parent grant is sufficient. Child and exact-file grants are not.
+Provider read-only or execution restrictions do not reduce these configuration requirements.
+
+The checker rejects overlapping selections and any intersection with a denied path, a write-protected
+path, Box's state directory, or loaded authority sources. Restrictions on absent descendants also
+cause rejection. Existing configured-command and installed-program protections still run. The
+native filesystem policy cannot be combined with a nonempty selection. No mount feature flag is
+required on Linux. macOS rejects declarations through its existing configuration checks.
+
+Each selected directory stays open while the checker compares permissions and protected paths.
+Coverage and identity comparisons follow parent directories from this open object, rather than
+reopening the selected pathname. Path comparisons also preserve restrictions on future descendants.
+These checks visit permission paths and their ancestors; they do not list all storage contents.
+Existing command-alias scans retain their separate behavior.
+
+The translated boundary retains a private approved-directory token. The token is not a connection
+to the Linux mount backend: source handoff and public activation remain unimplemented. Nonempty
+selections are still refused by the configuration loader and stored-run contract, so normal launches
+continue to use the private filesystem view.
 
 ### Linux filesystem metadata
 
