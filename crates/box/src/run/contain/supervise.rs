@@ -122,7 +122,7 @@ async fn spawn_registered(
         };
         if let Some(reason) = error {
             let _ = group.stop().await;
-            return Err(SuperviseError::Control { reason }.into());
+            return Err(SuperviseError::Native { reason }.into());
         }
     }
     #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
@@ -135,7 +135,7 @@ async fn spawn_registered(
         };
         if let Some(reason) = error {
             let _ = group.stop().await;
-            return Err(SuperviseError::Control { reason }.into());
+            return Err(SuperviseError::Native { reason }.into());
         }
     }
     Ok((group, trampoline))
@@ -534,7 +534,7 @@ impl Contained {
             #[cfg(target_os = "macos")]
             refuse_a_held_workload_port(workload_port)?;
             let listener = std::net::TcpListener::bind(address).map_err(|source| {
-                crate::error::SuperviseError::Control {
+                crate::error::SuperviseError::Ingress {
                     reason: format!("binding the ingress {address}: {source}"),
                 }
             })?;
@@ -547,8 +547,9 @@ impl Contained {
             (ingress_connection_limit() / ingress.len()).max(1)
         };
         for (_, address, workload_port) in &ingress {
-            eprintln!(
-                "strands-box: [ingress] {address} is relayed to the agent's port \
+            ::diagnostics::diag!(
+                B0701,
+                "[ingress] {address} is relayed to the agent's port \
                  {workload_port}, at most {limit} callers at once"
             );
         }
@@ -562,7 +563,9 @@ impl Contained {
             signals.restore_default = false;
         }
         #[cfg(unix)]
-        let diagnostics = if own_terminal || std::io::stderr().is_terminal() {
+        // Core holds its messages only while they would reach a terminal; a caller that points
+        // stderr at a pipe reads them live.
+        let diagnostics = if ::diagnostics::stderr().is_terminal() {
             Some(
                 crate::run::diagnostics::Diagnostics::capture()
                     .map_err(|source| SuperviseError::Diagnostics { source })?,
@@ -686,7 +689,7 @@ impl Contained {
                 if let Some(mut terminal) = terminal {
                     let _ = terminal.restore();
                 }
-                return Err(crate::error::SuperviseError::Control {
+                return Err(crate::error::SuperviseError::Ingress {
                     reason: format!("starting the ingress relay: {error}"),
                 }
                 .into());
@@ -1094,13 +1097,52 @@ fn trampoline_message(stderr: &[u8]) -> Option<String> {
     // Containment's MissingReads caps its reason at 6000 bytes, leaving room for error framing.
     const MAXIMUM_CHARACTERS: usize = 8192;
     let text = String::from_utf8_lossy(stderr);
-    let start = text
+    let starts: Vec<usize> = text
         .match_indices(PREFIX)
         .filter(|(offset, _)| *offset == 0 || text.as_bytes()[offset - 1] == b'\n')
-        .last()
-        .map(|(offset, _)| offset + PREFIX.len());
+        .map(|(offset, _)| offset)
+        .collect();
+    // A supervisor that reads end-of-file after a failed setup can write last, so the setup
+    // failure's own message wins over a later trampoline line.
+    let setup_failure = |start: &&usize| {
+        matches!(
+            ::diagnostics::parse(text[**start..].lines().next().unwrap_or_default()),
+            ::diagnostics::Line::Message(message)
+                if message.code == Some(::diagnostics::Code::H0401)
+        )
+    };
+    let start = starts
+        .iter()
+        .rev()
+        .find(setup_failure)
+        .or(starts.last())
+        .copied();
     let message = match start {
-        Some(start) => text[start..].trim(),
+        // The detail is the text after the trampoline's severity and code, with the indented lines
+        // that belong to it.
+        Some(start) => {
+            let block = &text[start..];
+            let line = block.lines().next().unwrap_or_default();
+            match ::diagnostics::parse(line) {
+                ::diagnostics::Line::Message(message) => {
+                    // The message text is the end of its first line.
+                    let first = &block[line.len() - message.text.len()..];
+                    let end = first
+                        .match_indices('\n')
+                        .map(|(offset, _)| offset + 1)
+                        .find(|next| {
+                            first[*next..]
+                                .chars()
+                                .next()
+                                .is_some_and(|c| c != ' ' && c != '\t')
+                        })
+                        .unwrap_or(first.len());
+                    &first[..end]
+                }
+                _ => &block[PREFIX.len()..],
+            }
+            .trim()
+        }
         None => text
             .lines()
             .rev()
@@ -1346,7 +1388,7 @@ fn refuse_a_held_workload_port(port: u16) -> Result<(), BoxError> {
     let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     if std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(200)).is_ok()
     {
-        return Err(crate::error::SuperviseError::Control {
+        return Err(crate::error::SuperviseError::Ingress {
             reason: format!(
                 "the agent's port {port} already has a listener at {address}; another process \
                  holds it, so the ingress relay would reach that process and not the agent"
@@ -1397,6 +1439,49 @@ mod tests {
             "the failure names the library and the binary: {text}"
         );
         assert!(trampoline_message(b"").is_none());
+        let coded = b"strands-box: note[B0201]: [tool.cargo] runs /usr/bin/app\n\
+            strands-box-contain-trampoline: error[H0401]: containment apply failed: '/usr/bin/app' \
+            needs the shared library 'libnope.so.1'\n";
+        assert_eq!(
+            trampoline_message(coded).as_deref(),
+            Some(
+                "containment apply failed: '/usr/bin/app' needs the shared library 'libnope.so.1'"
+            ),
+            "the detail leaves out the trampoline's severity and code"
+        );
+    }
+
+    /// **A setup failure keeps its reason when the query supervisor writes after it.**
+    #[test]
+    fn a_setup_failure_wins_over_a_later_supervisor_line() {
+        use ::diagnostics::{Code, Kind, Source, text};
+        let setup = text(
+            Source::ContainTrampoline,
+            Kind::Coded(Code::H0401),
+            format_args!(
+                "apply failed: 2 dependencies lack read access\nDependency: /vendor/codec"
+            ),
+        );
+        let supervisor = text(
+            Source::ContainTrampoline,
+            Kind::Coded(Code::H0502),
+            format_args!("filesystem query supervisor failed: unexpected end of file"),
+        );
+        for stderr in [
+            format!("{setup}{supervisor}"),
+            format!("{supervisor}{setup}"),
+        ] {
+            assert_eq!(
+                trampoline_message(stderr.as_bytes()).as_deref(),
+                Some("apply failed: 2 dependencies lack read access\n  Dependency: /vendor/codec"),
+                "{stderr}"
+            );
+        }
+        assert_eq!(
+            trampoline_message(supervisor.as_bytes()).as_deref(),
+            Some("filesystem query supervisor failed: unexpected end of file"),
+            "with no setup failure the last trampoline line is the reason"
+        );
     }
 
     #[test]

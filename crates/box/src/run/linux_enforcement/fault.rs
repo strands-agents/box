@@ -1,6 +1,8 @@
 //! Fault controls compiled only into dedicated test builds.
 use std::io;
 #[cfg(box_native_test_faults)]
+// `NATIVE_TEST_FAULT=` lines are a protocol between a fault test and its child, not messages.
+#[allow(clippy::print_stderr)]
 pub(super) fn at(stage: &str) -> io::Result<()> {
     #[cfg(test)]
     run_outcome_hook(stage);

@@ -116,10 +116,10 @@ diagnostic text. `ProfileMissing`, and a `ProfilePath` whose file is not found, 
 map to `unknown`.
 `NotOnHost` does not distinguish the agent from another missing host input.
 
-The current invocation's `box_started` control record with outcome `ok` confirms that the Core
-box run started. It gives `box_launched: true` and `failure_reason: null`. Core emits this
-record after its initial preparation and before workload spawn. Later workload failures do not
-reverse the launch result. An error during Core's initial preparation can leave no lifecycle
+The current invocation's `workload_started` control record with outcome `ok` confirms the
+launch. It gives `box_launched: true` and `failure_reason: null`.
+[Core's control-plane records](../../user/telemetry.md#a-control-plane-record) say when Core
+writes it. Later workload failures do not reverse the launch result. An error during Core's initial preparation can leave no lifecycle
 records.
 A nonzero Core exit does not establish a preparation failure.
 
@@ -140,7 +140,8 @@ preparation, it creates a `Session` with one invocation and the collected
 context. A preparation failure's run event goes out with shutdown, without waiting for launch
 evidence. Successful preparation waits for `workload_started` before it sends the run event. A
 run whose workload never starts sends it with shutdown.
-If observation ends without that evidence, the session emits `null` for all three run fields.
+If observation ends without that evidence, the session emits `null` for all three run fields,
+including when Core refused the run after `box_started`.
 Preparation failures also give `startup_latency_ms: null`. Every field is required; unavailable
 values serialize as `null`.
 Missing records alone do not establish that no box started.
@@ -159,7 +160,7 @@ new record. The reader retains partial lines appended after the boundary until t
 
 Lifecycle observation accepts only `strands-box.control` logs with the Core service and source
 attributes.
-It reads `box_started` and `workload_started` with outcome `ok`, and `box_stopped` with outcome
+It reads `workload_started` with outcome `ok`, and `box_stopped` with outcome
 `ok` or `refused`.
 Old records and relayed agent records cannot supply evidence for this invocation. Missing or
 unreadable records leave the corresponding observations unknown.

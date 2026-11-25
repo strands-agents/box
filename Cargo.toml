@@ -11,6 +11,7 @@ members = [
     "crates/box",
     "crates/shell",
     "crates/credentials",
+    "crates/diagnostics",
     "crates/policy",
     "crates/containment",
     "crates/egress-gateway",

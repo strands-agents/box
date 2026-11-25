@@ -41,7 +41,7 @@ pub(crate) async fn generate_schema(
         enabled,
         &tables,
         references,
-        std::io::stderr(),
+        ::diagnostics::stderr(),
     )?;
     for server in &remote_servers {
         if let Some(secret) = &server.secret

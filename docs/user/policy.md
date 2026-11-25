@@ -590,7 +590,7 @@ on a policy with a rule it can prove will never match (the refusals call such a 
 has run before keeps its state.
 
 ```text
-strands-box: error: policy file /Users/you/box-tutorial/my-box/policy.dw will not load: <refusal>
+strands-box: error[B0103]: policy file /Users/you/box-tutorial/my-box/policy.dw will not load: <refusal>
 ```
 
 Each refusal below is the text after `will not load: `. Two numberings appear. `rule N` counts from
@@ -603,7 +603,7 @@ with the line and column in the file, and often a hint in parentheses, such as
 When the box suspects a rule is inert but cannot prove it, it prints a warning and starts:
 
 ```text
-strands-box: warning: <finding>
+policy: warning[<code>]: <finding>
 ```
 
 ### The rule does not parse
@@ -1040,7 +1040,7 @@ policy writes a cap as a permit: rule @id("write_budget") (rule 2) carries a tem
 startup:
 
 ```text
-strands-box: warning: rule @id("write_budget") (rule 2) carries a temporal clause beside rule @id("project_writes") (rule 1), which also permits that action; the budget is inert for every request the other rule admits, so write a cap as a forbid
+policy: warning[P0103]: rule @id("write_budget") (rule 2) carries a temporal clause beside rule @id("project_writes") (rule 1), which also permits that action; the budget is inert for every request the other rule admits, so write a cap as a forbid
 ```
 
 **Loads**, with no warning, when the temporal `permit` is the only permit for its action, or when
@@ -1068,7 +1068,7 @@ refuses when the record says the box has run but the history is missing or empty
 record says it has not run but the history holds events:
 
 ```text
-strands-box: error: policy staging failed: the box record is committed, but the history /Users/dev/.box/<name>/private/dogwood.redb is absent. Wipe the box directory to start again.
+strands-box: error[B0105]: policy staging failed: the box record is committed, but the history /Users/dev/.box/<name>/private/dogwood.redb is absent. Wipe the box directory to start again.
 ```
 
 A first run that stops after Box stores the record and before it opens the history leaves the box
@@ -1084,15 +1084,15 @@ The run also refuses history stamped more than five minutes ahead of the system 
 happens when the clock moved back after the box last ran, or when someone edited the history file:
 
 ```text
-strands-box: error: policy staging failed: policy staging history failure: durable timestamp <t> is <n> ns ahead of the current clock <now>, exceeding the maximum allowed future skew of 300000000000 ns; refusing the operation rather than issuing future-dated timestamps
+strands-box: error[B0103]: policy staging failed: policy staging history failure: durable timestamp <t> is <n> ns ahead of the current clock <now>, exceeding the maximum allowed future skew of 300000000000 ns; refusing the operation rather than issuing future-dated timestamps
 ```
 
 If the clock moves back more than five minutes during a run, the box denies each request and prints
-`policy: warn: durable timestamp ...; denying` on stderr. Requests are decided again once the clock
-is within five minutes of the newest history timestamp. If an action finished while the clock was
-that far back, the box keeps its record and prints
-`policy: warn: an earlier outcome is not recorded yet: ...; denying` for each request until the
-record is saved. Once the clock is within five minutes again, the box retries it when another
+`policy: warning[P0202]: durable timestamp ...; denying` on stderr. Requests are decided again once
+the clock is within five minutes of the newest history timestamp. If an action finished while the
+clock was that far back, the box keeps its record and prints
+`policy: warning[P0202]: an earlier outcome is not recorded yet: ...; denying` for each request
+until the record is saved. Once the clock is within five minutes again, the box retries it when another
 request or completed outcome arrives, or when the run shuts down. Requests are decided normally
 after the record is saved. If the run ends while the clock
 is still more than five minutes behind, or the process is killed, that action doesn't count toward

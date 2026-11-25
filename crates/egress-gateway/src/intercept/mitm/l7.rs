@@ -489,8 +489,9 @@ async fn run_l7_legs(
                 body: &captured,
             },
         ) {
-            eprintln!(
-                "strands-box: warning: staging remote MCP catalog for {server:?} failed: {error}"
+            diagnostics::diag!(
+                B0401,
+                "staging remote MCP catalog for {server:?} failed: {error}"
             );
         }
         body = captured.into();

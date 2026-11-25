@@ -36,8 +36,9 @@ fn launch_failure(exit: &Exit) -> Option<String> {
     let refused = [
         "error: the following required arguments",
         "Usage: strands-box",
-        "strands-box: error:",
-        "strands-box: refusing to run:",
+        "strands-box: error",
+        "policy: error[",
+        "telemetry: error[",
     ];
     let unreachable = [
         "api error",

@@ -156,7 +156,7 @@ credential it attached from that answer, so an endpoint that echoes a refused ke
 key in your logs:
 
 ```text
-strands-box: telemetry export failed: https://cloud.langfuse.com/api/public/otel/v1/traces answered 401 Unauthorized: ...
+telemetry: warning[T0102]: telemetry export failed: https://cloud.langfuse.com/api/public/otel/v1/traces answered 401 Unauthorized: ...
 ```
 
 ## The workload's own signals
@@ -415,7 +415,8 @@ A telemetry error stops the run before the workload starts, so the agent never r
 the reason on stderr and exits `1`.
 
 Exit `1` alone does not prove that Box refused, because a workload is free to exit `1` as well. The
-message does: Box prefixes every line it prints with `strands-box:`.
+message does: a telemetry refusal reads `telemetry: error[T0103]: ...`. See
+[message codes](message-codes.md).
 
 | What the operator sees | Cause |
 |---|---|
@@ -447,8 +448,8 @@ Box prints one line on stderr if any of these happened:
 - The final export did not finish in time.
 
 ```text
-strands-box: warning: telemetry records were lost: 441 records were dropped before export to the configured targets
-strands-box: warning: telemetry records were lost: 2 exports to the configured targets failed
+telemetry: warning[T0101]: telemetry records were lost: 441 records were dropped before export to the configured targets
+telemetry: warning[T0101]: telemetry records were lost: 2 exports to the configured targets failed
 ```
 
 When more than one cause applies, the line names each of them. The run's exit code does not change.

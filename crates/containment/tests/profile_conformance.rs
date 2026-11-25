@@ -3085,8 +3085,7 @@ fn a_stated_home_still_anchors_a_row_after_the_wire_round_trip() {
 /// **A wildcard cannot stand in for these names.** `(deny default)` does not reach an operation the
 /// version-1 preamble grants unconditionally, and a wildcard deny does not take one back either — so
 /// three of the eleven below were reachable in a shipped box, and a `fs-snapshot*` line would have
-/// left the one that matters open. The crate's `AGENTS.md` records which three and how it was
-/// measured.
+/// left the one that matters open. The crate's `AGENTS.md` names the three operations.
 ///
 /// The other eight are already refused by the default deny. They are named anyway so each closure can
 /// be falsified by deleting one line.

@@ -84,6 +84,17 @@ pub enum PolicyWarning {
     },
 }
 
+impl PolicyWarning {
+    /// The message code a printed warning of this kind carries.
+    pub fn code(&self) -> diagnostics::Code {
+        match self {
+            Self::HomeAfterWildcard { .. } => diagnostics::Code::P0101,
+            Self::ProgramSpelledAsPath { .. } => diagnostics::Code::P0102,
+            Self::InertTemporalPermit { .. } => diagnostics::Code::P0103,
+        }
+    }
+}
+
 impl std::fmt::Display for PolicyWarning {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

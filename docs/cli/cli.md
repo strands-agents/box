@@ -549,7 +549,7 @@ variables, listed in [Installer variables](install.md#installer-variables).
 | Status | When |
 | --- | --- |
 | `0` | The command succeeded. |
-| `1` | An error. An error from `box` starts with `box: error:`, and one that stops a box as it starts begins with `strands-box: error:`. Most name their own fix. For the rest, see [Troubleshooting](troubleshooting.md). `box runs history` also exits with `1` when it can't read a line of the run's log, after it shows the rest. |
+| `1` | An error. An error from `box` starts with `box: error:`, and one that stops a box as it starts is a Box message with the severity `error`, such as `strands-box: error[<code>]:`. Box's [message codes](../user/message-codes.md) explain each code. Most name their own fix. For the rest, see [Troubleshooting](troubleshooting.md). `box runs history` also exits with `1` when it can't read a line of the run's log, after it shows the rest. |
 | `2` | The command line is wrong, such as an unknown flag. |
 | `130` | You pressed Ctrl+C at a prompt. |
 

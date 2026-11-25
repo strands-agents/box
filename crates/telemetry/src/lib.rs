@@ -4,6 +4,9 @@
 //!
 //! `README.md` serves a Rust consumer; `AGENTS.md` holds the boundaries.
 
+/// The voice of this crate's stderr messages, which `diagnostics::diag!` reads.
+const DIAGNOSTIC_SOURCE: diagnostics::Source = diagnostics::Source::Telemetry;
+
 mod collector;
 mod config;
 mod correlation;

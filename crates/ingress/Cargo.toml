@@ -10,6 +10,7 @@ name = "ingress"
 path = "src/lib.rs"
 
 [dependencies]
+diagnostics = { package = "strands-box-diagnostics", path = "../diagnostics" }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 
@@ -22,3 +23,6 @@ libc = "0.2"
 
 [lints.rust]
 unused_must_use = "deny"
+
+[lints.clippy]
+print_stderr = "warn"
