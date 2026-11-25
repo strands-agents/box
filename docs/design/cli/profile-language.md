@@ -1184,8 +1184,11 @@ creates that file on its first run, so a copy made once never brings the host va
   copy, and adds each `keep` path that the copy lacks, creating each missing table. A value that
   the copy holds stays, whatever it is. A path whose parent in the copy is not a table is not
   added. The copy is written only if it changed, by the same walk as a `set` rewrite.
-- **When `keep` includes `["model"]`**, differing string values for that top-level key in the
-  source and copy produce a warning before each run. The copy keeps its value.
+- **When `warn-if-different` selects a `keep` path**, differing parsed values present in both
+  source and copy produce a warning before each run. The selection defaults to empty and needs
+  `fill = true`. The guarded read supplies the comparison, and the copy keeps its value.
+  Interactive runs save the warning in `box.log` and, when the log is retained, print an exit
+  reminder outside the bounded error preview.
 - **A copy that is a link, not a file, or a file with another hard link** is left alone, as the
   MCP import leaves it, and `box run` reports it. A `set` rewrite stops the run there instead.
 - A host file or a copy that does not parse as its `kind` stops the run.

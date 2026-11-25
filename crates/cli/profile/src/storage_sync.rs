@@ -731,15 +731,17 @@ pub(crate) fn copy_files_waiting(
             State::WillCopy(_) | State::NothingKept => {}
             State::InStorage => storage_files::rewrite(file)?,
             State::Fill { text, .. } => {
-                let (skipped, model_differs) = storage_files::fill(file, &text)?;
+                let (skipped, different) = storage_files::fill(file, &text)?;
                 if let Some(why) = skipped {
                     not_copied.push((tilde(home, &file.source), why));
                 }
-                if model_differs {
+                if !different.is_empty() {
                     copied.import_warnings.push(format!(
-                        "Saved model in {:?} differs from {:?}; kept the saved value.",
+                        "Saved settings in {:?} differ from {:?} at {}; kept the saved values. \
+                         If intentional, no action is needed.",
                         tilde(home, &file.target),
                         tilde(home, &file.source),
+                        different.join(", "),
                     ));
                 }
             }
@@ -955,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_different_imported_string_model_produces_a_warning() {
+    fn only_selected_present_values_that_differ_produce_an_import_warning() {
         use crate::mcp::Format;
         use crate::storage_edit::Edit;
         use serde_json::json;
@@ -972,6 +974,7 @@ mod tests {
                 keep: Some(vec![vec!["model".into()], vec!["theme".into()]]),
                 set: Vec::new(),
                 fill: true,
+                warn_if_different: vec![vec!["model".into()]],
             });
             let source = json!({"model": "host-private-model", "theme": "light"});
             fixture.write("settings", &encode(&source));
@@ -988,9 +991,13 @@ mod tests {
                     false,
                 ),
                 (json!({"theme": "dark"}), source.clone(), false),
-                (json!({"model": false}), source.clone(), false),
+                (
+                    json!({"model": false, "theme": "dark"}),
+                    source.clone(),
+                    true,
+                ),
                 (source.clone(), json!({"theme": "dark"}), false),
-                (source.clone(), json!({"model": false}), false),
+                (source.clone(), json!({"model": false}), true),
             ] {
                 std::fs::write(&file.target, encode(&saved)).expect("saved settings");
                 fixture.write("settings", &encode(&source));
@@ -1000,27 +1007,56 @@ mod tests {
                     assert_eq!(
                         copied.import_warnings,
                         [
-                            "Saved model in \"~/.strands/box/storage/p/default/config/settings\" \
-                             differs from \"~/settings\"; kept the saved value."
+                            "Saved settings in \"~/.strands/box/storage/p/default/config/settings\" \
+                             differ from \"~/settings\" at model; kept the saved values. \
+                             If intentional, no action is needed."
                         ]
                     );
                     assert_eq!(fixture.read("config/settings"), encode(&saved));
                 }
             }
+            if kind == Format::Toml {
+                std::fs::write(&file.target, "model = inf\n").unwrap();
+                fixture.write("settings", "model = -inf\n");
+                assert_eq!(fixture.run(&file).import_warnings.len(), 1);
+                assert_eq!(fixture.read("config/settings"), "model = inf\n");
+            }
             fixture.write("settings", &encode(&source));
             let saved = encode(&json!({"model": "saved-private-model", "theme": "dark"}));
             std::fs::write(&file.target, &saved).expect("saved settings");
-            for keep in [
-                vec![vec!["theme".into()]],
-                vec![vec!["nested".into(), "model".into()]],
-            ] {
-                file.edit.as_mut().unwrap().keep = Some(keep);
+            file.edit.as_mut().unwrap().warn_if_different =
+                vec![vec!["model".into()], vec!["theme".into()]];
+            let copied = fixture.run(&file);
+            assert_eq!(copied.import_warnings.len(), 1);
+            assert!(copied.import_warnings[0].contains("at model, theme;"));
+            file.edit.as_mut().unwrap().warn_if_different.clear();
+            assert!(
+                fixture.run(&file).import_warnings.is_empty(),
+                "no selection"
+            );
+            for path in [vec!["theme".into()], vec!["nested".into(), "choice".into()]] {
+                file.edit.as_mut().unwrap().keep = Some(vec![path.clone()]);
+                file.edit.as_mut().unwrap().warn_if_different = vec![path.clone()];
+                std::fs::write(
+                    &file.target,
+                    encode(&json!({"theme": "dark", "nested": {"choice": false}})),
+                )
+                .unwrap();
+                fixture.write(
+                    "settings",
+                    &encode(&json!({"theme": "light", "nested": {"choice": true}})),
+                );
+                let copied = fixture.run(&file);
+                assert_eq!(copied.import_warnings.len(), 1);
                 assert!(
-                    fixture.run(&file).import_warnings.is_empty(),
-                    "model not imported"
+                    copied.import_warnings[0]
+                        .contains(&format!("at {};", crate::storage_edit::shown(&path)))
                 );
             }
+            fixture.write("settings", &encode(&source));
+            std::fs::write(&file.target, &saved).unwrap();
             file.edit.as_mut().unwrap().keep = Some(vec![vec!["model".into()]]);
+            file.edit.as_mut().unwrap().warn_if_different = vec![vec!["model".into()]];
             file.edit.as_mut().unwrap().fill = false;
             assert!(fixture.run(&file).import_warnings.is_empty(), "copy once");
             file.edit.as_mut().unwrap().fill = true;

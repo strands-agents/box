@@ -948,6 +948,7 @@ host source alone does not update an existing ordinary copy.
 | `sync` | Copy changed host files on every run; cannot combine with `kind`, `keep`, `set`, or `fill` |
 | `exclude` | File or folder names a folder copy leaves out at any depth, such as `["mcp.json"]`, also on each `sync`; one whole name each, matched without regard to case, no `/` and no `*`, `?`, or `[`; needs `sync = true`; cannot combine with `kind`, `keep`, `set`, or `fill`, and refused for a source that is one file |
 | `fill` | Add missing selected values on every run; requires `keep` and `kind = "json"` or `"toml"`, and cannot have `set` |
+| `warn-if-different` | Key paths such as `[["theme"]]`; requires `fill = true` and the exact paths in `keep`. Warn when both saved and source values exist and differ, preserving the saved values. Defaults to `[]`. |
 
 Active rows cannot have equal or nested targets. A profile row does not replace an inherited
 row. Disable the pack's copy through its controlling input before adding your own for that

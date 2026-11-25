@@ -607,7 +607,7 @@ fn spawn_at_terminal(mut command: Command) -> (Child, std::fs::File) {
 }
 
 #[test]
-fn an_imported_model_warning_precedes_the_agent_and_explains_reset() {
+fn an_import_warning_precedes_the_agent_and_survives_in_the_terminal_log() {
     use std::io::Read as _;
 
     let scene = Scene::new();
@@ -623,6 +623,7 @@ source = "${{{{ home }}}}/settings.toml"
 target = "settings/config.toml"
 kind = "toml"
 fill = true
+warn-if-different = [["model"]]
 keep = [["model"], ["theme"]]
 "#
         ),
@@ -639,11 +640,15 @@ keep = [["model"], ["theme"]]
     let saved = "# saved choice\nmodel = 'saved-private-model'\ntheme = 'dark'\n";
     std::fs::write(&target, saved).unwrap();
     let check = |text: &str, target: &Path| {
-        let warning = text.find("box: warning: Saved model").expect("a warning");
+        let warning = text
+            .find("box: warning: Saved settings")
+            .expect("a warning");
         assert!(warning < text.find("agent-started").expect("agent output"));
         assert_eq!(text.matches("box: warning:").count(), 1);
         assert!(text.contains("box profile reset probe"));
         assert!(text.contains("deletes this profile's sessions and memory"));
+        assert!(text.contains("remove only the named keys"));
+        assert!(text.contains("If intentional, no action is needed."));
         assert!(!text.contains("host-private-model"));
         assert!(!text.contains("saved-private-model"));
         assert_eq!(std::fs::read_to_string(target).unwrap(), saved);
@@ -654,6 +659,7 @@ keep = [["model"], ["theme"]]
     let text = String::from_utf8_lossy(&output.stderr);
     check(&text, &target);
     assert!(!text.contains("with the same BOX_HOME"));
+    assert!(!text.contains("startup reminder"));
     let box_home = scene.home().join("box-home");
     std::fs::rename(scene.home().join(".strands/box"), &box_home).unwrap();
     let target = box_home.join(relative);
@@ -678,6 +684,16 @@ keep = [["model"], ["theme"]]
         assert!(output.status.success(), "{}: {text}", output.status);
         check(&text, &target);
         assert!(text.contains("with the same BOX_HOME"));
+        assert!(text.contains("startup reminder: saved settings differed"));
+        let log = std::fs::read_dir(box_home.join("r"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_to_string(entry.path().join("box.log")).ok())
+            .find(|log| log.contains("box: warning: Saved settings"))
+            .expect("the warning survives in a retained run log");
+        assert!(log.contains("remove only the named keys"));
+        assert!(!log.contains("host-private-model"));
+        assert!(!log.contains("saved-private-model"));
     }
 }
 

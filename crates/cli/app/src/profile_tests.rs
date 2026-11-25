@@ -10578,6 +10578,30 @@ fn a_storage_files_edit_needs_its_kind_and_well_formed_rows() {
             "`storage.files[0] fill` is not true or false",
         ),
         (
+            "warn-if-different = [[\"a\"]]",
+            "`storage.files[0]` needs `kind`",
+        ),
+        (
+            "kind = \"json\"\nkeep = [[\"a\"]]\nwarn-if-different = [[\"a\"]]",
+            "`storage.files[0] warn-if-different` needs `fill = true`",
+        ),
+        (
+            "kind = \"json\"\nkeep = [[\"a\"]]\nfill = true\nwarn-if-different = true",
+            "`storage.files[0] warn-if-different` is a list of key lists",
+        ),
+        (
+            "kind = \"json\"\nkeep = [[\"a\"]]\nfill = true\nwarn-if-different = [[]]",
+            "`storage.files[0] warn-if-different[0]` is a list of one or more keys",
+        ),
+        (
+            "kind = \"json\"\nkeep = [[\"a\"]]\nfill = true\nwarn-if-different = [[1]]",
+            "`storage.files[0] warn-if-different[0][0]` is not a string",
+        ),
+        (
+            "kind = \"json\"\nkeep = [[\"a\"]]\nfill = true\nwarn-if-different = [[\"a\", \"b\"]]",
+            "`storage.files[0] warn-if-different[0]` needs the same key path in `keep`",
+        ),
+        (
             "kind = \"json\"\nkeep = [[\"a\"]]\nfill = true\n\
              [[storage.files.set]]\nkey = [\"b\"]\nvalue = \"c\"",
             "`storage.files[0]` holds `fill` and `set`",

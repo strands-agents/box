@@ -87,9 +87,14 @@ Codex uses its own default. Other settings, except `mcp_servers`, and your sessi
 the box.
 
 If both files set a model and the values differ, Box warns before each run and keeps the saved
-choice. To change it, use Codex's `/model`. To import these settings again, stop the profile's
-runs and use `box profile reset <profile>`, then start a new run. Reset also deletes that
-profile's agent sessions and memory ([Reset](../../../docs/cli/cli.md#box-profile-reset)).
+choice. If that difference is intentional, no action is needed. Interactive runs also keep the
+warning in the run log and show a reminder on exit.
+
+To change the saved choice, open Codex's `/model` picker inside Box and save a new default.
+To import the model from your Codex settings again, stop the profile's runs, remove only `model`
+from the saved `config.toml` named in the warning, and start a new run. This keeps the profile's
+sessions and memory. `box profile reset <profile>` also imports settings again, but deletes those sessions
+and memory ([Reset](../../../docs/cli/cli.md#box-profile-reset)).
 
 Your Codex folder's `agents/` folder comes into `home/agents`. Its `skills` and `~/.agents/skills` come into separate folders,
 `home/skills/codex` and `home/skills/agents`, so matching names stay separate.

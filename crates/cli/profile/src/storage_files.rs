@@ -15,6 +15,7 @@ use crate::files::{
     remove_if_present, rename_at, unlink_at,
 };
 use crate::host::{canonical, resolved, tilde, within};
+use crate::mcp::Format;
 use crate::storage_edit::{Edit, Failure, Kept, shown};
 use crate::storage_sync::{Entry, entry};
 
@@ -813,40 +814,62 @@ pub(crate) fn rewrite(file: &StorageFile) -> Result<(), Error> {
     .map(|_| ())
 }
 
-/// Fill missing values, returning any refusal and whether the imported model differs.
-pub(crate) fn fill(file: &StorageFile, kept: &str) -> Result<(Option<String>, bool), Error> {
+/// Fill missing values, returning any refusal and the selected keys whose saved values differ.
+pub(crate) fn fill(file: &StorageFile, kept: &str) -> Result<(Option<String>, Vec<String>), Error> {
     let Some(edit) = file.edit.as_ref().filter(|edit| edit.fill) else {
-        return Ok((None, false));
+        return Ok((None, Vec::new()));
     };
     let in_storage = format!("{} in storage", file.relative);
     let failure = |failure| {
         let (at, reason) = failure_text(file, edit, &in_storage, failure);
         Error::Set { at, reason }
     };
-    let mut model_differs = false;
+    let mut different = Vec::new();
     let skipped = edit_copy(file, true, |text| {
         let filled = edit.fill(text, kept).map_err(&failure)?;
-        if edit
-            .keep
-            .as_ref()
-            .is_some_and(|paths| paths.iter().any(|path| path == &["model"]))
-        {
-            let parse = |text| {
-                edit.kind
-                    .parse(text)
-                    .map_err(|reason| failure(Failure::Parse(reason)))
-            };
-            let saved = parse(text)?;
-            let source = parse(kept)?;
-            model_differs = saved
-                .get("model")
-                .and_then(serde_json::Value::as_str)
-                .zip(source.get("model").and_then(serde_json::Value::as_str))
-                .is_some_and(|(saved, source)| saved != source);
+        if !edit.warn_if_different.is_empty() {
+            match edit.kind {
+                Format::Json => {
+                    let parse = |text| {
+                        serde_json::from_str::<serde_json::Value>(text)
+                            .map_err(|error| failure(Failure::Parse(error.to_string())))
+                    };
+                    let saved = parse(text)?;
+                    let source = parse(kept)?;
+                    for path in &edit.warn_if_different {
+                        let saved = path.iter().try_fold(&saved, |value, key| value.get(key));
+                        let source = path.iter().try_fold(&source, |value, key| value.get(key));
+                        if saved
+                            .zip(source)
+                            .is_some_and(|(saved, source)| saved != source)
+                        {
+                            different.push(shown(path));
+                        }
+                    }
+                }
+                Format::Toml => {
+                    let parse = |text| {
+                        toml::from_str::<toml::Value>(text)
+                            .map_err(|error| failure(Failure::Parse(error.to_string())))
+                    };
+                    let saved = parse(text)?;
+                    let source = parse(kept)?;
+                    for path in &edit.warn_if_different {
+                        let saved = path.iter().try_fold(&saved, |value, key| value.get(key));
+                        let source = path.iter().try_fold(&source, |value, key| value.get(key));
+                        if saved
+                            .zip(source)
+                            .is_some_and(|(saved, source)| saved != source)
+                        {
+                            different.push(shown(path));
+                        }
+                    }
+                }
+            }
         }
         Ok(filled.map(|(text, _)| text))
     })?;
-    Ok((skipped, model_differs))
+    Ok((skipped, different))
 }
 
 /// Replace the copy of `file` with what `change` makes of its text, when `change` returns a text.
@@ -1034,6 +1057,7 @@ mod tests {
                 value: value.into(),
             }],
             fill: false,
+            warn_if_different: Vec::new(),
         }
     }
 
@@ -1719,6 +1743,7 @@ mod tests {
                 keep: Some(vec![vec!["model".into()], vec!["theme".into()]]),
                 set: Vec::new(),
                 fill: false,
+                warn_if_different: Vec::new(),
             },
         );
         let plan = fixture.plan(&file);
@@ -1884,6 +1909,7 @@ mod tests {
             keep: Some(vec![vec!["done".into()]]),
             set: Vec::new(),
             fill: true,
+            warn_if_different: Vec::new(),
         }
     }
 

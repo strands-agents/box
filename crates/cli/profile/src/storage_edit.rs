@@ -25,6 +25,8 @@ pub struct Edit {
     pub set: Vec<Setting>,
     /// Each run adds each `keep` value that the copy lacks.
     pub fill: bool,
+    /// The kept paths whose different saved and source values produce a warning.
+    pub warn_if_different: Vec<KeyPath>,
 }
 
 /// What `keep` takes from one host file, by key path.
@@ -555,6 +557,7 @@ mod tests {
                 })
                 .collect(),
             fill: false,
+            warn_if_different: Vec::new(),
         }
     }
 
@@ -727,6 +730,7 @@ mod tests {
                 })
                 .collect(),
             fill: false,
+            warn_if_different: Vec::new(),
         }
     }
 

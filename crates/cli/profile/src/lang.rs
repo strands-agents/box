@@ -5162,6 +5162,7 @@ impl<S: Sources> Resolver<'_, S> {
                         | "keep"
                         | "set"
                         | "fill"
+                        | "warn-if-different"
                         | "sync"
                         | "exclude"
                         | "mode"
@@ -5169,7 +5170,7 @@ impl<S: Sources> Resolver<'_, S> {
             }) {
                 return Err(format!(
                     "`{at}` holds the unknown key `{key}`; a row holds `source`, `target`, \
-                     `optional`, `when`, `kind`, `keep`, `set`, `fill`, `sync`, `exclude`, and \
+                     `optional`, `when`, `kind`, `keep`, `set`, `fill`, `warn-if-different`, `sync`, `exclude`, and \
                      `mode`"
                 ));
             }
@@ -5340,6 +5341,7 @@ impl<S: Sources> Resolver<'_, S> {
         let kind = string_field(row, "kind", at)?;
         let edits = row.contains_key("keep")
             || row.contains_key("set")
+            || row.contains_key("warn-if-different")
             || row
                 .get("fill")
                 .is_some_and(|fill| fill != &toml::Value::Boolean(false));
@@ -5447,11 +5449,29 @@ impl<S: Sources> Resolver<'_, S> {
                 ));
             }
         }
+        let mut warn_if_different = Vec::new();
+        if let Some(paths) = row.get("warn-if-different") {
+            if !fill {
+                return Err(format!("`{at} warn-if-different` needs `fill = true`"));
+            }
+            let paths = paths.as_array().ok_or_else(|| {
+                format!("`{at} warn-if-different` is a list of key lists, such as [[\"model\"]]")
+            })?;
+            for (place, keys) in paths.iter().enumerate() {
+                let here = format!("{at} warn-if-different[{place}]");
+                let path = self.key_path(keys, &here)?;
+                if !keep.as_ref().is_some_and(|keep| keep.contains(&path)) {
+                    return Err(format!("`{here}` needs the same key path in `keep`"));
+                }
+                warn_if_different.push(path);
+            }
+        }
         Ok(Some(Edit {
             kind,
             keep,
             set,
             fill,
+            warn_if_different,
         }))
     }
 

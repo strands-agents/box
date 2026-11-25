@@ -228,6 +228,8 @@ target = "home/config.toml"
 kind = "toml"
 optional = true
 fill = true
+# A saved model can outlive its availability at the provider.
+warn-if-different = [["model"]]
 keep = [
     ["model"],
     ["model_verbosity"],

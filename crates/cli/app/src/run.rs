@@ -2649,21 +2649,32 @@ impl Launch {
         result
     }
 
+    fn import_warnings_text(&self) -> String {
+        if self.import_warnings.is_empty() {
+            return String::new();
+        }
+        let mut text: String = self
+            .import_warnings
+            .iter()
+            .map(|warning| format!("box: warning: {warning}\n"))
+            .collect();
+        let box_home = if self.box_home.is_some() {
+            " with the same BOX_HOME"
+        } else {
+            ""
+        };
+        text.push_str(&format!(
+            "box: To import those settings again, stop this profile's runs, remove only the named \
+             keys from the saved file, and run again. Keep the file valid JSON or TOML. \
+             Alternatively, `box profile reset {}`{box_home} also deletes this profile's sessions \
+             and memory.\n",
+            self.profile_name,
+        ));
+        text
+    }
+
     fn run_inner(&self, args: &[OsString]) -> Result<ExitCode, Error> {
-        for warning in &self.import_warnings {
-            eprintln!("box: warning: {warning}");
-        }
-        if !self.import_warnings.is_empty() {
-            let box_home = if self.box_home.is_some() {
-                " with the same BOX_HOME"
-            } else {
-                ""
-            };
-            eprintln!(
-                "box: To import settings again, stop this profile's runs and use `box profile reset {}`{box_home}. Reset also deletes this profile's sessions and memory.",
-                self.profile_name,
-            );
-        }
+        eprint!("{}", self.import_warnings_text());
         let result = if terminal::attached() {
             terminal::run(self, |options| {
                 strands_box::run(self.config.clone(), args.to_vec(), options)

@@ -42,7 +42,9 @@ impl Log {
             file.set_permissions(Permissions::from_mode(0o600))?;
             Ok(file)
         })();
-        Self::new(input, output)
+        let mut log = Self::new(input, output);
+        log.save(launch.import_warnings_text().as_bytes());
+        log
     }
 
     pub(super) fn new(input: File, output: io::Result<File>) -> Self {
@@ -157,9 +159,15 @@ impl Log {
             ),
         };
         let id = launch.name();
+        let reminder = if !launch.import_warnings.is_empty() && self.output.is_ok() {
+            "box: startup reminder: saved settings differed from their sources; \
+             see the log if this still needs attention.\n"
+        } else {
+            ""
+        };
         format!(
             "\n{preview}box: run {id} ended\n  startup disclosure \u{b7} {}\n  log      {log}\n  \
-             history  {}\n  reuse    {}\n\n",
+             history  {}\n  reuse    {}\n{reminder}\n",
             match self.unshown {
                 1 => "1 more message".to_owned(),
                 count => format!("{count} more messages"),
@@ -286,6 +294,22 @@ mod tests {
             format!("{}\n--box-id\n{}\n", profile.display(), launch.name),
         );
 
+        launch
+            .import_warnings
+            .push("selected settings differ".into());
+        let mut log = Log::open(&launch, File::open("/dev/null").unwrap());
+        for number in 0..8 {
+            log.push(format!("box: error: failure {number}\n").as_bytes());
+        }
+        let console = log.report(&launch, true);
+        assert!(console.contains("startup reminder: saved settings differed"));
+        for number in 2..8 {
+            assert!(console.contains(&format!("  box: error: failure {number}\n")));
+        }
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("box: warning: selected settings differ\n"));
+        assert!(saved.contains("remove only the named keys"));
+
         let target = host.home().join("untouched");
         std::fs::write(&target, "keep").unwrap();
         std::fs::remove_file(&path).unwrap();
@@ -301,6 +325,7 @@ mod tests {
                 console.contains("\n  log      could not write "),
                 "{console}"
             );
+            assert!(!console.contains("startup reminder"), "{console}");
         }
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
 
