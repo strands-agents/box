@@ -177,6 +177,9 @@ Box binds one loopback port for the workload and sets three variables in its env
 
 Box owns every name that begins with `OTEL_EXPORTER_OTLP_`, so `[agent] env` may not set one. The
 receiver answers `/v1/traces`, `/v1/logs`, and `/v1/metrics`, and answers `404` on every other route.
+It relays one payload at a time. It answers a payload that arrives during a relay with `503` and
+`Retry-After: 2`. An exporter that retries, as the OpenTelemetry Python and JavaScript OTLP/HTTP
+exporters do, sends that payload again.
 
 The exporter switches belong to the workload, so write them in `[agent] env`:
 

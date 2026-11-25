@@ -1388,7 +1388,7 @@ mod tests {
 
     /// **A flood of relayed payloads costs no decision**, which is the audit-suppression property.
     ///
-    /// The relay slot admits one payload at a time and drops the rest without waiting, so a workload
+    /// The relay slot admits one payload at a time and refuses the rest without waiting, so a workload
     /// posting without pause cannot hold the box's own export worker behind it. One queue carrying both
     /// kinds would break this: the workload would fill it and the box's refusals would be dropped to
     /// make room.
