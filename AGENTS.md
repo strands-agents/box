@@ -1,8 +1,13 @@
 # AGENTS.md
 
 Edit this file only when the user asks. `CLAUDE.md` files are symlinks; edit their `AGENTS.md` sources.
-Keep guidance to current constraints and costly traps. Code inventories, version counts, and histories
-of resolved defects belong in neither this file nor crate guidance.
+Keep this file and crate guidance to current constraints, approval boundaries, and costly,
+non-obvious traps. Prefer enforcement in code and tests; retain prose when it adds constraints or
+context they do not convey. Say what to do and what breaks. State each rule once and link to it.
+
+When editing guidance, fix or remove stale rules. Put durable design rationale and detailed
+measurements in design docs, and change rationale in commits and PRs. Leave obsolete history in
+Git; keep code inventories and version counts out of guidance.
 
 ## Two products
 
@@ -73,8 +78,7 @@ Keep research, prototypes, and drafts in the ignored `.agents/explorations/`, `.
 
 Use `workload`, not `session`, in new public names; follow [terminology](docs/design/terminology.md).
 Item doc comments are one sentence; module docs are one sentence plus a table when needed.
-Put change rationale in the commit, durable design reasoning in design docs, and only current,
-non-obvious traps in crate guidance. Cite symbols or tests, not line numbers or local drafts.
+Cite symbols or tests, not line numbers or local drafts.
 
 ### TCP sockets
 
