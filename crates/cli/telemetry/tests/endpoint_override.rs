@@ -74,6 +74,8 @@ fn endpoint_override_reaches_the_local_receiver() {
             Err(error) => panic!("accept telemetry: {error}"),
         }
     };
+    // macOS gives an accepted socket the listener's O_NONBLOCK, and the reads below must wait.
+    stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
