@@ -15,12 +15,14 @@ The root freeze covers this facade.
   exception requires exact routes and no backend; it does not generalize to arbitrary HTTP hosts.
 - Log the pre-mutation `workload_path`, never the credential-bearing rewritten target. Attempts
   carry no secret headers or bodies. Avoid `Debug` on request/header containers.
-- Keep `escapes_backend_prefix` an allowlist-shaped refusal under a backend `path_prefix`. Policy
-  judges the canonical path, but a backend can fold a spelling the gateway keeps into `..` after the
-  join: a path parameter (`..;`), trailing dots or spaces (`...`, `..%20`), a second decode
-  (`%252e%252e`, `%252F`), an overlong UTF-8 slash (`%C0%AF`), or an escaped delimiter (`%3B`). A
-  wider decode does not close this class, because each fold is the backend's. Benign escapes such as
-  `%3A` in a Bedrock model ID, and `%20` inside a name, still pass.
+- Keep `escapes_backend_prefix` strict under a backend `path_prefix`. Policy judges the canonical
+  path, but a backend can fold a spelling the gateway keeps into `..` after the join. So the rule
+  refuses every segment that starts with `..` (after `%20` is removed), whatever follows, which
+  covers path parameters (`..;`), trailing dots or spaces, and suffixes a backend strips
+  (`..::$INDEX_ALLOCATION`, `..+`). It also refuses a raw `;` and named escaped octets: a second
+  decode (`%252e`), an escaped delimiter (`%2F`, `%5C`, `%3B`), a control octet, and an octet at or
+  above `0x80`. The octet list is a denylist, so a new backend fold needs a new entry. Benign escapes
+  such as `%3A` in a Bedrock model ID, and `%20` inside a name, still pass.
 - Reserve enough header and coalesced-body capacity before copying secrets. Reallocation leaves
   un-wiped prefixes despite `Zeroizing`. `Target::path`/`query` and the CA library's private key
   remain wiping gaps; do not turn partial wiping into a completeness claim.

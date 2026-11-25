@@ -712,6 +712,10 @@ fn a_backend_reroute_refuses_a_path_that_could_escape_the_prefix() {
         "/..%3B/slack/secret",
         "/..%3F/slack/secret",
         "/..%23/slack/secret",
+        "/..::$INDEX_ALLOCATION/slack/secret",
+        "/..+/slack/secret",
+        "/..%2B/slack/secret",
+        "/..\\slack/secret",
     ] {
         let upstream = TlsUpstream::start("gw.example.test");
         let handle = start_reroute(&upstream, original, "/github");

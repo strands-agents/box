@@ -140,8 +140,8 @@ auth downstream. Because the box never reads the real value, the named variable 
 `secret` in a declared scheme is refused too, because the box never reads that secret.
 
 When the backend `url` has a path prefix, the box refuses a request whose path a backend could fold
-out of that prefix. It refuses a `;`, a segment of only dots and escaped spaces (`%20`) that holds
-two or more dots, such as `...` or `..%20`, and a percent-escape of a slash (`%2F`), a backslash
+out of that prefix. It refuses a `;`, a segment that starts with two dots once escaped spaces
+(`%20`) are removed, such as `...`, `..%20`, `..+`, or `..b`, and a percent-escape of a slash (`%2F`), a backslash
 (`%5C`), a percent sign (`%25`), a `;`, `?`, or `#` (`%3B`, `%3F`, `%23`), a control character, or a
 byte at or above `%80`. Each one can change which path the backend sees after the prefix is joined, so the
 box fails the request with `403` rather than risk a traversal. Other escapes, such as `%3A`, pass.

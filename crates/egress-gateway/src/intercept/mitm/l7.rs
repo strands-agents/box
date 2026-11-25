@@ -777,13 +777,13 @@ fn escapes_backend_prefix(path: &str) -> Option<&'static str> {
              path parameter and escape the prefix",
         );
     }
-    if path.split('/').any(|segment| {
-        let dots = segment.replace("%20", "");
-        dots.len() >= 2 && dots.bytes().all(|byte| byte == b'.')
-    }) {
+    if path
+        .split('/')
+        .any(|segment| segment.replace("%20", "").starts_with(".."))
+    {
         return Some(
-            "a re-routed path under a backend prefix may not carry a segment of only dots and \
-             spaces: the backend could fold it to `..` and escape the prefix",
+            "a re-routed path under a backend prefix may not carry a segment that starts with \
+             `..`: the backend could fold it to `..` and escape the prefix",
         );
     }
     let bytes = path.as_bytes();
@@ -994,6 +994,14 @@ mod tests {
             "/..%3B/admin",
             "/..%3F/admin",
             "/..%23/admin",
+            "/a/..b/c",
+            "/..::$INDEX_ALLOCATION/x",
+            "/..%3A%3A$INDEX_ALLOCATION/x",
+            "/..+/x",
+            "/..%2B/x",
+            "/..~/x",
+            "/..,/x",
+            "/%2E%2Ex/admin",
         ] {
             let canonical = canonicalize_request_path(path);
             assert!(
@@ -1010,7 +1018,9 @@ mod tests {
             "/a.b/c",
             "/v1.2/x",
             "/.hidden/x",
-            "/a/..b/c",
+            "/a..b/c",
+            "/a/b../c",
+            "/.a.b/c",
             "/repos/o/r/contents/docs/My%20File.md",
             "/v1.0/me/drive/root:/My%20Documents/a.docx:/content",
             "/.%20/x",
