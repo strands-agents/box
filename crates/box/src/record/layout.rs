@@ -2121,7 +2121,7 @@ fn first_use_contents(
 }
 
 fn no_valid_private_record(root: &Path) -> BoxError {
-    LayoutError::UnsafeDirectory {
+    LayoutError::NotThisBox {
         path: root.to_path_buf(),
         reason: "it is not empty and contains no valid private record".to_string(),
     }
@@ -2129,7 +2129,7 @@ fn no_valid_private_record(root: &Path) -> BoxError {
 }
 
 fn record_identity_mismatch(root: &Path, stored: &str, found: &str) -> BoxError {
-    LayoutError::UnsafeDirectory {
+    LayoutError::NotThisBox {
         path: root.to_path_buf(),
         reason: format!(
             "its record identity is {}, but the committed record has identity {}. Delete the box \

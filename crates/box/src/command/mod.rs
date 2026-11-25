@@ -19,11 +19,14 @@ use crate::error::BoxError;
 use crate::run::hardening::Hardening;
 
 pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
+    let events = options.events;
+    let refuse = |code| crate::refuse(events.as_ref(), code);
     // Disable core dumps and restrict process-memory inspection before Box starts its runtime or loads credentials.
     if matches!(cli.command, Command::Run { .. })
         && let Err(error) = Hardening::apply()
     {
-        ::diagnostics::diag!(B0108, "refusing to run: {error}");
+        ::diagnostics::diag!(B0118, "refusing to run: {error}");
+        refuse(::diagnostics::Code::B0118.into());
         return ExitCode::FAILURE;
     }
 
@@ -34,6 +37,7 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
                 Ok(setup) => Some(setup),
                 Err(error) => {
                     ::diagnostics::diag!({ error.code() }, "refusing to run: {error}");
+                    refuse(error.code());
                     return ExitCode::FAILURE;
                 }
             }
@@ -45,6 +49,7 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
         Ok(runtime) => runtime,
         Err(error) => {
             ::diagnostics::diag!(error, "failed to start async runtime: {error}");
+            refuse(::diagnostics::Kind::Uncoded(::diagnostics::Severity::Error));
             return ExitCode::FAILURE;
         }
     };
@@ -74,6 +79,7 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
         Ok(code) => code,
         Err(error) => {
             ::diagnostics::diag!({ error.code() }, "{error}");
+            refuse(error.code());
             ExitCode::FAILURE
         }
     }
