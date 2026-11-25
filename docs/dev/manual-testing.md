@@ -41,8 +41,8 @@ startup file can put another `box` first again, so `--env` is the reliable form.
 
 - The build starts with no profiles. `BOX_HOME` is `~/.box-try/<commit>`, a folder for that
   build alone, so a pull request cannot leave profiles that your usual `box` cannot read. It is in
-  your home folder and not in `$TMPDIR`, because Box Core refuses a run whose socket path is longer
-  than 103 bytes, and a box home in `$TMPDIR` on macOS leaves too few. Create a profile first:
+  your home folder and not in `$TMPDIR`, because a box home in `$TMPDIR` on macOS makes the socket
+  path [too long](../cli/troubleshooting.md#the-box-folder-path-is-too-long). Create a profile first:
   `box profile create claude`. A new commit gets a new, empty folder, also when you run `--env`
   again in the same shell.
 - To try the build on your own profiles, set `BOX_HOME=~/.strands/box` before you run the script.

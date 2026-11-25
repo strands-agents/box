@@ -6,6 +6,8 @@
 #   scripts/try-build.sh <pr-number|main> -- <command...>  one command with that PATH
 #   scripts/try-build.sh --clean                           remove every cached build
 set -euo pipefail
+# bash 5.2 and later treat a backslash in a replacement as an escape; quote() needs it literal.
+shopt -u patsub_replacement 2>/dev/null || true
 
 repo="${BOX_TRY_REPO:-strands-agents/box}"
 triple="aarch64-apple-darwin"
@@ -128,8 +130,8 @@ else
   mv "$work/bin.files" "$files"
 fi
 
-# A BOX_HOME in $homes is one that an earlier run of this script set, so a new build gets its own.
-if [[ -n "${BOX_HOME:-}" && "$BOX_HOME" != "$homes/"* ]]; then
+# A BOX_HOME in $homes, or in $cache from an older script, is one this script set, so a new build gets its own.
+if [[ -n "${BOX_HOME:-}" && "$BOX_HOME" != "$homes/"* && "$BOX_HOME" != "$cache/"* ]]; then
   box_home="$BOX_HOME"
 else
   mkdir -p -m 700 "$homes"

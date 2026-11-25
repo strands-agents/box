@@ -45,7 +45,7 @@ class TryBuildTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name).resolve()
-        self.home = self.root / "it's home"
+        self.home = self.root / "it's a\\\\b home"
         self.home.mkdir()
         self.tmp = self.root / "tmp"
         self.tmp.mkdir()
@@ -247,6 +247,14 @@ class TryBuildTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, f"{own}\n")
         self.assertFalse(self.box_home().exists())
+
+    def test_a_box_home_that_an_older_script_set_is_replaced(self):
+        old = self.cached / "home"
+        result = self.run_script(
+            "329", "--", "sh", "-c", 'echo "$BOX_HOME"', env={"BOX_HOME": str(old)}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"{self.box_home()}\n")
 
     def test_a_build_that_ignores_box_home_gets_a_warning(self):
         self.build(reads_box_home=False)
