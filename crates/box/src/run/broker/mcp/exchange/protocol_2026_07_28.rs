@@ -41,7 +41,8 @@ pub(super) async fn handle_request(
             return Ok(ProgramAction::Continue);
         }
     };
-    let (key, id) = require_request_id(request)?;
+    let (key, id) =
+        require_request_id(request).map_err(|refusal| refuse_frame(exchange, refusal))?;
     if exchange.connection.in_flight.contains(&key) {
         return refuse_reused_id(exchange, Some(&id)).await;
     }
