@@ -3,9 +3,13 @@
 This experimental feature adds Dogwood checks to selected native file operations on macOS and Linux ARM64.
 
 ### macOS requirements
-It requires macOS 27 or later and a binary built with the macOS 27 SDK or later.
+
+Enabling native filesystem policy requires macOS 27 or later and a binary built with the macOS 27 SDK or later.
 The binary must carry Apple's Endpoint Security entitlement and a valid signature.
 Endpoint Security is the macOS interface that lets a client decide selected operating system requests.
+
+These requirements apply only when native filesystem policy is enabled.
+Runs with the feature disabled use the [standard Box Core requirements](getting-started.md#before-you-start).
 
 ## Enable native filesystem policy
 
