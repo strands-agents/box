@@ -139,14 +139,17 @@ one. A directory entry is recursive, and a file entry is exact. `write` does not
 is the residual: a writable bind reads there, and the startup disclosure says so on that entry's
 line.
 
-The separate `filesystem.receive_mounts` array selects paths where the agent, a tool, or a local
-MCP server would receive externally attached filesystems. It defaults to empty and grants no
-filesystem access. In `box.toml`, `[experimental-features] linux-passthrough-mounts` defaults to
-`false`; a nonempty array requires it to be `true`. This build rejects that selection on every
-platform before creating Box state or starting a workload, because incoming mount forwarding is
-unavailable. The removed `linux-storage-mounts` key is also an error, including when `false`.
-See [incoming mount declarations](../../docs/user/config.md#incoming-mount-declarations) for the
-per-process path checks.
+In `box.toml`, the separate `filesystem.receive_mounts` array selects paths where the agent, a tool,
+or a local MCP server would receive externally attached filesystems. Each process has its own
+array, and listing a path grants no filesystem access. Linux requires no additional experimental
+setting, but this build still rejects nonempty arrays because incoming mount forwarding is
+unavailable. On Linux, an empty or omitted array leaves ordinary filesystem behavior unchanged.
+
+On macOS, any `receive_mounts` key rejects configuration loading, including an explicit empty
+array. Omit the key on macOS. Both platform refusals happen before Box creates state or starts a
+workload. The removed `[experimental-features] linux-storage-mounts` key is also an error, including
+when `false`. See [incoming mount declarations](../../docs/user/config.md#incoming-mount-declarations)
+for the per-process path checks.
 
 Without experimental native filesystem policy, no `fs:*` decision records these operations, so the box prints each grant
 on stderr when it starts. A grant that would expose the box's own directory is refused, which

@@ -105,7 +105,10 @@ Kernel event delivery and trusted launcher setup can still add overhead.
 
 A nonempty [`filesystem.receive_mounts` array](config.md#incoming-mount-declarations) is incompatible
 with enabled native filesystem policy checks for the same process.
-Incoming mount forwarding is unavailable in this build; disabling native checks does not enable it.
+On Linux, Box requires no separate experimental flag for incoming mount declarations. This build
+still rejects nonempty arrays because incoming mount forwarding is unavailable. Disabling native checks does not enable it. On macOS,
+any `receive_mounts` key rejects configuration loading, including an explicit empty array; omit
+the key there.
 
 ## Coverage and limits
 
@@ -222,8 +225,7 @@ no egress destination has a backend, `[gateway] upgrade_http` is empty, the box 
 every process leaves `file-watching` disabled, and each telemetry target uses only the settings
 an earlier build reads,
 configurations without process overrides retain version 21 when disabled and version 22 when enabled.
-These versions also require `linux-passthrough-mounts = false` and an empty `receive_mounts` array
-for every process.
+These versions also require every process's `receive_mounts` array to be empty or omitted.
 An explicit process override requires record version 23.
 Two stdio MCP servers that share a program require record version 24.
 Setting [`file-attributes`](config.md#file-attributes) to `true` requires record version 25.
@@ -247,10 +249,11 @@ A [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table, or a `secre
 remote MCP server, requires record version 39.
 A [telemetry target](telemetry.md#include) that names `mcp_tool_calls` requires record version 40.
 A [`policy`](config.md#keys) table with `enforcement = "log_only"` requires record version 41.
-Record version 42 preserves the `linux-passthrough-mounts` setting and each process's
+Record version 42 preserves each process's
 [`receive_mounts` array](config.md#incoming-mount-declarations). A record requires this version
-when the flag is `true` or any such array is nonempty. Record-format support does not enable
-mount forwarding: this build rejects the corresponding run configuration before creating Box state.
+when any such array is nonempty; empty or omitted arrays do not require it. Record-format support
+does not enable mount forwarding. This build rejects nonempty arrays in Linux run configurations
+and any `receive_mounts` key in macOS run configurations before creating Box state.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 

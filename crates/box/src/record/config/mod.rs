@@ -19,7 +19,7 @@
 //! | [`ingress`] | `[[agent.ingress]]`: where callers reach the agent |
 //! | [`limits`] | `[limits.shell]`: the execution timeout of one Shell submission |
 //! | `env` | which environment names a process may set, and which Core owns |
-//! | [`mounts`] | the incoming mount declarations and their feature selection |
+//! | [`mounts`] | the incoming mount declarations and their platform checks |
 //! | [`mcp`] | `[mcp.<name>]`: which local MCP servers exist, and how each starts |
 //! | [`secret_source`] | `[secret-source.<scheme>]`: which host program reads a secret for a scheme |
 //! | [`telemetry`] | `[telemetry.<label>]`: where a box's decision records go |
@@ -837,15 +837,13 @@ const TOOL_CALLS_RECORD_VERSION: u32 = 40;
 /// The record version of a record whose policy applies in log-only mode, so an older build refuses
 /// the box rather than enforcing a policy the operator asked to trial.
 const LOG_ONLY_RECORD_VERSION: u32 = 41;
-/// The record version that preserves incoming mount declarations and their feature selection.
+/// The record version that preserves nonempty incoming mount declarations.
 const MOUNTS_RECORD_VERSION: u32 = 42;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub(crate) struct ExperimentalFeatures {
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) linux_passthrough_mounts: bool,
     #[serde(default)]
     pub(crate) native_filesystem_policy: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -858,8 +856,7 @@ pub(crate) struct ExperimentalFeatures {
 
 impl ExperimentalFeatures {
     fn is_disabled(&self) -> bool {
-        !self.linux_passthrough_mounts
-            && !self.native_filesystem_policy
+        !self.native_filesystem_policy
             && !self.tool_grammars
             && !self.ingress
             && !self.secret_sources
@@ -910,10 +907,9 @@ fn record_version<'a>(
     enforcement: Enforcement,
 ) -> u32 {
     let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
-    if features.linux_passthrough_mounts
-        || specs
-            .clone()
-            .any(|spec| !spec.filesystem.receive_mounts.is_empty())
+    if specs
+        .clone()
+        .any(|spec| !spec.filesystem.receive_mounts.is_empty())
     {
         MOUNTS_RECORD_VERSION
     } else if enforcement.is_log_only() {
@@ -1784,6 +1780,8 @@ impl ConfigFile {
             path: path.to_path_buf(),
             source,
         })?;
+        #[cfg(not(target_os = "linux"))]
+        mounts::refuse_unsupported_config(text, path)?;
         file.validate()?;
         Ok(file)
     }
@@ -1877,11 +1875,19 @@ impl ConfigFile {
             agent_ingress(self.agent.as_ref()),
         )?;
         validate_egress(&self.egress, &self.declared_sources()?)?;
-        if self.experimental_features.linux_passthrough_mounts {
+        let contained = mcp::contained_specs(&self.mcp);
+        if self
+            .agent
+            .iter()
+            .chain(self.tool.values())
+            .chain(contained.values().map(|server| &server.spec))
+            .any(|spec| !spec.filesystem.receive_mounts.is_empty())
+        {
             return Err(ConfigError::Contract {
-                reason: "`linux-passthrough-mounts` cannot be enabled: incoming mount forwarding \
+                reason:
+                    "cannot start Box with `filesystem.receive_mounts`: incoming mount forwarding \
                          is not available in this build"
-                    .into(),
+                        .into(),
             });
         }
         Ok(())
@@ -2419,7 +2425,6 @@ native-filesystem-policy = false
             for file_attributes in [false, true] {
                 for native_filesystem_policy in [false, true] {
                     let features = ExperimentalFeatures {
-                        linux_passthrough_mounts: false,
                         native_filesystem_policy,
                         tool_grammars: true,
                         ingress: false,

@@ -1,4 +1,4 @@
-//! Incoming mount declarations and their experimental feature selection.
+//! Incoming mount declarations and their platform and policy checks.
 
 use std::path::{Path, PathBuf};
 
@@ -46,11 +46,6 @@ pub(super) fn validate_selection(
         table: table.into(),
         reason: reason.into(),
     };
-    if !features.linux_passthrough_mounts {
-        return Err(refuse(
-            "`filesystem.receive_mounts` requires `linux-passthrough-mounts = true` in `[experimental-features]`",
-        ));
-    }
     if spec
         .native_filesystem_policy
         .unwrap_or(features.native_filesystem_policy)
@@ -58,6 +53,45 @@ pub(super) fn validate_selection(
         return Err(refuse(
             "`filesystem.receive_mounts` cannot be combined with native filesystem policy checks in this build",
         ));
+    }
+    Ok(())
+}
+
+/// Non-Linux startup refuses the setting itself, including an explicitly empty list.
+/// Stored records remain readable on every platform; only configuration loading calls this.
+#[cfg(any(test, not(target_os = "linux")))]
+pub(super) fn refuse_unsupported_config(text: &str, path: &Path) -> Result<(), ConfigError> {
+    let document: toml::Value = toml::from_str(text).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let check = |spec: &toml::Value, table: String| {
+        if spec
+            .get("filesystem")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|filesystem| filesystem.contains_key("receive_mounts"))
+        {
+            Err(ConfigError::Process {
+                table,
+                reason:
+                    "`filesystem.receive_mounts` is supported only on Linux; mount forwarding is \
+                         not implemented on this platform. Remove this setting, including an empty \
+                         list, to start Box"
+                        .into(),
+            })
+        } else {
+            Ok(())
+        }
+    };
+    if let Some(agent) = document.get("agent") {
+        check(agent, "[agent]".into())?;
+    }
+    for section in ["tool", "mcp"] {
+        if let Some(entries) = document.get(section).and_then(toml::Value::as_table) {
+            for (name, spec) in entries {
+                check(spec, format!("[{section}.{name}]"))?;
+            }
+        }
     }
     Ok(())
 }
@@ -143,24 +177,29 @@ mod tests {
     }
 
     #[test]
-    fn selection_requires_the_flag_and_checks_each_process_policy() {
-        let mut spec = process(&["/mnt/data"]);
-        let mut features = ExperimentalFeatures::default();
+    fn selection_needs_no_flag_and_checks_each_process_policy() {
         for table in ["[agent]", "[tool.reader]", "[mcp.reader]"] {
+            let mut spec = process(&["/mnt/data"]);
+            let mut features = ExperimentalFeatures::default();
+            validate_selection(&spec, table, &features).unwrap();
+            features.native_filesystem_policy = true;
             let error = validate_selection(&spec, table, &features).unwrap_err();
             assert!(error.to_string().contains(table));
-            assert!(error.to_string().contains("linux-passthrough-mounts"));
+            assert!(error.to_string().contains("cannot be combined"));
+            spec.native_filesystem_policy = Some(false);
+            validate_selection(&spec, table, &features).unwrap();
+            features.native_filesystem_policy = false;
+            spec.native_filesystem_policy = Some(true);
+            assert!(validate_selection(&spec, table, &features).is_err());
+            validate_selection(&process(&[]), table, &features).unwrap();
         }
-        features.linux_passthrough_mounts = true;
-        validate_selection(&spec, "[agent]", &features).unwrap();
-        features.native_filesystem_policy = true;
-        assert!(validate_selection(&spec, "[agent]", &features).is_err());
-        spec.native_filesystem_policy = Some(false);
-        validate_selection(&spec, "[agent]", &features).unwrap();
-        features.native_filesystem_policy = false;
-        spec.native_filesystem_policy = Some(true);
-        assert!(validate_selection(&spec, "[agent]", &features).is_err());
-        validate_selection(&process(&[]), "[agent]", &features).unwrap();
+    }
+
+    fn declaration(table: &str, kind: &str, mounts: &str) -> String {
+        format!(
+            "[{table}]\n{kind}command = ['reader']\n\
+             [{table}.filesystem]\nreceive_mounts = {mounts}\n"
+        )
     }
 
     #[test]
@@ -172,42 +211,33 @@ mod tests {
             ("tool.reader", ""),
             ("mcp.reader", "type = 'stdio'\n"),
         ] {
-            let declaration = format!(
-                "[{table}]\n{kind}command = ['reader']\n\
-                 [{table}.filesystem]\nreceive_mounts = ['/mnt/data']\n"
-            );
             let base = "name = 'mounts'\nbox_dir = '/tmp/box-mount-test'\n";
-            let error = ConfigFile::parse(&format!("{base}{declaration}"), Path::new("box.toml"))
-                .unwrap_err();
-            assert!(
-                matches!(error, ConfigError::Process { table: ref actual, .. } if actual == &format!("[{table}]"))
+            let text = format!("{base}{}", declaration(table, kind, "['/mnt/data']"));
+            let error = ConfigFile::parse(&text, Path::new("box.toml")).unwrap_err();
+            if cfg!(target_os = "linux") {
+                assert!(matches!(error, ConfigError::Contract { ref reason }
+                    if reason.contains("not available in this build")));
+                let malformed = text.replace("'/mnt/data'", "'/mnt/data', '/mnt/data/child'");
+                assert!(matches!(
+                    ConfigFile::parse(&malformed, Path::new("box.toml")),
+                    Err(ConfigError::Process { ref reason, .. }) if reason.contains("overlap")
+                ));
+            } else {
+                assert!(
+                    matches!(error, ConfigError::Process { table: ref actual, ref reason }
+                    if actual == &format!("[{table}]") && reason.contains("only on Linux"))
+                );
+            }
+            let empty = format!("{base}{}", declaration(table, kind, "[]"));
+            let result = ConfigFile::parse(&empty, Path::new("box.toml"));
+            assert_eq!(
+                result.is_ok(),
+                cfg!(target_os = "linux"),
+                "{table}: {result:?}"
             );
-            let enabled = format!(
-                "{base}[experimental-features]\nlinux-passthrough-mounts = true\n{declaration}"
-            );
-            let error = ConfigFile::parse(&enabled, Path::new("box.toml")).unwrap_err();
-            assert!(
-                matches!(error, ConfigError::Contract { ref reason } if reason.contains("not available in this build"))
-            );
-            let malformed = enabled.replace("'/mnt/data'", "'/mnt/data', '/mnt/data/child'");
-            let error = ConfigFile::parse(&malformed, Path::new("box.toml")).unwrap_err();
-            assert!(
-                matches!(error, ConfigError::Process { ref reason, .. } if reason.contains("overlap"))
-            );
+            let omitted = empty.replace("receive_mounts = []\n", "");
+            ConfigFile::parse(&omitted, Path::new("box.toml")).unwrap();
         }
-        ConfigFile::parse(
-            "name = 'ordinary'\nbox_dir = '/tmp/box-mount-test'\n\
-             [experimental-features]\nlinux-passthrough-mounts = false\n\
-             [agent]\ncommand = ['reader']\n",
-            Path::new("box.toml"),
-        )
-        .unwrap();
-        let flag_without_paths = "name = 'unavailable'\nbox_dir = '/tmp/box-mount-test'\n\
-             [experimental-features]\nlinux-passthrough-mounts = true\n";
-        assert!(matches!(
-            ConfigFile::parse(flag_without_paths, Path::new("box.toml")),
-            Err(ConfigError::Contract { .. })
-        ));
         let unrecognized_spelling = "name = 'unrecognized'\nbox_dir = '/tmp/box-mount-test'\n\
              [agent]\ncommand = ['reader']\n[agent.filesystem]\nmounts = ['/mnt/data']\n";
         assert!(ConfigFile::parse(unrecognized_spelling, Path::new("box.toml")).is_err());
@@ -225,6 +255,49 @@ mod tests {
                         && replacement.contains("not available in this build")
                         && !replacement.contains("linux-passthrough-mounts")
             ));
+            let removed_flag = text.replace("linux-storage-mounts", "linux-passthrough-mounts");
+            assert!(matches!(
+                ConfigFile::parse(&removed_flag, Path::new("box.toml")),
+                Err(ConfigError::Parse { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn unsupported_platform_rejects_key_presence_including_empty_and_inline_tables() {
+        for (table, kind) in [
+            ("agent", ""),
+            ("tool.reader", ""),
+            ("mcp.reader", "type = 'stdio'\n"),
+        ] {
+            for mounts in ["[]", "['/mnt/data']"] {
+                for text in [
+                    declaration(table, kind, mounts),
+                    format!(
+                        "[{table}]\n{kind}command = ['reader']\nfilesystem = {{ receive_mounts = {mounts} }}"
+                    ),
+                    format!(
+                        "[{table}]\n{kind}command = ['reader']\nfilesystem.receive_mounts = {mounts}"
+                    ),
+                ] {
+                    assert!(
+                        matches!(
+                            refuse_unsupported_config(&text, Path::new("box.toml")),
+                            Err(ConfigError::Process { table: ref actual, ref reason })
+                                if actual == &format!("[{table}]") && reason.contains("only on Linux")
+                        ),
+                        "{text}"
+                    );
+                }
+            }
+        }
+        for text in [
+            "# receive_mounts = []\n[agent]\ncommand = ['receive_mounts = []']",
+            "[agent.filesystem]\nread = ['/mnt/receive_mounts']",
+            "[tool.receive_mounts]\ncommand = ['reader']",
+            "[mcp.receive_mounts]\ntype = 'stdio'\ncommand = ['reader']",
+        ] {
+            refuse_unsupported_config(text, Path::new("box.toml")).unwrap();
         }
     }
 
@@ -235,32 +308,51 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let workspace = directory.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
-        let state = directory.path().join("box-state");
-        let path = directory.path().join("box.toml");
-        let ordinary = format!(
-            "name = 'mounts'\nbox_dir = {:?}\n",
-            state.display().to_string()
-        );
-        std::fs::write(
-            &path,
-            format!(
-                "{ordinary}[experimental-features]\nlinux-passthrough-mounts = true\n\
-                 [agent]\ncommand = ['reader']\n\
-                 [agent.filesystem]\nreceive_mounts = ['/mnt/data']\n"
-            ),
-        )
-        .unwrap();
-        let error = RunContract::read(&path, &workspace)
-            .err()
-            .expect("must refuse");
-        assert!(error.to_string().contains("not available in this build"));
-        assert!(!state.exists());
-        std::fs::write(&path, ordinary).unwrap();
-        RunContract::read(&path, &workspace).unwrap();
-        assert!(
-            state.is_dir(),
-            "the ordinary control reaches state creation"
-        );
+        for (index, (table, kind)) in [
+            ("agent", ""),
+            ("tool.reader", ""),
+            ("mcp.reader", "type = 'stdio'\n"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let state = directory.path().join(format!("box-state-{index}"));
+            let path = directory.path().join("box.toml");
+            let ordinary = format!(
+                "name = 'mounts'\nbox_dir = {:?}\n",
+                state.display().to_string()
+            );
+            std::fs::write(
+                &path,
+                format!("{ordinary}{}", declaration(table, kind, "['/mnt/data']")),
+            )
+            .unwrap();
+            let error = RunContract::read(&path, &workspace)
+                .err()
+                .expect("must refuse");
+            let expected = if cfg!(target_os = "linux") {
+                "not available in this build"
+            } else {
+                "only on Linux"
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+            assert!(!state.exists());
+            if !cfg!(target_os = "linux") {
+                std::fs::write(
+                    &path,
+                    format!("{ordinary}{}", declaration(table, kind, "[]")),
+                )
+                .unwrap();
+                assert!(RunContract::read(&path, &workspace).is_err());
+                assert!(!state.exists());
+            }
+            std::fs::write(&path, ordinary).unwrap();
+            RunContract::read(&path, &workspace).unwrap();
+            assert!(
+                state.is_dir(),
+                "the ordinary control reaches state creation"
+            );
+        }
     }
 
     #[test]
@@ -270,7 +362,6 @@ mod tests {
         let text = format!(
             "version = {MOUNTS_RECORD_VERSION}\n\
              box_id = 'box-0123456789abcdef'\nbox_dir = '/tmp/box-mount-test'\nname = 'mounts'\n\
-             [experimental-features]\nlinux-passthrough-mounts = true\n\
              [agent]\ncommand = ['agent']\n\
              [agent.filesystem]\nreceive_mounts = ['/mnt/data', '/mnt/agent-only']\n\
              read = ['/mnt/data', '/mnt/agent-only']\nwrite = ['/mnt/data', '/mnt/agent-only']\n\
@@ -314,22 +405,22 @@ mod tests {
                 ..
             })
         ));
-        let mut flag_only = record.clone();
-        flag_only
+        let mut empty_record = record.clone();
+        empty_record
             .agent
             .as_mut()
             .unwrap()
             .filesystem
             .receive_mounts
             .clear();
-        flag_only
+        empty_record
             .tool
             .get_mut("reader")
             .unwrap()
             .filesystem
             .receive_mounts
             .clear();
-        flag_only
+        empty_record
             .contained_mcp
             .get_mut("local")
             .unwrap()
@@ -337,14 +428,22 @@ mod tests {
             .filesystem
             .receive_mounts
             .clear();
+        let error =
+            Record::parse(&empty_record.to_toml().unwrap(), Path::new("record.toml")).unwrap_err();
+        let ConfigError::RecordVersion { found, expected } = error else {
+            panic!("expected a lower record version: {error}");
+        };
+        assert_eq!(found, MOUNTS_RECORD_VERSION);
+        assert!(expected < MOUNTS_RECORD_VERSION);
+        empty_record.version = expected;
         assert_eq!(
-            Record::parse(&flag_only.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
-            flag_only
+            Record::parse(&empty_record.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+            empty_record
         );
         for table in ["[agent]", "[tool.reader]", "[mcp.local]"] {
             for native in [false, true] {
-                let mut isolated = flag_only.clone();
-                isolated.experimental_features.linux_passthrough_mounts = native;
+                let mut isolated = empty_record.clone();
+                isolated.version = MOUNTS_RECORD_VERSION;
                 let spec = match table {
                     "[agent]" => isolated.agent.as_mut().unwrap(),
                     "[tool.reader]" => isolated.tool.get_mut("reader").unwrap(),
@@ -352,18 +451,16 @@ mod tests {
                 };
                 spec.filesystem.receive_mounts = paths(&["/mnt/data"]);
                 spec.native_filesystem_policy = Some(native);
-                let error = Record::parse(&isolated.to_toml().unwrap(), Path::new("record.toml"))
-                    .unwrap_err();
-                let expected = if native {
-                    "cannot be combined"
+                let result = Record::parse(&isolated.to_toml().unwrap(), Path::new("record.toml"));
+                if native {
+                    assert!(
+                        matches!(result, Err(ConfigError::Process { table: ref actual, ref reason })
+                            if actual == table && reason.contains("cannot be combined")),
+                        "{table}: {result:?}"
+                    );
                 } else {
-                    "requires"
-                };
-                assert!(
-                    matches!(error, ConfigError::Process { table: ref actual, ref reason }
-                        if actual == table && reason.contains(expected)),
-                    "{table}: {error}"
-                );
+                    assert_eq!(result.unwrap(), isolated);
+                }
             }
         }
     }

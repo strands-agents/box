@@ -344,12 +344,6 @@ default.
 `secret-sources = true` turns on [`[secret-source.<scheme>]`](#secret-sourcescheme) and the
 `secret.env` key of a route or a remote MCP server, which are experimental and off by default.
 
-Box Core recognizes `linux-passthrough-mounts`, a Boolean setting that defaults to `false`, but
-this build cannot enable incoming mount forwarding. Setting it to `true` rejects configuration
-loading on every platform, before Box creates its state directory or starts a workload.
-Leave it `false` and omit nonempty
-[`filesystem.receive_mounts` arrays](#incoming-mount-declarations).
-
 The former `linux-storage-mounts` key is rejected even when its value is `false`.
 Remove that key; this build has no replacement that enables incoming mount forwarding.
 
@@ -693,16 +687,20 @@ This includes directories that inherited their group bit: GNU `chmod g+w` and ev
 
 ### Incoming mount declarations
 
-The optional `receive_mounts` array in `[agent.filesystem]`, `[tool.<name>.filesystem]`, or a local
-`[mcp.<name>.filesystem]` selects paths where that sandbox would receive externally attached
-filesystems after startup. It does not tell Box to create or attach a filesystem.
-The default is an empty array. Each process has its own array; tools and local servers do not
-inherit the agent's entries. Listing a path grants no read, write, or execution access.
+In `box.toml`, the optional `receive_mounts` array in `[agent.filesystem]`,
+`[tool.<name>.filesystem]`, or a local `[mcp.<name>.filesystem]` selects paths where that sandbox
+would receive externally attached filesystems after startup. It does not tell Box to create or
+attach a filesystem. Omitting the array selects no paths. Each process has its own array; tools
+and local servers do not inherit the agent's entries. Listing a path grants no read, write, or
+execution access.
 
-**Incoming mount forwarding is unavailable in this build.** A nonempty array requires
-`[experimental-features] linux-passthrough-mounts = true`, but that setting rejects configuration
-loading on every platform. Box creates no state directory and starts no workload for it.
-An empty or omitted array, with the flag disabled, leaves ordinary filesystem behavior unchanged.
+**Incoming mount forwarding is unavailable in this build.** Linux requires no additional
+experimental setting, but a nonempty array still rejects configuration loading until forwarding
+is implemented. On Linux, an empty or omitted array leaves ordinary filesystem behavior unchanged.
+
+On macOS, the presence of `receive_mounts` rejects configuration loading, including
+`receive_mounts = []`. Omit the key on macOS. Both platform refusals happen before Box creates its
+state directory or starts a workload.
 
 The declaration checks require absolute, literal paths other than `/`. Entries cannot be
 home-relative, such as `~/data`, or contain patterns, control characters, or `..`. Within one
@@ -1578,10 +1576,10 @@ equal to any entry's `workload_port`.
 An invalid `limits.shell.timeout`, `limits.shell.max_input`, `limits.shell.max_output`, or `limits.shell.max_stdin` is also a parse error.
 
 [Incoming mount declarations](#incoming-mount-declarations) also fail before Box creates state:
-invalid or overlapping `receive_mounts` paths, a nonempty array without its experimental flag, or a
-nonempty array combined with native filesystem policy for that process.
-Setting `linux-passthrough-mounts = true` rejects startup because forwarding is unavailable.
-The removed `linux-storage-mounts` key is an error regardless of its value.
+invalid or overlapping `receive_mounts` paths, or a nonempty array combined with native filesystem
+policy for that process. This build rejects nonempty arrays on Linux because forwarding is
+unavailable. On macOS, any `receive_mounts` key is rejected, including `receive_mounts = []`.
+The removed `[experimental-features] linux-storage-mounts` key is an error regardless of its value.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload
