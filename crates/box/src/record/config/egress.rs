@@ -1764,6 +1764,9 @@ pub(crate) fn host_of(destination: &str) -> &str {
 /// removes them from a connecting host.
 pub(crate) fn without_trailing_dot(destination: &str) -> String {
     let host = host_of(destination);
+    if matches!(host.trim_end_matches('.'), "" | "*") {
+        return destination.to_string();
+    }
     let start = host.as_ptr().addr() - destination.as_ptr().addr();
     let end = start + host.len();
     format!(
@@ -2406,6 +2409,18 @@ mod tests {
             ("bücher.example", "punycode (xn--)"),
             ("*.bücher.example", "punycode (xn--)"),
             ("*..example.com", "an empty label"),
+            ("user@api.example.com", "a character other than"),
+            ("api%2eexample.com", "a character other than"),
+            ("api\u{3002}example.com", "punycode (xn--)"),
+            ("10.5", "ends in a number"),
+            ("0x7f.1", "ends in a number"),
+            ("0177.0.0.1", "ends in a number"),
+            ("2130706433", "ends in a number"),
+            ("10.5:8443/v1", "ends in a number"),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com",
+                "longer than DNS allows",
+            ),
         ] {
             let plain =
                 format!("[egress.a]\ndestinations = [{destination:?}]\nsecret.ref = \"env://A\"\n");
@@ -2455,6 +2470,8 @@ mod tests {
             ("bücher.example", "punycode (xn--)"),
             ("*.example.com", "may not be a wildcard"),
             ("*.example.com:8931", "may not be a wildcard"),
+            ("10.5", "ends in a number"),
+            ("0x7f.1:8931", "ends in a number"),
         ] {
             let error = load(&format!(
                 "[egress.tools]\nprotocol = \"mcp\"\ndestinations = [{destination:?}]\n"
@@ -2474,6 +2491,10 @@ mod tests {
             ("https://.gw.example.com", "an empty label"),
             ("https://gw..example.com:8443", "an empty label"),
             ("https://*.example.com", "a character other than"),
+            ("https://10.5", "ends in a number"),
+            ("https://0x7f.1/x", "ends in a number"),
+            ("https://0177.0.0.1:8443", "ends in a number"),
+            ("https://2130706433", "ends in a number"),
         ] {
             let error = load(&format!(
                 "[egress.a]\ndestinations = [\"api.example.com\"]\n\
@@ -2512,6 +2533,32 @@ mod tests {
         let backend = &entries["a"].backends[0];
         assert_eq!(backend.url, "https://gw.example.com/github");
         assert_eq!(backend.target().unwrap().host, "gw.example.com");
+    }
+
+    #[test]
+    fn a_zone_id_destination_is_refused() {
+        load("[egress.a]\ndestinations = [\"fe80::1%eth0\"]\nsecret.ref = \"env://A\"\n")
+            .expect_err("a zone ID is not a destination host");
+    }
+
+    #[test]
+    fn a_refusal_names_the_host_as_written() {
+        for (destination, written) in [("*.", "\"*.\""), (".", "\".\""), ("..:443", "\"..\"")] {
+            let error = load(&format!(
+                "[egress.a]\ndestinations = [{destination:?}]\nsecret.ref = \"env://A\"\n"
+            ))
+            .expect_err(destination)
+            .to_string();
+            assert!(error.contains(written), "{destination:?}: {error}");
+            assert!(!error.contains("every host"), "{destination:?}: {error}");
+        }
+        let error = load(
+            "[egress.a]\ndestinations = [\"api.example.com\"]\n\
+             [[egress.a.backends]]\nurl = \"https://./x\"\n",
+        )
+        .expect_err("an all-dot backend host")
+        .to_string();
+        assert!(error.contains("names host \".\""), "{error}");
     }
 
     #[test]

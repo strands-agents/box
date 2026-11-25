@@ -97,7 +97,9 @@ A host is matched in lowercase. Write it as the gateway sees it on a connection:
 digits, `.`, `-`, and `_`, with no empty label. Write an internationalized name in its punycode
 form, such as `xn--bcher-kva.example` for `bücher.example`. The loader refuses another spelling,
 such as `.api.example.com`, `api..example.com`, or `bücher.example`, because no connection could
-match it. The loader removes a trailing dot from a host, so `api.example.com.` loads as
+match it. It also refuses a name that ends in a number, such as `10.5` or `0x7f.1`, because a
+resolver reads it as an IPv4 address: write an IP address as four decimal numbers, such as
+`10.0.0.5`. A label holds at most 63 bytes, and a name at most 253. The loader removes a trailing dot from a host, so `api.example.com.` loads as
 `api.example.com`, as the gateway compares it. A path is matched case-sensitively, against the path in the
 gateway's canonical form. Two routes, or two entries in one route, can't match the same
 destination, and an http MCP server's host can't appear in a route.
@@ -366,6 +368,8 @@ not upgrade `rust-lang.org`.
 |---|---|
 | A route has no `destinations`, or an entry is empty, `*`, or has port `0` | Name each host the credential goes to. |
 | A destination host or a `backends.url` host has an empty label, or a character other than an ASCII letter, a digit, `.`, `-`, or `_` | Write the host as a connection names it, such as `api.example.com`. Write an internationalized name in its punycode (`xn--`) form. |
+| A destination host or a `backends.url` host ends in a number, such as `10.5` | Write an IPv4 address as four decimal numbers with no leading zero, such as `10.0.0.5`. |
+| A destination host or a `backends.url` host is longer than DNS allows | Write a host whose labels hold at most 63 bytes, and whose name holds at most 253. |
 | A `backends.url` host is a host that another entry re-routes, or a remote MCP server's host | Point the backend at a host that no other entry re-routes and that serves no declared MCP server. |
 | Two routes, or two entries in one route, match the same destination | Narrow one of them, for example by path or port. |
 | A route names an http MCP server's host | Put the credential on the `[mcp.<name>]` table. |

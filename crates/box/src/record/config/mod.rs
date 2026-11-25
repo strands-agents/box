@@ -1574,6 +1574,19 @@ pub(crate) fn unbindable_host_name(host: &str) -> Option<&'static str> {
              non-ASCII name in its punycode (xn--) form",
         );
     }
+    let named = canonical.parse::<std::net::IpAddr>().is_err()
+        && canonical
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'));
+    if named && (canonical.len() > 253 || canonical.split('.').any(|label| label.len() > 63)) {
+        return Some("it is longer than DNS allows: 63 bytes in a label, 253 in a name");
+    }
+    if named && ends_in_a_number(&canonical) {
+        return Some(
+            "it ends in a number, so a resolver reads it as an IPv4 address; write the address \
+             as four decimal numbers with no leading zero, such as 10.0.0.5",
+        );
+    }
     if !egress_gateway::is_bindable_host(&canonical) {
         return Some("it holds a character other than a letter, a digit, '.', '-', or '_'");
     }
@@ -1581,6 +1594,16 @@ pub(crate) fn unbindable_host_name(host: &str) -> Option<&'static str> {
         return Some("it has an empty label");
     }
     None
+}
+
+/// Whether the last label of the lowercase `host` is decimal digits, or `0x` and hexadecimal digits.
+fn ends_in_a_number(host: &str) -> bool {
+    let last = host.rsplit('.').next().unwrap_or(host);
+    !last.is_empty()
+        && (last.bytes().all(|byte| byte.is_ascii_digit())
+            || last
+                .strip_prefix("0x")
+                .is_some_and(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit())))
 }
 
 /// Whether one character may appear in a box name, an MCP server name, or an alias filename.
