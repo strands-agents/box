@@ -7,7 +7,6 @@ mod native_filesystem;
 pub(crate) mod netns;
 pub(crate) mod probe;
 pub(crate) mod reaper;
-pub(crate) mod storage;
 pub(crate) mod syscall;
 pub(crate) mod view;
 
@@ -156,80 +155,19 @@ impl ContainmentBackend for NamespaceBackend {
         egress_handoff: Option<&std::os::unix::net::UnixStream>,
         confirm_fd: Option<std::os::fd::RawFd>,
         native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
-        storage_control_fd: Option<std::os::fd::RawFd>,
     ) -> Result<(), ContainmentError> {
-        let production_request = storage_control_fd
-            .map(storage::production::request)
-            .transpose()?;
-        self.apply_with_storage(
-            config,
-            egress_handoff,
-            confirm_fd,
-            native_filesystem_handoff,
-            #[cfg(any(test, feature = "test-support"))]
-            None,
-            production_request,
-        )
-    }
-
-    fn support_info(&self) -> SupportInfo {
-        let details = if self.user_namespace_permitted {
-            "Linux namespaces available (user namespace creation measured)"
-        } else {
-            "Linux namespace launcher unavailable: this identity may not create a \
-             user namespace"
-        };
-
-        SupportInfo {
-            is_supported: self.user_namespace_permitted,
-            platform: Platform::Linux,
-            mechanism: MECHANISM.to_string(),
-            details: details.to_string(),
+        if native_filesystem_handoff.is_some() && !config.receiving_mounts().is_empty() {
+            return Err(unenforceable(
+                "incoming mounts cannot be combined with native filesystem policy checks",
+            ));
         }
-    }
-}
-
-impl NamespaceBackend {
-    fn apply_with_storage(
-        &self,
-        config: &ContainmentConfig,
-        egress_handoff: Option<&std::os::unix::net::UnixStream>,
-        confirm_fd: Option<std::os::fd::RawFd>,
-        native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
-        #[cfg(any(test, feature = "test-support"))] storage_request: Option<storage::Request>,
-        production_request: Option<storage::production::ProductionRequest>,
-    ) -> Result<(), ContainmentError> {
         // Repeat live pathname validation at this backend's last safe point, per the
         // `ContainmentBackend` contract.
         config.require_live_path_identities()?;
         require_no_configured_devices(config)?;
 
-        // Pending storage has no readable underlay, including through an ancestor grant. Only
-        // the workload view receives this mask; the receiver is forked before materialization.
-        #[cfg(any(test, feature = "test-support"))]
-        let pending_config = storage_request
-            .as_ref()
-            .map(|request| config.clone().refuse(&request.root, Scope::Root))
-            .transpose()?;
-        #[cfg(any(test, feature = "test-support"))]
-        let initial_config = pending_config.as_ref().unwrap_or(config);
-        #[cfg(not(any(test, feature = "test-support")))]
-        let initial_config = config;
-
         // Build the plan and compile both filters before anything irreversible.
-        let view = view::MountView::plan(initial_config)?;
-        let view = if let Some(request) = &production_request {
-            view.with_pending_masks(
-                &request
-                    .layout
-                    .masks
-                    .iter()
-                    .map(|target| (target.path.clone(), target.scope))
-                    .collect::<Vec<_>>(),
-            )?
-        } else {
-            view
-        };
+        let view = view::MountView::plan(config)?;
         let policy = syscall::SyscallPolicy::for_config(config.network());
         #[cfg(feature = "native-filesystem-policy")]
         let policy = policy.with_native_filesystem(native_filesystem_handoff.is_some());
@@ -247,20 +185,6 @@ impl NamespaceBackend {
         // a private, routeless one. Decided before the unshare, which cannot be undone.
         let join_host_network = matches!(config.network(), Network::AllowAll);
         enter_namespaces(join_host_network)?;
-        #[cfg(any(test, feature = "test-support"))]
-        let storage_setup = storage_request.map(storage::prepare).transpose()?;
-        #[cfg(not(any(test, feature = "test-support")))]
-        let storage_setup: Option<storage::Setup> = None;
-        let storage_setup = if let Some(request) = production_request {
-            if storage_setup.is_some() {
-                return Err(unenforceable(
-                    "test and production storage handoffs cannot be combined",
-                ));
-            }
-            Some(storage::production::prepare(request)?)
-        } else {
-            storage_setup
-        };
 
         // The egress listener is created *before* the mount view, while the network namespace is
         // new and nothing else has run.
@@ -322,7 +246,7 @@ impl NamespaceBackend {
         }
         keep.extend(connector.as_ref().map(|connector| connector.handoff));
         let filesystem_handoff =
-            establish_pid_namespace_and_reaper(&view, &keep, confirm_fd, connector, storage_setup)?;
+            establish_pid_namespace_and_reaper(&view, &keep, confirm_fd, connector)?;
 
         // Only the workload process reaches here, in the pivoted view.
         authority::drop_all_capabilities()?;
@@ -348,6 +272,22 @@ impl NamespaceBackend {
         drop(listeners);
 
         Ok(())
+    }
+
+    fn support_info(&self) -> SupportInfo {
+        let details = if self.user_namespace_permitted {
+            "Linux namespaces available (user namespace creation measured)"
+        } else {
+            "Linux namespace launcher unavailable: this identity may not create a \
+             user namespace"
+        };
+
+        SupportInfo {
+            is_supported: self.user_namespace_permitted,
+            platform: Platform::Linux,
+            mechanism: MECHANISM.to_string(),
+            details: details.to_string(),
+        }
     }
 }
 
@@ -530,7 +470,10 @@ fn reaper_exit_code(mut wait: impl FnMut(&mut libc::c_int) -> std::io::Result<()
 
 fn close_reaper_descriptors(keep: &[libc::c_int], confirm_fd: Option<libc::c_int>) {
     if let Err(error) = authority::close_inherited_descriptors(keep) {
-        eprintln!("strands-box: namespace reaper could not close descriptors: {error}");
+        diagnostics::diag!(
+            H0501,
+            "namespace reaper could not close descriptors: {error}"
+        );
         write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: PID 1 exits before the workload starts, terminating the namespace.
         unsafe { libc::_exit(127) };
@@ -539,8 +482,9 @@ fn close_reaper_descriptors(keep: &[libc::c_int], confirm_fd: Option<libc::c_int
 
 fn protect_reaper_memory(confirm_fd: Option<libc::c_int>) {
     if let Err(error) = authority::refuse_process_memory_access() {
-        eprintln!(
-            "strands-box: namespace reaper could not refuse process-memory access \
+        diagnostics::diag!(
+            H0501,
+            "namespace reaper could not refuse process-memory access \
              ({error:?}); killing the namespace rather than starting a workload \
              from a reachable PID 1"
         );
@@ -555,8 +499,9 @@ fn drop_reaper_authority(confirm_fd: Option<libc::c_int>) {
     let locked = authority::set_no_new_privileges();
     if dropped.is_err() || locked.is_err() {
         write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
-        eprintln!(
-            "strands-box: namespace reaper could not drop its own authority \
+        diagnostics::diag!(
+            H0501,
+            "namespace reaper could not drop its own authority \
              ({dropped:?}, {locked:?}); killing the namespace rather than \
              supervising from a privileged PID 1"
         );
@@ -571,7 +516,6 @@ fn establish_pid_namespace_and_reaper(
     keep: &[libc::c_int],
     confirm_fd: Option<std::os::fd::RawFd>,
     connector: Option<reaper::Connector>,
-    mut storage_setup: Option<storage::Setup>,
 ) -> Result<std::os::unix::net::UnixStream, ContainmentError> {
     use std::os::fd::AsRawFd as _;
     let proc = filesystem_queries::open_proc()
@@ -599,9 +543,6 @@ fn establish_pid_namespace_and_reaper(
     }
 
     if reaper > 0 {
-        if let Some(setup) = storage_setup.as_mut() {
-            setup.close_registration();
-        }
         drop(reaper_control);
         drop(query_workload);
         let preserved = [
@@ -614,13 +555,15 @@ fn establish_pid_namespace_and_reaper(
         ];
         let mut preserved = preserved.to_vec();
         preserved.extend(confirm_fd);
-        preserved.extend(storage_setup.as_ref().and_then(storage::Setup::lifetime_fd));
         let hardened = authority::close_inherited_descriptors(&preserved)
             .and_then(|_| authority::retain_workload_memory_access())
             .and_then(|_| authority::set_no_new_privileges())
             .and_then(|_| authority::refuse_process_memory_access());
         if let Err(error) = hardened {
-            eprintln!("strands-box: filesystem query supervisor could not drop authority: {error}");
+            diagnostics::diag!(
+                H0502,
+                "filesystem query supervisor could not drop authority: {error}"
+            );
             write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
             // SAFETY: exit closes an incomplete lifetime handshake or triggers the armed parent-death signal.
             unsafe { libc::_exit(127) };
@@ -634,17 +577,11 @@ fn establish_pid_namespace_and_reaper(
         close_confirm_descriptor(confirm_fd);
         // The original caller retains only scoped process inspection and the notification channel.
         let code = filesystem_queries::supervise(reaper, proc, query_parent);
-        if let Some(setup) = storage_setup.as_mut() {
-            setup.complete();
-        }
         // SAFETY: exiting the launcher process with the run's status.
         unsafe { libc::_exit(code) };
     }
 
     // Namespace PID 1.
-    if let Some(setup) = storage_setup.as_mut() {
-        setup.disown_child();
-    }
     drop(proc);
     drop(query_parent);
     drop(parent_control);
@@ -657,19 +594,10 @@ fn establish_pid_namespace_and_reaper(
     if let Err(error) = view.materialize() {
         // Printed because the reaper cannot return a `Result`: without this, a
         // failure here is only exit 127 and the cause is invisible.
-        eprintln!("strands-box: namespace reaper could not build the view: {error}");
+        diagnostics::diag!(H0501, "namespace reaper could not build the view: {error}");
         write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: PID 1 exiting kills the namespace, which is the right response to
         // being unable to build the boundary at all.
-        unsafe { libc::_exit(127) };
-    }
-
-    if let Some(setup) = storage_setup.as_mut()
-        && let Err(error) = setup.register_target()
-    {
-        eprintln!("strands-box: storage target registration failed: {error}");
-        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
-        // SAFETY: PID 1 exits before starting a workload with an unprotected target.
         unsafe { libc::_exit(127) };
     }
 
@@ -727,6 +655,39 @@ mod tests {
 
     /// The default request shape this backend accepts: every reach mode isolated,
     /// which is also `ContainmentConfig::new`'s default.
+    #[test]
+    fn receiving_mounts_refuse_a_native_filesystem_handoff_before_setup() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().canonicalize().unwrap().join("selected");
+        std::fs::create_dir(&path).unwrap();
+        let directory = std::fs::File::open(&path).unwrap();
+        let config = ContainmentConfig::new()
+            .receive_mounts_from(&path, &directory)
+            .unwrap();
+        let (handoff, _other) = std::os::unix::net::UnixStream::pair().unwrap();
+        // The absent path bounds both calls before any namespace operation, even if the
+        // incompatibility guard regresses. The guarded call must refuse this combination first.
+        std::fs::rename(&path, path.with_file_name("moved")).unwrap();
+        let error = NamespaceBackend::new()
+            .apply(&config, None, None, Some(&handoff))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "incoming mounts cannot be combined with native filesystem policy checks"
+            ),
+            "{error}"
+        );
+        let error = NamespaceBackend::new()
+            .apply(&config, None, None, None)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot inspect approved incoming mount"),
+            "{error}"
+        );
+    }
+
     fn acceptable() -> ContainmentConfig {
         ContainmentConfig::new()
     }
@@ -1165,7 +1126,7 @@ mod tests {
             assert_ne!(child, -1, "fork failed");
             if child == 0 {
                 let backend = NamespaceBackend::with_probe_result(true);
-                if let Err(error) = backend.apply(&config, None, None, None, None) {
+                if let Err(error) = backend.apply(&config, None, None, None) {
                     eprintln!("apply failed: {error}");
                     // SAFETY: terminating the child.
                     unsafe { libc::_exit(20) };
@@ -1238,7 +1199,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -1370,7 +1331,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -1438,7 +1399,7 @@ mod tests {
         assert_ne!(child, -1, "fork failed");
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
@@ -1771,6 +1732,75 @@ mod tests {
     }
 
     #[test]
+    fn a_file_lists_its_attribute_names_but_reads_no_value_under_the_filters() {
+        let directory = tempfile::tempdir().expect("create the xattr fixture");
+        let file = directory.path().join("wheel.whl");
+        std::fs::write(&file, "wheel").expect("write the xattr fixture");
+        let path = std::ffi::CString::new(file.as_os_str().as_encoded_bytes()).unwrap();
+        let held = std::fs::File::open(&file).expect("open the xattr fixture");
+        let descriptor = std::os::fd::AsRawFd::as_raw_fd(&held);
+        let name = c"user.box";
+        // Give the file an attribute before the filters go on, so the names come back non-empty and
+        // `getxattr` has a value to refuse. ext4 and tmpfs from Linux 6.6 accept a `user.` name; a
+        // filesystem that refuses it leaves the file with none, and the name check below is skipped.
+        // SAFETY: both strings and the value stay live for the call.
+        let labelled =
+            unsafe { libc::setxattr(path.as_ptr(), name.as_ptr(), b"hello".as_ptr().cast(), 5, 0) }
+                == 0;
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        let outcome = in_filtered_child(&filters, || {
+            let answer = |result: libc::ssize_t| {
+                if result >= 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error().raw_os_error())
+                }
+            };
+            let mut names = [0_u8; 256];
+            // SAFETY: the path stays live, and the buffer is writable for its whole length.
+            let listed =
+                unsafe { libc::listxattr(path.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+            if answer(listed).is_err() {
+                return 10;
+            }
+            let listed = usize::try_from(listed).unwrap_or_default();
+            if labelled
+                && !names[..listed]
+                    .split(|byte| *byte == 0)
+                    .any(|n| n == b"user.box")
+            {
+                return 14;
+            }
+            // SAFETY: the path stays live, and a null buffer of size 0 asks only for the length.
+            if answer(unsafe { libc::llistxattr(path.as_ptr(), std::ptr::null_mut(), 0) }).is_err()
+            {
+                return 11;
+            }
+            // SAFETY: the descriptor is the parent's open file, inherited by this child.
+            if answer(unsafe { libc::flistxattr(descriptor, std::ptr::null_mut(), 0) }).is_err() {
+                return 12;
+            }
+            // SAFETY: both strings stay live, and a null buffer of size 0 asks only for the length.
+            let value =
+                unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+            if answer(value) != Err(Some(libc::EPERM)) {
+                return 13;
+            }
+            0
+        });
+        drop(held);
+        assert_eq!(
+            outcome, 0,
+            "10/11/12 = listxattr, llistxattr or flistxattr was refused (EPERM fails Python's \
+             shutil.copy2, which treats only ENOTSUP, ENODATA and EINVAL as no attributes), \
+             13 = getxattr was not refused with EPERM, 14 = listxattr did not return the \
+             fixture's user.box name"
+        );
+    }
+
+    #[test]
     fn select_waits_on_held_descriptors_under_the_filters() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
@@ -1944,7 +1974,7 @@ mod tests {
             if libc::setresgid(!0, !0, !0) != 0 {
                 return 11;
             }
-            if libc::setresgid(!0, 0, !0) != -1
+            if libc::setresgid(!0, 1, !0) != -1
                 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
             {
                 return 12;
@@ -2316,7 +2346,7 @@ mod tests {
 
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if backend.apply(&config, None, None, None, None).is_err() {
+            if backend.apply(&config, None, None, None).is_err() {
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(30) };
             }
@@ -2393,7 +2423,7 @@ mod tests {
 
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) = backend.apply(&config, None, None, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(40) };
@@ -2492,7 +2522,7 @@ mod tests {
 
         if child == 0 {
             let backend = NamespaceBackend::with_probe_result(true);
-            if backend.apply(&config, None, None, None, None).is_err() {
+            if backend.apply(&config, None, None, None).is_err() {
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(20) };
             }
@@ -2580,7 +2610,7 @@ mod tests {
             let backend = NamespaceBackend::with_probe_result(true);
             // No handoff: this test asserts the filesystem, process, and authority properties, and
             // the request below is `Blocked` by default so no egress endpoint is created.
-            if let Err(error) = backend.apply(&config, None, None, None, None) {
+            if let Err(error) = backend.apply(&config, None, None, None) {
                 // Printed rather than swallowed: exit code 20 says "apply failed" and this says
                 // why, which is the difference between a five-minute diagnosis and an afternoon of
                 // bisecting namespaces.
@@ -2628,7 +2658,7 @@ mod tests {
                 let credential_widening_refused = unsafe {
                     let uid_refused = libc::setresuid(0, 1, 0) == -1
                         && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-                    let gid_refused = libc::setresgid(!0, 0, !0) == -1
+                    let gid_refused = libc::setresgid(!0, 1, !0) == -1
                         && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
                     uid_refused && gid_refused
                 };
@@ -2757,7 +2787,7 @@ mod tests {
             assert_ne!(child, -1, "fork failed");
             if child == 0 {
                 let backend = NamespaceBackend::with_probe_result(true);
-                if let Err(error) = backend.apply(&config, None, None, None, None) {
+                if let Err(error) = backend.apply(&config, None, None, None) {
                     eprintln!("apply failed: {error}");
                     // SAFETY: terminating the child.
                     unsafe { libc::_exit(20) };
@@ -2933,7 +2963,7 @@ mod tests {
                 // SAFETY: closing the child's copy of the read end.
                 unsafe { libc::close(reader) };
                 let backend = NamespaceBackend::with_probe_result(true);
-                if let Err(error) = backend.apply(config, None, Some(writer), None, None) {
+                if let Err(error) = backend.apply(config, None, Some(writer), None) {
                     eprintln!("apply failed: {error}");
                     // SAFETY: terminating the child.
                     unsafe { libc::_exit(50) };
@@ -2996,9 +3026,7 @@ mod tests {
             // SAFETY: closing the child's copy of the read end.
             unsafe { libc::close(reader) };
             let backend = NamespaceBackend::with_probe_result(true);
-            if let Err(error) =
-                backend.apply(&ContainmentConfig::new(), None, Some(writer), None, None)
-            {
+            if let Err(error) = backend.apply(&ContainmentConfig::new(), None, Some(writer), None) {
                 eprintln!("apply failed: {error}");
                 // SAFETY: terminating the child.
                 unsafe { libc::_exit(50) };

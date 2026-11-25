@@ -260,12 +260,7 @@ fn records_uses_recorded_time_and_fields_and_filters_only_the_exact_deny_verdict
     success(&output);
     let all = rows(&output);
     assert_eq!(all.len(), 3);
-    assert!(
-        all[0][0] == "2025-01-01T00:00:00Z"
-            || all[0][0].starts_with("2025-01-01T00:00:00.000") && all[0][0].ends_with('Z'),
-        "{:?}",
-        all[0]
-    );
+    assert_eq!(all[0][0], "2025-01-01T00:00:00Z", "{:?}", all[0]);
     assert_eq!(
         &all[0][1..],
         [
@@ -841,7 +836,7 @@ fn records_exits_successfully_when_the_output_pipe_closes() {
 }
 
 #[test]
-fn records_uses_exact_subject_keys_and_nanosecond_timestamps() {
+fn records_uses_exact_subject_keys_and_prints_whole_seconds_in_text() {
     let scene = Scene::new();
     let mut spans = Vec::new();
     let subjects = [
@@ -877,7 +872,7 @@ fn records_uses_exact_subject_keys_and_nanosecond_timestamps() {
     let all = rows(&output);
     assert_eq!(all.len(), 4);
     for (row, subject) in all.iter().zip(subjects) {
-        assert_eq!(row[0], "2025-01-01T00:00:00.123456789Z");
+        assert_eq!(row[0], "2025-01-01T00:00:00Z");
         assert_eq!(row[3], format!("value:{subject}"));
     }
 }

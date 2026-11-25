@@ -6,6 +6,8 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
+use diagnostics::diag;
+
 pub(super) fn execute(program: &str, arguments: &[String]) -> io::Result<u8> {
     let image = std::env::current_exe()?;
     let image_identity = identity(&image)?;
@@ -81,13 +83,19 @@ pub(super) fn execute(program: &str, arguments: &[String]) -> io::Result<u8> {
     if refused {
         execution_error(program, &io::Error::from(io::ErrorKind::PermissionDenied))
     } else {
-        eprintln!("strands-box: no ordinary executable for {program:?} on the agent's PATH");
+        diag!(
+            H0301,
+            "no ordinary executable for {program:?} on the agent's PATH"
+        );
         Ok(127)
     }
 }
 
 fn execution_error(program: &str, error: &io::Error) -> io::Result<u8> {
-    eprintln!("strands-box: cannot execute ordinary program {program:?}: {error}");
+    diag!(
+        H0302,
+        "cannot execute ordinary program {program:?}: {error}"
+    );
     Ok(126)
 }
 

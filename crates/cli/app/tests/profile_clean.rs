@@ -391,6 +391,75 @@ fn a_profile_clean_of_several_profiles_with_no_boxes_names_them() {
 }
 
 #[test]
+fn a_profile_clean_of_all_removes_a_linked_run_folder_but_keeps_its_target_and_files() {
+    let home = Home::new();
+    home.saved(CLAUDE_A, Some("claude"));
+    let elsewhere = home.path.join("elsewhere");
+    std::fs::create_dir_all(elsewhere.join("box")).expect("a folder");
+    std::fs::write(elsewhere.join("profile-name"), "claude\n").expect("a record");
+    std::os::unix::fs::symlink(&elsewhere, home.runs().join(CLAUDE_B)).expect("a link");
+    std::fs::write(home.runs().join("notes.txt"), "kept\n").expect("a file");
+
+    let output = home.clean(&["--all", "--no-ask"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!home.exists(CLAUDE_A));
+    assert!(
+        home.runs().join(CLAUDE_B).symlink_metadata().is_err(),
+        "the link is removed"
+    );
+    assert!(
+        elsewhere.join("profile-name").exists(),
+        "the link's target stays"
+    );
+    assert!(
+        home.runs().join("notes.txt").exists(),
+        "a file is not a run"
+    );
+}
+
+#[test]
+fn a_profile_clean_of_all_reports_what_it_removed_before_a_failure() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = Home::new();
+    home.saved(CLAUDE_A, Some("claude"));
+    home.saved(CLAUDE_B, Some("codex"));
+    let stuck = home.runs().join(CLAUDE_B).join("box");
+    std::fs::write(stuck.join("state"), "").expect("a file");
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o500)).expect("read-only");
+
+    let output = home.clean(&["--all", "--no-ask"]);
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o700)).expect("writable");
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("box: removed 1 of 2 boxes"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn box_clean_is_no_longer_a_command() {
+    let home = Home::new();
+    home.saved(CLAUDE_A, Some("claude"));
+    let output = Command::new(env!("CARGO_BIN_EXE_box"))
+        .args(["clean", "--all", "--no-ask"])
+        .env_clear()
+        .env("HOME", &home.path)
+        .env("TERM", "dumb")
+        .current_dir(&home.path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("box runs");
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("unrecognized subcommand 'clean'"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(home.exists(CLAUDE_A));
+}
+
+#[test]
 fn a_profile_clean_names_only_the_profiles_that_own_boxes() {
     let home = Home::new();
     home.saved(CLAUDE_A, Some("claude"));

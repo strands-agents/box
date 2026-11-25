@@ -32,7 +32,7 @@ pub(crate) fn show(
 ) -> Result<(), Error> {
     let mut runs = read(home, box_home)?;
     if let Some(profile) = profile {
-        runs.retain(|run| run.profile.as_deref() == Some(profile));
+        runs.retain(|run| crate::run::owns(&run.id, run.profile.as_deref(), profile));
     }
     let result = match format {
         OutputFormat::Json => crate::output::json(output, &runs).and_then(|()| writeln!(output)),
@@ -126,11 +126,8 @@ fn read_profile(directory: &OwnedFd) -> Option<String> {
     if bytes.len() > PROFILE_LIMIT {
         return None;
     }
-    let mut profile = String::from_utf8(bytes).ok()?;
-    if profile.ends_with('\n') {
-        profile.pop();
-    }
-    (!profile.is_empty()).then_some(profile)
+    let record = String::from_utf8(bytes).ok()?;
+    crate::run::profile_of(&record).map(str::to_owned)
 }
 
 fn write_text(output: &mut impl Write, runs: &[SavedRun], profile: Option<&str>) -> io::Result<()> {
@@ -151,7 +148,7 @@ fn write_text(output: &mut impl Write, runs: &[SavedRun], profile: Option<&str>)
             "{}\t{}\t{}",
             run.profile.as_deref().unwrap_or("unknown").escape_debug(),
             run.updated
-                .map(|time| time.to_rfc3339_opts(SecondsFormat::AutoSi, true))
+                .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
                 .as_deref()
                 .unwrap_or("unknown"),
             run.id.escape_debug()

@@ -18,13 +18,8 @@ path = "src/main.rs"
 name = "strands-box-sock-alias"
 path = "src/bin/strands-box-sock-alias.rs"
 
-# Private compiler process for Linux storage admission. It exposes no operator command.
-[[bin]]
-name = "strands-box-storage-compiler"
-path = "src/storage_compiler_main.rs"
-test = false
-
 [dependencies]
+diagnostics = { package = "strands-box-diagnostics", path = "../diagnostics" }
 async-trait = "0.1"
 containment = { package = "strands-box-containment", path = "../containment" }
 credentials = { package = "strands-box-credentials", path = "../credentials" }
@@ -106,11 +101,6 @@ native-filesystem-policy = ["containment/native-filesystem-policy"]
 # binary, so its TLS deps are optional dependencies this feature enables rather than
 # dev-dependencies (a `[[bin]]` cannot see those).
 test-support = ["dep:rcgen", "dep:rustls-pemfile"]
-
-[[bin]]
-name = "box-storage-probe"
-path = "tests/support/storage_probe.rs"
-required-features = ["test-support"]
 
 [[bin]]
 name = "box-filesystem-probe"
@@ -212,3 +202,6 @@ tokio = { version = "1", features = ["test-util"] }
 
 [lints.rust]
 unused_must_use = "deny"
+
+[lints.clippy]
+print_stderr = "warn"

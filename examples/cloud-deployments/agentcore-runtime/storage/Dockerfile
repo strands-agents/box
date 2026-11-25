@@ -3,6 +3,6 @@ WORKDIR /opt/runtime-storage
 COPY bin/ ./bin/
 COPY server.py workload binary-manifest.json ./
 ENV PYTHONUNBUFFERED=1 STORAGE_PATH=/mnt/storage
-USER 0
+USER 1000:1000
 EXPOSE 8080
 CMD ["python3", "/opt/runtime-storage/server.py"]

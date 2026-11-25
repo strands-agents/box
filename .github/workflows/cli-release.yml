@@ -154,7 +154,7 @@ jobs:
             box-linux-release \
             cargo build --release --locked --target "$TARGET" \
               -p strands-box-cli -p strands-box -p strands-box-containment \
-              --bin box --bin strands-box-sock-alias --bin strands-box-contain-trampoline --bin strands-box-storage-compiler "$@"
+              --bin box --bin strands-box-sock-alias --bin strands-box-contain-trampoline "$@"
 
       - name: Package tarball
         # Stage Box with its helpers and resources, then tar its contents.
@@ -170,9 +170,6 @@ jobs:
           cp "target/${TRIPLE}/release/box" "$stage/box"
           cp "target/${TRIPLE}/release/strands-box-sock-alias" "$stage/strands-box-sock-alias"
           cp "target/${TRIPLE}/release/strands-box-contain-trampoline" "$stage/strands-box-contain-trampoline"
-          if [[ "$TRIPLE" == *-unknown-linux-gnu ]]; then
-            cp "target/${TRIPLE}/release/strands-box-storage-compiler" "$stage/strands-box-storage-compiler"
-          fi
           chmod 0755 "$stage"/*
           mkdir "$stage/resources"
           cp resources/config.toml "$stage/resources/"
@@ -199,7 +196,6 @@ jobs:
               {box_version: $version, box_commit: $commit,
                core_version: ($core[] | select(.name == "strands-box") | .version),
                core_commit: $core_commit, target: $target}
-              + (if ($target | endswith("-unknown-linux-gnu")) then {storage_compiler: true} else {} end)
             ' > "$stage/release.json"
           # Without this, macOS tar adds a ._ file for each extended attribute.
           COPYFILE_DISABLE=1 tar -C "$stage" -czf "dist/${asset}" .
@@ -263,7 +259,7 @@ jobs:
           docker run --rm \
             --mount "type=bind,source=$PWD,target=/src,readonly" \
             box-linux-release \
-            python3 scripts/check-linux-package.py stage/package --target "$TRIPLE" --require-storage-metadata
+            python3 scripts/check-linux-package.py stage/package --target "$TRIPLE"
           python3 -c 'import json, os; print("installation_id = " + json.dumps(os.environ.get("BOX_TEST_INSTALLATION_ID", "")))' \
             > "$RUNNER_TEMP/box-smoke-installation.toml"
           # Namespace setup needs a fresh proc mount, without Docker's masked system paths.
@@ -309,7 +305,7 @@ jobs:
     environment: macos-signing
     outputs:
       team_id: ${{ vars.CD_SIGNER_TEAM_ID }}
-      cli_profile_name: ${{ vars.CD_SIGNER_CLI_PROFILE_NAME }}
+      cli_profile_name: ${{ vars.CD_SIGNER_PROFILE_NAME }}
       package_sha256: ${{ steps.package.outputs.sha256 }}
     permissions:
       contents: read
@@ -319,7 +315,7 @@ jobs:
       CD_SIGNER_BUCKET: ${{ vars.CD_SIGNER_BUCKET }}
       CD_SIGNER_BUCKET_ACCESS_ROLE: ${{ vars.CD_SIGNER_BUCKET_ACCESS_ROLE }}
       CD_SIGNER_TEAM_ID: ${{ vars.CD_SIGNER_TEAM_ID }}
-      CD_SIGNER_CLI_PROFILE_NAME: ${{ vars.CD_SIGNER_CLI_PROFILE_NAME }}
+      CD_SIGNER_PROFILE_NAME: ${{ vars.CD_SIGNER_PROFILE_NAME }}
       NOTARY_CREDENTIAL_SECRET: ${{ vars.NOTARY_CREDENTIAL_SECRET }}
     steps:
       # The caller checks the source too, but this workflow signs, so it refuses an unmerged
@@ -366,8 +362,8 @@ jobs:
       - name: Check native signing configuration
         if: inputs.native_filesystem_policy == true
         run: |
-          test -n "$CD_SIGNER_CLI_PROFILE_NAME" || {
-            echo "::error::Set CD_SIGNER_CLI_PROFILE_NAME to a distribution profile authorized for the CLI's native filesystem policy."
+          test -n "$CD_SIGNER_PROFILE_NAME" || {
+            echo "::error::Set CD_SIGNER_PROFILE_NAME to a distribution profile authorized for the shared Box native filesystem policy."
             exit 1
           }
 
@@ -448,7 +444,7 @@ jobs:
       contents: read
     env:
       CD_SIGNER_TEAM_ID: ${{ needs.sign-macos.outputs.team_id }}
-      CD_SIGNER_CLI_PROFILE_NAME: ${{ needs.sign-macos.outputs.cli_profile_name }}
+      CD_SIGNER_PROFILE_NAME: ${{ needs.sign-macos.outputs.cli_profile_name }}
     steps:
       - name: Checkout trusted verification source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

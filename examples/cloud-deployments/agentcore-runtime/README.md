@@ -10,8 +10,6 @@ A check for another order cannot satisfy it. The eligibility endpoint returns HT
 
 Follow the [full build guide](../../../docs/user/tutorials/agentcore-runtime.md) to prepare dependencies, deploy, invoke, inspect the result, and clean up.
 
-For storage that arrives after Box starts, use the separate [experimental storage example](storage/). Its root-user configuration and storage checks differ from the shipment examples on this page.
-
 ## Choose a workload
 
 | Workload | Source | Behavior |
@@ -55,3 +53,7 @@ The backend must enforce those properties in a production application.
 The Strands response checks cover selected confirmed fields. Intermediate model prose remains ungraded.
 The LangChain verifier checks structured facts before a trusted template renders the final response.
 Rebuilt packages require fresh run results. Existing cloud results do not qualify other platforms or configurations.
+
+## Storage that arrives after startup
+
+The separate [storage example](storage/) starts Box before Runtime attaches provider storage. It compares real file operations inside and outside the existing sandbox and checks persistence across a Runtime stop and resume. It needs no model access.

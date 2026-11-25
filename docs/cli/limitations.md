@@ -1,8 +1,3 @@
----
-reader: Someone deciding what to trust a box with, for example before turning permission prompts off.
-belongs: One section per thing the box leaves to you: what it leaves open, who it affects, and what to check or turn off. A key's meaning goes to its reference page. Install steps go to install.md, and a fix after an error goes to troubleshooting.md.
----
-
 # What a box does not protect
 
 Read this page before you trust a run with work that matters, such as a run with the agent's
@@ -53,7 +48,7 @@ the box's shell and Python, so they can change a program in it that a later run 
 and programs set when the run started still limit the agent.
 
 A run's records, in `~/.strands/box/r/<box ID>/`, are the box's own decisions for that run, and they
-stay until `box clean` removes the run. They're a plain file on your machine, not a tamper-proof
+stay until `box profile clean` removes the run. They're a plain file on your machine, not a tamper-proof
 audit log.
 
 ## File rules decide only the box's shell
@@ -84,7 +79,7 @@ after a run:
 | File | What runs it |
 | --- | --- |
 | `.git/hooks/*`, and `.git/config` (`core.hooksPath`, `core.fsmonitor`, aliases) | `git`. Even `git status` runs `core.fsmonitor`, and `git status` doesn't list either file. |
-| `.claude/settings.json` and `.claude/settings.local.json` (hooks), `.mcp.json` | Claude Code, when you run it outside the box. The permission mode and the allow rules Claude Code uses in the next box run. |
+| The agent's project settings, such as Claude Code's `.claude/settings.json` and `.mcp.json` | Your agent, the next time you run it in the project outside the box. For Claude Code, they also set the next box run's permissions. |
 | `package.json` scripts, `.npmrc` | `npm install`, `npm test`, and the like. |
 | `Makefile`, `build.rs`, `.cargo/config.toml`, other build files | `make`, `cargo build`, and other build tools. |
 | `.envrc` | `direnv`, as soon as you `cd` into the project. |
@@ -217,8 +212,9 @@ So give a profile only the tools it needs. Each tool is one pack, such as `@box/
 
 The agent keeps its own files outside your project, but the tools still use folders in it. A tool
 pack keeps its cache in the project's `.cache/<tool>` folder ([Tools](profiles-reference.md#tools)),
-and a pack that writes another folder names it in its README, such as cargo's `.cargo` and
-`target` and node's `.npm`. Add `/.cache` and those folders to the project's `.gitignore`. That
+unless its README says it keeps the cache in its own storage, and a pack that writes another folder
+names it in its README, such as cargo's `target` and node's `.npm`. Add `/.cache` and those folders
+to the project's `.gitignore`. That
 hides them from plain `git status`, which is why step 2 of the
 [check after a run](#the-agent-can-plant-code-that-runs-outside-the-box-later) uses `--ignored`.
 
@@ -365,7 +361,7 @@ opens:
   also run the other programs in the box. `box profile show --full <profile>` shows each server's
   grants.
 - **Keys are saved with the run.** A key in a declared server's `env` stays in
-  `~/.strands/box/r/<run>/` until you run `box clean`. The agent can't read `~/.strands/box`, but
+  `~/.strands/box/r/<run>/` until you run `box profile clean`. The agent can't read `~/.strands/box`, but
   `box profile show --full` prints the key, and so does `box profile show --format json --full`,
   so be careful where you paste the output.
 
@@ -405,8 +401,7 @@ from a route, so do this only for a tool and a host you trust.
 
 ## How Linux differs
 
-Box runs on Linux on aarch64, such as AWS Graviton, and on x86_64, with no opt-in. Releases have no
-x86_64 archive yet, so on x86_64 build `box` from source ([CONTRIBUTING.md](../../CONTRIBUTING.md)).
+Box runs on Linux on aarch64, such as AWS Graviton, and on x86_64, with no opt-in.
 What is different from a Mac:
 
 - Each run creates an empty `.box` folder in your project, so that the box can keep the agent out

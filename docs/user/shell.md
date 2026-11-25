@@ -44,10 +44,16 @@ This limit applies only to input piped into the alias from outside the Shell, su
 event or a program that starts `bash` with input. A pipe inside a command, such as
 `cat big.json | jq .`, is not affected.
 
-Only commands that the Shell runs itself, such as `cat`, `read`, or `jq`, receive the input. A
-program that the Shell starts in its own sandbox gets no input. Text that a command reads from its
-input is still data: when a command runs it, as in `eval "$(cat)"`, or opens a file it names,
-policy decides that command or file.
+Commands that the Shell runs itself, such as `cat`, `read`, or `jq`, receive the input. So does a
+program that the Shell starts in its own sandbox, such as a hook binary run as
+`zsh -c ~/src/project/hooks/pre-tool-use`. The box copies the input to the program while it runs.
+When the command has no input, as when the alias gets a terminal or `/dev/null`, the program
+gets `/dev/null`, so a tool such as `rg` searches its folder rather than an empty input.
+Input that the program does not read is dropped when it exits. The commands after it in the same
+invocation read no input.
+
+Text that a command reads from its input is still data: when a command runs it, as in
+`eval "$(cat)"`, or opens a file it names, policy decides that command or file.
 
 A Lua script that the Shell runs does not read the input piped into the alias: it reads it as empty
 and never waits for it. A pipe inside one command, such as `echo x | lua -e 'print(io.read())'`,
@@ -60,11 +66,16 @@ the agent. So `curl -H "Authorization: Bearer $GITHUB_TOKEN" ...` sends the plac
 request to the route's destination that policy permits, the gateway puts the real token in its
 place.
 
+The hosted filesystem roots are the operator home, agent home, workspace, and, on Linux, canonical
+directories approved from `box.toml`'s `[agent.filesystem] receive_mounts` selection. Selecting a
+directory grants no policy permission. Tool and local-server selections add no hosted roots. See
+[incoming mount declarations](config.md#incoming-mount-declarations).
+
 The alias takes the directory it was run from from `PWD` when `PWD` names it, and otherwise asks
 the operating system. A directory other than the workspace takes the same `fs:read` decision, with
 operation `change_dir`, that `cd` takes. The command doesn't run, and the alias exits `126`, if
-policy refuses that decision, if the directory isn't a directory, or if it is outside the
-operator's home, the agent's home, and the workspace. The last case covers `/` and `/tmp`, which
+policy refuses that decision, if the directory isn't a directory, or if it is outside the hosted
+filesystem roots. The last case covers `/` and `/tmp`, which
 the Shell holds only in memory. If the alias can't tell which directory it was run from, or the
 directory's name isn't valid UTF-8, it exits `125` and runs nothing.
 
@@ -74,9 +85,9 @@ input: the command reads its input as empty.
 
 ## What runs where
 
-The reachable paths check is deny-only and runs after policy. It refuses a path outside the operator's home,
-the agent's home, and the workspace, a path inside the box directory, and the `box.toml` and
-`policy.dw` the run loaded, whatever a `permit` says.
+The reachable paths check is deny-only and runs after policy. It refuses a path outside the hosted
+filesystem roots, a path inside the box directory, and the `box.toml` and `policy.dw` the run loaded,
+whatever a `permit` says.
 
 Once the alias hands a command to the Shell, each command in it runs as follows:
 
@@ -103,7 +114,7 @@ The Shell implements these, each in place of a program of the same name on the `
   `program == "sh"`, and `lash FILE` and `/bin/lash FILE` as `program == "lash"`, so a rule meant
   for the Shell's script interpreter must name both. `.` and `source` also run a file.
 
-Paths outside the operator's home, the agent's home, and the workspace, such as `/tmp`, exist only
+Paths outside the hosted filesystem roots, such as `/tmp`, exist only
 in the Shell's memory, for one command. A file written to `/tmp` is gone when the command ends.
 
 ## `shell:exec`
@@ -344,9 +355,9 @@ the file of a `[tool]` is gone, its name is not found, and the Shell doesn't loo
 `PATH`. `run` prints the file each name runs:
 
 ```text
-strands-box: [tool.git]: a bare `git` in the Shell runs /Applications/Xcode.app/Contents/Developer/usr/bin/git
-strands-box: [tool.brew_git]: runs another program path, so a bare `git` in the Shell runs the file of `[tool.git]`, whose label is that name
-strands-box: [tool.brew_node], [tool.node]: these tables run different program paths, so a bare `node` in the Shell runs the file that `PATH` finds
+strands-box: note[B0208]: [tool.git]: a bare `git` in the Shell runs /Applications/Xcode.app/Contents/Developer/usr/bin/git
+strands-box: note[B0208]: [tool.brew_git]: runs another program path, so a bare `git` in the Shell runs the file of `[tool.git]`, whose label is that name
+strands-box: note[B0208]: [tool.brew_node], [tool.node]: these tables run different program paths, so a bare `node` in the Shell runs the file that `PATH` finds
 ```
 
 A name changes only which file runs. The spawn still needs a `shell:spawn` permit, or a grammar
@@ -372,11 +383,11 @@ its effect at the server stays.
 | `1` | Submitted command text exceeds 256 KiB, including text with line breaks. Split the text across several calls, for example by appending to a file. | `strands-shell: input too large` |
 | `1` | The Shell call exceeded its execution allowance. | `strands-shell: execution timeout exceeded` |
 | `125` | Box failed to serve the command. | The failure |
-| `125` | The alias can't tell which directory it was run from. Set `PWD` to it. | `strands-box-sock-alias: read the working directory: <error>; set PWD to it` |
-| `125` | The name of the directory the alias was run from isn't valid UTF-8. Run the command from another directory. | `strands-box-sock-alias: the working directory is not valid UTF-8` |
-| `125` | The call exceeded the broker's backup deadline, five seconds after its finite Shell allowance. | `strands-box: the call exceeded its deadline` |
-| `125` | The deadline exceeds the platform's clock range. Reduce `limits.shell.timeout`. | `strands-box: the call deadline exceeds this platform's clock range` |
-| `126` | Policy refused the directory the alias was run from, it isn't a directory, or it is outside the operator's home, the agent's home, and the workspace. Nothing ran. | `strands-box: cannot start in <directory>: <error>` |
+| `125` | The alias can't tell which directory it was run from. Set `PWD` to it. | `strands-box-sock-alias: error[H0203]: read the working directory: <error>; set PWD to it` |
+| `125` | The name of the directory the alias was run from isn't valid UTF-8. Run the command from another directory. | `strands-box-sock-alias: error[H0203]: the working directory is not valid UTF-8` |
+| `125` | The call exceeded the broker's backup deadline, five seconds after its finite Shell allowance. | `strands-box-sock-alias: error[H0105]: the call exceeded its deadline` |
+| `125` | The deadline exceeds the platform's clock range. Reduce `limits.shell.timeout`. | `strands-box-sock-alias: error[H0106]: the call deadline exceeds this platform's clock range` |
+| `126` | Policy refused the directory the alias was run from, it isn't a directory, or it is outside the hosted filesystem roots. Nothing ran. | `strands-box: error[B1202]: cannot start in <directory>: <error>` |
 | `126` | Policy refused the command. | `strands-shell: effect denied: policy denied this operation on '<program>'`, then `[policy: <id>]` or `[default-deny]`. A tool grammar action reads the same way. |
 | `126` | A tool grammar binds the program file, and Box refused the spawn before any rule decided it. | `strands-shell: effect denied: policy denied this operation on '<program>' [tool-grammar]: <reason>. No policy can permit it.` |
 | `126` | Policy permitted a program that a `[tool.<name>]` table names, and its arguments match no table's fixed arguments. | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments`` |

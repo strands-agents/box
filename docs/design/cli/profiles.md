@@ -141,7 +141,7 @@ runs in <new>`. A new run writes the full profile name to `profile-name` in its 
 `0600`. The profile check reads the `profile-name` record, which must be a file that names this profile
 exactly. Every run then holds an exclusive lock on its run directory until it ends, opened without
 following a link, and `box` refuses a run directory that another `box run` holds, or that a
-`box clean` holds while it removes it.
+`box profile clean` holds while it removes it.
 
 ### Load the packs
 
@@ -177,39 +177,17 @@ turns each server that the box can run into an `[mcp.<name>]` table (see [MCP se
 each launcher's cache, environment, and registry hosts. It reports each omitted automatic
 declaration and its reason. Each selected host entry remains in the configuration import.
 
+Incoming mount selections follow a separate path from access grants. The resolver expands
+`filesystem.receive_mounts` for each process without reading the selected directory's contents.
+The compiler preserves those selections in `box.toml`; Core validates their authority and
+connects incoming mounts during each process's startup. No storage watcher or data-readiness
+signal is part of CLI startup. See [incoming mount selections](profile-language.md#incoming-mount-selections).
+
 ### Compile
 
 `box` builds the run's `box.toml` and `policy.dw` (see
 [What Box Core receives](#what-box-core-receives)), and checks what it refuses (see
 [What `box run` refuses](#what-box-run-refuses)).
-
-### Preserve incoming storage rules
-
-The CLI passes each recipient's `filesystem.mounts` list and the profile's
-`linux-storage-mounts` feature flag to Box Core. Each agent, tool, and local server keeps its
-own list; no recipient inherits another's mount sources. The resolver uses that recipient's
-list when deciding which filesystem checks wait for arrival. It keeps required rules that
-cannot yet be resolved against the incoming filesystem, including program-resolved tools'
-missing literal paths and symbolic links that enter a declared mount path.
-
-Path resolution checks existing components only up to the incoming mount. Wildcard expansion
-must reject a path before entering that mount, including entry through an outer symbolic link.
-Boxy does not enumerate the incoming filesystem. Optional paths retain their ordinary semantics.
-
-An incoming write grant can reach an external denial through a symbolic link. Boxy therefore
-preserves authored `deny_write` paths that it cannot yet prove irrelevant. It keeps the same
-paths in generated Shell and Monty policy. Move and delete restrictions on their ancestors use
-exact path comparisons, so they do not prohibit operations on unrelated sibling files.
-
-Box Core owns mount detection, preparation of each process's restricted view, and publication.
-Boxy adds no mount watcher or readiness gate. The application can start while the declared
-storage is inaccessible. Failure to apply a required rule stops the affected Box.
-
-Box Core also gives hosted Shell and Python (Monty) the agent's protected incoming storage view.
-Their existing `fs:*` policy decisions remain mandatory. The broker retains a handle to the
-protected view and resolves storage operations through it, including when a declared root
-is nested beneath a home or workspace mapping. It does not reopen the host's raw storage path.
-Without an agent view, declared hosted storage remains unavailable.
 
 ### Write the run's files
 
@@ -230,7 +208,7 @@ earlier files.
 
 ### Prepare storage
 
-`box` creates each managed storage directory and each detected launcher's cache, and refuses one that is a
+`box` creates each storage directory and each detected launcher's cache, and refuses one that is a
 link. It copies each `[[storage.files]]` source whose target does not exist yet, brings each
 `sync = true` copy up to date with the host, writes each
 `[[storage.files.set]]` value into a copy already in storage, and prints each link or entry that the
@@ -241,9 +219,6 @@ and existing sections (see [MCP servers](profile-language.md#mcp-servers)). When
 [Load the packs](#load-the-packs) to this one fails, `box` removes a run directory it minted, and
 keeps a reused one with its box. A policy error comes before this step, so it creates no storage
 directory and copies nothing.
-
-Each recipient's `filesystem.mounts` list names incoming paths owned by the external storage
-manager. Managed-storage preparation does not create those paths or their contents.
 
 ### Start Box Core
 
@@ -446,7 +421,7 @@ Compared with the merged profile and packs, `box run` made these changes:
 | --- | --- |
 | Set `name` and `box_dir` to the new instance, and `policy` to the run's own `policy.dw`. | Top level. |
 | Set `file-attributes` to the profile's value, or to `true` when `box` does not run as root ([decisions.md](decisions.md#file-times-follow-the-user-id)). | Top level. |
-| Replaced each placeholder with its value, each existing filesystem entry with its real path, dropped each `optional` entry that does not exist, dropped each entry, table, and `{ value, when }` value whose `when` does not hold, and put `value` in place of each other `{ value, when }` table. | Every template field. |
+| Replaced each placeholder with its value, each existing filesystem access entry with its real path, dropped each `optional` entry that does not exist, dropped each entry, table, and `{ value, when }` value whose `when` does not hold, and put `value` in place of each other `{ value, when }` table. | Every template field. |
 | Replaced `program`, `helpers`, and `hosts` with the real file as `command`, set the base `PATH` and `TMPDIR` that the table does not set (with read and write on the default `TMPDIR`, the tool's own folder `tool-tmp/<tool>` in the run's directory), added the interpreter's reads and deny entries and the helpers, added the variables, filesystem, and program folder of each kept tool that the tool's tool pack extends, left out each tool that only a tool pack's `extend` brings in, and put the workspace first in `read`, and in `write`, as far as `[project] access` allows. | Each `[tool.<name>]` that names a `program`. |
 | Set the workspace, put it first in `read` and `write` as far as `[project] access` allows, and added each storage directory. | `[agent]`, `[agent.filesystem]`. |
 | Added an `[mcp.<name>]` table for each server that the packs' `[[mcp-servers]]` rows name and the box can run. | `[mcp]`. |
@@ -488,13 +463,13 @@ work in this order:
    `env` holds the operator's value of a variable that a `pass-secret-env` entry covers, or sets
    such a variable, and it loses `args` when an argument, as written, holds that value, even when a declaration matches, so the agent starts no declared server with it. A profile table with a `type`
    that replaces an entry that keeps environment fields and does not match it adds that to the skip line.
-2. **Check each server.** `box` reads `type`, `command`, `args`, `env`, `url`, `enabled`, and
-   each field the row's `env-var-locations` gives a role. Every other field passes through: it
-   stays in the agent's configuration, `box.toml` never holds it, and it keeps no server out
-   ([decisions.md](decisions.md#a-pack-names-where-its-agents-mcp-servers-are)). An explicit
-   `type` of `stdio` or `http` wins, else `command` means stdio and `url` means http. A server
-   with `enabled = false`, or with a field of the other transport (`url` on stdio, `command`,
-   `args`, or `env` on http), is skipped. A field with a local role on a remote server also
+2. **Check each server.** `box` reads `type`, `command`, `args`, `env`, `url`, `enabled`,
+   `disabled`, and each field the row's `env-var-locations` gives a role. Every other field passes
+   through: it stays in the agent's configuration, `box.toml` never holds it, and it keeps no
+   server out ([decisions.md](decisions.md#a-pack-names-where-its-agents-mcp-servers-are)). An
+   explicit `type` of `stdio` or `http` wins, else `command` means stdio and `url` means http. A
+   server with `enabled = false` or `disabled = true`, or with a field of the other transport
+   (`url` on stdio, `command`, `args`, or `env` on http), is skipped. A field with a local role on a remote server also
    skips it. `Role::is_local` identifies local roles. A field with a remote role on a stdio
    server skips it when `mcp::keys` reads a variable in that field or cannot read it. A field
    with a remote role and no variable passes through
@@ -581,10 +556,11 @@ work in this order:
    `header-references` value with no variable is left to the agent, which sends it as on the
    host ([decisions.md](decisions.md#a-detected-server-carries-no-credential)). Its header name
    is not checked because it never becomes `secret.header`. Header names that carry a variable
-   must contain only letters, digits, and `-`, and must not be empty. A
+   must be RFC 7230 tokens, the rule Core checks `secret.header` by: letters, digits, and
+   `` !#$%&'*+-.^_`|~ ``, and not empty. A
    `header-references` value with a variable must end in one variable written in the
    row's `env-var-syntax`
-   (`${NAME}` for `@box/claude`, `${NAME}` or `$NAME` for `@box/pi`), and the text before it becomes
+   (`${NAME}` for `@box/claude` and `@box/kiro`, `${NAME}` or `$NAME` for `@box/pi`), and the text before it becomes
    `secret.prefix`. A reference can
    include a literal `:-default`, except in a form with no closing text, such as `$NAME`. If the variable is unset, the reference creates no credential
    binding; the harness uses the fallback in its own configuration. A variable that a route or a
@@ -685,8 +661,7 @@ history and each `when temporal` rule that the compiled policy has not changed k
 `policy.dw`. Two runs of
 one profile in one workspace share its storage, so the run that starts last writes each
 `[[storage.files.set]]` value into the shared copy. Run directories stay after the run stops, about
-2 MB each. `box clean <BOX_ID>` removes one run directory, and `box clean --all` removes every run
-directory whose box is not running. It asks `[y/N]` first, and `--no-ask` removes without asking.
+2 MB each. [`box profile clean`](../../cli/cli.md#box-profile-clean) removes them.
 
 ## What `box run` refuses
 
@@ -757,8 +732,8 @@ candidate it can run, and lists each candidate it passed over and why.
 **`--box-id`.** The value is not `b-` followed by 16 lowercase hexadecimal digits, names no run
 directory with a `box.toml` and a `box/` (none of them a link), or names a run whose `box.toml`
 names no workspace. The run's `profile-name` record is missing, is not a file, or does not name
-this profile exactly. Another `box run` holds the run directory, or a `box clean` holds it while
-it removes it.
+this profile exactly. Another `box run` holds the run directory, or a `box profile clean` holds it
+while it removes it.
 
 ## Paths and variables
 

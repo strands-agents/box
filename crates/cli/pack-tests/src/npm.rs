@@ -117,7 +117,22 @@ fn tools_name_shipped_packs_and_npm_brings_node() {
         .create()
         .expect_err("base is no tool pack");
     assert!(
-        matches!(&error, Error::UnknownTool { known, .. } if known == "bunx, cargo, gh, git, go, node, npm, npx, pnpm, pnpx, uv, uvx, yarn"),
+        matches!(&error, Error::UnknownTool { known, .. } if known == "bunx, cargo, gh, git, go, node, npm, npx, pnpm, pnpx, rg, uv, uvx, yarn"),
         "{error}"
     );
+}
+
+#[test]
+fn npms_cache_is_in_its_own_storage_outside_the_project() {
+    let host = FakeHost::new();
+    let generated = host
+        .trial()
+        .with("claude")
+        .with("bedrock")
+        .tools(["npm"])
+        .generate()
+        .expect("a configuration");
+    let npm = tool(&generated, "npm");
+    let cache = npm["env"]["npm_config_cache"].as_str().expect("a cache");
+    assert_in_tool_storage(&generated, &host, cache, "/tool/npm/cache");
 }

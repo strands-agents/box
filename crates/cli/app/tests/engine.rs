@@ -1,11 +1,5 @@
 //! `box run` against a real engine.
-#![cfg(any(
-    target_os = "macos",
-    all(
-        target_os = "linux",
-        any(target_arch = "aarch64", target_arch = "x86_64")
-    )
-))]
+#![cfg(any(target_os = "macos", all(target_os = "linux", target_arch = "aarch64")))]
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -298,18 +292,19 @@ fn a_helper_python_outside_homebrew_passes_core_validation() {
         filesystem["read"].as_array().unwrap().contains(&python),
         "{filesystem}"
     );
-    if cfg!(target_os = "linux") {
-        let shell = std::fs::canonicalize("/bin")
-            .expect("canonical bin directory")
-            .join("sh");
-        assert_eq!(
-            filesystem["read_file"].as_array().expect("file grants"),
-            &[toml::Value::String(shell.display().to_string())],
-            "{filesystem}"
-        );
-    } else {
-        assert!(filesystem.get("read_file").is_none(), "{filesystem}");
-    }
+    // The helper's Python keeps only its `read`. The one `read_file` is the pack's own `/bin/sh`,
+    // which uv's tool scripts start with, shown at its real file.
+    let shell = std::path::Path::new("/bin")
+        .canonicalize()
+        .unwrap()
+        .join("sh");
+    assert_eq!(
+        filesystem.get("read_file"),
+        Some(&toml::Value::Array(vec![toml::Value::from(
+            shell.display().to_string()
+        )])),
+        "{filesystem}"
+    );
 }
 
 fn wait_for_output(mut child: Child) -> Output {
@@ -583,13 +578,8 @@ done"#,
     assert!(!text.contains("planted"), "{text}");
 }
 
-/// Run `box run probe <flags> -- -c <script>` at a 40x200 pseudo-terminal with the banner on. Wait
-/// for each of `needles` in order on the screen, then send a line so the script can finish. Return
-/// the screen as it was when the last needle appeared.
-fn banner_run(scene: &Scene, flags: &[&str], script: &str, needles: &[&str]) -> String {
-    use std::io::{Read as _, Write as _};
+fn spawn_at_terminal(mut command: Command) -> (Child, std::fs::File) {
     use std::os::unix::process::CommandExt as _;
-    use std::sync::mpsc;
 
     let size = nix::pty::Winsize {
         ws_row: 40,
@@ -598,10 +588,7 @@ fn banner_run(scene: &Scene, flags: &[&str], script: &str, needles: &[&str]) -> 
         ws_ypixel: 0,
     };
     let pair = nix::pty::openpty(Some(&size), None).unwrap();
-    let mut input = std::fs::File::from(pair.master);
-    let mut output = input.try_clone().unwrap();
     let slave = std::fs::File::from(pair.slave);
-    let mut command = scene.command_with(&scene.workspace(), "probe", flags, &["-c", script]);
     command
         .env("TERM", "xterm-256color")
         .stdin(slave.try_clone().unwrap())
@@ -616,8 +603,19 @@ fn banner_run(scene: &Scene, flags: &[&str], script: &str, needles: &[&str]) -> 
             Ok(())
         });
     }
-    let child = command.spawn().unwrap();
-    drop(command);
+    (command.spawn().unwrap(), std::fs::File::from(pair.master))
+}
+
+/// Run `box run probe <flags> -- -c <script>` at a 40x200 pseudo-terminal with the banner on. Wait
+/// for each of `needles` in order on the screen, then send a line so the script can finish. Return
+/// the screen as it was when the last needle appeared.
+fn banner_run(scene: &Scene, flags: &[&str], script: &str, needles: &[&str]) -> String {
+    use std::io::{Read as _, Write as _};
+    use std::sync::mpsc;
+
+    let command = scene.command_with(&scene.workspace(), "probe", flags, &["-c", script]);
+    let (child, mut input) = spawn_at_terminal(command);
+    let mut output = input.try_clone().unwrap();
     let (send, received) = mpsc::channel();
     std::thread::spawn(move || {
         let mut bytes = [0; 8192];
@@ -890,7 +888,10 @@ fn a_profile_that_turns_file_attributes_off_cannot_set_file_times_on_macos() {
     if cfg!(target_os = "macos") {
         let text = stderr(&output);
         assert!(!output.status.success(), "{text}");
-        assert!(text.contains("strands-box: starting workload"), "{text}");
+        assert!(
+            text.contains("strands-box: note[B0302]: starting workload"),
+            "{text}"
+        );
         assert!(
             text.contains("stamped.txt: Operation not permitted"),
             "{text}"
@@ -1402,7 +1403,8 @@ fn a_run_refuses_an_entry_that_became_a_link_beneath_a_write_grant() {
     scene.profile(
         "notes",
         &format!(
-            "{PROBE}filesystem.read = [\"${{{{ home }}}}/notes\", \"${{{{ home }}}}/notes/out\"]\n\
+            "{PROBE}filesystem.read = [\"${{{{ home }}}}/notes/out\", \
+             {{ path = \"${{{{ home }}}}/notes\", when = \"linux\" }}]\n\
              filesystem.write = [\"${{{{ home }}}}/notes\"]\n"
         ),
         PROBE_POLICY,
@@ -3747,7 +3749,7 @@ fn a_run_prints_the_box_id_that_brings_it_back() {
         "Box Core stores the box ID that box prints"
     );
     assert!(
-        stderr(&output).contains(&format!("strands-box: box {id} created")),
+        stderr(&output).contains(&format!("strands-box: note[B0301]: box {id} created")),
         "{}",
         stderr(&output)
     );
@@ -3757,6 +3759,80 @@ fn a_run_prints_the_box_id_that_brings_it_back() {
             "{{\"key\":\"strands.box.name\",\"value\":{{\"stringValue\":\"{id}\"}}}}"
         )),
         "Box Core labels its records with the box ID\n{records}"
+    );
+}
+
+/// **A run with redirected output still prints the startup disclosure on stderr**, before the
+/// workload's own output, because no `fs:*` decision covers a grant.
+#[test]
+fn a_redirected_run_prints_the_startup_disclosure_on_stderr() {
+    let scene = Scene::new();
+    let output = scene.probe(&scene.workspace(), "echo WORKLOAD_RAN >&2");
+    succeeded(&output);
+    let text = stderr(&output);
+    let workload = text.find("WORKLOAD_RAN").expect("the workload ran");
+    let shell = Path::new("/bin/bash")
+        .canonicalize()
+        .expect("the probe shell");
+    let command_exec = format!("\n  exec        {}", shell.display());
+    for heading in [
+        "strands-box: note[B0201]: [agent] runs ",
+        "strands-box: note[B0201]: [agent] runtime minimum, added by Core:",
+        command_exec.as_str(),
+        "strands-box: note[B0201]: [agent] HOME=",
+    ] {
+        let at = text
+            .find(heading)
+            .unwrap_or_else(|| panic!("{heading:?}\n{text}"));
+        assert!(at < workload, "{heading:?} after the workload\n{text}");
+    }
+}
+
+/// **A terminal run ends with the short exit block**, while the full startup disclosure goes to the
+/// run's log and not to the screen.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_terminal_run_ends_with_the_exit_block_and_logs_the_disclosure() {
+    use std::io::Read as _;
+
+    let scene = Scene::new();
+    let command = scene.command_with(
+        &scene.workspace(),
+        "probe",
+        &["--no-banner"],
+        &["-c", "true"],
+    );
+    let (child, mut output) = spawn_at_terminal(command);
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = Vec::new();
+        // A closed PTY can finish with EIO.
+        let _ = output.read_to_end(&mut text);
+        let _ = sent.send(text);
+    });
+    let result = wait_for_output(child);
+    let text = received.recv_timeout(Duration::from_secs(5)).unwrap();
+    let text = String::from_utf8_lossy(&text).replace('\r', "");
+    assert_eq!(result.status.code(), Some(0), "{text}");
+    let run = new_run(&[], &scene.runs());
+    let id = box_id(&run);
+    let block = text
+        .split_once(&format!("box: run {id} ended\n  "))
+        .unwrap_or_else(|| panic!("no exit block\n{text}"))
+        .1;
+    assert!(block.starts_with("startup disclosure \u{b7} "), "{text}");
+    for line in [
+        format!("\n  log      {}\n", run.join("box.log").display()),
+        format!("\n  history  box runs history {id}\n"),
+        format!("\n  reuse    box run probe --box-id {id}\n"),
+    ] {
+        assert!(block.contains(&line), "{line:?}\n{text}");
+    }
+    assert!(!text.contains("runtime minimum, added by Core"), "{text}");
+    let log = std::fs::read_to_string(run.join("box.log")).expect("the run log");
+    assert!(
+        log.contains("strands-box: note[B0201]: [agent] runtime minimum, added by Core:"),
+        "{log}"
     );
 }
 
@@ -3838,6 +3914,60 @@ fn long_box_home(scene: &Scene, length: usize) -> PathBuf {
     }
     assert_eq!(long.as_os_str().len(), length);
     long
+}
+
+#[test]
+fn the_history_command_names_a_moved_box_home_so_another_shell_can_run_it() {
+    let scene = Scene::new();
+    let moved = scene.root.join("moved home");
+    let folder = moved.join("profiles/probe");
+    std::fs::create_dir_all(&folder).expect("a profile folder");
+    for file in ["profile.toml", "policy.dw"] {
+        std::fs::copy(
+            scene.home().join(".strands/box/profiles/probe").join(file),
+            folder.join(file),
+        )
+        .expect("a copy of the probe profile");
+    }
+    let output = scene
+        .command(&scene.workspace(), "probe", &["-c", "true"])
+        .env("BOX_HOME", &moved)
+        .output()
+        .expect("box runs");
+    succeeded(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let command = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("box: policy history: "))
+        .unwrap_or_else(|| panic!("no history line\n{stderr}"));
+    let id = std::fs::read_dir(moved.join("r"))
+        .expect("the runs folder")
+        .next()
+        .expect("a run")
+        .expect("a run")
+        .file_name();
+    let id = id.to_str().expect("a UTF-8 box ID");
+    assert_eq!(
+        command,
+        format!("BOX_HOME='{}' box runs history {id}", moved.display())
+    );
+    // A shell with no BOX_HOME runs the command as printed, and finds the run only through it.
+    let program = format!(" '{}' runs history ", env!("CARGO_BIN_EXE_box"));
+    let shell = |command: &str| {
+        scene
+            .process(Path::new("/bin/sh"))
+            .arg("-c")
+            .arg(command.replacen(" box runs history ", &program, 1))
+            .current_dir(scene.workspace())
+            .output()
+            .expect("the shell runs")
+    };
+    succeeded(&shell(command));
+    assert!(
+        !shell(&format!("exec box runs history {id}"))
+            .status
+            .success()
+    );
 }
 
 #[test]
@@ -3935,6 +4065,46 @@ fn a_new_run_refused_for_path_length_leaves_no_run_folder() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn a_startup_failure_at_a_terminal_shows_the_error_and_leaves_no_run_folder() {
+    use std::io::Read as _;
+
+    let scene = Scene::new();
+    let long = long_box_home(&scene, 66);
+    let mut command = scene.command_with(
+        &scene.workspace(),
+        "probe",
+        &["--no-banner"],
+        &["-c", "true"],
+    );
+    command.env("BOX_HOME", &long);
+    let (child, mut output) = spawn_at_terminal(command);
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = Vec::new();
+        // A closed PTY can finish with EIO.
+        let _ = output.read_to_end(&mut text);
+        let _ = sent.send(text);
+    });
+    let result = wait_for_output(child);
+    let text = received.recv_timeout(Duration::from_secs(5)).unwrap();
+    let text = String::from_utf8_lossy(&text).replace('\r', "");
+    assert_eq!(result.status.code(), Some(1));
+    assert!(
+        text.contains("box: recent log output\n  strands-box: error[")
+            && text.contains("its broker socket path exceeds the platform limit"),
+        "{text}"
+    );
+    assert!(!text.contains("to reuse this box run"), "{text}");
+    assert!(!text.contains(" ended\n  "), "{text}");
+    let leftovers: Vec<PathBuf> = std::fs::read_dir(long.join("r"))
+        .expect("the runs folder")
+        .map(|entry| entry.expect("a run").path())
+        .collect();
+    assert!(leftovers.is_empty(), "leftover run folders: {leftovers:?}");
+}
+
+#[test]
 fn a_folder_too_deep_for_any_profile_name_is_left_to_box_core() {
     let scene = Scene::new();
     let long = long_box_home(&scene, 100);
@@ -3944,11 +4114,16 @@ fn a_folder_too_deep_for_any_profile_name_is_left_to_box_core() {
         .output()
         .expect("box runs");
     assert!(!output.status.success(), "{}", stderr(&output));
+    // The history line names the moved box home so another shell can run it; it is not advice.
+    let text = stderr(&output);
+    let others: Vec<_> = text
+        .lines()
+        .filter(|line| !line.starts_with("box: policy history: "))
+        .collect();
     for advice in ["BOX_HOME", "profile name", "cannot start"] {
         assert!(
-            !stderr(&output).contains(advice),
-            "box gives no advice when no profile name would help: {}",
-            stderr(&output)
+            !others.iter().any(|line| line.contains(advice)),
+            "box gives no advice when no profile name would help: {text}"
         );
     }
 }
@@ -4181,7 +4356,7 @@ fn a_box_id_whose_run_is_still_running_is_refused_and_leaves_that_run_alone() {
 }
 
 #[test]
-fn a_clean_keeps_a_box_that_is_still_running() {
+fn a_profile_clean_refuses_a_box_that_is_still_running() {
     let scene = Scene::new();
     let waiting = scene
         .command(
@@ -4215,7 +4390,7 @@ fn a_clean_keeps_a_box_that_is_still_running() {
     let clean = |args: &[&str]| {
         scene
             .process(Path::new(env!("CARGO_BIN_EXE_box")))
-            .arg("clean")
+            .args(["profile", "clean"])
             .args(args)
             .arg("--no-ask")
             .output()
@@ -4224,7 +4399,7 @@ fn a_clean_keeps_a_box_that_is_still_running() {
 
     let asked = scene
         .process(Path::new(env!("CARGO_BIN_EXE_box")))
-        .args(["clean", &box_id(&run)])
+        .args(["profile", "clean", "probe"])
         .output()
         .expect("box runs");
     failed_with(&asked, "is still running");
@@ -4233,21 +4408,17 @@ fn a_clean_keeps_a_box_that_is_still_running() {
         "refused before it asks: {}",
         stderr(&asked)
     );
-    failed_with(&clean(&[&box_id(&run)]), "is still running");
+    failed_with(&clean(&["probe"]), "is still running");
     let all = clean(&["--all"]);
-    succeeded(&all);
-    assert!(
-        stderr(&all).contains(&format!("still running: {}", box_id(&run))),
-        "{}",
-        stderr(&all)
-    );
+    failed_with(&all, "is still running");
+    assert!(stderr(&all).contains(&box_id(&run)), "{}", stderr(&all));
     assert_eq!(scene.runs(), vec![run.clone()], "the running box stays");
 
     std::fs::write(scene.workspace().join("go"), "").expect("release the run");
     let first = wait_for_output(waiting);
     succeeded(&first);
     assert_eq!(stdout(&first), "done\n");
-    succeeded(&clean(&[&box_id(&run)]));
+    succeeded(&clean(&["probe"]));
     assert!(scene.runs().is_empty(), "a stopped box is removed");
 }
 
@@ -4302,15 +4473,15 @@ fn a_rerun_whose_policy_box_core_refuses_leaves_the_run_as_it_was() {
 }
 
 #[test]
-fn a_clean_with_a_box_id_removes_only_that_run() {
+fn a_profile_clean_removes_the_profiles_boxes_and_keeps_it_and_its_storage() {
     let scene = Scene::new();
     succeeded(&scene.probe(&scene.workspace(), "true"));
     let first = new_run(&[], &scene.runs());
     succeeded(&scene.probe(&scene.workspace(), "true"));
-    let second = new_run(std::slice::from_ref(&first), &scene.runs());
+    new_run(std::slice::from_ref(&first), &scene.runs());
     let clean = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_box"))
-            .arg("clean")
+            .args(["profile", "clean"])
             .args(args)
             .current_dir(scene.workspace())
             .env_clear()
@@ -4321,9 +4492,14 @@ fn a_clean_with_a_box_id_removes_only_that_run() {
             .expect("box runs")
     };
 
-    let refused = clean(&["no-such-run"]);
-    failed_with(&refused, "no saved box no-such-run");
-    let no_terminal = clean(&[&box_id(&first)]);
+    let none = clean(&["nosuch", "--no-ask"]);
+    succeeded(&none);
+    assert!(
+        stderr(&none).contains("no boxes found for profile nosuch"),
+        "{}",
+        stderr(&none)
+    );
+    let no_terminal = clean(&["probe"]);
     failed_with(&no_terminal, "box asks before it removes anything");
     assert_eq!(
         scene.runs().len(),
@@ -4334,14 +4510,14 @@ fn a_clean_with_a_box_id_removes_only_that_run() {
     let kept = scene.home().join(".strands/box/storage/probe/default/kept");
     std::fs::create_dir_all(kept.parent().unwrap()).expect("a storage folder");
     std::fs::write(&kept, "").expect("a storage file");
-    let removed = clean(&[&box_id(&first), "--no-ask"]);
+    let removed = clean(&["probe", "--no-ask"]);
     succeeded(&removed);
     assert!(
-        stderr(&removed).contains(&format!("removed box {}", box_id(&first))),
+        stderr(&removed).contains("removed 2 boxes of profile probe"),
         "{}",
         stderr(&removed)
     );
-    assert_eq!(scene.runs(), vec![second]);
+    assert!(scene.runs().is_empty());
     assert!(
         scene
             .home()
@@ -4353,20 +4529,23 @@ fn a_clean_with_a_box_id_removes_only_that_run() {
 }
 
 #[test]
-fn a_clean_takes_one_box_id_or_all() {
+fn a_profile_clean_takes_profile_names_or_all_and_box_clean_is_gone() {
     let scene = Scene::new();
     succeeded(&scene.probe(&scene.workspace(), "true"));
     let run = new_run(&[], &scene.runs());
     for (args, error) in [
-        (vec!["clean", "--no-ask"], "required"),
+        (vec!["profile", "clean", "--no-ask"], "required"),
         (
-            vec!["clean", &box_id(&run), "--all", "--no-ask"],
+            vec!["profile", "clean", "probe", "--all", "--no-ask"],
             "cannot be used with",
         ),
-        (vec!["clean", "probe", &box_id(&run)], "unexpected argument"),
         (
-            vec!["clean", "--all"],
+            vec!["profile", "clean", "--all"],
             "box asks before it removes anything",
+        ),
+        (
+            vec!["clean", "--all", "--no-ask"],
+            "unrecognized subcommand",
         ),
         (vec!["run", "--clean-up", "--no-ask"], "unexpected argument"),
     ] {
@@ -5065,7 +5244,17 @@ fn fake_run(folder: &Path, workspace: &Path, parts: &[&str]) {
 
 #[test]
 fn each_part_of_a_run_folder_is_checked_before_a_box_id_is_reused() {
-    let scene = Scene::new();
+    let mut scene = Scene::new();
+    // This test moves a file outside the run; both fixture roots must use the same mount.
+    let outside = tempfile::Builder::new()
+        .prefix("bx")
+        .tempdir_in(scene.root.parent().expect("the fixture parent"))
+        .expect("an outside directory on the run's mount");
+    scene.outside = outside
+        .path()
+        .canonicalize()
+        .expect("a canonical directory");
+    scene._outside = outside;
     succeeded(&scene.probe(&scene.workspace(), "true"));
     let runs = scene.home().join(".strands/box/r");
     let workspace = scene.workspace();
@@ -5105,13 +5294,11 @@ fn each_part_of_a_run_folder_is_checked_before_a_box_id_is_reused() {
         &workspace,
         &["box", "box.toml"],
     );
-    std::fs::copy(
+    std::fs::rename(
         runs.join("b-0000000000000010/box.toml"),
         scene.outside().join("box.toml"),
     )
-    .expect("copy box.toml outside the run folder");
-    std::fs::remove_file(runs.join("b-0000000000000010/box.toml"))
-        .expect("remove box.toml before replacing it with a link");
+    .expect("move box.toml");
     std::os::unix::fs::symlink(
         scene.outside().join("box.toml"),
         runs.join("b-0000000000000010/box.toml"),
@@ -5188,12 +5375,12 @@ fn a_long_profile_name_reuses_its_own_box_id() {
 }
 
 #[test]
-fn a_box_id_names_no_run_after_clean() {
+fn a_box_id_names_no_run_after_a_profile_clean() {
     let scene = Scene::new();
     succeeded(&scene.probe(&scene.workspace(), "true"));
     let id = box_id(&new_run(&[], &scene.runs()));
     let clean = Command::new(env!("CARGO_BIN_EXE_box"))
-        .args(["clean", "--all", "--no-ask"])
+        .args(["profile", "clean", "--all", "--no-ask"])
         .current_dir(scene.workspace())
         .env_clear()
         .env("HOME", scene.home())
@@ -5643,7 +5830,3 @@ fn box_git_rewrites_github_ssh_remotes_to_https() {
         "https://github.com/owner/repo.git\nhttps://github.com/owner/repo.git\n"
     );
 }
-
-#[cfg(target_os = "linux")]
-#[path = "support/storage_mounts.rs"]
-mod storage_mounts;

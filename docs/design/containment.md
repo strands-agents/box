@@ -92,11 +92,9 @@ disclosed](decisions.md#direct-filesystem-reach-is-declared-and-disclosed).
 A box makes five guarantees:
 
 - Before a process starts, Box reads `box.toml`, adds the system paths the process needs, and writes
-  one set of sandbox grants. The configured permissions stay fixed while the box runs. For
-  ordinary paths, Box builds those grants without running a program. Experimental Linux storage
-  mounts defer checks that require the incoming filesystem until it arrives, as described in
-  [storage that arrives after startup](#storage-that-arrives-after-startup). See
-  [fixed and built without running a program](decisions.md#containment-is-fixed-and-built-without-running-a-program).
+  one set of sandbox grants. It runs no program to do this, and the grants never change while the
+  box runs. See [fixed and built without running a
+  program](decisions.md#containment-is-fixed-and-built-without-running-a-program).
 - The launcher, `strands-box-contain-trampoline`, applies the sandbox to itself and then starts the
   configured program. See [one trampoline spawns every contained
   process](decisions.md#one-trampoline-spawns-every-contained-process). If that step fails or Box
@@ -116,40 +114,6 @@ A box makes five guarantees:
   doesn't make the box's own contents confidential, and it doesn't govern code the agent writes and
   gets run somewhere else. See [the sandbox protects the surrounding
   system](decisions.md#box-protects-the-machine-not-the-box).
-
-## Storage that arrives after startup
-
-The experimental Linux storage feature lets an already running box access a filesystem attached
-later by a trusted storage manager. The operator declares the attachment directories in
-`box.toml`; the [configuration reference](../user/config.md) defines the feature switch and root
-list. Declaring a directory does not grant access. The agent, each configured tool, and each local
-MCP server retain their own filesystem lists.
-
-Box covers each declared directory before launching the workload. One Box-owned helper observes
-the distinct source paths across all recipients. It retains one source cache per path, with an
-independent acquisition worker so one blocked provider does not stop the others. Recipient exit
-does not discard those caches. Each compilation and preparation receives a fresh private mount
-clone; recipient permissions and publication remain separate. When a filesystem arrives, the storage compiler resolves
-the original rules against a private copy of its mount view. It applies the required read-only,
-execution, and denied-path restrictions before the worker attaches the completed view to the
-recipient. Preparation follows configured permission paths and mount records; it does not list
-every object in the filesystem. A required path that cannot be protected causes preparation to
-fail, keeps the incoming storage hidden, and stops the affected box.
-
-Strands Shell and Monty use a retained reference to the agent's protected filesystem view for
-storage operations. They still require the corresponding policy permit. Pending storage has no
-fallback to the surrounding filesystem. The dedicated interpreter thread drops filesystem
-capabilities, while a separate trusted thread launches programs inside their own sandboxes.
-
-At subscription, the helper identifies sources already captured or present in its mount table.
-The recipient's launcher waits until those sources have completed rule compilation and protected
-publication. A completed compilation that needs no new publication also satisfies this check.
-The private launch receipt precedes workload creation. Sources absent at subscription remain
-asynchronous, and Box adds no readiness exchange with the storage manager.
-
-This version handles the first attachment at each root and trusts the external mounting process. Replacement mounts, later nested mounts, and
-revocation of already open files require further qualification. macOS does not support this
-experimental feature.
 
 ## Where a box's reach comes from
 
@@ -373,6 +337,76 @@ Those checks govern the requested operation, not later actions by a separate pro
 
 macOS also retains root file creation inside granted directories.
 Seatbelt path denials govern the sandboxed process's own access.
+
+### Linux incoming mounts
+
+Box launches build a private filesystem view except at explicitly selected
+`filesystem.receive_mounts` directories. At those directories, Box establishes a one-way receiving
+connection before the process starts. Linux propagates later mounts directly; no background watcher,
+copy of file contents, or Runtime readiness handshake is involved. See
+[the configuration reference](../user/config.md#incoming-mount-declarations) for the permission contract.
+
+The Linux mount planner receives each selected storage directory through `ContainmentConfig`. Each directory must already be a dedicated mount point with an upstream
+connection. This implementation pins and verifies each selected mount by its own mount ID.
+A shared parent alone cannot satisfy that check. This is a planner requirement, not a Linux
+limitation on receiving mounts beneath an ordinary directory. The internal planner requires
+covering writable and executable grants and rejects intersecting protected paths; these checks
+do not replace Core's per-process permission checks.
+
+During setup, this path keeps sources attached, binds the selected subtrees into the sandbox,
+and makes unrelated mounts private. A bind makes the same filesystem visible at another path;
+it does not copy file contents. Source identity and child-mount checks reject a changed source
+or an incomplete bind. An unbindable child, which Linux omits from recursive binds, causes
+startup refusal. A source that changes during setup can require a startup retry. Checks after
+the root switch verify that each selected directory remains connected and unrelated paths do not.
+
+Setup preserves existing source restrictions within selected storage. Ordinary parent and
+sibling grants must still provide their requested permissions; Box refuses startup if they
+cannot. Shared mount-table parsing and descriptor-based mount identity checks support both
+ordinary grants and selected storage.
+
+Future mounts retain the trusted publisher's
+options and contents: Box does not add read-only, `noexec`, `nosuid`, or `nodev` restrictions to
+those arrivals. These options respectively block writes, executable file mappings, privilege
+gains through executable file attributes, and device-node use. Core's per-process checks
+are described below. Omitting the selection leaves ordinary launches unchanged.
+
+### Core validation of incoming mount selections
+
+Core checks the directories in one process's `filesystem.receive_mounts`
+selection. It runs during run-wide judgment and again when translating an agent, configured tool,
+or local MCP server's launch. The agent must grant the whole directory read, write, and execute
+access. A tool or local MCP server must grant read and write access; its existing execution rules
+already cover those grants. A covering parent grant is sufficient. Child and exact-file grants are not.
+Provider read-only or execution restrictions do not reduce these configuration requirements.
+
+The checker rejects overlapping selections and any intersection with a denied path, a write-protected
+path, Box's state directory, or loaded authority sources. Restrictions on absent descendants also
+cause rejection. Existing configured-command and installed-program protections still run. The
+native filesystem policy cannot be combined with a nonempty selection. No mount feature flag is
+required on Linux. macOS rejects declarations through its existing configuration checks.
+
+Each selected directory stays open while the checker compares permissions and protected paths.
+Coverage and identity comparisons follow parent directories from this open object, rather than
+reopening the selected pathname. Path comparisons also preserve restrictions on future descendants.
+These checks visit permission paths and their ancestors; they do not list all storage contents.
+Existing command-alias scans retain their separate behavior.
+
+The translated boundary passes each already-open directory to
+`ContainmentConfig::receive_mounts_from`. This method records its canonical path and mandatory object
+identity separately from access grants. Core retains the open object through launch; the serialized
+configuration cannot silently adopt another directory at the same pathname. The existing opened
+configuration file and digest bind the handoff to the bytes Core prepared.
+
+The trampoline loads the configuration and checks each identity again. The Linux planner checks
+the selected directory against the lowered grants, then captures the corresponding mount in its
+current namespace. It retains the existing mount-ID and connection checks before and after setup.
+The setup process releases its pins through the existing cleanup before workload execution; the
+workload gains no source descriptor. Core retains its own approved objects through launch. A failed
+check prevents that process from running.
+
+The startup disclosure names each selected path and its whole-directory permission contract.
+On-demand local MCP servers are disclosed before the agent starts and again when the server starts.
 
 ### Linux filesystem metadata
 

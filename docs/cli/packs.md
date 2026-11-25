@@ -1,8 +1,3 @@
----
-reader: Someone who wants to know what a pack is, or to write one for an agent, a tool, or settings that a team shares.
-belongs: A section belongs here only if most authors need it for their first pack. Anything else goes to packs-reference.md, profiles-reference.md, or troubleshooting.md, and nowhere on this page.
----
-
 # Packs
 
 A pack holds what one program needs in a box: how to start it, the files and hosts it reaches, and
@@ -65,7 +60,9 @@ name = "team-agent"
 version = 1              # raise it when the pack changes
 kind = "agent"           # a profile that uses it names one model provider and no other agent
 extend = ["@box/base"]   # the settings and tools that every shipped agent pack uses
-engine = ">=0.1.0"       # the oldest box that reads this pack
+
+[requires]
+box = ">=0.1.0"          # the oldest box that reads this pack
 
 [run]
 command = [

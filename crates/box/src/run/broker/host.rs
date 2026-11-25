@@ -1,8 +1,5 @@
 //! The broker's transport: one listener, one reader per connection, and dispatch on `Open`.
 //!
-//! Still threads `Arc<ShellSpec>` through four signatures, so it is not yet interpreter-agnostic;
-//! `AGENTS.md` records what closing that costs.
-//!
 //! | Cause | Response |
 //! |---|---|
 //! | The client disconnects mid-Call | Drop that Program, keep accepting |
@@ -12,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 // `Arc` for the spec: each connection runs on its own thread, so the spec itself crosses
 // threads. (It was `Rc` while every Shell shared one `LocalSet`.)
 use std::sync::Arc;
@@ -173,7 +170,7 @@ impl BrokerHost {
         protected_sources: &[AuthoritySource],
         commands: Arc<crate::run::commands::ConfiguredCommands>,
         installation: Arc<crate::run::installation::TrustedInstallation>,
-        #[cfg(target_os = "linux")] storage: Option<Arc<box_shell::StorageView>>,
+        hosted_mount_roots: &[PathBuf],
     ) -> Result<Self, BoxError> {
         let host_programs = commands
             .bare_names(record, &crate::run::contain::executable::host_search_path())
@@ -187,15 +184,12 @@ impl BrokerHost {
                 Some(workspace),
                 layout.root(),
                 protected_sources,
+                hosted_mount_roots,
             )
             .map_err(|source| ShellError::Serve { source })?
             .with_commands(commands)
             .with_installation(installation)
-            .with_upstream_trust(crate::run::contain::boundary::upstream_trust())
-            .with_storage(
-                #[cfg(target_os = "linux")]
-                storage,
-            ),
+            .with_upstream_trust(crate::run::contain::boundary::upstream_trust()),
         );
         // The declared MCP servers, from the same record.
         let declared_mcp = Arc::new(record.mcp.clone());
@@ -524,16 +518,7 @@ fn host(
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
 ) -> io::Result<()> {
-    #[cfg(target_os = "linux")]
-    if reach.storage().is_some()
-        && let Err(error) = containment::storage::drop_hosted_capabilities()
-    {
-        let message = format!("prepare protected hosted storage credentials: {error}");
-        let _ = ready.send(Err(io::Error::other(message.clone())));
-        return Err(io::Error::other(message));
-    }
     let runtime = match tokio::runtime::Builder::new_current_thread()
-        .thread_name("box-hosted-io")
         .enable_all()
         .build()
     {
@@ -801,9 +786,10 @@ async fn serve_transport(
                                 running.remove(&done.id);
                                 if done.status != 0 && done.slot.control.input_capped() {
                                     let limit = done.slot.control.input_limit();
-                                    let note = format!(
-                                        "strands-box: stdin is more than {limit} bytes; the command \
-                                         received only the first {limit}\n"
+                                    let note = ::diagnostics::diag!(
+                                        text B1201,
+                                        "stdin is more than {limit} bytes; the command \
+                                         received only the first {limit}"
                                     );
                                     send(
                                         &frames,
@@ -1184,14 +1170,26 @@ async fn serve_transport(
                 }
                 Body::Input { data } => {
                     if data.len() > MAX_ENCODED_CHUNK_BYTES {
-                        refuse_input(&frames, &programs, &running, id, "an input frame is too long")
-                            .await?;
+                        refuse_input(
+                            &frames,
+                            &programs,
+                            &running,
+                            id,
+                            "an input frame is too long",
+                        )
+                        .await?;
                         continue;
                     }
                     let bytes = decode_payload(&data)?;
                     if bytes.len() > MAX_CHUNK_BYTES {
-                        refuse_input(&frames, &programs, &running, id, "an input frame is too long")
-                            .await?;
+                        refuse_input(
+                            &frames,
+                            &programs,
+                            &running,
+                            id,
+                            "an input frame is too long",
+                        )
+                        .await?;
                         continue;
                     }
                     // **Denied rather than fatal, and this one was measured.** An `Err` here takes the
@@ -1527,7 +1525,7 @@ async fn run_call_in(
     if let Err(error) = entered {
         // Through the Program's output budget and chunking, because the directory is the
         // caller's own text and can be as long as a frame.
-        let refusal = format!("strands-box: cannot start in {directory}: {error}\n");
+        let refusal = ::diagnostics::diag!(text B1202, "cannot start in {directory}: {error}");
         let mut pending = Vec::new();
         let chunk = Chunk {
             stream: Stream::Stderr,
@@ -1751,8 +1749,8 @@ fn describe_peer(peer: Option<i32>) -> String {
 fn report_client_result(result: Result<io::Result<()>, JoinError>) {
     match result {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => eprintln!("strands-box broker: rejected client: {error}"),
-        Err(error) => eprintln!("strands-box broker: client task failed: {error}"),
+        Ok(Err(error)) => ::diagnostics::diag!(B1101, "broker rejected client: {error}"),
+        Err(error) => ::diagnostics::diag!(B1102, "broker client task failed: {error}"),
     }
 }
 
@@ -6971,7 +6969,7 @@ done"#;
             .await;
             assert_eq!(status, DIRECTORY_REFUSED_STATUS, "{output}");
             assert!(
-                output.contains(&format!("strands-box: cannot start in {}", sub.display())),
+                output.contains(&format!("strands-box: error[B1202]: cannot start in {}", sub.display())),
                 "the refusal must name the directory: {output}"
             );
             assert!(
@@ -7022,7 +7020,8 @@ done"#;
                     run_in(&socket, &directory, Command::Text("printf RAN".to_string())).await;
                 assert_eq!(status, DIRECTORY_REFUSED_STATUS, "{directory:?}: {output}");
                 assert!(
-                    output.starts_with("strands-box: cannot start in ") && !output.contains("RAN"),
+                    output.starts_with("strands-box: error[B1202]: cannot start in ")
+                        && !output.contains("RAN"),
                     "{directory:?} must be refused before the command runs: {output}"
                 );
             }

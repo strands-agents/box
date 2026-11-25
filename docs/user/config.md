@@ -4,6 +4,10 @@
 `strands-box run --config FILE`; the tutorial's download names the binary `box`. Box reads the
 selected file and its policy on every start.
 
+`box.toml` is Box Core's stable interface. A program that runs Box Core, such as the `box` CLI,
+writes it, and each key keeps its meaning across releases. If you use the `box` CLI, you don't
+write this file: the CLI builds it from your [profile](../cli/profiles.md).
+
 Audience: an operator who runs an agent or another command under a box, and who declares the
 paths, hosts, credentials, MCP servers, and telemetry targets it can use. The example on this page
 is the box that [getting started](./getting-started.md) builds: the Strands CLI on a
@@ -74,7 +78,7 @@ The file carries fourteen keys. `name` and `box_dir` are required.
 |---|---|---|
 | `name` | string | Which box this is. One path component of letters, digits, `.`, `_`, or `-`, at most 32 bytes. |
 | `box_dir` | string | Where the box keeps its private state. Required, and absolute. |
-| `policy` | string | The Dogwood policy, relative to this file's directory unless absolute. Absent means no authored policy, and absent policy denies. |
+| `policy` | string or table | The Dogwood policy, relative to this file's directory unless absolute. Absent means no authored policy, and absent policy denies. The table form, `[policy]`, takes `source` (the file, required) and `enforcement`: `enforce` (the default) or `log_only`. See [log-only mode](policy.md#log-only-mode). |
 | `[agent]` | table | The one process the box runs. |
 | `[tool.<name>]` | tables | One process each, which the agent selects by invocation. The label takes the same characters as `name`. |
 | `[egress.<name>]` | tables | Which secret attaches to which outbound destination. |
@@ -82,7 +86,7 @@ The file carries fourteen keys. `name` and `box_dir` are required.
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
-| `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, ingress, secret sources, and Linux storage mounts. Each is disabled by default. |
+| `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, ingress, and secret sources. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
 | `monty` | boolean | Whether a bare `python3` or `python` in the Shell runs Monty, Box's built-in Python subset. `true` by default. With `false`, both names resolve like any other program: a `[tool.python3]` or `[tool.python]`, else the host's `PATH`. |
 | `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
@@ -184,8 +188,9 @@ restores times with the switch, but an archive that macOS `tar` made with its de
 still fails to restore the owner and the flags. Extract it with `tar -x --no-mac-metadata`.
 
 The box prints one line for each process the switch applies to, in the startup disclosure:
-`strands-box: [agent] file attributes: may set file times, set-user-ID and set-group-ID bits, the
-group, the owner, and access control lists on files in its writable grants`. Linux prints no line.
+`strands-box: note[B0201]: [agent] file attributes: may set file times, set-user-ID and
+set-group-ID bits, the group, the owner, and access control lists on files in its writable grants`.
+Linux prints no line.
 
 ## `[limits]`
 
@@ -339,90 +344,9 @@ default.
 `secret-sources = true` turns on [`[secret-source.<scheme>]`](#secret-sourcescheme) and the
 `secret.env` key of a route or a remote MCP server, which are experimental and off by default.
 
-`linux-storage-mounts = true` turns on incoming Linux storage for each process's
-[`filesystem.mounts`](#filesystemmounts) declarations. It is experimental, off by default,
-and rejected on other operating systems.
-
-<a id="storage"></a>
-
-## `filesystem.mounts`
-
-In Box Core's `box.toml`, each process's `filesystem.mounts` array lists absolute storage
-attachment paths that may receive filesystems before or after Box starts. Enable this
-experimental Linux feature explicitly:
-
-```toml
-[experimental-features]
-linux-storage-mounts = true
-
-[agent.filesystem]
-mounts = ["/mnt/data", "/mnt/shared"]
-read = ["/mnt/data", "/mnt/shared"]
-
-[tool.indexer.filesystem]
-mounts = ["/mnt/data"]
-read = ["/mnt/data"]
-write = ["/mnt/data/output"]
-```
-
-For deployment steps, see [Use storage in AgentCore Runtime](../cli/experimental-runtime-storage.md).
-The declared attachment directories must exist when Box starts, even while their storage is
-pending. Box does not create these directories or mount the source filesystem.
-
-Add these filesystem tables beneath processes with their own configured `command`.
-The agent, each tool, and each local MCP server declare their mount paths independently.
-Use `[mcp.<name>.filesystem] mounts` for a local MCP server. Remote MCP servers do not
-participate. A missing or empty `mounts` array selects no asynchronous forwarding for that
-process. It does not change ordinary access to storage mounted before the process starts.
-
-Declaring a mount grants no read, write, or execute access. Keep permissions in that
-process's existing filesystem lists. Each process receives only its declared sources,
-restricted by its own permissions and any stronger restrictions from the mounted source.
-No process inherits another process's mount list or permission lists.
-
-Box starts the workload while storage is pending. It hides pending storage behind an
-empty, read-only view, so early file operations can fail. When a source arrives, Box
-prepares its protected view privately and then makes that view visible to the process.
-If a source is already present when Box checks storage for a new process, that process waits
-for the source's protected view before its code runs. Other declared sources that have not arrived do not delay that launch.
-Box exposes no readiness callback to the storage manager. Applications already running when a
-source arrives must handle an unavailable path until preparation finishes.
-
-Hosted Shell and Monty filesystem operations beneath these storage destinations also
-use the agent's protected view. Both the agent's filesystem grants and each operation's
-existing `fs:*` policy permission must allow access. A hosted policy permit cannot bypass
-`deny`, `deny_write`, exact-file boundaries, or stronger source permissions. A native
-filesystem grant does not grant a hosted policy permission. Pending destinations remain
-unavailable even when they lie beneath a normal Shell home or workspace mapping. Only the agent's `mounts` array selects these protected hosted destinations; a tool or
-local MCP server declaration does not create a hosted storage mapping.
-
-A hosted operation can follow a storage symbolic link only when its resolved destination
-is also within a declared protected destination. Links between protected destinations
-work; a link that leaves them fails with `storage symlink leaves the declared protected
-destinations`. Box does not retry the operation through the surrounding filesystem.
-These restrictions do not add support for the native Linux `list` grant or broaden the
-existing `metadata` grant. Listing or inspecting the protected view reveals only what
-that view exposes, including exact-file boundaries.
-
-Hosted storage access requires matching real, effective, and filesystem user IDs, and
-matching real, effective, and filesystem group IDs in the invoking process. Box rejects
-hosted storage setup when they differ. The thread that serves hosted storage drops its capabilities before
-starting its worker threads or direct child processes; supplementary groups remain unchanged.
-Contained tools and local MCP servers use the original caller's authority for namespace
-setup. Their workloads still drop capabilities before execution. This separate launch
-step allows a caller with user ID zero to create the required child user namespace
-without giving hosted file operations that caller's capabilities.
-
-The configured command, interpreter, and initial working directory must already be
-available outside pending storage. Box checks rules beneath a pending root when the
-source arrives. If it cannot resolve or enforce a required rule, it stops the Box instance,
-including its tools and local MCP servers. A mount that has not arrived is not itself
-an admission failure.
-
-This experiment trusts the privileged storage manager. It does not guarantee preservation
-of Box permissions across later mount replacement, removal, or new mounts beneath an
-admitted root. The switch is rejected on other operating systems. Selecting it requires
-record version 42; older Box binaries reject that record.
+The former `linux-storage-mounts` key is rejected even when its value is `false`.
+Remove that key. On Linux, use the per-process `filesystem.receive_mounts` setting described in
+[incoming mount declarations](#incoming-mount-declarations).
 
 ## `[agent]` and `[tool.<name>]`
 
@@ -445,7 +369,7 @@ The box adds the runtime minimum to every process; see
 The program is a full path or a bare name. A bare name uses `env.PATH` when set.
 Otherwise, Box uses the operator's `PATH`, or `/usr/bin:/bin` if it is absent. In the Shell, the last
 part of a `[tool]`'s program is the name that runs it, before the operator's `PATH`, and `run` prints
-``strands-box: [tool.git]: a bare `git` in the Shell runs <file>`` for each. See
+``strands-box: note[B0208]: [tool.git]: a bare `git` in the Shell runs <file>`` for each. See
 [`PATH` in the Shell reference](shell.md#path). A relative path with more than one
 component is refused: ``` `command` element 0 "<program>" is a relative path; write an absolute
 path, or a bare name that `env.PATH` resolves```. Scripts on Linux require
@@ -547,7 +471,7 @@ On macOS, the startup disclosure names each selected process before the agent st
 This includes stdio MCP servers that remain unstarted; Box repeats their disclosure when they start.
 
 ```text
-strands-box: [tool.dev] file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events, as well as the host-wide event count and each volume's history identifier; file-content and write restrictions still apply, except that a root process can delete any volume's event history
+strands-box: note[B0206]: [tool.dev] file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events, as well as the host-wide event count and each volume's history identifier; file-content and write restrictions still apply, except that a root process can delete any volume's event history
 ```
 
 A record with any selected process requires version 35.
@@ -681,8 +605,8 @@ accepts on its port. On Linux the agent's sandbox creates no IPv6 socket, so an 
 At startup the box prints each listener:
 
 ```text
-strands-box: [ingress] 0.0.0.0:8080 is relayed to the agent's port 8081, at most 640 callers at once
-strands-box: [ingress] 0.0.0.0:8000 is relayed to the agent's port 8001, at most 640 callers at once
+strands-box: note[B0701]: [ingress] 0.0.0.0:8080 is relayed to the agent's port 8081, at most 640 callers at once
+strands-box: note[B0701]: [ingress] 0.0.0.0:8000 is relayed to the agent's port 8001, at most 640 callers at once
 ```
 
 On Linux, the box starts no listener's relay until the agent's sandbox reports that it is ready, and
@@ -696,9 +620,7 @@ one line until a caller is served again.
 
 ## `[agent.filesystem]` and `[tool.<name>.filesystem]`
 
-The table below describes the nine filesystem permission lists.
-[`filesystem.mounts`](#filesystemmounts) separately declares incoming storage and grants no access.
-`[agent.filesystem]` takes all nine permission lists;
+Each list, and what one entry in it grants. `[agent.filesystem]` takes all nine;
 `[tool.<name>.filesystem]` takes seven. A `metadata` or `exec` list there is refused by name at
 load. [A tool's sandbox](../design/containment.md#a-tools-leaf-box) states what a tool reaches in
 their place.
@@ -731,7 +653,7 @@ exec = ["/work/project/.venv"]
 deny_write = ["/work/project/.venv"]
 ```
 
-The agent cannot create, change, rename, link, or remove anything below the directory. Like the other lists, `deny_write` governs the agent's own processes. A Shell or Python request through Box is decided by policy, so pair the entry with `forbid` rules on `fs:write`, `fs:delete`, and `fs:move` for the directory. For [incoming Linux storage](#filesystemmounts), hosted operations also use the agent's protected view; both that view and the hosted policy must allow the operation. A file below it that also has a hard link in a writable directory can still be changed through that link. Install with copies, such as `UV_LINK_MODE=copy`, or keep the installer's cache outside every write grant. The box does not
+The agent cannot create, change, rename, link, or remove anything below the directory. Like the other lists, `deny_write` governs the agent's own processes. A Shell or Python request through Box is decided by policy, so pair the entry with `forbid` rules on `fs:write`, `fs:delete`, and `fs:move` for the directory. A file below it that also has a hard link in a writable directory can still be changed through that link. Install with copies, such as `UV_LINK_MODE=copy`, or keep the installer's cache outside every write grant. The box does not
 warn that a program below a `deny_write` directory is writable. The startup disclosure lists each
 entry as `deny_write  <path>  (read-only)`. A `[tool.<name>] command` below a `deny_write`
 directory is still refused, as every tool command inside a write grant is.
@@ -763,6 +685,61 @@ A permission change also fails if its requested mode keeps a set-user-ID or set-
 that the file or directory already has. The request must clear both bits to succeed.
 This includes directories that inherited their group bit: GNU `chmod g+w` and even
 `chmod 755` preserve that bit and fail. A refused request leaves the existing permissions unchanged.
+
+### Incoming mount declarations
+
+On Linux, `receive_mounts` in `[agent.filesystem]`, `[tool.<name>.filesystem]`, or a local
+`[mcp.<name>.filesystem]` selects directories where that process receives filesystems attached
+by the surrounding host. Box establishes each connection before the process starts. Later mounts
+arrive through Linux mount propagation; Box does not poll for them or run a background mount helper.
+This setting does not create storage, start a filesystem service, or wait for remote files to download.
+
+Each process selects its own directories. Tools and local servers do not inherit the agent's
+entries. An empty or omitted array keeps ordinary, private mount behavior. Linux requires no
+experimental feature flag. On macOS, any `receive_mounts` key rejects configuration loading,
+including `receive_mounts = []`; omit the key to start Box.
+
+An agent selection also makes its approved canonical directory available to Strands Shell and
+Monty, the hosted Python interpreter, in the box's trusted process. Each file operation still
+requires a policy permit and passes the existing protected-state and command checks. A tool or
+local server selection does not extend hosted access. Omitting the agent selection does not remove
+the interpreters' existing access to the operator home, agent home, or workspace under policy.
+
+Listing a directory grants no access. The agent must separately grant the whole directory read,
+write, and execution access. Tools and local servers need whole-directory read and write grants;
+their existing execution rules already permit code in those grants. A covering parent grant works;
+child and exact-file grants do not. For an existing connected mount at `/mnt/data`, add:
+
+```toml
+[agent.filesystem]
+read = ["/mnt/data"]
+write = ["/mnt/data"]
+exec = ["/mnt/data"]
+receive_mounts = ["/mnt/data"]
+```
+
+The process still needs the grants required by its application and runtime. Before launch, each
+selected directory must exist as a dedicated mount point with an upstream propagation connection.
+A shared parent alone does not satisfy Box's check. The trusted host or storage provider prepares
+this mount connection; Box prepares the receiving side inside the sandbox. Box refuses process
+startup if the connection or approved directory identity cannot be verified.
+
+**Select a directory only when the process may read, write, and execute throughout it.** Box rejects
+selections that intersect `deny`, `deny_write`, its state directory, or loaded configuration and
+policy sources. Existing command and installed-program protections still apply. These checks also
+reject restrictions on absent descendants that later mounts could introduce. A nonempty selection
+cannot be combined with [native filesystem policy checks](native-filesystem-policy.md).
+
+Existing source read-only and execution restrictions remain effective. Future mounts keep the
+trusted publisher's options and contents. Box does not add read-only, `noexec`, `nosuid`, or `nodev`
+options to those arrivals. These options respectively block writes, executable mappings, privilege
+gains through executable attributes, and device-node use. Keep publishing under trusted control.
+Box prints the selected paths and this whole-directory permission contract at startup, including
+local servers that start on demand.
+
+Paths must be absolute and literal, other than `/`. They cannot be home-relative, contain patterns,
+control characters, or `..`. Within one process, selections cannot repeat or contain one another:
+`/mnt/data` and `/mnt/data/child` conflict. Different processes may select the same directory.
 
 ### Direct access by operating system
 
@@ -828,20 +805,22 @@ A `read` or `read_file` entry is the one exception: it may name a symbolic link 
 - The disclosure shows the entry as `read_file   /usr/bin/cc -> /usr/bin/gcc`.
 
 **No policy decision covers a filesystem list**, so `run` discloses each entry on stderr before the
-workload starts, under `strands-box: [agent] runs <program> with no policy decision over these
-paths:`. Getting started shows the example's disclosure. A credential store, such as `~/.aws` or
-`~/.ssh`, is disclosed by name as well, as `strands-box: [tool.<name>]: exposes ~/.ssh (read)` for
-a tool granted the operator's SSH directory.
+workload starts, under
+`strands-box: note[B0201]: [agent] runs <program> with no policy decision over these paths:`.
+Getting started shows the example's disclosure. A credential store, such as `~/.aws` or `~/.ssh`, is
+disclosed by name as well, as `strands-box: note[B0202]: [tool.<name>]: exposes ~/.ssh (read)` for a
+tool granted the operator's SSH directory.
 
 On Linux, preserved interpreter spellings appear in a separate section before the runtime minimum:
 
 ```text
-strands-box: [tool.check] interpreter aliases for configured access:
+strands-box: note[B0201]: [tool.check] interpreter aliases for configured access:
   alias       /bin/sh -> /usr/bin/dash  (interpreter spelling)
 ```
 
 The arrow maps the script's spelling to the file its configured grants already authorize.
 The section appears only when Box preserves an interpreter spelling.
+[Message codes](message-codes.md) explains the code in each line of the disclosure, such as `B0201`.
 
 With no `filesystem` table, the process reaches its `command` and the runtime minimum. The
 command's own exec grant is implicit: a process may always run its `command`, and the startup
@@ -892,8 +871,8 @@ Let the filesystem update finish, then retry the launch.
 **A `write` grant alone is not runnable.** The agent's sandbox refuses to map code from a writable
 grant. When the agent's `command` or one of its interpreters lies inside a writable grant, the
 startup disclosure carries a warning:
-`strands-box: warning: [agent] command <path> lies inside the writable grant <path>, so the process
-can replace the program it runs`.
+`strands-box: warning[B0212]: [agent] command <path> lies inside the writable grant <path>, so the
+process can replace the program it runs`.
 
 <a id="linux-writable-libraries"></a>
 
@@ -934,7 +913,7 @@ count as nothing, so Box refuses to start.
 `run` prints one line for each tool it leaves out, before the workload starts:
 
 ```text
-strands-box: [tool.tsx] left out: tsx not found
+strands-box: note[B0207]: [tool.tsx] left out: tsx not found
 ```
 
 A left-out tool gets no filesystem grants, and Box does not check its lists. It runs nothing for
@@ -943,7 +922,7 @@ spawns by program name, so it still decides another `[tool]` or stdio `[mcp.<nam
 program name. The startup line for that table says so:
 
 ```text
-strands-box: [tool.system_git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
+strands-box: note[B0208]: [tool.system_git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
 ```
 
 The set of tools is fixed when the run starts. A program installed
@@ -1086,7 +1065,7 @@ still decides each other name of that program file, such as `make` through macOS
 except in the cases that [`shell:spawn`](shell.md#shellspawn) refuses:
 
 ```text
-strands-box: [tool.git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
+strands-box: note[B0208]: [tool.git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
 ```
 
 A copy of that program at another path is a different file, and `shell:spawn` still decides it.
@@ -1159,9 +1138,9 @@ remote MCP server as `[mcp.<name>]` with `type = "http"`, which the next section
 
 An `aws://` route signs inside the box, so it takes no `header`, `prefix`, `placement`, `param`,
 `inject`, or `phantom_prefix`. Setting one is refused when the configuration loads. A bare `aws://`
-(no profile) signs with the host's ambient identity and prints a warning on every signed request;
+(no profile) signs with the host's ambient identity;
 [Credential sources](egress.md#credential-sources) describes the default chain, the profiles it does
-not resolve (AWS SSO), the warning, and the writable-`~/.aws` rule.
+not resolve (AWS SSO), the warning and when it prints, and the writable-`~/.aws` rule.
 
 An entry re-routes to a backend with one `[[egress.<name>.backends]]` table, holding a `url`
 (`scheme://host[:port][/prefix]`, `https` or `http`) and an optional `auth`, which is the backend's own
@@ -1278,7 +1257,7 @@ When the box starts, it checks the program file of each table and prints one lin
 stderr:
 
 ```text
-strands-box: [secret-source.op]: reads each op:// secret with /opt/homebrew/bin/op, which runs outside every sandbox
+strands-box: note[B0203]: [secret-source.op]: reads each op:// secret with /opt/homebrew/bin/op, which runs outside every sandbox
 ```
 
 Box then runs the program once for each secret that the configuration names, before the workload
@@ -1310,8 +1289,8 @@ Each of these stops the box before the workload starts:
   program on its stderr. The second names the entry that holds the reference:
 
   ```text
-  strands-box: [egress.github] secret.ref: credential error: the secret source "op" ("/opt/homebrew/bin/op") for op://[REDACTED] exited unsuccessfully (exit status: 1): [ERROR] "GitHub" isn't an item in the "Personal" vault
-  strands-box: error: `[egress.github] secret.ref` names a secret that the secret source `op` (/opt/homebrew/bin/op) did not return, so the box does not start
+  strands-box: error[B0113]: [egress.github] secret.ref: credential error: the secret source "op" ("/opt/homebrew/bin/op") for op://[REDACTED] exited unsuccessfully (exit status: 1): [ERROR] "GitHub" isn't an item in the "Personal" vault
+  strands-box: error[B0104]: `[egress.github] secret.ref` names a secret that the secret source `op` (/opt/homebrew/bin/op) did not return, so the box does not start
   ```
 
   Sign in to the vault or correct the reference, then start the box again. When the entry is a
@@ -1368,7 +1347,7 @@ sandbox also denies these
 paths, as it denies an entry of its own `deny` list. An entry that is a symbolic link protects the link and the path that it names. On macOS, a path that is absent when the box starts stays closed if it appears later. That includes a path behind a link, such as a socket that an app makes when it starts. On Linux, a sandbox gets an empty, read-only folder or an empty file in place of each path that exists when the box starts. Box skips an entry whose path doesn't exist then, or whose symbolic link names a target that doesn't exist: the box starts, and no sandbox denies that path in this run. No grant can reach it, as on macOS. Box prints one line for the entry after the line of its source:
 
 ```text
-strands-box: [secret-source.op]: `reads` entry "~/.op" names /home/me/.op, which does not exist when the box starts, so no sandbox denies it in this run
+strands-box: note[B0203]: [secret-source.op]: `reads` entry "~/.op" names /home/me/.op, which does not exist when the box starts, so no sandbox denies it in this run
 ```
 
 So one table can name each place that a vault can have, and a box starts on a machine that has only some of them. `policy generate-schema` prints the same line when a remote MCP server names a secret in that scheme. Read these lines when you write a table: on Linux a path with a typing error doesn't stop the box, and the line is how you see it.
@@ -1471,7 +1450,7 @@ started reads with `jq`.
 | `secret.prefix` | string | For `otlp`: text before the secret in the header. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |
 | `project` | string | For `langsmith`: the project the spans go to. |
 | `region` | string | For a CloudWatch kind: the AWS region, such as `us-west-2`. Required. |
-| `log_group`, `log_stream` | string | For `cloudwatch_logs`: where the log records go. Both are required. |
+| `log_group`, `log_stream` | string | For `cloudwatch_logs`: where the log records go. Both are required. For `cloudwatch_traces`: the log group and stream the spans go to. Write both or neither. Absent, CloudWatch puts the spans in its default `aws/spans` log group. |
 
 A vendor kind sets the vendor's path, headers, payloads, and credential placement itself. Write
 only what is yours:
@@ -1505,7 +1484,7 @@ secret.ref = "aws://my-profile"
 | `langfuse` | spans, to `<destination>/api/public/otel`, with `x-langfuse-ingestion-version: 4` | Basic auth, from a `public-key:secret-key` secret |
 | `langsmith` | spans, to `<destination>/otel`, with `Langsmith-Project` when `project` is set | `x-api-key` |
 | `cloudwatch_logs` | log records, to `https://logs.<region>.amazonaws.com`, with `x-aws-log-group` and `x-aws-log-stream` | SigV4 for `logs`, from `aws://` or `credsd://` |
-| `cloudwatch_traces` | spans, to `https://xray.<region>.amazonaws.com` | SigV4 for `xray`, from `aws://` or `credsd://` |
+| `cloudwatch_traces` | spans, to `https://xray.<region>.amazonaws.com`, with `x-aws-log-group` and `x-aws-log-stream` when `log_group` and `log_stream` are set | SigV4 for `xray`, from `aws://` or `credsd://` |
 
 A `langfuse` or `langsmith` target also takes a reference in a
 [declared scheme](#secret-sourcescheme), such as
@@ -1625,6 +1604,13 @@ five `[[agent.ingress]]` entries, an `[[agent.ingress]] listen` that is not an I
 port of 0, two entries with one `listen` port or one `workload_port`, and on macOS a `listen` port
 equal to any entry's `workload_port`.
 An invalid `limits.shell.timeout`, `limits.shell.max_input`, `limits.shell.max_output`, or `limits.shell.max_stdin` is also a parse error.
+
+[Incoming mount declarations](#incoming-mount-declarations) also fail before Box creates state:
+invalid or overlapping `receive_mounts` paths, or a nonempty array combined with native filesystem
+policy for that process. On macOS, any `receive_mounts` key is rejected, including
+`receive_mounts = []`. Directory identity, permissions, and mount connections are checked later,
+before the selected process runs; those failures do not promise that Box state remains uncreated.
+The removed `[experimental-features] linux-storage-mounts` key is an error regardless of its value.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload

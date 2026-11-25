@@ -105,17 +105,11 @@ pub(crate) struct ExperimentalFeatures {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) native_filesystem_policy: Option<bool>,
-    #[serde(
-        default,
-        rename = "linux-storage-mounts",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub(crate) linux_storage_mounts: Option<bool>,
 }
 
 impl ExperimentalFeatures {
     fn is_empty(&self) -> bool {
-        self.native_filesystem_policy.is_none() && self.linux_storage_mounts.is_none()
+        self.native_filesystem_policy.is_none()
     }
 }
 
@@ -247,8 +241,8 @@ impl Network {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Filesystem {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mounts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receive_mounts: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -276,11 +270,14 @@ impl Filesystem {
 }
 
 impl Profile {
-    /// Read a profile from its text, refusing every key that belongs to one run.
-    pub fn parse(text: &str, path: &Path) -> Result<Self, Error> {
+    /// Read a profile from its text, refusing every key that belongs to one run. Its
+    /// `[requires]` is checked against `box` `version` first and taken out, so a profile for a
+    /// later `box` gets the version it needs before any key that the later `box` added.
+    pub fn parse(text: &str, path: &Path, version: &str) -> Result<Self, Error> {
         let invalid = |refusal: Refusal| refusal.in_file(path, text);
-        let table: toml::Table =
+        let mut table: toml::Table =
             toml::from_str(text).map_err(|error| invalid(error.to_string().into()))?;
+        lang::take_requires(&mut table, "profile", version).map_err(invalid)?;
         if let Some(refusal) = run_key(&table, "profile") {
             return Err(invalid(refusal));
         }
@@ -681,6 +678,8 @@ pub fn validate_name(name: &str) -> Result<(), Error> {
 #[derive(Debug, Clone)]
 pub struct Profiles {
     root: PathBuf,
+    /// The version of `box` that each profile's `[requires]` is checked against.
+    version: &'static str,
 }
 
 /// One profile folder as `box profile list` reports it.
@@ -693,9 +692,12 @@ pub struct Listed {
 }
 
 impl Profiles {
-    /// The profiles under `root`.
-    pub fn at(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+    /// The profiles under `root`, read by `box` `version`.
+    pub fn at(root: impl Into<PathBuf>, version: &'static str) -> Self {
+        Self {
+            root: root.into(),
+            version,
+        }
     }
 
     /// The directory that holds the profiles.
@@ -734,7 +736,7 @@ impl Profiles {
             path: path.clone(),
             source: io::Error::new(io::ErrorKind::InvalidData, source),
         })?;
-        let profile = Profile::parse(&text, &path)?;
+        let profile = Profile::parse(&text, &path, self.version)?;
         if let Some(declared) = profile.declared_name()
             && declared != name
         {

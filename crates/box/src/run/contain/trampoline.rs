@@ -90,8 +90,6 @@ const HELPER_NAME: &str = "strands-box-contain-trampoline";
 
 /// What the box must hold until the child is reaped.
 pub(crate) struct Trampoline {
-    #[cfg(target_os = "linux")]
-    storage: Option<super::boundary::storage::controller::Receiver>,
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     bootstrap: Option<File>,
     #[cfg(any(
@@ -100,23 +98,11 @@ pub(crate) struct Trampoline {
     ))]
     launch_gate: Option<LaunchGate>,
     setup_status: SetupStatusPipe,
+    /// The background read of the setup status, once [`Trampoline::watch_launch`] started it.
+    launch: Option<std::thread::JoinHandle<Result<Option<SetupStage>, TrampolineError>>>,
 }
 
 impl Trampoline {
-    #[cfg(target_os = "linux")]
-    pub(crate) fn own_storage(
-        &mut self,
-        storage: Option<super::boundary::storage::controller::Receiver>,
-    ) {
-        self.storage = storage;
-    }
-
-    /// End this launch's storage admission before intentionally stopping its processes.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn stop_storage_admission(&mut self) {
-        drop(self.storage.take());
-    }
-
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     pub(crate) fn bootstrap(&self) -> std::io::Result<&File> {
         self.bootstrap
@@ -146,8 +132,6 @@ impl Trampoline {
             .map_err(|source| TrampolineError::StatusRead { source })?;
         drop(writer);
         Ok(Self {
-            #[cfg(target_os = "linux")]
-            storage: None,
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             bootstrap: None,
             #[cfg(any(
@@ -159,6 +143,7 @@ impl Trampoline {
                 reader,
                 writer: None,
             },
+            launch: None,
         })
     }
 
@@ -170,9 +155,41 @@ impl Trampoline {
         }
     }
 
+    /// Read the setup status in the background, and call `launched` once the workload's `exec`
+    /// succeeded. The status pipe reaches its end at that `exec`, because its writer is
+    /// close-on-exec, so this reports the launch as it happens rather than when the workload exits.
+    /// A containment or `exec` failure never calls `launched`. [`Trampoline::setup_failure`] then
+    /// returns this same read.
+    #[cfg(unix)]
+    pub(crate) fn watch_launch(
+        &mut self,
+        launched: impl FnOnce() + Send + 'static,
+    ) -> Result<(), TrampolineError> {
+        let mut reader = self
+            .setup_status
+            .reader
+            .try_clone()
+            .map_err(|source| TrampolineError::StatusRead { source })?;
+        // The box's own copy of the writer would hold the pipe open past the `exec`.
+        self.close_setup_writer();
+        self.launch = Some(std::thread::spawn(move || {
+            let result = read_setup_failure(&mut reader);
+            if matches!(result, Ok(None)) {
+                launched();
+            }
+            result
+        }));
+        Ok(())
+    }
+
     /// The stage containment failed at, or `None` when it never failed.
     pub(crate) fn setup_failure(&mut self) -> Result<Option<SetupStage>, TrampolineError> {
-        self.setup_status.read_failure()
+        match self.launch.take() {
+            Some(launch) => launch
+                .join()
+                .unwrap_or(Err(TrampolineError::SetupIncomplete)),
+            None => self.setup_status.read_failure(),
+        }
     }
 }
 
@@ -233,9 +250,6 @@ pub(crate) struct Launch<'a> {
     /// has no namespace to cross, so it passes `None` and no argument is added.
     #[cfg(target_os = "linux")]
     pub(crate) relay_control: Option<&'a std::os::unix::net::UnixStream>,
-    /// Private storage receiver control, available only to trusted setup helpers.
-    #[cfg(target_os = "linux")]
-    pub(crate) storage_control: Option<&'a std::os::unix::net::UnixStream>,
 }
 
 /// Build the command that runs the workload under containment.
@@ -267,19 +281,17 @@ pub(crate) fn command(
     } else {
         None
     };
-    #[cfg(target_os = "linux")]
-    if let Some(control) = launch.storage_control {
-        attach_descriptor(&mut command, control, "--storage-control-fd")?;
-    }
-    configure_launch(&mut command, &launch);
+    command
+        .args(workload_argv(&launch))
+        .env_clear()
+        .current_dir(launch.working_directory);
     Ok((
         command,
         Trampoline {
-            #[cfg(target_os = "linux")]
-            storage: None,
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             bootstrap: Some(prepared.bootstrap),
             setup_status,
+            launch: None,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
                 all(target_os = "linux", feature = "native-filesystem-policy")
@@ -287,15 +299,6 @@ pub(crate) fn command(
             launch_gate,
         },
     ))
-}
-
-/// Configure trusted startup without entering the workload's filesystem.
-fn configure_launch(command: &mut Command, launch: &Launch<'_>) {
-    // macOS identity-bound exec also enters its trusted image cache in pre_exec.
-    command
-        .args(workload_argv(launch))
-        .env_clear()
-        .current_dir("/");
 }
 
 /// The trampoline's own arguments, in order, after the descriptors are attached.
@@ -309,8 +312,6 @@ fn workload_argv(launch: &Launch<'_>) -> Vec<OsString> {
         launch.config_sha256.into(),
         "--target-env-json".into(),
         launch.target_environment.into(),
-        "--working-directory".into(),
-        launch.working_directory.into(),
     ];
     if let Some(spelled) = launch.argument_zero {
         argv.push("--argv0".into());
@@ -892,24 +893,7 @@ impl SetupStatusPipe {
 
     #[cfg(unix)]
     fn read_failure(&mut self) -> Result<Option<SetupStage>, TrampolineError> {
-        let mut complete = false;
-        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
-        let mut reaper_ready = !cfg!(target_os = "linux");
-        loop {
-            let mut byte = [0u8; 1];
-            let read = match self.reader.read(&mut byte) {
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                result => result.map_err(|source| TrampolineError::StatusRead { source })?,
-            };
-            match (read, byte[0]) {
-                (0, _) if complete && reaper_ready => return Ok(None),
-                (0, _) => return Err(TrampolineError::SetupIncomplete),
-                (_, SETUP_COMPLETE_BYTE) if !complete => complete = true,
-                #[cfg(target_os = "linux")]
-                (_, REAPER_READY_BYTE) if !reaper_ready => reaper_ready = true,
-                (_, stage) => return SetupStage::decode(stage).map(Some),
-            }
-        }
+        read_setup_failure(&mut self.reader)
     }
 
     #[cfg(not(unix))]
@@ -917,6 +901,29 @@ impl SetupStatusPipe {
         Err(TrampolineError::UnsupportedPlatform {
             os: std::env::consts::OS,
         })
+    }
+}
+
+/// The stage containment failed at, read from the setup-status pipe to its end.
+#[cfg(unix)]
+fn read_setup_failure(reader: &mut File) -> Result<Option<SetupStage>, TrampolineError> {
+    let mut complete = false;
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut reaper_ready = !cfg!(target_os = "linux");
+    loop {
+        let mut byte = [0u8; 1];
+        let read = match reader.read(&mut byte) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result.map_err(|source| TrampolineError::StatusRead { source })?,
+        };
+        match (read, byte[0]) {
+            (0, _) if complete && reaper_ready => return Ok(None),
+            (0, _) => return Err(TrampolineError::SetupIncomplete),
+            (_, SETUP_COMPLETE_BYTE) if !complete => complete = true,
+            #[cfg(target_os = "linux")]
+            (_, REAPER_READY_BYTE) if !reaper_ready => reaper_ready = true,
+            (_, stage) => return SetupStage::decode(stage).map(Some),
+        }
     }
 }
 
@@ -1002,91 +1009,7 @@ mod tests {
             image_name,
             #[cfg(target_os = "linux")]
             relay_control: None,
-            #[cfg(target_os = "linux")]
-            storage_control: None,
         }
-    }
-
-    #[test]
-    fn private_working_directory_is_inert_and_precedes_the_workload_separator() {
-        let file = File::open("/dev/null").unwrap();
-        let name: ImageName<'_> = &|_| unreachable!("argv construction needs no image");
-        let mut request = launch(
-            Path::new("/cfg"),
-            &file,
-            Path::new("/bin/true"),
-            &[],
-            None,
-            name,
-        );
-        request.working_directory = Path::new("/storage-not-yet-attached/path with spaces");
-        let mut command = Command::new("/unused-trusted-launcher");
-        configure_launch(&mut command, &request);
-        assert_eq!(command.as_std().get_current_dir(), Some(Path::new("/")));
-        let argv: Vec<_> = command.as_std().get_args().collect();
-        let directory = argv
-            .iter()
-            .position(|value| *value == "--working-directory")
-            .unwrap();
-        let separator = argv.iter().position(|value| *value == "--").unwrap();
-        assert!(directory < separator);
-        assert_eq!(argv[directory + 1], request.working_directory.as_os_str());
-    }
-
-    #[tokio::test]
-    async fn trusted_launcher_starts_and_is_reaped_before_target_directory_access() {
-        use crate::run::contain::supervise::ProcessGroup;
-        use std::os::unix::net::UnixStream;
-        use std::os::unix::process::ExitStatusExt as _;
-        use std::time::Duration;
-
-        let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join("storage-not-attached");
-        assert!(!target.exists());
-        let file = File::open("/dev/null").unwrap();
-        let name: ImageName<'_> = &|_| unreachable!("argv construction needs no image");
-        let mut request = launch(
-            Path::new("/dev/null"),
-            &file,
-            Path::new("/bin/true"),
-            &[],
-            None,
-            name,
-        );
-        request.working_directory = &target;
-        let (mut parent, gate) = UnixStream::pair().unwrap();
-        parent
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-        let mut command = Command::new(locate().unwrap());
-        let mut status = SetupStatusPipe::attach(&mut command).unwrap();
-        attach_descriptor(&mut command, &gate, "--launch-gate-fd").unwrap();
-        configure_launch(&mut command, &request);
-        let mut group = ProcessGroup::spawn(command)
-            .await
-            .expect("trusted spawn must not look up the absent workload directory");
-        drop(gate);
-        status.writer.take();
-        let mut ready = [0];
-        parent
-            .read_exact(&mut ready)
-            .expect("the trusted launcher reaches its pre-apply gate");
-        assert_eq!(ready, *b"R");
-        group.signal(libc::SIGKILL).unwrap();
-        let exit = tokio::time::timeout(Duration::from_secs(3), group.wait())
-            .await
-            .unwrap()
-            .unwrap();
-        group.release().await.unwrap();
-        assert_eq!(exit.signal(), Some(libc::SIGKILL));
-        assert!(matches!(
-            status.read_failure(),
-            Err(TrampolineError::SetupIncomplete)
-        ));
-        assert!(
-            !target.exists(),
-            "trusted startup must not create a placeholder directory"
-        );
     }
 
     /// **The spelling reaches the trampoline as `--argv0`, and only when there is one**, so the hop

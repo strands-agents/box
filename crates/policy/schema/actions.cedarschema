@@ -201,6 +201,20 @@ action "http:request" appliesTo {
   context: { input: NetworkRequestInput, output?: NetworkResponseOutput }
 };
 
+type WebSocketConnectInput = {
+  host: String,
+  port: Long,
+  method: String,
+  path: String,
+  intercepted: Bool
+};
+
+action "websocket:connect" appliesTo {
+  principal: Agent,
+  resource: Resource,
+  context: { input: WebSocketConnectInput, output?: NetworkResponseOutput }
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ── Shell ────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────

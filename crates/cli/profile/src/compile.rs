@@ -123,36 +123,9 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
     let mut profile = run.profile.clone();
     let access = profile.project_access();
     let deny = utf8(&run.workspace.join(PROJECT_CONFIGURATION))?;
-    let mounts: Vec<PathBuf> = profile
-        .agent
-        .filesystem
-        .mounts
-        .iter()
-        .map(PathBuf::from)
-        .collect();
-    let pending_for = |entry: &str, roots: &[PathBuf]| {
-        crate::storage_mounts::depends(&expand_home(run.home, Path::new(entry)), roots)
-    };
-    let resolve_for = |entry: &str, roots: &[PathBuf]| {
-        let path = expand_home(run.home, Path::new(entry));
-        if crate::storage_mounts::depends(&path, roots) {
-            path
-        } else {
-            (run.resolve)(&path)
-        }
-    };
-    let pending = |entry: &str| pending_for(entry, &mounts);
-    let resolve = |entry: &str| resolve_for(entry, &mounts);
-    let keep_protection =
-        |entry: &str, writes: &[PathBuf], pending_write: bool, roots: &[PathBuf]| {
-            pending_for(entry, roots)
-                || pending_write
-                || writes
-                    .iter()
-                    .any(|write| within(&resolve_for(entry, roots), write))
-        };
+    let resolve = |entry: &str| (run.resolve)(&expand_home(run.home, Path::new(entry)));
     let everywhere = std::mem::take(&mut profile.filesystem.deny_write);
-    refuse_file_protections("[filesystem] deny_write", &everywhere, &resolve, &pending)?;
+    refuse_file_protections("[filesystem] deny_write", &everywhere, &resolve)?;
     let denied_everywhere = std::mem::take(&mut profile.filesystem.deny);
     for process in profile.processes_mut() {
         for entry in &everywhere {
@@ -189,11 +162,6 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
             fresh
         });
     }
-    let agent_pending_write = filesystem
-        .write
-        .iter()
-        .chain(&filesystem.write_file)
-        .any(|entry| pending(entry));
     let writes: Vec<PathBuf> = filesystem
         .write
         .iter()
@@ -203,30 +171,19 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
         "[agent.filesystem] deny_write",
         &filesystem.deny_write,
         &resolve,
-        &pending,
     )?;
     filesystem
         .deny_write
-        .retain(|entry| keep_protection(entry, &writes, agent_pending_write, &mounts));
+        .retain(|entry| writes.iter().any(|write| within(&resolve(entry), write)));
     for process in profile.processes_mut() {
         add(&mut process.filesystem.deny, &deny);
     }
     for (name, tool) in &mut profile.tool {
-        let mounts: Vec<PathBuf> = tool.filesystem.mounts.iter().map(PathBuf::from).collect();
-        let pending = |entry: &str| pending_for(entry, &mounts);
-        let resolve = |entry: &str| resolve_for(entry, &mounts);
         refuse_file_protections(
             &format!("[tool.{name}.filesystem] deny_write"),
             &tool.filesystem.deny_write,
             &resolve,
-            &pending,
         )?;
-        let pending_write = tool
-            .filesystem
-            .write
-            .iter()
-            .chain(&tool.filesystem.write_file)
-            .any(|entry| pending(entry));
         let writes: Vec<PathBuf> = tool
             .filesystem
             .write
@@ -235,7 +192,7 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
             .collect();
         tool.filesystem
             .deny_write
-            .retain(|entry| keep_protection(entry, &writes, pending_write, &mounts));
+            .retain(|entry| writes.iter().any(|write| within(&resolve(entry), write)));
     }
     let agent_deny = profile.agent.filesystem.deny.clone();
     let servers = profile.servers.clone();
@@ -268,12 +225,6 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
             .or_insert_with(|| toml::Value::Table(toml::Table::new()))
             .as_table_mut()
             .ok_or_else(|| refuse("`filesystem` is not a table"))?;
-        let mounts: Vec<PathBuf> = strings_in(filesystem.get("mounts"))
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
-        let pending = |entry: &str| pending_for(entry, &mounts);
-        let resolve = |entry: &str| resolve_for(entry, &mounts);
         if !everywhere.is_empty() {
             let list = filesystem
                 .entry("deny_write")
@@ -294,12 +245,7 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
             &format!("[mcp.{name}.filesystem] deny_write"),
             &protections,
             &resolve,
-            &pending,
         )?;
-        let pending_write = strings_in(filesystem.get("write"))
-            .into_iter()
-            .chain(strings_in(filesystem.get("write_file")))
-            .any(pending);
         let writes: Vec<PathBuf> = strings_in(filesystem.get("write"))
             .into_iter()
             .map(resolve)
@@ -307,7 +253,7 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
         if let Some(toml::Value::Array(list)) = filesystem.get_mut("deny_write") {
             list.retain(|item| {
                 item.as_str()
-                    .is_some_and(|entry| keep_protection(entry, &writes, pending_write, &mounts))
+                    .is_some_and(|entry| writes.iter().any(|write| within(&resolve(entry), write)))
             });
             if list.is_empty() {
                 filesystem.remove("deny_write");
@@ -356,15 +302,7 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
     let around = project_rules(&tilde(run.home, run.workspace), access);
     let with_parents = |entry: &String| {
         let folder = resolve(entry);
-        let mut parents: Vec<String> = if agent_pending_write {
-            folder
-                .ancestors()
-                .skip(1)
-                .map(|parent| tilde(run.home, parent))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let mut parents: Vec<String> = Vec::new();
         for write in writes.iter().filter(|write| within(&folder, write)) {
             for parent in folder
                 .ancestors()
@@ -400,9 +338,6 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
     let mut experimental_features = toml::Table::new();
     if let Some(enabled) = profile.experimental_features.native_filesystem_policy {
         experimental_features.insert("native-filesystem-policy".into(), enabled.into());
-    }
-    if let Some(enabled) = profile.experimental_features.linux_storage_mounts {
-        experimental_features.insert("linux-storage-mounts".into(), enabled.into());
     }
     if profile.tool.values().any(|tool| tool.grammar.is_some()) {
         experimental_features.insert("tool-grammars".into(), true.into());
@@ -1100,6 +1035,7 @@ struct Reach {
     command: Vec<String>,
     arguments: Vec<String>,
     exec: Vec<String>,
+    receive_mounts: Vec<String>,
     write: Vec<String>,
     /// The `deny_write` folders that the process's own write grants cannot change.
     write_protected: Vec<String>,
@@ -1115,6 +1051,11 @@ fn reaches(profile: &mut Resolved) -> Vec<Reach> {
             command: process.command.clone(),
             arguments: Vec::new(),
             exec: process.filesystem.exec.clone(),
+            receive_mounts: process
+                .filesystem
+                .receive_mounts
+                .clone()
+                .unwrap_or_default(),
             write: process
                 .filesystem
                 .write
@@ -1162,6 +1103,7 @@ fn reaches(profile: &mut Resolved) -> Vec<Reach> {
             command,
             arguments,
             exec: list("exec"),
+            receive_mounts: list("receive_mounts"),
             write: list("write")
                 .into_iter()
                 .chain(list("write_file"))
@@ -1190,6 +1132,7 @@ fn reaches(profile: &mut Resolved) -> Vec<Reach> {
             command,
             arguments: Vec::new(),
             exec: Vec::new(),
+            receive_mounts: Vec::new(),
             write: Vec::new(),
             write_protected: Vec::new(),
             search_path: None,
@@ -1362,7 +1305,23 @@ fn refuse_reach(profile: &Resolved, run: &Run<'_>) -> Result<(), Error> {
         }
     }
     for reach in &reaches {
+        let receiving: Vec<PathBuf> = reach
+            .receive_mounts
+            .iter()
+            .map(|entry| expand(entry))
+            .collect();
         for exec in reach.exec.iter().map(|entry| expand(entry)) {
+            // Selecting this directory explicitly accepts native read, write, and execute access.
+            if receiving.contains(&exec) {
+                continue;
+            }
+            if let Some(selected) = receiving.iter().find(|selected| within(selected, &exec)) {
+                return Err(Error::IncomingMountExecAncestor {
+                    table: reach.table.clone(),
+                    exec,
+                    selected: selected.clone(),
+                });
+            }
             if let Some(grant) = grants.iter().find(|grant| within(grant, &exec)) {
                 return Err(Error::WriteUnderExec {
                     exec,
@@ -1389,7 +1348,12 @@ fn refuse_reach(profile: &Resolved, run: &Run<'_>) -> Result<(), Error> {
                         || expand(program).is_file())
             })
             .map(|(_, program)| program)
-            .chain(&reach.exec)
+            .chain(
+                reach
+                    .exec
+                    .iter()
+                    .filter(|entry| !receiving.contains(&expand(entry))),
+            )
             .map(|entry| expand(entry))
             .chain(argument_files(&reach.arguments, run))
             .chain(
@@ -1608,12 +1572,8 @@ fn refuse_file_protections(
     at: &str,
     entries: &[String],
     resolve: &dyn Fn(&str) -> PathBuf,
-    pending: &dyn Fn(&str) -> bool,
 ) -> Result<(), Error> {
     for entry in entries {
-        if pending(entry) {
-            continue;
-        }
         let path = resolve(entry);
         if path.exists() && !path.is_dir() {
             return Err(Error::Profile {

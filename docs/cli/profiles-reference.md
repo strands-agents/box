@@ -1,8 +1,3 @@
----
-reader: Someone who writes or reads a profile, knows the key or table they want, and needs what it does and which file may hold it.
-belongs: A key or table that a profile writes, and the rules that profiles and packs share, such as placeholders, when, and the merge. A rarer task goes here too, under the key it uses. A key that only a pack writes goes to packs-reference.md, a task that most users need in their first month goes to profiles.md, and a fix after an error goes to troubleshooting.md.
----
-
 # Profile reference
 
 This page lists every key that a `profile.toml` can hold, and what each one does. Packs write many
@@ -21,6 +16,7 @@ writes. `packs`, `plugins`, `policies`, `agent-args`, and `file-attributes` go a
 
 | Key | What it does |
 | --- | --- |
+| `[requires]` | What the profile needs of the `box` that runs it, such as its oldest version. See [`[requires]`](#requires). |
 | `[profile] name` | The profile's name, for a profile file that you run by its path ([Run a profile file](cli.md#run-a-profile-file)). A profile in `~/.strands/box/profiles/` can leave it out, and if it sets it, it matches the folder name. |
 | `packs` | The packs to use, as a list of names, in [merge order](#merge-order). `@box/<name>` is a pack that ships with `box`, and a plain name is a folder in `~/.strands/box/packs/`. |
 | `plugins` | The [plugins](plugins.md) to use, as a list of names, such as `plugins = ["@box/1password"]`. `@box/<name>` is a plugin that ships with `box`, and a plain name is a folder in `~/.strands/box/plugins/`. |
@@ -33,7 +29,7 @@ writes. `packs`, `plugins`, `policies`, `agent-args`, and `file-attributes` go a
 | `[filesystem] deny` | Paths that no process in the box can reach, such as a folder of keys. `box` adds each one to the agent, each tool, and each MCP server, and refuses the box's shell and Python a read or change there. `[filesystem]` holds no other key but a `when` for the whole table. See [Keep a folder away from every process](profiles.md#keep-a-folder-away-from-every-process). |
 | `[banner] enabled` | `false` turns off the activity banner for this profile, and `true` turns it on. [`[banner]`](config.md#banner) says which setting wins. See [The activity banner](cli.md#the-activity-banner). |
 | `[limits]` | Limits of the box's shell. See [Limits](#limits). |
-| `[experimental-features]` | See [Incoming Linux storage](#incoming-linux-storage) and [Experimental native filesystem policy](#experimental-native-filesystem-policy). |
+| `[experimental-features]` | See [Experimental native filesystem policy](#experimental-native-filesystem-policy). |
 | `[agent]`, `[tool.<name>]`, `[egress.<name>]`, `[mcp.<name>]`, [`[storage]`](packs-reference.md#storage) | Additions to what the packs say, such as a second project folder in `[agent.filesystem]` or your own credential in `[egress.bedrock.secret]`. They merge over the packs, as [Merge order](#merge-order) states. |
 | `[telemetry]` | Where the box exports its records, such as to an OTLP collector. Box's [`[telemetry.<label>]` reference](../user/config.md#telemetrylabel) lists the keys. A target's `project`, `region`, `log_group`, and `log_stream` can hold [placeholders](#which-fields-take-a-placeholder), so a target can read them from your machine. So can its `destination`, unless it's a `file` target. |
 | `[secret-source.<scheme>]` | A [secret source](plugins.md) of your own, with the full path of its program as the first element of `command`. It reads no input of a pack or a plugin, and no `${{ root }}` or `${{ tool.<name>.root }}`, so you write each value of `command` yourself. A program, the interpreter that its `#!` line starts, or a path that its `command` names in full, such as the path in `-config=<path>`, that sits in your project, in `~/.strands/box`, or in a folder the agent can write, even through a link, stops the run, whatever the project access, and a `deny_write` doesn't change that. The path can be a file, a folder, or a path where nothing is yet, and a folder in `command` that holds a folder the agent can write stops the run too. `box` doesn't check a path that `{ref}` completes. Use a plugin instead when more than one profile needs it. A profile file that you run by its path can't hold one ([Rules](plugins-reference.md#a-profile-file-that-runs-by-its-path)). Its keys are Box's: Box's [`[secret-source.<scheme>]` reference](../user/config.md#secret-sourcescheme) lists them, and [A message from Box Core](plugins-reference.md#a-message-from-box-core) maps them to the keys of a plugin. |
@@ -94,7 +90,7 @@ agent pack's.
 | `command` | The agent's program and its arguments, as in [An agent pack's `[run]`](packs-reference.md#an-agent-packs-run). |
 | `dependency` | A list of other tables. It changes nothing about the run. |
 | `env` | The agent's variables, by name. A value is a string, a `{ value = ..., when = ... }` table, or a `{ from = "env:<NAME>" }` table ([A variable from the shell](#a-variable-from-the-shell)). |
-| `filesystem` | The agent's filesystem grants, in the lists below, and its [incoming mount declarations](#incoming-linux-storage). Each permission entry is a [path](#paths) or an [entry table](#entry-tables). |
+| `filesystem` | The access lists below and [incoming mount selections](#incoming-storage-mounts-on-linux). Access entries are [paths](#paths) or [entry tables](#entry-tables). |
 | `file-watching` | See [`file-watching`](#file-watching). |
 | `ingress` | Only in `[agent]`, so not in an agent pack. A port where the box takes callers and relays them to a server that the agent runs in the box, written as one `[[agent.ingress]]` table for each port, up to five. `listen` is the address that `box` binds, such as `"127.0.0.1:8080"`, and `workload_port` is the port of the agent's server, such as `8081`. A profile's tables add to the packs'. A profile table whose `when` holds replaces the packs' tables for its `workload_port`, such as to listen on `127.0.0.1` instead of `0.0.0.0`. The values hold no placeholder. Ingress is experimental in Box Core, so `box` turns it on for the run. Box's [`[[agent.ingress]]` reference](../user/config.md#agentingress) has the rules. |
 | `native-filesystem-policy` | Only in a profile. See [Experimental native filesystem policy](#experimental-native-filesystem-policy). |
@@ -116,9 +112,61 @@ has the details of each list. The agent never gets your shell's environment, and
 read and write on its storage and, with [Project access](#project-access), your project. Add only
 what else the agent needs.
 
+### Incoming storage mounts on Linux
+
+To receive filesystems that a trusted storage process mounts later, select the receiving
+directory in that process's `filesystem.receive_mounts` list:
+
+```toml
+[agent.filesystem]
+read = ["/mnt/data"]
+write = ["/mnt/data"]
+exec = ["/mnt/data"]
+receive_mounts = ["/mnt/data"]
+```
+
+The selected directory must exist when the process starts. The storage process must prepare it
+for Linux mount propagation before Box starts. Box connects that directory during process
+startup; it does not wait for storage to arrive or signal that data is ready. Arrange data
+readiness separately before the workload uses it.
+
+| Setting | What it does |
+| --- | --- |
+| `receive_mounts` | Selects directories whose later mounts reach this process. It grants no access. Use `[agent.filesystem]`, `[tool.<name>.filesystem]`, or a local `type = "stdio"` server's `[mcp.<name>.filesystem]`. |
+
+Give the agent whole-directory `read`, `write`, and `exec` access to each selected directory.
+A tool or local MCP server needs whole-directory `read` and `write` access; its existing
+execution rules still apply. A `read` or `write` grant on a covering parent also satisfies these requirements. In CLI
+profiles, the agent's `exec` entry must name the exact selected directory; list other executable
+directories separately. Selection does not make configured programs, their files, or `PATH`
+directories safe to write.
+Selections do not copy between the agent, tools, or servers. Each tool or server connects its
+own selection when that process starts, including a process started after storage arrives.
+
+Use absolute directory paths, `~/` paths, or [path placeholders](#paths). Selection entries
+are strings, not `{ path, optional }` entry tables. Box refuses `/`, overlapping selections,
+wildcards, and selections that conflict with denied paths, protected programs or credentials,
+Box's state, or native filesystem policy. The [Core configuration reference](../user/config.md#incoming-mount-declarations)
+owns the complete startup checks.
+
+A pack's selections and a profile's selections add together within the same process. Duplicate
+paths are removed after expansion; `[]` does not clear a pack's selections. Omit the setting
+for the ordinary private mount view. Linux needs no experimental feature flag. On macOS,
+Box rejects the setting even when its list is empty. For a shared profile, guard the setting:
+
+```toml
+[agent.filesystem]
+receive_mounts = { value = ["/mnt/data"], when = "linux" }
+```
+
+Trust the storage process to publish only the intended filesystems. Later mounts retain that
+process's mount flags, including read-only or no-execution flags. Box does not add restrictions
+to each arriving mount. The connection carries mounts into the receiving process; it does
+not grant that process permission to publish mounts back.
+
 ### Entry tables
 
-Each entry of a filesystem permission list is a path string. To give an entry a condition, write it as a
+Each entry of a filesystem list is a path string. To give an entry a condition, write it as a
 table:
 
 ```toml
@@ -289,6 +337,25 @@ placeholder in `when` that gives anything other than `true` or `false` is an err
 your profile put there. A `when` on `[agent.env]` removes all of the agent's variables, for
 example.
 
+## `[requires]`
+
+`[requires]` says what a file needs of the `box` that reads it. A profile, a pack, and a plugin
+each can hold one, and `box` checks each file's own table when it reads the file, before the
+merge. When a requirement does not hold, `box` refuses the file and names it. `[requires]` only
+checks: it loads nothing, and it is not merged into the profile.
+
+```toml
+[requires]
+box = ">=0.3.0"
+```
+
+| Key | What it does |
+| --- | --- |
+| `box` | The oldest version of `box` that reads this file, as `>=X.Y.Z`. An older `box` refuses the file with `this pack needs box >=0.3.0, and this is box 0.2.3`. A preview build of `box`, such as `0.3.0-preview.1` or `0.3.0-linux-preview.1`, counts as its release, `0.3.0`. |
+
+`box` checks `box` first. So when a later `box` adds a requirement, an older `box` that reads it
+names the version to update to. A requirement that this `box` does not know is refused.
+
 ## Merge order
 
 `box` merges each name in `packs` after its own `extend`, left to right, each pack once, then each
@@ -320,7 +387,7 @@ secret.ref = "env://GITHUB_TOKEN"
 | Key | What it does |
 | --- | --- |
 | `destinations` | Required. Up to 100 hosts, each with an optional `:port`, such as `api.github.com`. Not a URL. On a route with a credential, an entry can also hold a path, such as `api.example.com/v1`, and `*.example.com` matches every host below `example.com`, but not `example.com` itself. A route with no credential takes neither, as the list below says. |
-| `secret.ref` | Where the credential comes from: `env://<NAME>` for a variable in the shell where you run `box run`, `aws://<profile>` for an AWS profile, `aws://` with no profile to sign with your default AWS identity, or a reference in a scheme that a [plugin](plugins.md) or your profile declares, such as `op://`, which that source's program reads when the box starts. An input's `from` spells a variable `env:<NAME>`, with no `//`. Without it, the route has no credential. |
+| `secret.ref` | Where the credential comes from: `env://<NAME>` for a variable in the shell where you run `box run`, `aws://<profile>` for an AWS profile, `aws://` with no profile to sign with your default AWS identity, `credsd://<credential>` for a credential in the [credentials daemon](credentials.md#the-credentials-daemon), or a reference in a scheme that a [plugin](plugins.md) or your profile declares, such as `op://`, which that source's program reads when the box starts. [Credentials](credentials.md) explains each source. An input's `from` spells a variable `env:<NAME>`, with no `//`. Without it, the route has no credential. |
 | `secret.header` | The request header that carries the credential, such as `x-api-key`. The default is `Authorization`. |
 | `secret.prefix` | The text before the credential in the header, such as `"token "` for `gh`. The default is `Bearer ` on `Authorization`, and nothing on another header. |
 | `secret.phantom_prefix` | The start of the placeholder key, such as `sk-ant-`, for an agent that checks the format of its key. The default is `strands_box_`. |
@@ -353,34 +420,6 @@ A route with any other key is a route with a credential, so a typo such as `secr
 run instead of opening the hosts. For the same reason, a route's `secret` takes no `when`: to use a
 credential on one system only, write two routes, each with its own `when`. Your profile can replace
 a pack's `destinations`, or add `secret.ref` to give a route a credential.
-
-### `aws://` credentials
-
-A provider pack's route names where its key comes from. Your profile can point it elsewhere with
-`[egress.<route>.secret] ref`, and `box profile show --full` names the routes.
-
-`aws://<PROFILE>` works only on a route that takes a signed request. It signs with the profile's
-static keys, `credential_process`, assume-role, or web identity. `aws://` with no profile name
-signs with the first credentials that the AWS SDK finds outside the box, in this order:
-
-1. The `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` variables in the shell where you run
-   `box run`.
-2. The profile in `~/.aws/config` and `~/.aws/credentials` that `AWS_PROFILE` names, or
-   `default`.
-3. Web identity, such as an EKS service account.
-4. The ECS or EKS container credentials endpoint.
-5. EC2 instance metadata.
-
-So on a cloud machine, `aws://` can sign as the machine's own role. The box prints a warning on
-each request it signs this way.
-
-Neither form signs with an AWS SSO or `aws login` profile
-([AWS credentials resolve to nothing](troubleshooting.md#aws-credentials-resolve-to-nothing)).
-
-Both `aws://` forms run any `credential_process` in your AWS configuration outside the box. The box
-can't write `~/.aws`, but if you move that configuration with `AWS_CONFIG_FILE` or
-`AWS_SHARED_CREDENTIALS_FILE`, keep the new place out of your project and every other folder the box
-can write.
 
 ## Project access
 
@@ -549,82 +588,6 @@ the box refuses a grant in `~/.ssh`.
 To turn the gateway off on one system only, put `when` on the value:
 `contain_egress = { value = false, when = "macos" }`. Only your profile can hold this table, not a
 pack.
-
-## Incoming Linux storage
-
-Set `[experimental-features] linux-storage-mounts = true` in `profile.toml` to use experimental
-Linux storage forwarding. A trusted storage manager attaches the filesystems before or after
-Box starts. For deployment steps, see [Use storage in AgentCore Runtime](experimental-runtime-storage.md).
-List each recipient's source paths in its `filesystem.mounts` array:
-
-```toml
-[experimental-features]
-linux-storage-mounts = true
-
-[agent.filesystem]
-mounts = ["/mnt/data", "/mnt/workspace"]
-read = ["/mnt/data", "/mnt/workspace"]
-write = ["/mnt/workspace"]
-deny = ["/mnt/data/private"]
-
-[tool.indexer.filesystem]
-mounts = ["/mnt/data"]
-read = ["/mnt/data"]
-
-[mcp.files.filesystem]
-mounts = ["/mnt/workspace"]
-read = ["/mnt/workspace"]
-```
-
-The tool and local MCP server examples extend recipients already declared in the profile or
-its packs. Each recipient has its own list. A tool or server does not inherit the agent's
-mounts. Forwarding stays disabled when no layer declares paths for that recipient. Mount lists
-from packs and a profile merge only within the same recipient, appending and removing duplicates.
-An empty profile list does not remove paths declared for that recipient by a pack.
-
-| Setting | What it does |
-| --- | --- |
-| `[experimental-features] linux-storage-mounts` | Enables experimental mount forwarding on Linux. Only the profile can set this flag. Startup rejects mount declarations without the flag or on another operating system. |
-| `[agent.filesystem] mounts` | Lists the agent's incoming mount paths. |
-| `[tool.<name>.filesystem] mounts` | Lists that tool's incoming mount paths. |
-| `[mcp.<name>.filesystem] mounts` | Lists that local MCP server's incoming mount paths. Remote servers do not use local mounts. |
-
-Each path must resolve to an absolute directory path. The declared directories must exist
-when Box starts; they can be empty while storage is pending. Entry conditions and profile
-placeholders apply before validation. A mount declaration grants no read, write, or execute permission.
-Set each recipient's permission lists separately. Profile-wide `deny` and `deny_write` retain
-their existing scope, and the source filesystem's restrictions continue to apply.
-
-These paths are separate from `[storage] directories`, which the CLI creates and manages.
-The external storage manager owns mounting; Box does not create the declared source paths or
-ask the manager to mount them. This feature does not enable native filesystem policy.
-
-Box preserves required paths whose meaning depends on that recipient's incoming storage,
-including paths reached through symbolic links. Use literal permission paths inside these
-mounts; wildcard expansion into a pending mount is rejected. Existing `optional` rules still
-apply: an optional path absent during profile resolution does not become a required future path.
-
-When storage is pending, Box Core starts the process with that storage inaccessible. After
-the storage manager attaches it, Box Core prepares the process's protected view and then
-exposes it. An application already running can retry a file operation while storage remains
-unavailable. If a source is already mounted when Box checks storage for a new process, that
-process waits for the protected view before its code runs. Other pending sources do not delay
-that launch. If a required permission or denial cannot be applied, Box Core stops the affected
-Box instead of exposing that filesystem without the restriction.
-
-Hosted Shell and Python (Monty) use the agent's protected incoming storage view. Their `fs:*`
-policy rules apply in addition to that view's restrictions. An allowed hosted-tool request
-cannot remove the agent's storage restrictions or the source filesystem's permissions. If no
-agent view starts, hosted storage remains unavailable.
-
-For this experiment, hosted tools reject symbolic links from incoming storage to paths outside
-the protected storage destinations: the declared roots and their captured aliases.
-
-When an incoming write grant could reach an external `deny_write` path through a symbolic link,
-Boxy retains that denial for Box Core to validate. A missing required denial can therefore stop
-admission even if the unavailable filesystem would ultimately prove unrelated. Generated Shell
-and Monty rules also prevent moving or deleting the protected path's exact ancestors; these
-ancestor rules do not deny operations on unrelated sibling files.
 
 ## Experimental native filesystem policy
 

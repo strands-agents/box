@@ -161,7 +161,7 @@ make your change. Then list `my-1password` in `plugins` in place of `@box/1passw
 - On Linux, the box closes a folder that the plugin lists only if it exists when the box starts. For each one that doesn't, the box prints a line such as this one:
 
   ```text
-  strands-box: [secret-source.op]: `deny` entry "~/.op" names /home/you/.op, which does not exist when the box starts, so no sandbox denies it in this run
+  strands-box: note[B0203]: [secret-source.op]: `deny` entry "~/.op" names /home/you/.op, which does not exist when the box starts, so no sandbox denies it in this run
   ```
 
   The box doesn't close that folder in that run, unless `op` makes it while the box reads your secrets. Expect the line for `~/.op`, which only an older install of `op` makes, and for `~/Library/Group Containers/2BUA8C4S2C.com.1password`, which is the folder of the Mac app. Expect it for `~/.config/op` too, until `op` has made that folder. The plugin lists no folder of the 1Password app for Linux, so a grant on one doesn't stop the run. See the [plugin reference](../../../docs/cli/plugins-reference.md#protect).

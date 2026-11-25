@@ -23,7 +23,6 @@ section for the task, then the reference sections that it names.
 | Give the agent an MCP server | [Add an MCP server](#add-an-mcp-server) |
 | Change where the model runs, or its key | [Choose the model provider](#choose-the-model-provider) |
 | Bring host files or settings into the box | [Edit stored files](#edit-stored-files) |
-| Use externally mounted Linux storage | [Incoming Linux storage](#incoming-linux-storage) |
 | Allow or refuse an action | [Edit policy](#edit-policy) |
 | Confirm that a change is correct | [Check a change](#check-a-change) |
 | Repair a profile that `box` refuses | [Fix an error](#fix-an-error) |
@@ -69,7 +68,6 @@ it, so support files remain relative to their owning pack.
 The reference sections hold every rule:
 
 - [File boundaries and merge rules](#file-boundaries-and-merge-rules)
-- [Incoming Linux storage](#incoming-linux-storage)
 - [Experimental native filesystem policy](#experimental-native-filesystem-policy)
 - [Options, commands, and environment](#options-commands-and-environment)
 - [Placeholders, paths, and conditions](#placeholders-paths-and-conditions)
@@ -249,6 +247,7 @@ when { context.input.host like "*dynamodb*" };
 | `fs:move` | `path`, and `operation`: `rename` |
 | `net:connect` | `host`, `port`, and optional `ip4`, `ip6` |
 | `http:request` | `host`, `port`, `method`, `path` (the URL path), `body_bytes`, `intercepted` |
+| `websocket:connect` | The `http:request` fields without `body_bytes`, for a WebSocket handshake |
 | `shell:exec` | `program`, `command`, `arg_count`, `cwd`, and optional `arg1`, `arg2` |
 | `shell:spawn` | The `shell:exec` fields, `program_path`, and optional `credential_reads` |
 | `mcp:call` | `server`, `method`, and optional `tool`, `prompt`, `uri` |
@@ -275,7 +274,8 @@ is 2. The box decides a program that a tool table declares, such as `npm` from `
 5. To refuse one case of something that is permitted, write a `forbid`. A narrow `permit` does not
    limit a broad one.
 6. A host needs both `net:connect` and `http:request`. A route in `profile.toml` writes both, so
-   prefer a route to hand-written network permits.
+   prefer a route to hand-written network permits. A WebSocket also needs a permit on
+   `websocket:connect`, which a route does not write.
 7. Keep the `shell_commands` and `dev_null` rules of the copied `policy.dw` unless the operator
    asks to change them.
 8. An `fs:*` rule decides only the Shell and Monty. The agent's own file tools, each tool, and
@@ -331,6 +331,35 @@ by its `@id`, action, or field.
 Repair the cause in the file that owns it. Do not delete a rule or a grant only to make the
 message go away. Then do [Check a change](#check-a-change).
 
+## Select incoming storage mounts
+
+In `profile.toml`, set `filesystem.receive_mounts` only for the agent, tool, or local stdio MCP
+server that needs incoming Linux mounts. The setting grants no access and does not inherit
+between processes. Give the agent whole-directory `read`, `write`, and `exec` access, or give
+a tool or server whole-directory `read` and `write` access. A covering parent `read` or `write`
+grant is enough, but the agent's `exec` entry must name the exact selected directory. Keep
+configured programs, their files, and `PATH` directories outside writable selections.
+
+```toml
+[agent.filesystem]
+read = ["/mnt/data"]
+write = ["/mnt/data"]
+exec = ["/mnt/data"]
+receive_mounts = { value = ["/mnt/data"], when = "linux" }
+```
+
+Use existing absolute directories prepared by the trusted storage process for Linux mount
+propagation. `~/` and path placeholders expand; entry tables, wildcards, and overlapping
+selections are not supported. Pack selections append within the same process and duplicates
+are removed; `[]` cannot remove a pack selection. Omission keeps the ordinary private view.
+On macOS the setting is refused even as `[]`, so guard it with `when = "linux"` for shared profiles.
+No experimental feature flag is required.
+
+Box connects mounts during each process's startup. It does not wait for data or report storage
+readiness. Later mounts keep the publisher's flags; Box adds no restrictions to each arrival.
+Keep selections separate from denied paths, protected programs or credentials, Box state, and
+native filesystem policy. Check the complete rules in the profile reference before adding one.
+
 ## File boundaries and merge rules
 
 In a profile, keep top-level TOML keys, such as `packs`, `policies`, and `agent-args`, before
@@ -339,11 +368,11 @@ has no top-level keys: every key is in a table, and the file starts with `[pack]
 
 | File | Accepted contents |
 | --- | --- |
-| Profile | `packs`, `plugins`, `policies`, `agent-args`, `file-attributes`; `[profile]`, `[options]`, `[limits]`, `[project]`, `[filesystem]` with only `deny` and `deny_write`, `[banner]`, `[experimental-features]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[mcp.<name>]`, `[storage]`, `[telemetry]`, `[secret-source.<scheme>]` |
-| Agent pack | `[pack]`, `[inputs.<name>]`, `[run]` with `command`, `dependency`, `file-watching`, and `when`, then `[env]` and `[filesystem]` for the agent, which `box` reads as `[agent]`, plus `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, and `[[mcp-servers]]`. It writes no `[agent]` table. |
-| Support pack | `[pack]`, `[inputs.<name>]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, `[[mcp-servers]]`; `[mcp.<name>]` may add only `filesystem` and `network` grants. No `[run]`, `[env]`, or `[filesystem]`. |
-| Tool pack | `[pack]`, `[inputs.<name>]` with the program input, `[run]` with `command` and the tool's other keys, then the tool's tables, such as `[env]` and `[filesystem]`. See [Tools](#tools-and-program-trust). |
-| Plugin | `[plugin]` with `name`, `version`, `kind = "secret-source"`, `scheme`, and optional `engine`; `[inputs.<name>]`; `[run]` with `command` and optional `output`; `[env]`, where each entry is `NAME = { from = "env:NAME" }` and nothing else; `[protect]` with only `env`, a list of names of `[env]`, and `paths`, a list of path strings. Nothing else: no `[filesystem]` and no `[secret-source.<scheme>]` table. |
+| Profile | `packs`, `plugins`, `policies`, `agent-args`, `file-attributes`; `[profile]`, `[requires]`, `[options]`, `[limits]`, `[project]`, `[filesystem]` with only `deny` and `deny_write`, `[banner]`, `[experimental-features]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[mcp.<name>]`, `[storage]`, `[telemetry]`, `[secret-source.<scheme>]` |
+| Agent pack | `[pack]`, `[requires]`, `[inputs.<name>]`, `[run]` with `command`, `dependency`, `file-watching`, and `when`, then `[env]` and `[filesystem]` for the agent, which `box` reads as `[agent]`, plus `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, and `[[mcp-servers]]`. It writes no `[agent]` table. |
+| Support pack | `[pack]`, `[requires]`, `[inputs.<name>]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, `[[mcp-servers]]`; `[mcp.<name>]` may add only `filesystem` and `network` grants. No `[run]`, `[env]`, or `[filesystem]`. |
+| Tool pack | `[pack]`, `[requires]`, `[inputs.<name>]` with the program input, `[run]` with `command` and the tool's other keys, then the tool's tables, such as `[env]` and `[filesystem]`. See [Tools](#tools-and-program-trust). |
+| Plugin | `[plugin]` with `name`, `version`, `kind = "secret-source"`, and `scheme`; optional `[requires]`; `[inputs.<name>]`; `[run]` with `command` and optional `output`; `[env]`, where each entry is `NAME = { from = "env:NAME" }` and nothing else; `[protect]` with only `env`, a list of names of `[env]`, and `paths`, a list of path strings. Nothing else: no `[filesystem]` and no `[secret-source.<scheme>]` table. |
 
 A profile has no `[pack]`, `[inputs]`, `extend`, `include`, `[run]`, or `[[mcp-servers]]`. Packs have no `packs`,
 `plugins`, `policies`, `[profile]`, `[options]`, `agent-args`, `file-attributes`, `[limits]`, `[project]`,
@@ -378,8 +407,8 @@ and support packs, support packs extend support packs; a tool pack that extends 
 that tool's env, filesystem with writes, and program folder on `PATH` into its own tool, its own env
 wins, not `PATH` or `TMPDIR`, a skipped base gives nothing, and the base is not a tool of its own
 unless the profile or a support pack sets its `[tool.<name>] program`),
-optional `include` lists tool packs to load as tools of their own (nothing merged), and optional `engine = ">=X.Y.Z"` names the oldest Box CLI it needs.
-The header accepts only these keys.
+and optional `include` lists tool packs to load as tools of their own (nothing merged).
+The header accepts only these keys. A separate optional `[requires]` table with `box = ">=X.Y.Z"` names the oldest Box CLI that the pack, plugin, or profile needs.
 
 `kind` decides what `[run]` holds. A `tool` pack's `[run]` sets `command` to its program input alone, and the pack extends
 tool and support packs. An `agent` pack's `[run]` sets `command`, or the pack extends an agent pack
@@ -407,60 +436,6 @@ extends both instead.
 Conditions apply after merging. A false `when` on a table removes everything merged into that
 table, including another file's additions. Put conditions on the narrowest entry or value that
 should change.
-
-## Incoming Linux storage
-
-Enable experimental forwarding for filesystems that a trusted Linux storage manager attaches
-before or after Box starts. In `profile.toml`, list mount sources separately for each recipient:
-
-```toml
-[experimental-features]
-linux-storage-mounts = true
-
-[agent.filesystem]
-mounts = ["/mnt/data", "/mnt/workspace"]
-read = ["/mnt/data", "/mnt/workspace"]
-
-[tool.indexer.filesystem]
-mounts = ["/mnt/data"]
-read = ["/mnt/data"]
-
-[mcp.files.filesystem]
-mounts = ["/mnt/workspace"]
-read = ["/mnt/workspace"]
-```
-
-The tool and local MCP server must already be declared. Each recipient's `mounts` array
-contains absolute paths and grants no permissions. A recipient inherits no other recipient's
-list. With no paths declared for a recipient, forwarding stays disabled. Lists from packs and
-profiles append and deduplicate within the same recipient; an empty profile list does not
-remove a pack's paths for that recipient. Only a profile can set the experimental flag.
-Mount declarations require both Linux and the enabled flag. The declared directories must
-already exist when Box starts; they can remain empty until the storage manager attaches a mount.
-
-The CLI keeps `[storage]` for managed directories, files, and hooks; it does not accept
-`storage.mounts`. The external manager owns the incoming mount paths and their contents.
-Set each recipient's read, write, execute, and denial lists separately. Use literal permission
-paths inside incoming mounts, because wildcard expansion into them is rejected. Existing
-optional-path semantics remain in effect.
-
-Box CLI preserves required permission paths until Box Core can inspect the incoming filesystem.
-When storage is pending, the application starts with that storage inaccessible and can retry
-file operations. Box Core applies the original restrictions before making storage visible.
-If a source is already mounted when Box checks a new process, the process waits for its
-protected view before running code. Other pending sources do not delay that launch. A required
-rule that cannot be applied stops the affected Box.
-
-Hosted Shell and Python (Monty) use the agent's protected storage view, with their existing
-`fs:*` policy rules applied as well. Source filesystem permissions still apply. If no agent
-view starts, hosted storage remains unavailable. Hosted tools reject symbolic links from
-incoming storage to paths outside the protected roots and their captured aliases.
-
-An incoming write grant can reach an external `deny_write` path through a symbolic link.
-Boxy conservatively retains that denial, even when its relationship cannot yet be proved.
-Generated Shell and Monty rules deny moving or deleting protected paths and their exact
-ancestors, without denying unrelated sibling operations. This feature does not enable
-native filesystem policy or remove restrictions imposed by the host filesystem.
 
 ## Experimental native filesystem policy
 
@@ -1000,6 +975,7 @@ host source alone does not update an existing ordinary copy.
 | `kind` | `json` or `toml` when selecting or rewriting structured values |
 | `keep` | Array of key paths to retain, such as `[["theme"], ["spinnerVerbs", "mode"]]`; requires `kind` |
 | `sync` | Copy changed host files on every run; cannot combine with `kind`, `keep`, `set`, or `fill` |
+| `exclude` | File or folder names a folder copy leaves out at any depth, such as `["mcp.json"]`, also on each `sync`; one whole name each, matched without regard to case, no `/` and no `*`, `?`, or `[`; needs `sync = true`; cannot combine with `kind`, `keep`, `set`, or `fill`, and refused for a source that is one file |
 | `fill` | Add missing selected values on every run; requires `keep` and `kind = "json"` or `"toml"`, and cannot have `set` |
 
 Active rows cannot have equal or nested targets. A profile row does not replace an inherited

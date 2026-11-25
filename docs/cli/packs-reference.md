@@ -1,8 +1,3 @@
----
-reader: Someone who writes or reads a pack, knows the key or table they want, and needs what it does and which kind of pack may hold it.
-belongs: A key or table that a pack writes, and the rules for it. A rarer task goes here too, under the key it uses. A key that a profile writes, and the rules that both share, such as placeholders, when, and the merge, go to profiles-reference.md. A task that most authors need for their first pack goes to packs.md, and a fix after an error goes to troubleshooting.md.
----
-
 # Pack reference
 
 This page lists every key that only a pack writes, and `[storage]`, which a profile can also write,
@@ -19,7 +14,8 @@ of a pack is in a table, and the file starts with `[pack]`.
 
 | Key | Kinds | What it holds |
 | --- | --- | --- |
-| `[pack]` | Every pack. Required, and first. | The [header](#pack): name, version, kind, the packs it extends or includes, and the oldest `box` that reads it. |
+| `[pack]` | Every pack. Required, and first. | The [header](#pack): name, version, kind, and the packs it extends or includes. |
+| `[requires]` | Every pack. | What the pack needs of the `box` that reads it, such as its oldest version. See [`[requires]`](profiles-reference.md#requires). |
 | `[inputs.<name>]` | Every pack. | The [inputs](#inputs) the pack declares. |
 | `[run]` | Agent and tool packs. | How the program starts: an [agent pack's](#an-agent-packs-run) or a [tool pack's](#tool-packs) keys. |
 | `[env]`, `[filesystem]` | Agent and tool packs. | The program's variables and the files it can reach, as in [The `[agent]` table](profiles-reference.md#the-agent-table). |
@@ -67,6 +63,11 @@ a profile uses and each option they read, and `--full` shows everything they add
 | `file-watching` | See [`file-watching`](profiles-reference.md#file-watching). |
 | `when` | A condition that keeps the agent's `[agent]` table. See [`when`](profiles-reference.md#when). |
 
+A pack can select [incoming storage mounts](profiles-reference.md#incoming-storage-mounts-on-linux)
+in its process's `[filesystem] receive_mounts` list. These selections add to the profile's list
+for that process and grant no access. Guard the setting with `when = "linux"` when the pack
+also runs on macOS.
+
 ## `[pack]`
 
 | Key | What it does |
@@ -76,7 +77,6 @@ a profile uses and each option they read, and `--full` shows everything they add
 | `kind` | Required. `"agent"`, `"tool"`, or `"support"`, as [What a pack holds](#what-a-pack-holds) states. [Pack kinds](packs.md#what-a-pack-is) says what each kind is for. |
 | `extend` | The packs this one builds on, merged before it. An agent pack extends agent and support packs, a tool pack extends tool and support packs, and a support pack extends only support packs. |
 | `include` | Tool packs to load as tools of their own beside this one, as a profile's `packs` does. Nothing of them is merged into this pack. A support pack includes a tool pack to add to its tool, such as more `hosts` in `[tool.npm]`. |
-| `engine` | The oldest version of `box` that reads this pack, as `>=X.Y.Z`. An older `box` refuses the pack. A preview build of `box`, such as `0.3.0-preview.1` or `0.3.0-linux-preview.1`, counts as its release, `0.3.0`. |
 
 The header holds no other key, and `box` refuses a pack that has no header.
 
@@ -269,11 +269,6 @@ your project. Each profile gets one storage folder, which every project it runs 
 - `box run` creates each directory and gives the agent read and write on it, so do not add that
   access yourself.
 
-External mount paths belong to each recipient's `filesystem.mounts` list, described in
-[Incoming Linux storage](profiles-reference.md#incoming-linux-storage). They are separate from
-the managed directories in `[storage]`. For a deployment using external mounts, see
-[Use storage in AgentCore Runtime](experimental-runtime-storage.md).
-
 ### Copy files into storage
 
 A `[[storage.files]]` row copies a file or a folder of yours into storage on the profile's first
@@ -293,6 +288,7 @@ optional = true
 | `optional` | `true` copies nothing when your machine does not have the source. A row with `set` then writes a new file that holds only the values it sets. Without it, a missing source stops the run. |
 | `when` | Copy only when the condition holds, as in [`when`](profiles-reference.md#when). |
 | `sync` | `true` brings the copy up to date with your file on each run. Without it, the copy is made once. Not on a row with `kind`, `keep`, `set`, or `fill`. |
+| `exclude` | Names that a folder copy leaves out, such as `["mcp.json"]`. Each is one file or folder name, with no `/` and no `*`, `?`, or `[`: a name is matched whole, not as a pattern, and without regard to case. The copy leaves out every entry of that name at any depth, on the first copy and on each `sync`. An `exclude` added to a row whose copy is already in storage does not delete what it names from the box: each `box run` and `box profile show` name the file it kept until you delete it in storage. Only on a row with `sync = true`, and not on a row with `kind`, `keep`, `set`, or `fill`. A source that is one file stops the run. |
 | `kind` | `"json"` or `"toml"`. Required with `keep`, `set`, or `fill`, and refused without them. |
 | `keep` | The values to copy, as a list of key lists. Without it, the whole file is copied. See [Copy only part of a settings file](#copy-only-part-of-a-settings-file). |
 | `fill` | `true` adds each `keep` value that the copy lacks, on every run. See [Add missing values on every run](#add-missing-values-on-every-run). |
@@ -315,7 +311,19 @@ optional = true
   nothing from a path that a [plugin](plugins.md) keeps on your machine, a shipped pack's files
   included.
 - **Links.** `box profile show` lists each link in a copied folder that it follows and each entry
-  it leaves out.
+  it leaves out, including each one that `exclude` names. `box run` prints each entry it leaves out.
+- **A file that changes during the copy.** A first copy reaches storage only when none of its
+  files changed while `box` copied them, so a database and its journal come from one moment. When
+  one changes, `box` tries again, three times in all. When it keeps changing, the run stops before
+  the box starts, and storage gets no copy:
+
+  ```text
+  box: error: cannot copy /Users/you/.claude/skills into storage: /Users/you/.claude/skills/review/SKILL.md changed each time box copied it (3 tries); stop the program that writes it, then start the run again
+  ```
+
+  Quit the program that writes the file, such as the agent on your machine, then run again. A
+  `sync` update does not make this check, so a file written during an update can come in part
+  written, and the next update brings it up to date.
 
 [Copies](../design/cli/profile-language.md#copies) has the full steps, including `sync`.
 

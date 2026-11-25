@@ -134,7 +134,6 @@ impl PreparedFilesystemPath {
     }
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ObjectIdentity {
@@ -187,16 +186,20 @@ impl ObjectPin {
                 .read(true)
                 .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
                 .open(path)?;
-            let identity = ObjectIdentity::from_metadata(&file.metadata()?);
-            Ok(Self(std::sync::Arc::new(PinnedObject {
-                identity,
-                file: std::sync::Mutex::new(Some(file)),
-            })))
+            Self::from_file(file)
         };
         open().map_err(|source| ContainmentError::PathCanonicalization {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    pub(crate) fn from_file(file: File) -> std::io::Result<Self> {
+        let identity = ObjectIdentity::from_metadata(&file.metadata()?);
+        Ok(Self(std::sync::Arc::new(PinnedObject {
+            identity,
+            file: std::sync::Mutex::new(Some(file)),
+        })))
     }
 
     pub(crate) fn release(&self) -> Result<()> {

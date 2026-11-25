@@ -47,7 +47,12 @@ enum Reply {
     Deaf,
     Sip(Duration),
     Controlled(Arc<Mutex<Option<Receiver<Vec<u8>>>>>),
+    Custom(Arc<UpstreamHandler>),
 }
+
+pub type UpstreamTls = StreamOwned<ServerConnection, TcpStream>;
+
+pub type UpstreamHandler = dyn Fn(&mut UpstreamTls, &SeenRequest) + Send + Sync;
 
 pub struct TlsUpstream {
     port: u16,
@@ -113,6 +118,13 @@ impl TlsUpstream {
             ),
             sender,
         )
+    }
+
+    pub fn start_custom(
+        host: &str,
+        handler: impl Fn(&mut UpstreamTls, &SeenRequest) + Send + Sync + 'static,
+    ) -> Self {
+        Self::start_serving(host, Reply::Custom(Arc::new(handler)))
     }
 
     /// Start a TLS upstream that completes the handshake and then never reads, so the peer's
@@ -190,8 +202,10 @@ impl TlsUpstream {
                     // then blocked the request) is NOT counted — only a real request line is.
                     let raw = read_http_head_and_body(&mut tls);
                     if raw.contains("HTTP/") {
-                        seen.lock().unwrap().push(SeenRequest { raw });
+                        let request = SeenRequest { raw };
+                        seen.lock().unwrap().push(request.clone());
                         match &reply {
+                            Reply::Custom(handler) => handler(&mut tls, &request),
                             Reply::Whole(response) => {
                                 let _ = tls.write_all(response);
                                 let _ = tls.flush();

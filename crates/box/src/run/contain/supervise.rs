@@ -13,7 +13,6 @@ use crate::record::layout::BoxRoot;
 use crate::run::contain::boundary::Boundary;
 use crate::run::contain::terminal::ForegroundTerminal;
 use crate::run::contain::trampoline::{self, Trampoline};
-use crate::run::hosted::storage::StorageOwner;
 
 /// How long a signalled group may take to leave before it is killed.
 const STOP_GRACE: Duration = Duration::from_secs(1);
@@ -24,7 +23,6 @@ async fn spawn_registered(
     layout: &BoxRoot,
     configure_streams: impl FnOnce(&mut Command),
     own_terminal: bool,
-    storage: Option<&StorageOwner>,
     #[cfg(target_os = "linux")] relay_control: Option<&std::os::unix::net::UnixStream>,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
@@ -32,22 +30,6 @@ async fn spawn_registered(
     ))]
     registration: Option<crate::run::native_enforcement::Registration>,
 ) -> Result<(ProcessGroup, Trampoline), BoxError> {
-    if let Some(storage) = storage {
-        storage.check()?;
-    }
-    #[cfg(target_os = "linux")]
-    let mut storage_receiver = match boundary.storage() {
-        Some(plan) => {
-            let owner = storage.ok_or_else(|| SuperviseError::Control {
-                reason: "storage-enabled launch has no Box admission owner".into(),
-            })?;
-            Some(super::boundary::storage::controller::Receiver::prepare(
-                std::sync::Arc::clone(plan),
-                owner.clone(),
-            )?)
-        }
-        None => None,
-    };
     #[cfg_attr(
         not(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
@@ -79,8 +61,6 @@ async fn spawn_registered(
             },
             #[cfg(target_os = "linux")]
             relay_control,
-            #[cfg(target_os = "linux")]
-            storage_control: storage_receiver.as_ref().map(|receiver| receiver.child()),
         },
         boundary.installation(),
     )?;
@@ -120,21 +100,7 @@ async fn spawn_registered(
         )),
         allow(unused_mut)
     )]
-    let mut group =
-        ProcessGroup::spawn_guarded_with_terminal(command, own_terminal, storage).await?;
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(receiver) = &mut storage_receiver
-            && let Err(error) = receiver.start()
-        {
-            if let Some(owner) = storage {
-                owner.fail(&error);
-            }
-            let _ = group.stop().await;
-            return Err(error);
-        }
-        trampoline.own_storage(storage_receiver);
-    }
+    let mut group = ProcessGroup::spawn_with_terminal(command, own_terminal).await?;
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     if let (Some(gate), Some(registration)) = (gate, registration) {
         let pid = match group.leader_pid() {
@@ -156,7 +122,7 @@ async fn spawn_registered(
         };
         if let Some(reason) = error {
             let _ = group.stop().await;
-            return Err(SuperviseError::Control { reason }.into());
+            return Err(SuperviseError::Native { reason }.into());
         }
     }
     #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
@@ -169,7 +135,7 @@ async fn spawn_registered(
         };
         if let Some(reason) = error {
             let _ = group.stop().await;
-            return Err(SuperviseError::Control { reason }.into());
+            return Err(SuperviseError::Native { reason }.into());
         }
     }
     Ok((group, trampoline))
@@ -189,15 +155,9 @@ impl ProcessGroup {
         Self::spawn_with_terminal(command, false).await
     }
 
-    #[cfg(test)]
-    async fn spawn_with_terminal(command: Command, own_terminal: bool) -> Result<Self, BoxError> {
-        Self::spawn_guarded_with_terminal(command, own_terminal, None).await
-    }
-
-    async fn spawn_guarded_with_terminal(
+    async fn spawn_with_terminal(
         mut command: Command,
         own_terminal: bool,
-        storage: Option<&StorageOwner>,
     ) -> Result<Self, BoxError> {
         command.kill_on_drop(true);
         if own_terminal {
@@ -215,22 +175,9 @@ impl ProcessGroup {
         } else {
             isolate(&mut command);
         }
-        let spawn = || -> Result<_, BoxError> {
-            let mut command = command;
-            #[cfg(target_os = "linux")]
-            if let Some(storage) = storage {
-                return storage
-                    .spawn_contained_command(command)
-                    .map_err(|source| SuperviseError::Spawn { source }.into());
-            }
-            command
-                .spawn()
-                .map_err(|source| SuperviseError::Spawn { source }.into())
-        };
-        let mut child = match storage {
-            Some(storage) => storage.admit(spawn)?,
-            None => spawn()?,
-        };
+        let mut child = command
+            .spawn()
+            .map_err(|source| SuperviseError::Spawn { source })?;
         let Some(leader) = child.id() else {
             let _ = child.wait().await;
             return Err(SuperviseError::NoProcessId.into());
@@ -505,12 +452,16 @@ pub(crate) struct Contained {
 impl Contained {
     /// Spawn the workload in its own process group, holding the foreground
     /// terminal so job control and Ctrl-C behave as they would outside the box.
+    ///
+    /// `launched` runs once the workload's `exec` succeeded inside its containment. A containment
+    /// or `exec` failure never calls it.
     pub(crate) async fn spawn(
         boundary: Boundary,
         layout: &BoxRoot,
         hosted: crate::run::hosted::HostedBox,
         terminal: Option<std::fs::File>,
         signals: Option<Signals>,
+        launched: impl FnOnce() + Send + 'static,
     ) -> Result<Self, BoxError> {
         Self::spawn_with(
             boundary,
@@ -520,6 +471,7 @@ impl Contained {
             true,
             terminal,
             signals,
+            launched,
         )
         .await
     }
@@ -559,6 +511,7 @@ impl Contained {
     }
 
     /// The one spawn body. `stdio` supplies stdin and stdout; stderr is always inherited.
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_with(
         boundary: Boundary,
         layout: &BoxRoot,
@@ -567,32 +520,8 @@ impl Contained {
         claim_terminal: bool,
         terminal: Option<std::fs::File>,
         signals: Option<Signals>,
+        launched: impl FnOnce() + Send + 'static,
     ) -> Result<Self, BoxError> {
-        let storage = hosted.storage_owner();
-        storage
-            .while_open(Self::spawn_inner(
-                boundary,
-                layout,
-                hosted,
-                stdio,
-                claim_terminal,
-                terminal,
-                signals,
-            ))
-            .await
-    }
-
-    async fn spawn_inner(
-        boundary: Boundary,
-        layout: &BoxRoot,
-        hosted: crate::run::hosted::HostedBox,
-        stdio: fn() -> Stdio,
-        claim_terminal: bool,
-        terminal: Option<std::fs::File>,
-        signals: Option<Signals>,
-    ) -> Result<Self, BoxError> {
-        let storage = hosted.storage_owner();
-        storage.check()?;
         // The relay's control socket must exist before the trampoline is spawned,
         // because the trampoline sends its listening descriptor over it during
         #[cfg(target_os = "linux")]
@@ -605,7 +534,7 @@ impl Contained {
             #[cfg(target_os = "macos")]
             refuse_a_held_workload_port(workload_port)?;
             let listener = std::net::TcpListener::bind(address).map_err(|source| {
-                crate::error::SuperviseError::Control {
+                crate::error::SuperviseError::Ingress {
                     reason: format!("binding the ingress {address}: {source}"),
                 }
             })?;
@@ -618,8 +547,9 @@ impl Contained {
             (ingress_connection_limit() / ingress.len()).max(1)
         };
         for (_, address, workload_port) in &ingress {
-            eprintln!(
-                "strands-box: [ingress] {address} is relayed to the agent's port \
+            ::diagnostics::diag!(
+                B0701,
+                "[ingress] {address} is relayed to the agent's port \
                  {workload_port}, at most {limit} callers at once"
             );
         }
@@ -633,7 +563,9 @@ impl Contained {
             signals.restore_default = false;
         }
         #[cfg(unix)]
-        let diagnostics = if own_terminal || std::io::stderr().is_terminal() {
+        // Core holds its messages only while they would reach a terminal; a caller that points
+        // stderr at a pipe reads them live.
+        let diagnostics = if ::diagnostics::stderr().is_terminal() {
             Some(
                 crate::run::diagnostics::Diagnostics::capture()
                     .map_err(|source| SuperviseError::Diagnostics { source })?,
@@ -663,14 +595,13 @@ impl Contained {
             }
             None => (stdio(), stdio(), stderr),
         };
-        let (mut group, trampoline) = spawn_registered(
+        let (mut group, mut trampoline) = spawn_registered(
             &boundary,
             layout,
             |command| {
                 command.stdin(stdin).stdout(stdout).stderr(stderr);
             },
             own_terminal,
-            Some(&storage),
             #[cfg(target_os = "linux")]
             Some(&relay_child_side),
             #[cfg(any(
@@ -758,12 +689,24 @@ impl Contained {
                 if let Some(mut terminal) = terminal {
                     let _ = terminal.restore();
                 }
-                return Err(crate::error::SuperviseError::Control {
+                return Err(crate::error::SuperviseError::Ingress {
                     reason: format!("starting the ingress relay: {error}"),
                 }
                 .into());
             }
         };
+
+        // The one reader of the setup status, started once per spawn.
+        #[cfg(unix)]
+        if let Err(error) = trampoline.watch_launch(launched) {
+            let _ = group.stop().await;
+            if let Some(mut terminal) = terminal {
+                let _ = terminal.restore();
+            }
+            return Err(error.into());
+        }
+        #[cfg(not(unix))]
+        drop(launched);
 
         Ok(Self {
             group,
@@ -872,7 +815,7 @@ struct LaunchedLeaf {
 impl LeafBox {
     /// Build the trampoline, spawn the contained child in its own process group, and — on Linux —
     /// start the netns relays held for the child's lifetime. `stdin`/`stdout`/`stderr` are the
-    /// child's stdio: the buffered run pipes stdout/stderr and nulls stdin; the streaming spawn
+    /// child's stdio: the buffered run pipes stdout/stderr, and pipes stdin or nulls it; the streaming spawn
     /// pipes stdin/stdout for the JSON-RPC session and nulls stderr.
     async fn launch_contained(
         boundary: &Boundary,
@@ -880,7 +823,6 @@ impl LeafBox {
         stdin: Stdio,
         stdout: Stdio,
         stderr: Stdio,
-        storage: Option<&StorageOwner>,
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
             all(target_os = "linux", feature = "native-filesystem-policy")
@@ -901,7 +843,6 @@ impl LeafBox {
                 command.stdin(stdin).stdout(stdout).stderr(stderr);
             },
             false,
-            storage,
             #[cfg(target_os = "linux")]
             Some(&relay_child_side),
             #[cfg(any(
@@ -954,58 +895,10 @@ impl LeafBox {
     /// Linux — its own netns relay to the parent gateway. A containment setup failure is a
     /// [`TrampolineError::SetupFailed`], not a workload status. Buffered: the streams come back
     /// whole; a long-lived session uses [`spawn_streaming`](Self::spawn_streaming).
-    #[cfg(all(test, target_os = "linux"))]
     pub(crate) async fn run(
         boundary: Boundary,
         layout: &BoxRoot,
-        #[cfg(any(
-            all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(target_os = "linux", feature = "native-filesystem-policy")
-        ))]
-        registration: Option<crate::run::native_enforcement::Registration>,
-    ) -> Result<CapturedLeaf, BoxError> {
-        Self::run_inner(
-            boundary,
-            layout,
-            None,
-            #[cfg(any(
-                all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(target_os = "linux", feature = "native-filesystem-policy")
-            ))]
-            registration,
-        )
-        .await
-    }
-
-    /// Start a leaf under its parent Box's storage failure supervision.
-    pub(crate) async fn run_owned(
-        boundary: Boundary,
-        layout: &BoxRoot,
-        storage: &StorageOwner,
-        #[cfg(any(
-            all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(target_os = "linux", feature = "native-filesystem-policy")
-        ))]
-        registration: Option<crate::run::native_enforcement::Registration>,
-    ) -> Result<CapturedLeaf, BoxError> {
-        storage
-            .while_open(Self::run_inner(
-                boundary,
-                layout,
-                Some(storage),
-                #[cfg(any(
-                    all(target_os = "macos", feature = "native-filesystem-policy"),
-                    all(target_os = "linux", feature = "native-filesystem-policy")
-                ))]
-                registration,
-            ))
-            .await
-    }
-
-    async fn run_inner(
-        boundary: Boundary,
-        layout: &BoxRoot,
-        storage: Option<&StorageOwner>,
+        stdin: Option<std::os::fd::OwnedFd>,
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
             all(target_os = "linux", feature = "native-filesystem-policy")
@@ -1013,7 +906,8 @@ impl LeafBox {
         registration: Option<crate::run::native_enforcement::Registration>,
     ) -> Result<CapturedLeaf, BoxError> {
         // Captured, so the bytes come back to the Shell and leave through its own streams. stdin is
-        // null: a leaf binary reads no stdin, and one that blocked would hold the Call to its deadline.
+        // the read end of the pipe the Shell feeds, or null when the command has none.
+        let child_stdin = stdin.map_or_else(Stdio::null, Stdio::from);
         let LaunchedLeaf {
             mut group,
             mut trampoline,
@@ -1022,10 +916,9 @@ impl LeafBox {
         } = Self::launch_contained(
             &boundary,
             layout,
-            Stdio::null(),
+            child_stdin,
             Stdio::piped(),
             Stdio::piped(),
-            storage,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
                 all(target_os = "linux", feature = "native-filesystem-policy")
@@ -1033,7 +926,6 @@ impl LeafBox {
             registration,
         )
         .await?;
-
         // The boundary keeps all launch inputs alive until the child exits.
         trampoline.close_setup_writer();
         let output = group.wait_with_output().await;
@@ -1060,58 +952,9 @@ impl LeafBox {
     }
 
     /// Return live streams after setup completes without a reported executable launch failure.
-    #[cfg(all(test, target_os = "linux"))]
     pub(crate) async fn spawn_streaming(
         boundary: Boundary,
         layout: &BoxRoot,
-        #[cfg(any(
-            all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(target_os = "linux", feature = "native-filesystem-policy")
-        ))]
-        registration: Option<crate::run::native_enforcement::Registration>,
-    ) -> Result<StreamingLeaf, BoxError> {
-        Self::spawn_streaming_inner(
-            boundary,
-            layout,
-            None,
-            #[cfg(any(
-                all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(target_os = "linux", feature = "native-filesystem-policy")
-            ))]
-            registration,
-        )
-        .await
-    }
-
-    /// Start a leaf under its parent Box's storage failure supervision.
-    pub(crate) async fn spawn_streaming_owned(
-        boundary: Boundary,
-        layout: &BoxRoot,
-        storage: &StorageOwner,
-        #[cfg(any(
-            all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(target_os = "linux", feature = "native-filesystem-policy")
-        ))]
-        registration: Option<crate::run::native_enforcement::Registration>,
-    ) -> Result<StreamingLeaf, BoxError> {
-        storage
-            .while_open(Self::spawn_streaming_inner(
-                boundary,
-                layout,
-                Some(storage),
-                #[cfg(any(
-                    all(target_os = "macos", feature = "native-filesystem-policy"),
-                    all(target_os = "linux", feature = "native-filesystem-policy")
-                ))]
-                registration,
-            ))
-            .await
-    }
-
-    async fn spawn_streaming_inner(
-        boundary: Boundary,
-        layout: &BoxRoot,
-        storage: Option<&StorageOwner>,
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
             all(target_os = "linux", feature = "native-filesystem-policy")
@@ -1134,7 +977,6 @@ impl LeafBox {
             Stdio::piped(),
             Stdio::piped(),
             Stdio::piped(),
-            storage,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
                 all(target_os = "linux", feature = "native-filesystem-policy")
@@ -1149,17 +991,16 @@ impl LeafBox {
         let mut stderr = group.child_mut().stderr.take();
 
         // The reader waits for completed preparation and channel closure, or a reported failure.
-        let (trampoline, setup) = tokio::task::spawn_blocking(move || {
+        let setup = tokio::task::spawn_blocking(move || {
             let mut trampoline = trampoline;
             trampoline.close_setup_writer();
-            let setup = trampoline.setup_failure();
-            (trampoline, setup)
+            trampoline.setup_failure()
         })
         .await
         .map_err(|error| SuperviseError::Control {
             reason: format!("containment setup task failed: {error}"),
-        })?;
-        if let Some(stage) = setup? {
+        })??;
+        if let Some(stage) = setup {
             let _ = group.stop().await;
             // Setup failed before `exec`, so only the trampoline wrote to stderr and its last line
             // names what was refused — a bounded read, because the workload never ran. This is the
@@ -1186,7 +1027,6 @@ impl LeafBox {
             stdin,
             stdout,
             group,
-            _trampoline: trampoline,
             _boundary: boundary,
             #[cfg(target_os = "linux")]
             _relays: relays,
@@ -1199,10 +1039,6 @@ impl LeafBox {
 pub(crate) struct StreamingLeaf {
     stdin: Option<tokio::process::ChildStdin>,
     stdout: Option<tokio::process::ChildStdout>,
-
-    /// Keep launch-owned resources, including Linux storage admission, alive with the server.
-    /// Drop this before `group` so an unadopted leaf cancels admission before stopping its helper.
-    _trampoline: Trampoline,
     group: ProcessGroup,
 
     /// The assembled boundary, which keeps the containment config descriptor open for the child's
@@ -1225,22 +1061,12 @@ pub(crate) struct StreamingLeafParts {
 }
 
 /// What a contained MCP server must keep alive while it runs, held by the broker beside the child:
-/// its trampoline (including Linux storage admission), netns relays (Linux), and boundary (the open
-/// containment-config descriptor). The broker's handle owns and signals the child and its group;
-/// dropping this retention also cancels the launch's storage controller.
+/// the leaf's netns relays (Linux) and its boundary (the open containment-config descriptor). It
+/// carries no signalling responsibility — the broker's handle owns the child and its group.
 pub(crate) struct StreamingLeafRetention {
-    _trampoline: Trampoline,
     _boundary: Boundary,
     #[cfg(target_os = "linux")]
     _relays: Vec<crate::run::netns_relay::NetnsRelay>,
-}
-
-impl StreamingLeafRetention {
-    /// Mark intentional shutdown before the broker signals this leaf's process group.
-    pub(crate) fn begin_shutdown(&mut self) {
-        #[cfg(target_os = "linux")]
-        self._trampoline.stop_storage_admission();
-    }
 }
 
 impl StreamingLeaf {
@@ -1257,7 +1083,6 @@ impl StreamingLeaf {
             stdout,
             leader,
             retention: StreamingLeafRetention {
-                _trampoline: self._trampoline,
                 _boundary: self._boundary,
                 #[cfg(target_os = "linux")]
                 _relays: self._relays,
@@ -1272,13 +1097,52 @@ fn trampoline_message(stderr: &[u8]) -> Option<String> {
     // Containment's MissingReads caps its reason at 6000 bytes, leaving room for error framing.
     const MAXIMUM_CHARACTERS: usize = 8192;
     let text = String::from_utf8_lossy(stderr);
-    let start = text
+    let starts: Vec<usize> = text
         .match_indices(PREFIX)
         .filter(|(offset, _)| *offset == 0 || text.as_bytes()[offset - 1] == b'\n')
-        .last()
-        .map(|(offset, _)| offset + PREFIX.len());
+        .map(|(offset, _)| offset)
+        .collect();
+    // A supervisor that reads end-of-file after a failed setup can write last, so the setup
+    // failure's own message wins over a later trampoline line.
+    let setup_failure = |start: &&usize| {
+        matches!(
+            ::diagnostics::parse(text[**start..].lines().next().unwrap_or_default()),
+            ::diagnostics::Line::Message(message)
+                if message.code == Some(::diagnostics::Code::H0401)
+        )
+    };
+    let start = starts
+        .iter()
+        .rev()
+        .find(setup_failure)
+        .or(starts.last())
+        .copied();
     let message = match start {
-        Some(start) => text[start..].trim(),
+        // The detail is the text after the trampoline's severity and code, with the indented lines
+        // that belong to it.
+        Some(start) => {
+            let block = &text[start..];
+            let line = block.lines().next().unwrap_or_default();
+            match ::diagnostics::parse(line) {
+                ::diagnostics::Line::Message(message) => {
+                    // The message text is the end of its first line.
+                    let first = &block[line.len() - message.text.len()..];
+                    let end = first
+                        .match_indices('\n')
+                        .map(|(offset, _)| offset + 1)
+                        .find(|next| {
+                            first[*next..]
+                                .chars()
+                                .next()
+                                .is_some_and(|c| c != ' ' && c != '\t')
+                        })
+                        .unwrap_or(first.len());
+                    &first[..end]
+                }
+                _ => &block[PREFIX.len()..],
+            }
+            .trim()
+        }
         None => text
             .lines()
             .rev()
@@ -1524,7 +1388,7 @@ fn refuse_a_held_workload_port(port: u16) -> Result<(), BoxError> {
     let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     if std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(200)).is_ok()
     {
-        return Err(crate::error::SuperviseError::Control {
+        return Err(crate::error::SuperviseError::Ingress {
             reason: format!(
                 "the agent's port {port} already has a listener at {address}; another process \
                  holds it, so the ingress relay would reach that process and not the agent"
@@ -1541,44 +1405,6 @@ mod tests {
     use crate::error::SetupStage;
     use crate::test_support::{HELD_GROUP, SIGNALS, processes_exit, wait_for_pids};
     use std::os::unix::process::ExitStatusExt as _;
-
-    #[tokio::test]
-    async fn storage_failure_refuses_the_actual_process_spawn() {
-        let directory = tempfile::tempdir().expect("spawn marker directory");
-        let marker = directory.path().join("launched");
-        let storage = StorageOwner::testing();
-        storage.fail("storage helper exited unexpectedly");
-        let mut command = Command::new("/bin/sh");
-        command
-            .args(["-c", "printf launched > \"$1\"", "storage-spawn-control"])
-            .arg(&marker);
-        let refusal = ProcessGroup::spawn_guarded_with_terminal(command, false, Some(&storage))
-            .await
-            .err()
-            .expect("the owner refuses the actual spawn");
-        assert!(
-            refusal
-                .to_string()
-                .contains("storage helper exited unexpectedly")
-        );
-        assert!(!marker.exists(), "a refused process must never run");
-    }
-
-    #[tokio::test]
-    async fn an_open_storage_owner_preserves_process_exit_status() {
-        let storage = StorageOwner::testing();
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "exit 7"]);
-        let mut group = ProcessGroup::spawn_guarded_with_terminal(command, false, Some(&storage))
-            .await
-            .expect("an open owner permits the ordinary spawn");
-        let status = group.child_mut().wait().await.expect("the child exits");
-        group.release().await.expect("the group is reaped");
-        assert_eq!(status.code(), Some(7));
-        storage
-            .check()
-            .expect("an ordinary workload error does not fail storage admission");
-    }
 
     /// **The relay holds an eighth of the descriptor limit in callers**, within its floor and
     /// ceiling.
@@ -1613,6 +1439,49 @@ mod tests {
             "the failure names the library and the binary: {text}"
         );
         assert!(trampoline_message(b"").is_none());
+        let coded = b"strands-box: note[B0201]: [tool.cargo] runs /usr/bin/app\n\
+            strands-box-contain-trampoline: error[H0401]: containment apply failed: '/usr/bin/app' \
+            needs the shared library 'libnope.so.1'\n";
+        assert_eq!(
+            trampoline_message(coded).as_deref(),
+            Some(
+                "containment apply failed: '/usr/bin/app' needs the shared library 'libnope.so.1'"
+            ),
+            "the detail leaves out the trampoline's severity and code"
+        );
+    }
+
+    /// **A setup failure keeps its reason when the query supervisor writes after it.**
+    #[test]
+    fn a_setup_failure_wins_over_a_later_supervisor_line() {
+        use ::diagnostics::{Code, Kind, Source, text};
+        let setup = text(
+            Source::ContainTrampoline,
+            Kind::Coded(Code::H0401),
+            format_args!(
+                "apply failed: 2 dependencies lack read access\nDependency: /vendor/codec"
+            ),
+        );
+        let supervisor = text(
+            Source::ContainTrampoline,
+            Kind::Coded(Code::H0502),
+            format_args!("filesystem query supervisor failed: unexpected end of file"),
+        );
+        for stderr in [
+            format!("{setup}{supervisor}"),
+            format!("{supervisor}{setup}"),
+        ] {
+            assert_eq!(
+                trampoline_message(stderr.as_bytes()).as_deref(),
+                Some("apply failed: 2 dependencies lack read access\n  Dependency: /vendor/codec"),
+                "{stderr}"
+            );
+        }
+        assert_eq!(
+            trampoline_message(supervisor.as_bytes()).as_deref(),
+            Some("filesystem query supervisor failed: unexpected end of file"),
+            "with no setup failure the last trampoline line is the reason"
+        );
     }
 
     #[test]

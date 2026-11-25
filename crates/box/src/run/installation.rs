@@ -14,8 +14,6 @@ use crate::record::layout::{disk_identity, lies_within};
 #[path = "installation_mounts.rs"]
 mod mounts;
 
-pub(crate) mod snapshot;
-
 #[cfg(target_os = "linux")]
 pub(super) use mounts::inspect_single_mount;
 
@@ -62,7 +60,6 @@ pub(super) fn directory(executable: &Path) -> Option<&Path> {
 pub(crate) struct TrustedInstallation {
     binaries: Vec<InstalledBinary>,
     preparation: std::sync::Mutex<()>,
-    compiler_index: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -71,7 +68,6 @@ struct InstalledBinary {
     names: Vec<PathBuf>,
     opened: File,
     identity: (u64, u64),
-    verification: Option<super::commands::snapshot::ReplicaVerifier>,
 }
 
 impl TrustedInstallation {
@@ -79,38 +75,6 @@ impl TrustedInstallation {
         let current = executable().map_err(|source| InstallationError::Locate { source })?;
         let helper = super::contain::trampoline::locate()?;
         Self::open(current, helper)
-    }
-
-    /// Pin the compiler only for a storage-enabled run; ordinary installations need no compiler.
-    pub(crate) fn load_for_storage() -> Result<Self, BoxError> {
-        let current = executable().map_err(|source| InstallationError::Locate { source })?;
-        let helper = super::contain::trampoline::locate()?;
-        Self::open_for_storage(current, helper)
-    }
-
-    fn open_for_storage(current: PathBuf, helper: PathBuf) -> Result<Self, BoxError> {
-        let mut installation = Self::open(current, helper.clone())?;
-        let directory = helper.parent().expect("open already validated the parent");
-        let compiler =
-            InstalledBinary::open(directory.join("strands-box-storage-compiler"), directory)?;
-        installation.compiler_index = Some(installation.binaries.len());
-        installation.binaries.push(compiler);
-        installation.verify()?;
-        Ok(installation)
-    }
-
-    #[cfg_attr(
-        not(target_os = "linux"),
-        allow(
-            dead_code,
-            reason = "The storage compiler executable is launched only on Linux"
-        )
-    )]
-    pub(crate) fn storage_compiler(&self) -> Option<(&Path, &File)> {
-        self.compiler_index.map(|index| {
-            let compiler = &self.binaries[index];
-            (compiler.path.as_path(), &compiler.opened)
-        })
     }
 
     fn open(current: PathBuf, helper: PathBuf) -> Result<Self, BoxError> {
@@ -150,7 +114,6 @@ impl TrustedInstallation {
         let installation = Self {
             binaries,
             preparation: std::sync::Mutex::new(()),
-            compiler_index: None,
         };
         installation.verify()?;
         Ok(installation)
@@ -184,26 +147,6 @@ impl TrustedInstallation {
             || self.aliases().map_or(true, |aliases| {
                 aliases.iter().any(|name| lies_within(name, path))
             })
-    }
-
-    /// Judge a protected-view object against the original installed binary identities.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn refuses_projected_mutation(
-        &self,
-        path: &Path,
-        identity: Option<(u64, u64)>,
-    ) -> bool {
-        self.binaries.iter().any(|binary| {
-            identity == Some(binary.identity)
-                || binary.names.iter().any(|name| {
-                    name.starts_with(path)
-                        || identity.is_some_and(|identity| {
-                            name.ancestors()
-                                .filter_map(disk_identity)
-                                .any(|ancestor| ancestor == identity)
-                        })
-                })
-        })
     }
 
     fn aliases(&self) -> io::Result<Vec<PathBuf>> {
@@ -371,18 +314,14 @@ impl InstalledBinary {
             names,
             opened,
             identity,
-            verification: None,
         })
     }
 
     fn verify(&self) -> Result<(), BoxError> {
-        let unchanged_descriptor = if let Some(verification) = &self.verification {
-            verification.verify(&self.opened)?;
-            true
-        } else {
-            self.unchanged_owner_state()
-        };
-        let unchanged = unchanged_descriptor
+        let unchanged = self
+            .opened
+            .metadata()
+            .is_ok_and(|metadata| metadata.nlink() == self.names.len() as u64)
             && self.names.iter().all(|name| {
                 std::fs::symlink_metadata(name).is_ok_and(|metadata| {
                     metadata.is_file() && (metadata.dev(), metadata.ino()) == self.identity
@@ -396,12 +335,6 @@ impl InstalledBinary {
             }
             .into())
         }
-    }
-
-    fn unchanged_owner_state(&self) -> bool {
-        self.opened
-            .metadata()
-            .is_ok_and(|metadata| metadata.nlink() == self.names.len() as u64)
     }
 
     fn names(&self, path: &Path) -> bool {

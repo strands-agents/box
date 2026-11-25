@@ -11,7 +11,6 @@ just test-engine
 
 `just test-engine` runs `just build-cli` first. `just build-cli` puts `box`, Box Core's
 `strands-box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` in `target/debug`.
-Linux also builds `strands-box-storage-compiler` there.
 A missing helper fails the suite. `just check` runs the suite too, through `just test`.
 
 The suite runs with `PATH=/usr/bin:/bin`, so on macOS `the_agent_runs_git_through_the_git_pack`
@@ -47,9 +46,7 @@ git in a box, so it fails every git test. The GitHub macOS runner has Homebrew g
 The four `*_downloads_into_profile_storage_and_lists_tools` tests run real `npx`, `uvx`, `bunx`,
 and `pnpx` servers. Install Node.js with npm, Python 3, uv, Bun, and pnpm, and put their programs
 on `PATH`. Missing launchers fail these tests. CI installs the same prerequisites before the
-Linux and macOS engine suites. The Linux job installs pnpm, Bun, and uv in its temporary
-launcher directory and exports their executable directories through `GITHUB_PATH`.
-The tests download pinned MCP packages from the public npm registry and PyPI, so
+engine suite. The tests download pinned MCP packages from the public npm registry and PyPI, so
 registry access is required.
 
 `an_absolute_mcp_command_imports_its_filename_and_starts_the_selected_server` selects an
@@ -109,6 +106,14 @@ These measurements cover macOS arm64. The
 also targets Node 26.13.0 with bundled npm 11.20.0 and with npm 12.2.1; those combinations have
 no result yet. These checks establish no coverage for pnpm 11 or other Python versions.
 
+Manual MCP checks on Linux aarch64 ran one `@modelcontextprotocol/server-memory` server per
+run through Claude Code, and through Codex on Node 26.13.1. With Node 22.22.2, 24.22.1, and
+26.13.1, bundled npm, Bun 1.4.4 and 1.4.5, and native pnpm 12.16.1, 12.21.0, and 12.23.0 pass.
+Bun 1.3.4 fails. npm, and pnpm 10.34.9 or 11.28.13 on Node 24.22.1, fail when installed in a
+separate npm prefix. The
+`@box/npx`, `@box/bunx`, and `@box/pnpx` pack comments list the exact pairs. These runs are not
+part of the engine suite.
+
 Local checks also pass with uv 0.10.11. Bun 1.3.4 fails while it inspects the current directory
 inside the sandbox. Use Bun 1.4.4 for this suite. The uv pack uses an installed Python and
 disables Python downloads.
@@ -122,10 +127,9 @@ cargo test --locked -p strands-box-cli --all-features --test engine \
   pnpx_downloads_into_profile_storage_and_lists_tools -- --exact --nocapture
 ```
 
-These are finite version checks. The macOS CI job pins Node, npm, pnpm, and Bun; uv and
-Python come from Homebrew without version pins. The Linux job pins pnpm 10.34.9, Bun 1.4.4,
-and uv 0.13.7; Node, npm, and Python come from the runner. Passing CI does not establish
-compatibility with untested launcher or runtime releases.
+These are finite version checks. CI pins Node, npm, pnpm, and Bun; uv and Python come from
+Homebrew without version pins. Passing CI does not establish compatibility with untested
+launcher or runtime releases.
 
 The `npx` test fails with npm 11.19.1 on Node 22.22.2 and Node 24.22.1 on macOS. Its lock
 refresh calls `utimensat`, which Box Core's write policy refuses. The same policy permits
@@ -183,79 +187,3 @@ trusted project's `shellPath` changes neither and its `shellCommandPrefix` still
 `PATH`. With none it skips with a message, unless `BOX_REQUIRE_PI` is set, and then it fails. The
 CI `macos` job sets it and installs the pi version that `resources/packs/pi/pack.toml` names. To run it, install pi
 with `npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.5.2`.
-
-## Incoming Linux storage tests
-
-The CLI's `storage_mounts` tests start real profiles before attaching a filesystem through
-Filesystem in Userspace (FUSE). Core's `runtime_storage_mounts` tests also cover storage attached
-before startup and two roots arriving in either order. Both suites require native Linux user
-and mount namespaces, a usable `/dev/fuse`, `mount`, `umount`, `unshare`, and `ip`. Their FUSE
-cases are ignored by ordinary test runs. Run them explicitly; a missing fixture fails the test.
-
-Run the following commands from the repository root. Build the trusted passthrough fixture
-with a C compiler, `pkg-config`, libfuse 3 development headers, and its library:
-
-```sh
-cc -D_FILE_OFFSET_BITS=64 -std=c11 -Wall -Wextra -Werror -O2 \
-  $(pkg-config --cflags fuse3) crates/cli/app/tests/support/storage_fixture.c \
-  $(pkg-config --libs fuse3) -o /tmp/boxy-storage-fixture
-```
-
-Build the CLI, Core, and their helpers from the same source revision. `--all-features` includes
-Core's `test-support` feature, which builds the test-only `box-storage-probe`. This command also
-builds `strands-box-storage-compiler` beside the CLI and Core binaries. The explicit target
-directory keeps the probe path aligned with Cargo output:
-
-```sh
-export CARGO_TARGET_DIR="$(pwd)/target"
-cargo build --locked -p strands-box -p strands-box-cli -p strands-box-containment \
-  --all-features --bins
-export BOX_STORAGE_TEST_FUSE=/tmp/boxy-storage-fixture
-export BOX_STORAGE_TEST_PROBE="$CARGO_TARGET_DIR/debug/box-storage-probe"
-```
-
-Run the Core tests, then the CLI tests. `--include-ignored` runs ten Core FUSE cases,
-six CLI FUSE cases, and each suite's ordinary control that distinguishes a reaped child from
-a live child. Core also starts pending storage directly as the host user, without the FUSE fixture's
-outer user namespace. That test requires a non-root user and reports a skip when run as root.
-Run the suites serially:
-
-```sh
-cargo test --locked -p strands-box --all-features --test runtime_storage_mounts \
-  -- --include-ignored --test-threads=1 --nocapture
-cargo test --locked -p strands-box-cli --all-features --test engine storage_mounts:: \
-  -- --include-ignored --test-threads=1 --nocapture
-```
-
-Each FUSE test creates its own user, mount, process, and network namespaces. The CLI cases
-attach storage only after observing the original process's pending marker. The three-role case checks an
-agent, a program-resolved tool, and a local Model Context Protocol (MCP) server. The failure case
-requires all observed Box-owned processes to exit when a required denial cannot be applied.
-
-Core also tests the first storage read without retries in the agent, three sequential tool launches,
-and a local server. One source is mounted before Box starts; a second source stays absent. Another case mounts
-storage after the agent starts and before it launches its tools and server.
-The three-role test checks that concurrent recipients share one acquisition worker per distinct
-source while retaining their separate filesystem permissions.
-
-The file case checks exact-file read and write grants, a hidden subtree, a canonical-directory write
-denial, and allowed versus denied execution. A separate test requires Core to reject a mutable
-symbolic link used as a write-denial target. Source-side positive controls prove that the
-filesystem itself permits the operations Box refuses. The hosted case starts one Shell before
-attachment and checks pending paths through both Shell and Monty. After native access succeeds,
-that same Shell runs allowed and denied file operations through both interpreters. Each
-interpreter also checks metadata and lists a directory containing only two granted files;
-the ungranted sibling must remain absent. A separate
-file is native-readable and native-writable but has explicit hosted policy denials; each
-interpreter must produce the corresponding recorded policy decisions. Ordinary sibling
-operations must succeed, and the exact generated rule must deny moving a protected ancestor.
-A kernel refusal to move a mount is insufficient evidence for that policy check.
-
-The hosted failure case keeps a Shell program and one Monty evaluation active before
-attachment. Both must perform pending read and write checks and acknowledge a challenge.
-The incoming source omits a required denial path. The test requires the specific rule
-compilation error, shutdown within 15 seconds, no successful read or write markers, and
-no remaining observed processes or fixture mounts. A hosted timeout does not satisfy it.
-
-The tests do not cover every storage provider, remount behavior, or macOS. Fixture output is
-captured in temporary files so a noisy FUSE request log cannot fill a process pipe.

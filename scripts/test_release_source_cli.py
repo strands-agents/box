@@ -48,10 +48,9 @@ class ReleaseBundleTests(unittest.TestCase):
                     "x86_64-unknown-linux-gnu",
                 ]:
                     with tarfile.open(assets / f"box-cli-{tag}-{triple}.tar.gz", "w:gz") as archive:
-                        binaries = ["box", "strands-box-sock-alias", "strands-box-contain-trampoline"]
-                        if "-linux-" in triple:
-                            binaries.append("strands-box-storage-compiler")
-                        for name in binaries:
+                        for name in [
+                            "box", "strands-box-sock-alias", "strands-box-contain-trampoline",
+                        ]:
                             entry = tarfile.TarInfo(name)
                             entry.size = 4
                             entry.mode = 0o755

@@ -17,7 +17,8 @@ use crate::backend::dependencies::{
 };
 
 mod dependency_permissions;
-mod storage;
+mod incoming_mounts;
+mod mountinfo;
 mod targets;
 
 /// What provides an entry's bytes.
@@ -50,8 +51,6 @@ pub(crate) enum MountOrigin {
     Scaffold,
     /// A path the caller refused, overmounted empty and read-only so a grant above it stops here.
     Refusal,
-    /// A pending logical file name, masked without following an existing final symlink.
-    PendingFile,
     /// An exact write-protected object, with the identity the caller opened.
     Protection { device: u64, inode: u64 },
     /// A write-protected directory tree, read-only, and executable when an exec grant covers it.
@@ -81,6 +80,7 @@ pub(crate) struct MountEntry {
 #[derive(Debug)]
 pub(crate) struct MountView {
     entries: Vec<MountEntry>,
+    incoming_mounts: Vec<PathBuf>,
     /// Each link at the top of the view, as `(name, link text)`: the host's own `/bin -> usr/bin`
     /// and its kin, which reach only what the entries bind.
     root_links: Vec<(PathBuf, PathBuf)>,
@@ -92,8 +92,32 @@ pub(crate) struct MountView {
 }
 
 impl MountView {
+    /// Test callers use the same approved-source builder as production callers.
+    #[cfg(test)]
+    pub(crate) fn plan_receiving_mounts(
+        config: &ContainmentConfig,
+        incoming_mounts: &[PathBuf],
+    ) -> Result<Self, ContainmentError> {
+        let mut config = config.clone();
+        for path in incoming_mounts {
+            let directory = std::fs::File::open(path).map_err(|error| {
+                refusal(format!(
+                    "opening incoming mount '{}': {error}",
+                    path.display()
+                ))
+            })?;
+            config = config.receive_mounts_from(path, &directory)?;
+        }
+        Self::plan(&config)
+    }
+
     /// Plan the view from a request, without touching any namespace.
     pub(crate) fn plan(config: &ContainmentConfig) -> Result<Self, ContainmentError> {
+        let incoming_mounts: Vec<PathBuf> = config
+            .receiving_mounts()
+            .iter()
+            .map(|source| source.path().to_path_buf())
+            .collect();
         // A script names its interpreter by the host's spelling, such as `#!/bin/sh`. The view
         // copies the host's top-level links into `/usr` and mounts every path written through one
         // at its `/usr` name, so `/bin/sh` resolves wherever `/usr/bin/sh` is bound.
@@ -597,9 +621,31 @@ impl MountView {
                 })
         });
 
+        incoming_mounts::require_compatible_entries(&incoming_mounts, &entries)?;
+        for source in config.receiving_mounts() {
+            source.validate_live_identity()?;
+            let path = source.path();
+            let identity = source.identity();
+            if grant_identities
+                .insert(path.to_path_buf(), identity)
+                .is_some_and(|previous| previous != identity)
+            {
+                return Err(refusal(format!(
+                    "incoming mount '{}' changed after its grant was prepared",
+                    path.display()
+                )));
+            }
+        }
+        // Validate the reachable dedicated source mounts before namespace entry. Capture again
+        // during materialization so an intervening replacement cannot select an older mount.
+        drop(incoming_mounts::capture(
+            &incoming_mounts,
+            &grant_identities,
+        )?);
         let root_links = root_links(&entries, &host_links);
         Ok(Self {
             entries,
+            incoming_mounts,
             root_links,
             protected_parents,
             grant_identities,
@@ -607,94 +653,16 @@ impl MountView {
                 .authorizations()
                 .iter()
                 .filter_map(|grant| grant.pin.clone())
+                .chain(
+                    config
+                        .receiving_mounts()
+                        .iter()
+                        .map(|source| source.pin().clone()),
+                )
                 .collect(),
             dependency_sources: RefCell::new(dependency_sources),
             mount_locations: RefCell::new(BTreeMap::new()),
         })
-    }
-
-    /// Hide declared pending targets by their logical spelling without resolving source paths.
-    ///
-    /// The target walker creates placeholders only in the private scaffold. File masks attach to
-    /// retained regular-file or symlink objects without following a link. A missing child through
-    /// a host bind is refused during view construction, before any workload starts.
-    pub(crate) fn with_pending_masks(
-        mut self,
-        masks: &[(PathBuf, Scope)],
-    ) -> Result<Self, ContainmentError> {
-        use std::os::unix::ffi::OsStrExt as _;
-        let host_links = host_usr_links();
-        let mut logical = Vec::<(PathBuf, Scope)>::with_capacity(masks.len());
-        for (path, scope) in masks {
-            if !path.is_absolute()
-                || path == Path::new("/")
-                || path.components().any(|component| {
-                    !matches!(
-                        component,
-                        std::path::Component::RootDir | std::path::Component::Normal(_)
-                    )
-                })
-                || path
-                    .as_os_str()
-                    .as_bytes()
-                    .split(|byte| *byte == b'/')
-                    .any(|part| part == b"." || part == b"..")
-            {
-                return Err(refusal("a pending mask must name an absolute non-root logical path without dot components".into()));
-            }
-            let target = view_spelling(path, &host_links);
-            if logical
-                .iter()
-                .any(|(other, _)| target.starts_with(other) || other.starts_with(&target))
-            {
-                return Err(refusal("pending mask targets overlap or repeat".into()));
-            }
-            if !matches!(scope, Scope::File | Scope::Root) {
-                return Err(refusal(
-                    "a pending mask must have file or directory scope".into(),
-                ));
-            }
-            logical.push((target, *scope));
-        }
-        for (target, scope) in logical {
-            // No configured child may reintroduce bytes underneath a pending directory. The source
-            // identities remain retained; the full plan is rebuilt after captured sources arrive.
-            self.entries
-                .retain(|entry| !entry.target.starts_with(&target));
-            self.protected_parents
-                .retain(|parent| !parent.starts_with(&target));
-            for grant in self.entries.iter().filter(|entry| {
-                entry.kind == MountKind::Bind && entry.writable && target.starts_with(&entry.target)
-            }) {
-                self.protected_parents.extend(
-                    target
-                        .ancestors()
-                        .skip(1)
-                        .take_while(|parent| {
-                            *parent != grant.target && parent.starts_with(&grant.target)
-                        })
-                        .map(Path::to_path_buf),
-                );
-            }
-            self.entries.push(MountEntry {
-                source: None,
-                target,
-                kind: if scope == Scope::File {
-                    MountKind::EmptyFile
-                } else {
-                    MountKind::Fresh { fstype: "tmpfs" }
-                },
-                writable: false,
-                executable: false,
-                origin: if scope == Scope::File {
-                    MountOrigin::PendingFile
-                } else {
-                    MountOrigin::Refusal
-                },
-            });
-        }
-        self.root_links = root_links(&self.entries, &host_links);
-        Ok(self)
     }
 
     /// The planned mounts, in the order they must be established.
@@ -711,15 +679,31 @@ impl MountView {
 
     /// Execute the plan and `pivot_root` into it.
     pub(crate) fn materialize(&self) -> Result<(), ContainmentError> {
-        // Detach this namespace's propagation from the host's before mounting anything.
+        let incoming = incoming_mounts::capture(&self.incoming_mounts, &self.grant_identities)?;
+
+        // Ordinary plans detach the whole tree. Receiving plans retain attached, one-way
+        // sources until the final selected binds exist; detached clones miss setup-time arrivals.
         mount_syscall(
             None,
             Path::new("/"),
             None,
-            libc::MS_REC | libc::MS_PRIVATE,
+            libc::MS_REC
+                | if incoming.is_empty() {
+                    libc::MS_PRIVATE
+                } else {
+                    libc::MS_SLAVE
+                },
             None,
         )
-        .map_err(|e| refusal(format!("making the mount tree private: {e}")))?;
+        .map_err(|e| {
+            if incoming.is_empty() {
+                refusal(format!("making the mount tree private: {e}"))
+            } else {
+                refusal(format!("making the mount tree one-way: {e}"))
+            }
+        })?;
+        #[cfg(test)]
+        incoming_mounts::test_barrier(incoming_mounts::SetupStage::AfterCapture);
 
         // A FIXED path under the host's world-writable `/tmp`, created with `create_dir_all`, was a
         // symlink-following TOCTOU: `create_dir_all` follows symlinks, so a pre-placed link
@@ -746,6 +730,8 @@ impl MountView {
                 self.establish(entry, root)?;
             }
         }
+
+        incoming_mounts::install(self, root, incoming)?;
 
         // The pivot's temporary old-root mountpoint has to exist *before* the root is sealed read-
         // only.
@@ -780,7 +766,12 @@ impl MountView {
         )
         .map_err(|e| refusal(format!("remounting the view root read-only: {e}")))?;
 
+        #[cfg(test)]
+        incoming_mounts::test_barrier(incoming_mounts::SetupStage::BeforePivot);
         self.pivot_into(root)?;
+        #[cfg(test)]
+        incoming_mounts::after_pivot();
+        incoming_mounts::verify_final(&self.incoming_mounts)?;
         for pin in &self.grant_pins {
             pin.release()?;
         }
@@ -830,15 +821,6 @@ impl MountView {
 
     /// Establish one planned mount beneath `root`.
     fn establish(&self, entry: &MountEntry, root: &Path) -> Result<(), ContainmentError> {
-        self.establish_with_source_restrictions(entry, root, false)
-    }
-
-    fn establish_with_source_restrictions(
-        &self,
-        entry: &MountEntry,
-        root: &Path,
-        preserve_source_restrictions: bool,
-    ) -> Result<(), ContainmentError> {
         // The root entry is the staging tmpfs itself, mounted at `root` rather
         // than inside it.
         let target = if entry.target == Path::new("/") {
@@ -897,12 +879,21 @@ impl MountView {
                 if entry.origin == MountOrigin::Refusal {
                     targets::after_mount();
                 }
-                pinned.require_new_mount(&target, &previous)?;
+                let mounted = pinned.require_new_mount(&target, &previous)?;
+                if entry.target == Path::new("/") && !self.incoming_mounts.is_empty() {
+                    mount_syscall(
+                        None,
+                        &targets::descriptor_path(&mounted),
+                        None,
+                        libc::MS_PRIVATE,
+                        None,
+                    )
+                    .map_err(|error| {
+                        refusal(format!("isolating the receiving view root: {error}"))
+                    })?;
+                }
             }
             MountKind::EmptyFile => {
-                if entry.origin == MountOrigin::PendingFile {
-                    return self.establish_pending_file(entry, root);
-                }
                 let source = root.join(EMPTY_FILE_NAME);
                 if !source.exists() {
                     std::fs::OpenOptions::new()
@@ -1036,6 +1027,21 @@ impl MountView {
                 targets::after_bind_mount();
                 let mounted = target_pin.require_new_mount(&target, &previous)?;
                 let mounted_path = targets::descriptor_path(&mounted);
+                if !self.incoming_mounts.is_empty() {
+                    mount_syscall(
+                        None,
+                        &mounted_path,
+                        None,
+                        libc::MS_REC | libc::MS_PRIVATE,
+                        None,
+                    )
+                    .map_err(|error| {
+                        refusal(format!(
+                            "isolating ordinary bind '{}': {error}",
+                            entry.target.display()
+                        ))
+                    })?;
+                }
                 if let Some(identity) = expected {
                     require_grant_identity(&mounted_path, identity)?;
                 }
@@ -1055,18 +1061,8 @@ impl MountView {
                 } = entry.origin
                 {
                     require_mounted_tree_identity(&mounted_path, device, inode)?;
-                    if preserve_source_restrictions {
-                        restrict_mount_tree(&mounted, false, executable, false)?;
-                    } else {
-                        remount_protected_tree(&mounted_path, target_pin.location(), executable)?;
-                    }
-                    require_mount_flags_with_source_restrictions(
-                        &mounted,
-                        false,
-                        executable,
-                        false,
-                        preserve_source_restrictions,
-                    )?;
+                    remount_protected_tree(&mounted_path, target_pin.location(), executable)?;
+                    require_mount_flags(&mounted, false, executable, false)?;
                     target_pin.require_same_mount(&target, &previous, &mounted)?;
                     return Ok(());
                 }
@@ -1080,13 +1076,44 @@ impl MountView {
                     .file_type();
                 let device = std::os::unix::fs::FileTypeExt::is_char_device(&kind)
                     || std::os::unix::fs::FileTypeExt::is_block_device(&kind);
-                if preserve_source_restrictions {
-                    restrict_mount_tree(
+                if self
+                    .incoming_mounts
+                    .iter()
+                    .any(|path| entry.target.starts_with(path))
+                {
+                    let (writable, executable) = incoming_mounts::restrict_existing(
                         &mounted,
                         entry.writable,
                         entry.executable,
-                        device && entry.writable && !entry.executable,
                     )?;
+                    require_mount_flags(&mounted, writable, executable, false)?;
+                } else if self
+                    .incoming_mounts
+                    .iter()
+                    .any(|path| path.starts_with(&entry.target))
+                {
+                    // Preserve the ordinary grant outside incoming subtrees. The selected
+                    // subtrees are replaced by their incoming source binds during install.
+                    let exclusions = self
+                        .incoming_mounts
+                        .iter()
+                        .filter_map(|path| path.strip_prefix(&entry.target).ok())
+                        .map(|relative| mountpoint.join(relative))
+                        .collect::<Vec<_>>();
+                    let flags = libc::MS_REMOUNT
+                        | libc::MS_BIND
+                        | libc::MS_NOSUID
+                        | libc::MS_NODEV
+                        | if entry.writable { 0 } else { libc::MS_RDONLY }
+                        | if entry.executable { 0 } else { libc::MS_NOEXEC };
+                    remount_recursive_excluding(
+                        &mounted_path,
+                        mountpoint,
+                        flags,
+                        "with the requested permissions",
+                        &exclusions,
+                    )?;
+                    require_mount_flags(&mounted, entry.writable, entry.executable, false)?;
                 } else {
                     match (entry.writable, entry.executable) {
                         // An exec grant, its loader, or a library: read-only, and runnable.
@@ -1105,14 +1132,13 @@ impl MountView {
                             }
                         }
                     }
+                    require_mount_flags(
+                        &mounted,
+                        entry.writable,
+                        entry.executable,
+                        device && entry.writable && !entry.executable,
+                    )?;
                 }
-                require_mount_flags_with_source_restrictions(
-                    &mounted,
-                    entry.writable,
-                    entry.executable,
-                    device && entry.writable && !entry.executable,
-                    preserve_source_restrictions,
-                )?;
                 target_pin.require_same_mount(&target, &previous, &mounted)?;
                 if entry.writable {
                     self.mount_locations
@@ -1389,11 +1415,20 @@ fn remount_recursive(
     flags: libc::c_ulong,
     what: &str,
 ) -> Result<(), ContainmentError> {
+    remount_recursive_excluding(target, subtree, flags, what, &[])
+}
+
+fn remount_recursive_excluding(
+    target: &Path,
+    subtree: &Path,
+    flags: libc::c_ulong,
+    what: &str,
+    exclusions: &[PathBuf],
+) -> Result<(), ContainmentError> {
     let mut points = Vec::new();
 
-    // `/proc/self/mounts` is the view's own table here -- the mount namespace is already unshared,
-    // so this cannot see host-only mounts.
-    let table = std::fs::read_to_string("/proc/self/mounts").map_err(|source| {
+    // This is the view's own table: its mount namespace is already unshared.
+    let table = mountinfo::read().map_err(|source| {
         refusal(format!(
             "reading the mount table to remount '{}' {what} recursively: {source}; \
              refusing rather than leave a submount wider than its grant",
@@ -1401,13 +1436,16 @@ fn remount_recursive(
         ))
     })?;
 
-    for line in table.lines() {
-        // Field 2 is the mount point, with octal escapes for space/tab/newline.
-        let Some(raw) = line.split_whitespace().nth(1) else {
-            continue;
-        };
-        let point = PathBuf::from(unescape_mount_field(raw));
-        if point != subtree && point.starts_with(subtree) {
+    let mounts = mountinfo::parse(&table)
+        .ok_or_else(|| refusal("malformed mount table while remounting a grant".into()))?;
+    for mount in mounts {
+        let point = mount.point;
+        if point != subtree
+            && point.starts_with(subtree)
+            && !exclusions
+                .iter()
+                .any(|excluded| point.starts_with(excluded))
+        {
             points.push(point);
         }
     }
@@ -1436,62 +1474,12 @@ fn remount_recursive(
     Ok(())
 }
 
-/// Add the grant's restrictions to a retained mount and every mount beneath it.
-fn restrict_mount_tree(
-    mounted: &std::fs::File,
-    writable: bool,
-    executable: bool,
-    device: bool,
-) -> Result<(), ContainmentError> {
-    let attributes = libc::mount_attr {
-        attr_set: libc::MOUNT_ATTR_NOSUID
-            | if writable { 0 } else { libc::MOUNT_ATTR_RDONLY }
-            | if executable {
-                0
-            } else {
-                libc::MOUNT_ATTR_NOEXEC
-            }
-            | if device { 0 } else { libc::MOUNT_ATTR_NODEV },
-        attr_clr: 0,
-        propagation: 0,
-        userns_fd: 0,
-    };
-    // SAFETY: the descriptor is retained, and the empty path and attribute structure are valid.
-    if unsafe {
-        libc::syscall(
-            libc::SYS_mount_setattr,
-            mounted.as_raw_fd(),
-            c"".as_ptr(),
-            libc::AT_EMPTY_PATH | libc::AT_RECURSIVE,
-            &raw const attributes,
-            std::mem::size_of::<libc::mount_attr>(),
-        )
-    } != 0
-    {
-        return Err(refusal(format!(
-            "adding storage mount restrictions: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    Ok(())
-}
-
 /// Verify the restrictions on the retained mount after remounting it.
 fn require_mount_flags(
     mounted: &std::fs::File,
     writable: bool,
     executable: bool,
     device: bool,
-) -> Result<(), ContainmentError> {
-    require_mount_flags_with_source_restrictions(mounted, writable, executable, device, false)
-}
-
-fn require_mount_flags_with_source_restrictions(
-    mounted: &std::fs::File,
-    writable: bool,
-    executable: bool,
-    device: bool,
-    preserve_source_restrictions: bool,
 ) -> Result<(), ContainmentError> {
     let mut status = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     // SAFETY: mounted owns the descriptor, and status supplies writable storage.
@@ -1508,12 +1496,7 @@ fn require_mount_flags_with_source_restrictions(
         | if executable { 0 } else { libc::ST_NOEXEC }
         | if device { 0 } else { libc::ST_NODEV };
     let mask = libc::ST_RDONLY | libc::ST_NOEXEC | libc::ST_NOSUID | libc::ST_NODEV;
-    let valid = if preserve_source_restrictions {
-        actual & required == required
-    } else {
-        actual & mask == required
-    };
-    if !valid {
+    if actual & mask != required {
         return Err(refusal(format!(
             "mounted filesystem permissions differ from the grant: expected {required:#x}, got {actual:#x}"
         )));
@@ -1523,19 +1506,19 @@ fn require_mount_flags_with_source_restrictions(
 
 /// The mount that covers `point`, if one shadows it inside `target`.
 fn shadowing_mount(point: &Path, target: &Path) -> Result<Option<PathBuf>, ContainmentError> {
-    let table = std::fs::read_to_string("/proc/self/mounts").map_err(|source| {
+    let table = mountinfo::read().map_err(|source| {
         refusal(format!(
             "re-reading the mount table to classify '{}': {source}",
             point.display()
         ))
     })?;
 
+    let mounts = mountinfo::parse(&table).ok_or_else(|| {
+        refusal("malformed mount table while classifying a shadowed mount".into())
+    })?;
     let mut seen_point = false;
-    for line in table.lines() {
-        let Some(raw) = line.split_whitespace().nth(1) else {
-            continue;
-        };
-        let candidate = PathBuf::from(unescape_mount_field(raw));
+    for mount in mounts {
+        let candidate = mount.point;
         if candidate == point {
             seen_point = true;
             continue;
@@ -1553,7 +1536,7 @@ fn shadowing_mount(point: &Path, target: &Path) -> Result<Option<PathBuf>, Conta
     Ok(None)
 }
 
-/// Undo the octal escapes `/proc/self/mounts` uses for space, tab, newline, and backslash.
+/// Undo the mount table escapes for space, tab, newline, and backslash.
 fn unescape_mount_field(field: &str) -> String {
     let chars: Vec<char> = field.chars().collect();
     let mut out = String::with_capacity(field.len());
@@ -4485,6 +4468,7 @@ mod tests {
     fn unsafe_internal_mount_entries_are_refused_before_mounting() {
         let root = tempfile::tempdir().unwrap();
         let view = MountView {
+            incoming_mounts: Vec::new(),
             entries: Vec::new(),
             root_links: Vec::new(),
             protected_parents: BTreeSet::new(),
@@ -4515,6 +4499,7 @@ mod tests {
         let source = root.path().join("source");
         std::fs::write(&source, b"protected").unwrap();
         let view = MountView {
+            incoming_mounts: Vec::new(),
             entries: Vec::new(),
             root_links: Vec::new(),
             protected_parents: BTreeSet::new(),
@@ -4557,6 +4542,7 @@ mod tests {
             origin: MountOrigin::Grant,
         };
         let view = MountView {
+            incoming_mounts: Vec::new(),
             entries: vec![parent],
             root_links: Vec::new(),
             protected_parents: BTreeSet::new(),
@@ -4619,6 +4605,7 @@ mod tests {
             std::fs::write(&source, b"granted").unwrap();
             let identity = ObjectIdentity::from_metadata(&source.metadata().unwrap());
             let view = MountView {
+                incoming_mounts: Vec::new(),
                 entries: Vec::new(),
                 root_links: Vec::new(),
                 protected_parents: BTreeSet::new(),
@@ -4865,6 +4852,7 @@ mod tests {
             std::fs::create_dir(&old).unwrap();
             std::fs::write(old.join("unexpected"), b"marker").unwrap();
             let view = MountView {
+                incoming_mounts: Vec::new(),
                 entries: Vec::new(),
                 root_links: Vec::new(),
                 protected_parents: BTreeSet::new(),
@@ -4946,6 +4934,7 @@ mod tests {
                 },
             };
             let view = MountView {
+                incoming_mounts: Vec::new(),
                 entries: Vec::new(),
                 root_links: Vec::new(),
                 protected_parents: BTreeSet::new(),
@@ -5063,6 +5052,7 @@ mod tests {
             origin: MountOrigin::Grant,
         };
         let view = MountView {
+            incoming_mounts: Vec::new(),
             entries: Vec::new(),
             root_links: Vec::new(),
             protected_parents: BTreeSet::new(),

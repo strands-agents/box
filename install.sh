@@ -559,7 +559,7 @@ if grep -Eq '^(\./)*Box[.]app/Contents/MacOS/box$' "$box_work/names"; then
     [ "$box_system" = Darwin ] || die "native app bundles require macOS"
     box_native=1
 fi
-awk -v native="$box_native" -v box_os="$box_system" '
+awk -v native="$box_native" '
     BEGIN {
         alias["strands-box-sock-alias"] = "Box.app/Contents/MacOS/strands-box-sock-alias"
         alias["strands-box-contain-trampoline"] = "Box.app/Contents/MacOS/strands-box-contain-trampoline"
@@ -606,8 +606,7 @@ awk -v native="$box_native" -v box_os="$box_system" '
                     if (kind[FNR] != "d") bad = 1
                 } else if (path !~ /^resources\/(packs|plugins|policies|starters)\// || (kind[FNR] != "-" && kind[FNR] != "d")) bad = 1
             } else bad = 1
-        } else if (name ~ /^(box|strands-box-sock-alias|strands-box-contain-trampoline|release[.]json)$/ ||
-            (box_os == "Linux" && name == "strands-box-storage-compiler") || name == "resources/config.toml" || name == "resources/editing-box-profile.md") {
+        } else if (name ~ /^(box|strands-box-sock-alias|strands-box-contain-trampoline|release[.]json)$/ || name == "resources/config.toml" || name == "resources/editing-box-profile.md") {
             if (kind[FNR] != "-") bad = 1
         } else if (name == "resources" || name == "resources/packs" || name == "resources/shared" || name == "resources/plugins" || name == "resources/policies" || name == "resources/starters") {
             if (kind[FNR] != "d") bad = 1
@@ -639,29 +638,6 @@ cmp -s "$box_work/actual-files" "$box_work/sorted-files" || die "extracted files
 for box_required in box strands-box-sock-alias strands-box-contain-trampoline release.json resources/config.toml resources/policies/open/policy.toml resources/policies/open/policy.dw; do
     [ -f "$box_payload/$box_required" ] || die "bundle is missing $box_required"
 done
-box_binaries="box strands-box-sock-alias strands-box-contain-trampoline"
-if [ "$box_system" = Linux ]; then
-    box_storage_compiler=$(python3 -I -c '
-import json, sys
-try:
-    with open(sys.argv[1]) as source:
-        record = json.load(source)
-    if not isinstance(record, dict):
-        raise ValueError("expected an object")
-    if "storage_compiler" in record and record["storage_compiler"] is not True:
-        raise ValueError("storage_compiler must be true")
-    print("true" if record.get("storage_compiler") is True else "legacy")
-except (OSError, ValueError) as error:
-    sys.exit("install.sh: invalid release.json: " + str(error))
-' "$box_payload/release.json") || die "invalid Linux package metadata"
-    if [ "$box_storage_compiler" = true ]; then
-        [ -f "$box_payload/strands-box-storage-compiler" ] ||
-            die "bundle is missing strands-box-storage-compiler"
-        box_binaries="$box_binaries strands-box-storage-compiler"
-    elif [ -e "$box_payload/strands-box-storage-compiler" ]; then
-        die "bundle contains strands-box-storage-compiler without its metadata marker"
-    fi
-fi
 # Releases up to v0.1.11 hold their packs in resources/shared/, keep their starters inside the
 # agent packs, and ship the open and project policies. Only a packs/ release has the rest.
 # The profile guide is not required: packs/ releases before it ship without it.
@@ -714,7 +690,7 @@ done
 if [ "$box_system" = Darwin ] && [ "$box_unsigned" -eq 1 ]; then
     log "Allowing unsigned release; Apple signature and Gatekeeper checks are skipped."
 fi
-box_programs="$box_binaries"
+box_programs="box strands-box-sock-alias strands-box-contain-trampoline"
 if [ "$box_native" -eq 1 ]; then
     [ -x "$box_payload/box" ] && [ -x "$box_payload/Box.app/Contents/MacOS/box" ] ||
         die "native bundle launcher or executable is not executable"
@@ -723,12 +699,17 @@ fi
 for box_binary in $box_programs; do
     [ -x "$box_payload/$box_binary" ] || die "not executable: $box_binary"
     [ "$box_system" = Darwin ] && [ "$box_unsigned" -eq 0 ] || continue
-    case "$box_binary" in
-        box|Box.app) box_identifier=com.amazon.strands.box-cli ;;
-        *) box_identifier=com.amazon.strands.box ;;
-    esac
     codesign --display --verbose=4 -r- "$box_payload/$box_binary" > "$box_work/signature" 2>&1 ||
         die "cannot read signing identity: $box_binary"
+    box_identifier=com.amazon.strands.box
+    case "$box_binary" in
+        box|Box.app)
+            box_identifier=$(sed -n 's/^Identifier=//p' "$box_work/signature")
+            case "$box_identifier" in
+                com.amazon.strands.box|com.amazon.strands.box-cli) ;;
+                *) die "unexpected publisher or signing options: $box_binary" ;;
+            esac ;;
+    esac
     awk -v identifier="$box_identifier" -v team="$BOX_TEAM_ID" '
         /^Identifier=/ { identities++; if ($0 != "Identifier=" identifier) bad = 1 }
         /^Authority=/ { authorities++; if (authorities == 1 && $0 !~ /^Authority=Developer ID Application: /) bad = 1 }
@@ -756,7 +737,7 @@ box_reported=$("$box_payload/box" --version) || die "staged box --version failed
 [ "$box_reported" = "box $box_version" ] || die "binary version does not match $box_version"
 find "$box_payload" -type d -exec chmod 0755 {} +
 find "$box_payload" -type f -exec chmod 0644 {} +
-for box_binary in $box_binaries; do chmod 0755 "$box_payload/$box_binary"; done
+chmod 0755 "$box_payload/box" "$box_payload/strands-box-sock-alias" "$box_payload/strands-box-contain-trampoline"
 if [ "$box_native" -eq 1 ]; then chmod 0755 "$box_payload/Box.app/Contents/MacOS/box"; fi
 
 progress 99 Installing
@@ -817,9 +798,11 @@ if [ "$box_drawing" -eq 1 ]; then
     printf '\n\033[?25h' >&2
     box_drawing=0
 fi
+box_welcome=1
 if [ -n "$box_previous" ]; then
     box_old_version=${box_previous%-$box_triple}
     if [ "$box_old_version" = "$box_version" ]; then
+        box_welcome=0
         log "box $box_version is already installed."
     else
         log "Updated box $box_old_version to $box_version."
@@ -842,7 +825,9 @@ case ":${PATH-}:" in
         esac
         ;;
 esac
-if [ -z "$box_previous" ]; then
+# Installs and updates both welcome, so an update also shows the commands and the telemetry
+# notice. A rerun of the installed version keeps that release and leaves the welcome out.
+if [ "$box_welcome" -eq 1 ]; then
     printf '\n' >&2
     welcome
 fi

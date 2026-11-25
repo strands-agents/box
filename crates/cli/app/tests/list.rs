@@ -441,7 +441,8 @@ fn list_bounds_profile_metadata_by_bytes_and_strips_only_one_final_newline() {
     );
     assert_eq!(
         rows[1],
-        json!({"updated": null, "id": "no-final-newline", "profile": "whole-profile-name"})
+        json!({"updated": null, "id": "no-final-newline", "profile": null}),
+        "box writes every record with a final newline; one without it names no profile"
     );
     assert_eq!(
         rows[2],
@@ -642,7 +643,7 @@ fn runs_list_orders_nanoseconds_then_ids_and_places_missing_times_last() {
         text.iter().map(|row| row[2].as_str()).collect::<Vec<_>>(),
         ids(&rows)
     );
-    assert_eq!(text[0][1], "2000-01-02T03:04:05.000000009Z");
+    assert_eq!(text[0][1], "2000-01-02T03:04:05Z");
     assert_eq!(text[4][1], "unknown");
     assert_eq!(snapshot(&scene.home), before);
 }
@@ -786,13 +787,13 @@ fn runs_list_is_namespaced_without_a_top_level_list_alias() {
 fn runs_list_with_a_profile_keeps_only_runs_that_record_that_profile() {
     let scene = Scene::new();
     for (id, profile, offset) in [
-        ("claude-new", Some(&b"claude\n"[..]), 3),
-        ("other-mid", Some(&b"other\n"[..]), 2),
-        ("claude-old", Some(&b"claude\n"[..]), 1),
-        ("claude-prefix-only", None, 4),
-        ("claudette-near", Some(&b"claudette\n"[..]), 5),
-        ("cased-near", Some(&b"Claude\n"[..]), 6),
-        ("short-near", Some(&b"clau\n"[..]), 7),
+        ("b-000000000000000a", Some(&b"claude\n"[..]), 3),
+        ("b-000000000000000b", Some(&b"other\n"[..]), 2),
+        ("b-000000000000000c", Some(&b"claude\n"[..]), 1),
+        ("b-000000000000000d", None, 4),
+        ("b-000000000000000e", Some(&b"claudette\n"[..]), 5),
+        ("b-000000000000000f", Some(&b"Claude\n"[..]), 6),
+        ("b-0000000000000010", Some(&b"clau\n"[..]), 7),
     ] {
         let run = scene.saved(id, profile);
         configuration_at(&run, DATE_SECONDS + offset, 0);
@@ -806,7 +807,10 @@ fn runs_list_with_a_profile_keeps_only_runs_that_record_that_profile() {
 
     let json_output = filtered(Some("json"));
     success(&json_output);
-    assert_eq!(ids(&json_rows(&json_output)), ["claude-new", "claude-old"]);
+    assert_eq!(
+        ids(&json_rows(&json_output)),
+        ["b-000000000000000a", "b-000000000000000c"]
+    );
 
     let text_output = filtered(None);
     success(&text_output);
@@ -814,8 +818,8 @@ fn runs_list_with_a_profile_keeps_only_runs_that_record_that_profile() {
         text(&text_output.stdout),
         concat!(
             "PROFILE\tUPDATED (UTC)\tBOX ID\n",
-            "claude\t2000-01-02T03:04:08Z\tclaude-new\n",
-            "claude\t2000-01-02T03:04:06Z\tclaude-old\n"
+            "claude\t2000-01-02T03:04:08Z\tb-000000000000000a\n",
+            "claude\t2000-01-02T03:04:06Z\tb-000000000000000c\n"
         )
     );
 
@@ -885,5 +889,68 @@ fn runs_list_with_a_profile_that_has_no_runs_succeeds_with_an_empty_result() {
     assert!(
         !scene.home.join(".strands/box/profiles").exists(),
         "the filter needs no profile folder"
+    );
+}
+
+#[test]
+fn runs_list_with_a_profile_lists_exactly_what_profile_clean_removes() {
+    let scene = Scene::new();
+    for (id, profile) in [
+        ("b-0000000000000001", Some(&b"claude\n"[..])),
+        ("b-0000000000000002", Some(&b"codex\n"[..])),
+        ("b-0000000000000003", Some(&b"claude"[..])),
+        ("claude-0000000000000004", Some(&b"claude\n"[..])),
+    ] {
+        scene.saved(id, profile);
+        std::fs::create_dir_all(scene.runs().join(id).join("box")).unwrap();
+    }
+    let all = bounded_output(scene.command(Some("json")));
+    success(&all);
+    let rows = json_rows(&all);
+    let mut shown: Vec<(&str, Option<&str>)> = rows
+        .iter()
+        .map(|row| (row["id"].as_str().unwrap(), row["profile"].as_str()))
+        .collect();
+    shown.sort_unstable();
+    assert_eq!(
+        shown,
+        [
+            ("b-0000000000000001", Some("claude")),
+            ("b-0000000000000002", Some("codex")),
+            ("b-0000000000000003", None),
+            ("claude-0000000000000004", Some("claude")),
+        ],
+        "the PROFILE column reads a record the way the ownership check does"
+    );
+
+    let mut listed = scene.command(Some("json"));
+    listed.arg("claude");
+    let listed = bounded_output(listed);
+    success(&listed);
+    assert_eq!(
+        ids(&json_rows(&listed)),
+        ["b-0000000000000001"],
+        "a record without its newline, and an ID that is not a run ID, belong to no profile"
+    );
+
+    let clean = scene
+        .base_command()
+        .args(["profile", "clean", "claude", "--no-ask"])
+        .output()
+        .unwrap();
+    success(&clean);
+    let mut left: Vec<String> = std::fs::read_dir(scene.runs())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort_unstable();
+    assert_eq!(
+        left,
+        [
+            "b-0000000000000002",
+            "b-0000000000000003",
+            "claude-0000000000000004",
+        ],
+        "clean removes exactly what list showed for the profile"
     );
 }

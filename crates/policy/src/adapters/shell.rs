@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::io;
-use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -728,10 +727,7 @@ impl PolicyEffectPermit {
         };
 
         if recorded.is_err() {
-            let _ = writeln!(
-                io::stderr().lock(),
-                "strands-box: warning: policy outcome recording was not confirmed"
-            );
+            diagnostics::diag!(P0301, "policy outcome recording was not confirmed");
         }
         Ok(())
     }
@@ -2040,11 +2036,12 @@ mod tests {
         ));
         let warnings: Vec<&str> = stderr
             .lines()
-            .filter(|line| line.contains("strands-box: warning"))
+            // The adapters' only warning; every other policy line is the engine's own.
+            .filter(|line| line.contains("policy outcome recording was not confirmed"))
             .collect();
         assert_eq!(
             warnings,
-            vec!["strands-box: warning: policy outcome recording was not confirmed"],
+            vec!["policy: warning[P0301]: policy outcome recording was not confirmed"],
             "{stderr}"
         );
         assert!(!stderr.contains("printf"), "{stderr}");

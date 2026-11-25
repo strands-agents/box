@@ -21,8 +21,7 @@ HEADERS = {
     ARM64: ("AArch64", "/lib/ld-linux-aarch64.so.1"),
     X86_64: ("Advanced Micro Devices X86-64", "/lib64/ld-linux-x86-64.so.2"),
 }
-BINARIES = ("box", "strands-box-sock-alias", "strands-box-contain-trampoline",
-            "strands-box-storage-compiler")
+BINARIES = ("box", "strands-box-sock-alias", "strands-box-contain-trampoline")
 
 
 def readelf_output(target, *requirements, machine=None, loader=None):
@@ -83,7 +82,6 @@ class LinuxPackageTests(unittest.TestCase):
         stdout, stderr = io.StringIO(), io.StringIO()
         with (
             patch.object(checker.sys, "argv", ["check-linux-package.py", "package", *arguments]),
-            patch.object(checker.Path, "read_text", return_value='{"storage_compiler": true}'),
             patch.object(checker.subprocess, "run", return_value=SimpleNamespace(stdout=output)) as run,
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
@@ -97,8 +95,8 @@ class LinuxPackageTests(unittest.TestCase):
         self.assertEqual(stderr, "")
         records = json.loads(stdout)
         self.assertEqual([record["binary"] for record in records], list(BINARIES))
-        self.assertEqual([record["architecture"] for record in records], [architecture] * len(BINARIES))
-        self.assertEqual([record["loader"] for record in records], [loader] * len(BINARIES))
+        self.assertEqual([record["architecture"] for record in records], [architecture] * 3)
+        self.assertEqual([record["loader"] for record in records], [loader] * 3)
         self.assertEqual(
             [call.args[0][-1] for call in run.call_args_list],
             [str(Path("package") / name) for name in BINARIES],
@@ -135,7 +133,6 @@ class LinuxPackageTests(unittest.TestCase):
         for name, headers, message in [
             ("strands-box-sock-alias", {"machine": "AArch64"}, "expected an .* executable"),
             ("strands-box-contain-trampoline", {"loader": HEADERS[ARM64][1]}, "expected loader"),
-            ("strands-box-storage-compiler", {"machine": "AArch64"}, "expected an .* executable"),
         ]:
             with self.subTest(binary=name):
                 def readelf(command, **kwargs):
@@ -147,7 +144,6 @@ class LinuxPackageTests(unittest.TestCase):
                     patch.object(checker.sys, "argv", [
                         "check-linux-package.py", "package", "--target", X86_64,
                     ]),
-                    patch.object(checker.Path, "read_text", return_value='{"storage_compiler": true}'),
                     patch.object(checker.subprocess, "run", side_effect=readelf),
                     contextlib.redirect_stdout(stdout),
                     contextlib.redirect_stderr(stderr),

@@ -25,15 +25,6 @@ use crate::run::contain::executable;
 use crate::run::contain::runtime_minimum::{self, MinimumCell};
 use crate::run::hosted::Attachment;
 
-#[cfg_attr(
-    not(target_os = "linux"),
-    allow(
-        dead_code,
-        reason = "Production storage admission is supported only on Linux"
-    )
-)]
-pub(crate) mod storage;
-
 /// Where a `ProcessSpec` is translated: this BoxRun's attachment, layout, record, and loaded
 /// authority sources.
 pub(crate) struct Site<'a> {
@@ -69,6 +60,7 @@ pub(crate) struct Launch<'a> {
 #[derive(Debug)]
 pub(crate) struct ApprovedReach {
     tables: BTreeMap<String, DirectReach>,
+    hosted_mount_roots: Vec<PathBuf>,
     commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
     installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
 }
@@ -90,66 +82,50 @@ impl ApprovedReach {
         protected_sources: &[AuthoritySource],
         commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
     ) -> Result<Self, BoxError> {
-        let judged = stored.process_tables();
-        let installation = std::sync::Arc::new(if judged.storage_roots.is_empty() {
-            crate::run::installation::TrustedInstallation::load()?
-        } else {
-            crate::run::installation::TrustedInstallation::load_for_storage()?
-        });
+        let installation =
+            std::sync::Arc::new(crate::run::installation::TrustedInstallation::load()?);
         // The tables that the early check of a secret source program judges, so no table reaches
         // one judgement and not the other.
+        let judged = stored.process_tables();
+        let mut hosted_mount_roots = Vec::new();
         let tables = judged
             .tables
             .iter()
-            .map(|(table, spec)| {
-                if !spec.filesystem.mounts.is_empty() {
-                    let context = storage::FrozenFilesystemContext::capture(
-                        table,
-                        &judged,
-                        protected_sources,
-                    )?;
-                    let generation = storage::compile_generation(
-                        &storage::GenerationSite {
-                            spec,
-                            table,
-                            context: &context,
-                            roots: &spec.filesystem.mounts,
-                            commands: &commands,
-                            installation: &installation,
-                        },
-                        &[],
-                        None,
-                    )?;
-                    let policy = std::sync::Arc::new(storage::Policy {
-                        spec: spec.clone(),
-                        table: table.clone(),
-                        context,
-                        roots: spec.filesystem.mounts.clone(),
-                        checkpoint: generation.checkpoint(),
-                        layout: generation.with_policy(|_, masks, targets| {
-                            storage::StorageLayout {
-                                pending_masks: masks.to_vec(),
-                                publication_targets: targets.to_vec(),
-                            }
-                        }),
-                        commands: std::sync::Arc::clone(&commands),
-                        installation: std::sync::Arc::clone(&installation),
-                    });
-                    return Ok((table.clone(), generation.into_initial_reach(policy)));
+            .map(|table| {
+                let mut reach = judge_lists(&table.spec, &table.name, &judged, protected_sources)?;
+                commands.validate_reach(&table.name, &reach)?;
+                installation.validate_reach(&table.name, &reach)?;
+                let receiving = super::mounts::prepare(
+                    &table.spec,
+                    &table.name,
+                    table.runtime_reach,
+                    stored,
+                    &reach,
+                    protected_sources,
+                )?;
+                if matches!(table.runtime_reach, RuntimeReach::Agent) {
+                    hosted_mount_roots.extend(
+                        receiving
+                            .iter()
+                            .map(|mount| mount.resolved_path().to_path_buf()),
+                    );
                 }
-                let mut reach = judge_lists(spec, table, &judged, protected_sources)?;
-                commands.validate_reach(table, &reach)?;
-                installation.validate_reach(table, &reach)?;
                 reach.installation = Some(std::sync::Arc::clone(&installation));
-                reach.command = commands.get(table).cloned();
-                Ok((table.clone(), reach))
+                reach.command = commands.get(&table.name).cloned();
+                Ok((table.name.clone(), reach))
             })
             .collect::<Result<BTreeMap<_, _>, BoxError>>()?;
         Ok(Self {
             tables,
+            hosted_mount_roots,
             commands,
             installation,
         })
+    }
+
+    /// The agent's canonical receiving roots that hosted interpreters may access under policy.
+    pub(crate) fn hosted_mount_roots(&self) -> &[PathBuf] {
+        &self.hosted_mount_roots
     }
 
     pub(crate) fn commands(&self) -> &std::sync::Arc<crate::run::commands::ConfiguredCommands> {
@@ -160,17 +136,6 @@ impl ApprovedReach {
         &self,
     ) -> &std::sync::Arc<crate::run::installation::TrustedInstallation> {
         &self.installation
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn storage_roots(&self) -> Vec<std::path::PathBuf> {
-        self.tables
-            .values()
-            .filter_map(|reach| reach.storage.as_ref())
-            .flat_map(|policy| policy.roots.iter().cloned())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect()
     }
 
     /// The reach approved for one process table, named as a refusal names it.
@@ -196,24 +161,6 @@ pub(crate) fn judge_lists(
     tables: &ProcessTables,
     protected_sources: &[AuthoritySource],
 ) -> Result<DirectReach, BoxError> {
-    with_filesystem_context(table, tables, protected_sources, |context| {
-        let plan = filesystem::FilesystemPlan::new(&spec.filesystem, &[], context)?;
-        match plan.judge_current_view(&[], context)? {
-            filesystem::FilesystemCompilation::Complete(reach) => Ok(reach),
-            filesystem::FilesystemCompilation::Pending(pending) => {
-                Err(pending.unavailable(context).into())
-            }
-        }
-    })
-}
-
-/// Borrow the ordinary filesystem guards for startup and captured-storage compilation.
-fn with_filesystem_context<T>(
-    table: &str,
-    tables: &ProcessTables,
-    protected_sources: &[AuthoritySource],
-    judge: impl FnOnce(&FilesystemContext<'_>) -> Result<T, BoxError>,
-) -> Result<T, BoxError> {
     let operator_home = crate::record::layout::operator_home_directory()?;
     // Canonical, because a `~/` entry resolves against it and carries the identity the kernel
     // checks.
@@ -250,76 +197,7 @@ fn with_filesystem_context<T>(
         },
         source_paths: &tables.source_paths,
     };
-    judge(&context)
-}
-
-/// Apply a process table's already judged lists through the normal containment guards.
-fn apply_filesystem_reach(
-    mut containment: ContainmentConfig,
-    reach: &DirectReach,
-    table: &str,
-    guard: &GuardedBoxState<'_>,
-    program_identity: &Path,
-    interpreter_exec_files: &[PathBuf],
-) -> Result<ContainmentConfig, BoxError> {
-    // **Every refusal the grants need, applied before the grants themselves.** macOS renders
-    // these after every allow and Linux overmounts them empty, so each subtracts from the grant
-    // rather than sitting beside it.
-    for refusal in &reach.refusals {
-        containment = containment.refuse(&refusal.path, refusal.scope)?;
-    }
-    // The box's private tree is refused beneath every grant.
-    containment = containment.refuse(guard.private, Scope::Root)?;
-    for grant in &reach.grants {
-        if grant.operation == Operation::Exec
-            && grant.scope == Scope::File
-            && (grant.resolved == program_identity
-                || interpreter_exec_files.contains(&grant.resolved))
-        {
-            continue;
-        }
-        containment = if grant.credential_store {
-            // The guards judge the canonical identity; the grant itself keeps the authored
-            // path, which the credential-store exception validates on its own terms.
-            guard.judge(&grant.resolved, grant.operation, grant.scope)?;
-            containment.allow_credential_store(&grant.lexical, grant.operation, grant.scope)?
-        } else {
-            // One lookup, compared with the approved identity and then granted as it is.
-            let prepared = grant.prepare(table)?;
-            guard.judge(prepared.resolved_path(), grant.operation, grant.scope)?;
-            containment.allow_prepared(prepared, grant.operation, grant.scope)?
-        };
-    }
-
-    for tree in &reach.write_protections {
-        containment = containment.protect_write_tree(tree)?;
-    }
-    Ok(containment)
-}
-
-/// Recheck the startup command identity before admitting another filesystem view.
-fn apply_command_identity(
-    mut containment: ContainmentConfig,
-    reach: &DirectReach,
-    table: &str,
-    program_identity: &Path,
-) -> Result<ContainmentConfig, BoxError> {
-    if let Some(command) = reach.command.as_ref() {
-        command.verify()?;
-        if command.path() != program_identity {
-            return Err(ConfigError::Process {
-                table: table.to_string(),
-                reason: "configured command identity changed before launch".to_string(),
-            }
-            .into());
-        }
-        containment = if command.has_several_names() {
-            containment.require_command_identity(command.path(), command.opened())?
-        } else {
-            containment.require_file_identity(command.path(), command.opened())?
-        };
-    }
-    Ok(containment)
+    Ok(filesystem::direct_grants(&spec.filesystem, &context)?)
 }
 
 /// The host trust the egress gateway reads this run, judged once for every table and interpreter.
@@ -432,9 +310,9 @@ pub(crate) enum ShebangInterpreters {
 
 /// The translated boundary for one process.
 pub(crate) struct Boundary {
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    storage: Option<std::sync::Arc<storage::LaunchPlan>>,
     installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
+    /// Approved sources, held through launch so serialized identities cannot be reused.
+    _receiving_mounts: Vec<super::mounts::ApprovedMount>,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
         all(target_os = "linux", feature = "native-filesystem-policy")
@@ -468,7 +346,7 @@ pub(crate) struct Boundary {
     working_directory: PathBuf,
 
     /// What the caller prints before the process starts.
-    disclosure: String,
+    disclosure: Vec<DisclosureMessage>,
 
     /// Every localhost port the containment config grants, in grant order, for the Linux relay.
     #[cfg(target_os = "linux")]
@@ -669,6 +547,17 @@ impl Boundary {
             None => std::sync::Arc::new(crate::run::installation::TrustedInstallation::load()?),
         };
         installation.validate_reach(table, reach)?;
+        let receiving_mounts = super::mounts::prepare(
+            spec,
+            table,
+            launch.runtime_reach,
+            stored,
+            reach,
+            site.protected_sources,
+        )?;
+        for source in &receiving_mounts {
+            containment = source.forward_into(containment)?;
+        }
         let exec_trees: Vec<&Path> = reach
             .grants
             .iter()
@@ -868,46 +757,54 @@ impl Boundary {
             containment = containment.allow_file_watching();
         }
 
-        // Retain the ordinary runtime grants and authority identities before adding authored
-        // filesystem permissions. Each captured generation lowers those same original rules.
-        let storage = if let Some(policy) = &reach.storage {
-            let base = protect_authorities(
-                containment.clone(),
-                guard.private,
-                site.protected_sources
-                    .iter()
-                    .map(|source| (source.path(), source.opened())),
-            )?;
-            Some(std::sync::Arc::new(storage::LaunchPlan {
-                policy: std::sync::Arc::clone(policy),
-                input: storage::CompilationInput {
-                    spec: policy.spec.clone(),
-                    table: policy.table.clone(),
-                    context: policy.context.clone(),
-                    roots: policy.roots.clone(),
-                    previous: policy.checkpoint.clone(),
-                    admitted: Vec::new(),
-                    base_config_json: base.to_json()?,
-                    private: guard.private.to_path_buf(),
-                    box_directory: guard.box_directory.to_path_buf(),
-                    program_identity: program_identity.clone(),
-                    interpreter_exec_files: interpreter_exec_files.clone(),
-                },
-            }))
-        } else {
-            None
-        };
+        // **Every refusal the grants need, applied before the grants themselves.** macOS renders
+        // these after every allow and Linux overmounts them empty, so each subtracts from the grant
+        // rather than sitting beside it.
+        for refusal in &reach.refusals {
+            containment = containment.refuse(&refusal.path, refusal.scope)?;
+        }
+        // The box's private tree is refused beneath every grant.
+        containment = containment.refuse(guard.private, Scope::Root)?;
+        for grant in &reach.grants {
+            if grant.operation == Operation::Exec
+                && grant.scope == Scope::File
+                && (grant.resolved == program_identity
+                    || interpreter_exec_files.contains(&grant.resolved))
+            {
+                continue;
+            }
+            containment = if grant.credential_store {
+                // The guards judge the canonical identity; the grant itself keeps the authored
+                // path, which the credential-store exception validates on its own terms.
+                guard.judge(&grant.resolved, grant.operation, grant.scope)?;
+                containment.allow_credential_store(&grant.lexical, grant.operation, grant.scope)?
+            } else {
+                // One lookup, compared with the approved identity and then granted as it is.
+                let prepared = grant.prepare(table)?;
+                guard.judge(prepared.resolved_path(), grant.operation, grant.scope)?;
+                containment.allow_prepared(prepared, grant.operation, grant.scope)?
+            };
+        }
 
-        containment = apply_filesystem_reach(
-            containment,
-            reach,
-            table,
-            &guard,
-            &program_identity,
-            &interpreter_exec_files,
-        )?;
+        for tree in &reach.write_protections {
+            containment = containment.protect_write_tree(tree)?;
+        }
 
-        containment = apply_command_identity(containment, reach, table, &program_identity)?;
+        if let Some(command) = reach.command.as_ref() {
+            command.verify()?;
+            if command.path() != program_identity {
+                return Err(ConfigError::Process {
+                    table: table.to_string(),
+                    reason: "configured command identity changed before launch".to_string(),
+                }
+                .into());
+            }
+            containment = if command.has_several_names() {
+                containment.require_command_identity(command.path(), command.opened())?
+            } else {
+                containment.require_file_identity(command.path(), command.opened())?
+            };
+        }
 
         containment = protect_authorities(
             containment,
@@ -972,6 +869,7 @@ impl Boundary {
             table,
             grants: &reach.grants,
             write_protections: &reach.write_protections,
+            receiving_mounts: &receiving_mounts,
             minimum: &minimum,
             interpreters: &interpreters,
             interpreter_aliases: &interpreter_aliases,
@@ -1016,8 +914,8 @@ impl Boundary {
             .filter(|spelled| *spelled != executable_path.as_path())
             .map(|spelled| spelled.display().to_string());
         Ok(Self {
-            storage,
             installation,
+            _receiving_mounts: receiving_mounts,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
                 all(target_os = "linux", feature = "native-filesystem-policy")
@@ -1052,11 +950,6 @@ impl Boundary {
     ))]
     pub(crate) fn native_filesystem_policy(&self) -> bool {
         self.native_filesystem_policy
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn storage(&self) -> Option<&std::sync::Arc<storage::LaunchPlan>> {
-        self.storage.as_ref()
     }
 
     pub(crate) fn installation(&self) -> &crate::run::installation::TrustedInstallation {
@@ -1118,9 +1011,22 @@ impl Boundary {
         &self.working_directory
     }
 
-    /// What the caller prints on stderr before the process starts.
-    pub(crate) fn disclosure(&self) -> &str {
-        &self.disclosure
+    /// Write what the caller states before the process starts to stderr, one message per part.
+    pub(crate) fn disclose(&self) {
+        for (kind, text) in &self.disclosure {
+            ::diagnostics::diag!({ *kind }, "{text}");
+        }
+    }
+
+    /// The disclosure as stderr shows it.
+    #[cfg(test)]
+    pub(crate) fn disclosure(&self) -> String {
+        let mut output = Vec::new();
+        for (kind, text) in &self.disclosure {
+            ::diagnostics::diag!(into output, { *kind }, "{text}")
+                .expect("a Vec takes every write");
+        }
+        String::from_utf8(output).expect("each message is UTF-8")
     }
 
     /// Where the box listens for the agent, and the agent's own port, one pair per entry.
@@ -1140,6 +1046,7 @@ struct DisclosureInputs<'a> {
     table: &'a str,
     grants: &'a [DirectGrant],
     write_protections: &'a [PathBuf],
+    receiving_mounts: &'a [super::mounts::ApprovedMount],
     minimum: &'a [MinimumCell],
     interpreters: &'a [PathBuf],
     interpreter_aliases: &'a [(PathBuf, PathBuf)],
@@ -1156,11 +1063,11 @@ struct DisclosureInputs<'a> {
     native_filesystem_policy: bool,
 }
 
-/// The line a box prints for a `table` that selects file watching, at startup and again
-/// when the process starts.
+/// The message a box prints for a `table` that selects file watching, at startup and again
+/// when the process starts; `B0206`.
 pub(crate) fn file_watching_disclosure(table: &str) -> String {
     format!(
-        "strands-box: {table} file watching: macOS FSEvents may disclose denied names \
+        "{table} file watching: macOS FSEvents may disclose denied names \
          and event metadata, including outside the workspace and from past events, as well \
          as the host-wide event count and each volume's history identifier; file-content and \
          write restrictions still apply, except that a root process can delete any volume's \
@@ -1168,17 +1075,35 @@ pub(crate) fn file_watching_disclosure(table: &str) -> String {
     )
 }
 
-/// The text a box prints for one spec: its grants, selected policy checks, Core's own additions,
-/// and the effective `HOME` and `PATH`.
-fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
+/// The selected sources and the whole-directory contract, including on-demand servers.
+pub(crate) fn incoming_mounts_disclosure(table: &str, paths: &[PathBuf]) -> String {
+    let paths = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{table} incoming mounts: {paths}; this process permits read, write, and execution throughout each selected directory. New mounts keep the trusted publisher's options; Box does not add restrictions to them"
+    )
+}
+
+/// One startup message of a spec's disclosure: its code, and its text without the source.
+type DisclosureMessage = (::diagnostics::Kind, String);
+
+/// The messages a box prints for one spec: its grants, selected policy checks, Core's own
+/// additions, and the effective `HOME` and `PATH`.
+fn disclosure(inputs: &DisclosureInputs<'_>) -> Vec<DisclosureMessage> {
+    use ::diagnostics::{Code, Kind};
+    let grant = Kind::Coded(Code::B0201);
     let table = inputs.table;
     let coverage = if inputs.native_filesystem_policy {
         "with experimental native policy checks for open, create, unlink, rename, and truncate over these paths"
     } else {
         "with no policy decision over these paths"
     };
+    let mut messages = Vec::new();
     let mut lines = vec![format!(
-        "strands-box: {table} runs {} {coverage}:",
+        "{table} runs {} {coverage}:",
         inputs.program.display()
     )];
     if inputs.grants.is_empty() {
@@ -1197,10 +1122,19 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
             inputs.program.display()
         ));
     }
+    messages.push((grant, lines.join("\n")));
+    if !inputs.receiving_mounts.is_empty() {
+        let paths: Vec<_> = inputs
+            .receiving_mounts
+            .iter()
+            .map(|source| source.resolved_path().to_path_buf())
+            .collect();
+        messages.push((grant, incoming_mounts_disclosure(table, &paths)));
+    }
     if !inputs.interpreter_aliases.is_empty() {
-        lines.push(format!(
-            "strands-box: {table} interpreter aliases for configured access:"
-        ));
+        let mut lines = vec![format!(
+            "{table} interpreter aliases for configured access:"
+        )];
         for (spelled, resolved) in inputs.interpreter_aliases {
             lines.push(format!(
                 "  alias       {} -> {}  (interpreter spelling)",
@@ -1208,10 +1142,9 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
                 resolved.display()
             ));
         }
+        messages.push((grant, lines.join("\n")));
     }
-    lines.push(format!(
-        "strands-box: {table} runtime minimum, added by Core:"
-    ));
+    let mut lines = vec![format!("{table} runtime minimum, added by Core:")];
     lines.extend(inputs.minimum.iter().map(MinimumCell::disclosure));
     for interpreter in inputs.interpreters {
         lines.push(format!(
@@ -1225,20 +1158,27 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
             workspace.display()
         ));
     }
+    messages.push((grant, lines.join("\n")));
     if inputs.broad_exec {
-        lines.push(format!(
-            "strands-box: {table} broad exec: may run any reachable binary, and \
-             load code it writes into its writable grants above"
+        messages.push((
+            grant,
+            format!(
+                "{table} broad exec: may run any reachable binary, and \
+                 load code it writes into its writable grants above"
+            ),
         ));
     }
     if inputs.file_attributes {
-        lines.push(format!(
-            "strands-box: {table} file attributes: may set file times, set-user-ID and set-group-ID \
-             bits, the group, the owner, and access control lists on files in its writable grants"
+        messages.push((
+            grant,
+            format!(
+                "{table} file attributes: may set file times, set-user-ID and set-group-ID \
+                 bits, the group, the owner, and access control lists on files in its writable grants"
+            ),
         ));
     }
     if inputs.file_watching {
-        lines.push(file_watching_disclosure(table));
+        messages.push((Kind::Coded(Code::B0206), file_watching_disclosure(table)));
     }
     if inputs.native_egress {
         let arguments = if table.starts_with("[tool.") {
@@ -1246,24 +1186,33 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
         } else {
             ""
         };
-        lines.push(format!(
-            "strands-box: {table} native egress: connects to the network directly{arguments} with \
-             no egress gateway, no net:connect or http:request decision, and no credential injection"
+        messages.push((
+            Kind::Coded(Code::B0210),
+            format!(
+                "{table} native egress: connects to the network directly{arguments} with \
+                 no egress gateway, no net:connect or http:request decision, and no credential injection"
+            ),
         ));
-        lines.push(format!(
-            "strands-box: {table} native trust: no proxy and no CA variable from Box, so its \
-             client uses its own defaults or its table's `env`{services}",
-            services = if cfg!(target_os = "macos") {
-                "; the trustd and SecurityServer services for the system's certificate checks"
-            } else {
-                ""
-            }
+        messages.push((
+            Kind::Coded(Code::B0211),
+            format!(
+                "{table} native trust: no proxy and no CA variable from Box, so its \
+                 client uses its own defaults or its table's `env`{services}",
+                services = if cfg!(target_os = "macos") {
+                    "; the trustd and SecurityServer services for the system's certificate checks"
+                } else {
+                    ""
+                }
+            ),
         ));
     }
-    lines.push(format!(
-        "strands-box: {table} HOME={} PATH={}",
-        inputs.home.display(),
-        inputs.path
+    messages.push((
+        grant,
+        format!(
+            "{table} HOME={} PATH={}",
+            inputs.home.display(),
+            inputs.path
+        ),
     ));
     for (identity, grant) in inputs.writable {
         let role = if identity == inputs.program {
@@ -1271,14 +1220,17 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
         } else {
             "interpreter"
         };
-        lines.push(format!(
-            "strands-box: warning: {table} {role} {} lies inside the writable grant {}, so the \
-             process can replace the program it runs",
-            identity.display(),
-            grant.display()
+        messages.push((
+            Kind::Coded(Code::B0212),
+            format!(
+                "{table} {role} {} lies inside the writable grant {}, so the \
+                 process can replace the program it runs",
+                identity.display(),
+                grant.display()
+            ),
         ));
     }
-    lines.join("\n")
+    messages
 }
 
 /// Whether one of `cells` grants a read of `file`, compared by identity.
@@ -1938,9 +1890,6 @@ pub(crate) mod environment {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
-    mod storage_tests;
-
     use crate::record::config::RECORD_VERSION;
     use crate::record::config::mcp::McpServer;
     use crate::record::config::process::{ContainedMcp, Filesystem};
@@ -2031,6 +1980,7 @@ mod tests {
                         LeafBox::run(
                             boundary,
                             &fixture.root,
+                            None,
                             #[cfg(any(
                                 all(target_os = "macos", feature = "native-filesystem-policy"),
                                 all(target_os = "linux", feature = "native-filesystem-policy",)
@@ -2080,6 +2030,7 @@ mod tests {
                 LeafBox::run(
                     boundary,
                     &fixture.root,
+                    None,
                     #[cfg(any(
                         all(target_os = "macos", feature = "native-filesystem-policy"),
                         all(target_os = "linux", feature = "native-filesystem-policy",)
@@ -2254,6 +2205,7 @@ mod tests {
                 }
             }
             let record = Record {
+                enforcement: Default::default(),
                 version: RECORD_VERSION,
                 experimental_features: Default::default(),
                 file_attributes: false,
@@ -3086,7 +3038,7 @@ mod tests {
         );
         assert!(
             native.disclosure().contains(
-                "strands-box: [tool.sso-cli] native egress: connects to the network directly, with \
+                "strands-box: note[B0210]: [tool.sso-cli] native egress: connects to the network directly, with \
                  the arguments the agent passes,"
             ),
             "{}",
@@ -3103,7 +3055,7 @@ mod tests {
             "{}",
             gateway.disclosure()
         );
-        let trust = "strands-box: [tool.sso-cli] native trust: no proxy and no CA variable from \
+        let trust = "strands-box: note[B0211]: [tool.sso-cli] native trust: no proxy and no CA variable from \
                      Box, so its client uses its own defaults or its table's `env`";
         assert!(
             native.disclosure().contains(trust),
@@ -4296,7 +4248,7 @@ mod tests {
         let disclosure = boundary.disclosure();
 
         for needle in [
-            "strands-box: [agent] runs",
+            "strands-box: note[B0201]: [agent] runs",
             &format!("read        {}", fixture.path("vendor").display()),
             &format!("write       {}", fixture.path("scratch").display()),
             &format!("exec        {}", fixture.path("tools").display()),
@@ -4304,7 +4256,7 @@ mod tests {
                 "exec        {}  (command, implicit)",
                 Path::new("/bin/sh").canonicalize().expect("sh").display()
             ),
-            "strands-box: [agent] runtime minimum, added by Core:",
+            "strands-box: note[B0201]: [agent] runtime minimum, added by Core:",
             "/dev/null",
             &format!(
                 "enter       {}  (workspace, entry only)",
@@ -4344,7 +4296,9 @@ mod tests {
         let boundary = fixture.translate(&spec, "[agent]", &[]);
 
         assert!(
-            boundary.disclosure().contains("warning: [agent] command")
+            boundary
+                .disclosure()
+                .contains("strands-box: warning[B0212]: [agent] command")
                 && boundary
                     .disclosure()
                     .contains("can replace the program it runs"),
@@ -4372,7 +4326,7 @@ mod tests {
         let disclosure = boundary.disclosure();
 
         assert!(
-            disclosure.contains("warning: [agent] interpreter")
+            disclosure.contains("strands-box: warning[B0212]: [agent] interpreter")
                 && disclosure.contains(&interpreter.display().to_string()),
             "{disclosure}"
         );
@@ -4398,7 +4352,7 @@ mod tests {
         let disclosure = boundary.disclosure();
 
         assert!(
-            disclosure.contains("warning: [agent] interpreter")
+            disclosure.contains("strands-box: warning[B0212]: [agent] interpreter")
                 && disclosure.contains(&interpreter.display().to_string()),
             "{disclosure}"
         );
@@ -5745,6 +5699,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
                 LeafBox::run(
                     boundary,
                     &fixture.root,
+                    None,
                     #[cfg(any(
                         all(target_os = "macos", feature = "native-filesystem-policy"),
                         all(target_os = "linux", feature = "native-filesystem-policy",)
@@ -6391,5 +6346,74 @@ write = ["/Users/example/box-demo/aws-tmp"]
             .to_string();
             assert!(refusal.contains("protected authority source"), "{refusal}");
         }
+    }
+
+    /// A spawn rechecks its own selected paths, including leaves prepared after run-wide judgment.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn receiving_mounts_are_checked_during_boundary_translation() {
+        for (table, role) in [
+            ("[agent]", RuntimeReach::Agent),
+            ("[tool.reader]", RuntimeReach::Leaf),
+            ("[mcp.local]", RuntimeReach::Leaf),
+        ] {
+            let fixture = Fixture::new();
+            let mut spec = fixture.spec();
+            spec.filesystem.receive_mounts = vec![fixture.path("scratch")];
+            if role == RuntimeReach::Agent {
+                spec.filesystem.exec.push(fixture.path("scratch"));
+            }
+            let boundary = fixture
+                .try_translate_full(&spec, table, role, EgressMode::Gateway)
+                .unwrap();
+            assert_eq!(boundary._receiving_mounts.len(), 1);
+            assert_eq!(
+                boundary._receiving_mounts[0].resolved_path(),
+                fixture.path("scratch")
+            );
+            spec.filesystem.write.clear();
+            let refusal = fixture
+                .try_translate_full(&spec, table, role, EgressMode::Gateway)
+                .err()
+                .expect("a selected read-only directory is incompatible")
+                .to_string();
+            assert!(
+                refusal.contains(table)
+                    && refusal.contains("`write` grant covering the whole directory"),
+                "{refusal}"
+            );
+            spec.filesystem.receive_mounts.clear();
+            fixture
+                .try_translate_full(&spec, table, role, EgressMode::Gateway)
+                .expect("ordinary read-only grants remain valid");
+        }
+    }
+
+    /// Hosted roots retain the agent's approved canonical spelling and exclude leaf selections.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hosted_mount_roots_come_only_from_the_approved_agent() {
+        let mut fixture = Fixture::new();
+        fixture.record.mcp.clear();
+        let mut agent = fixture.spec();
+        let alias = fixture.path("selected-alias");
+        std::os::unix::fs::symlink(fixture.path("scratch"), &alias).unwrap();
+        agent.filesystem.receive_mounts = vec![alias];
+        agent.filesystem.exec.push(fixture.path("scratch"));
+        fixture.record.agent = Some(agent);
+        let mut leaf = fixture.spec();
+        leaf.filesystem.exec.clear();
+        leaf.filesystem.metadata.clear();
+        leaf.filesystem.receive_mounts = vec![fixture.path("scratch")];
+        fixture.record.tool.insert("reader".to_string(), leaf);
+        let operator_home = fixture.operator.path().to_path_buf();
+        let selected = fixture.path("scratch");
+        crate::test_support::with_operator_home(&operator_home, || {
+            let approved = ApprovedReach::judge(&fixture.record, &[]).unwrap();
+            assert_eq!(approved.hosted_mount_roots(), [selected]);
+            fixture.record.agent = None;
+            let leaf_only = ApprovedReach::judge(&fixture.record, &[]).unwrap();
+            assert!(leaf_only.hosted_mount_roots().is_empty());
+        });
     }
 }

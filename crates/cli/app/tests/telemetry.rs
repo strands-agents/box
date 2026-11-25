@@ -128,6 +128,12 @@ impl Server {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             assert!(validator().is_valid(&body), "{body}");
             for event in events_in(body) {
+                assert_eq!(
+                    request.headers["user-agent"],
+                    format!("box/{}", event["context"]["box_version"].as_str().unwrap()),
+                    "{}",
+                    event["event"]
+                );
                 completed |= event["event"] == "shutdown/1";
                 events.push(event);
             }
@@ -683,7 +689,7 @@ fn other_commands_do_not_start_delivery_or_create_identity() {
         vec!["--version"],
         vec!["profile", "list"],
         vec!["profile", "show", "probe"],
-        vec!["clean", "--all", "--no-ask"],
+        vec!["profile", "clean", "--all", "--no-ask"],
         vec!["profile", "delete", "probe", "--no-ask"],
     ] {
         let output = scene.command(&server).args(args).output().unwrap();

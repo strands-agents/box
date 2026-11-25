@@ -162,13 +162,13 @@ expect "an absent box passes nothing" "0" \
 
 # --- the disclosure block, out of everything else on stderr -------------------
 cat > "$WORK/stderr.1.log" <<'EOF'
-strands-box: box box-0123456789abcdef created · config /r/.strands-box/box.toml
-strands-box: [agent] runs /opt/claude with no policy decision over these paths:
+strands-box: note[B0301]: box box-0123456789abcdef created · config /r/.strands-box/box.toml
+strands-box: note[B0201]: [agent] runs /opt/claude with no policy decision over these paths:
   read        /r/project
   write       /r/project
-strands-box: [agent] runtime minimum, added by Core:
+strands-box: note[B0201]: [agent] runtime minimum, added by Core:
   /dev/null
-strands-box: [agent] HOME=/var/tmp/wl-home PATH=/r/box/bin:/usr/bin:/bin
+strands-box: note[B0201]: [agent] HOME=/var/tmp/wl-home PATH=/r/box/bin:/usr/bin:/bin
 agent noise line
 EOF
 sed -e '/created/d' -e 's/agent noise line/other noise/' "$WORK/stderr.1.log" > "$WORK/stderr.2.log"
@@ -178,9 +178,9 @@ expect "noise around the block does not break stability" 1 "$(python3 -c 'import
 sed -e 's#write       /r/project#write       /r/project /r/other#' "$WORK/stderr.1.log" > "$WORK/stderr.3.log"
 : > "$WL_CHECKS_FILE"; wl_assert_disclosure_stable disclosure-stable "$WORK/stderr.1.log" "$WORK/stderr.3.log"
 expect "a changed grant line fails stability" 0 "$(python3 -c 'import json,sys; print(int(json.loads(open(sys.argv[1]).readline())["ok"]))' "$WL_CHECKS_FILE")"
-: > "$WL_CHECKS_FILE"; wl_assert_no_line box-not-recreated "$WORK/stderr.2.log" 'strands-box: box .* (created|updated)'
+: > "$WL_CHECKS_FILE"; wl_assert_no_line box-not-recreated "$WORK/stderr.2.log" 'strands-box: note\[B0301\]: box .* (created|updated)'
 expect "run two with no created line passes" 1 "$(python3 -c 'import json,sys; print(int(json.loads(open(sys.argv[1]).readline())["ok"]))' "$WL_CHECKS_FILE")"
-: > "$WL_CHECKS_FILE"; wl_assert_no_line box-not-recreated "$WORK/stderr.1.log" 'strands-box: box .* (created|updated)'
+: > "$WL_CHECKS_FILE"; wl_assert_no_line box-not-recreated "$WORK/stderr.1.log" 'strands-box: note\[B0301\]: box .* (created|updated)'
 expect "a created line fails it" 0 "$(python3 -c 'import json,sys; print(int(json.loads(open(sys.argv[1]).readline())["ok"]))' "$WL_CHECKS_FILE")"
 
 # --- which agents a dimension runs for --------------------------------------

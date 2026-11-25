@@ -43,25 +43,7 @@ impl<'p> MontyPep<'p> {
         let mut judged = RenameDestination::Unbound;
         let (source, destination, permit) = self.policy.admit_rename(call, |destination| {
             judged = match reach.approve_mutation(destination, dst_spelled) {
-                Ok(approved) => {
-                    #[cfg(target_os = "linux")]
-                    if let Some(protected) =
-                        reach.approve_storage(&approved, dst_spelled, true, false)
-                    {
-                        return match protected.ok().and_then(|held| held.metadata().ok()) {
-                            Some(metadata) if metadata.is_dir() => {
-                                judged = RenameDestination::Directory;
-                                judged
-                            }
-                            Some(_) => {
-                                judged = RenameDestination::File;
-                                judged
-                            }
-                            None => RenameDestination::Unbound,
-                        };
-                    }
-                    RenameDestination::bound_at(&approved)
-                }
+                Ok(approved) => RenameDestination::bound_at(&approved),
                 // The floor refuses this destination after admission, so nothing is read there.
                 Err(_) => RenameDestination::Unbound,
             };
@@ -213,36 +195,7 @@ pub(super) fn admit_and_perform(
             determined.as_ref(),
         ));
     }
-    #[cfg(target_os = "linux")]
-    let protected = reach.approve_storage(
-        &approved,
-        &spelled,
-        mutates_authority(&call),
-        !matches!(
-            call,
-            OsFunctionCall::IsSymlink(_) | OsFunctionCall::Unlink(_)
-        ),
-    );
-    #[cfg(not(target_os = "linux"))]
-    let protected: Option<Result<(), io::Error>> = None;
-    let (result, resume_with) = if let Some(protected) = protected {
-        #[cfg(target_os = "linux")]
-        let held = protected
-            .map_err(|error| {
-                Unreached::Refused(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    error.to_string(),
-                ))
-            })
-            .and_then(|held| HeldPath::protected(held).map_err(Unreached::Refused));
-        #[cfg(not(target_os = "linux"))]
-        let held = protected
-            .and_then(|()| Err(io::Error::other("storage requires Linux")))
-            .map_err(Unreached::Refused);
-        perform_held(&call, held)
-    } else {
-        perform(&call, &approved)
-    };
+    let (result, resume_with) = perform(&call, &approved);
     record(permit, result);
     Ok(resume_with)
 }
@@ -369,16 +322,8 @@ fn respell(
 
 /// Rewrite every path this call carries as an absolute name.
 fn root_paths(call: &mut OsFunctionCall, reach: &Reach) {
-    #[cfg(target_os = "linux")]
-    let follows = !matches!(
-        call,
-        OsFunctionCall::IsSymlink(_) | OsFunctionCall::Unlink(_) | OsFunctionCall::Rename(_)
-    );
     let rooted = |path: &MontyPath| {
-        let absolute = reach.absolute(path.as_str());
-        #[cfg(target_os = "linux")]
-        let absolute = reach.storage_policy_path(&absolute, follows);
-        MontyPath::new(absolute.to_string_lossy().into_owned())
+        MontyPath::new(reach.absolute(path.as_str()).to_string_lossy().into_owned())
     };
     match call {
         OsFunctionCall::Exists(path)
@@ -423,14 +368,7 @@ fn root_paths(call: &mut OsFunctionCall, reach: &Reach) {
 
 /// Perform one admitted effect against the resolved path, following no symbolic link in it.
 fn perform(call: &OsFunctionCall, path: &Path) -> (FsResult, ExtFunctionResult) {
-    perform_held(call, HeldPath::reach(path))
-}
-
-fn perform_held(
-    call: &OsFunctionCall,
-    reached: Result<HeldPath, Unreached>,
-) -> (FsResult, ExtFunctionResult) {
-    let held = match reached {
+    let held = match HeldPath::reach(path) {
         Ok(held) => held,
         // A predicate answers false for a path it cannot reach, as `os.path.exists` does.
         Err(unreached) if is_predicate(call) => {
@@ -683,10 +621,7 @@ pub(super) fn io_exception(error: &io::Error) -> MontyException {
 /// Record a permit's outcome, warning to stderr if the durable write was not confirmed.
 fn record(permit: ScriptPermit<'_>, result: FsResult) {
     if permit.record(result).is_err() {
-        let _ = writeln!(
-            io::stderr().lock(),
-            "strands-box: warning: policy outcome recording was not confirmed"
-        );
+        ::diagnostics::diag!(P0301, "policy outcome recording was not confirmed");
     }
 }
 
@@ -790,7 +725,7 @@ fn perform_rename(
     };
 
     let (result, resume_with) =
-        match rename_reached(reach, &approved_src, &approved_dst, judged_destination) {
+        match rename_approved(&approved_src, &approved_dst, judged_destination) {
             Ok(()) => (
                 FsResult::Completed,
                 ExtFunctionResult::Return(MontyObject::none()),
@@ -831,43 +766,13 @@ fn perform_rename(
 
 const STALE_DESTINATION: &str = "filesystem identity changed during effect admission";
 
-fn rename_reached(
-    _reach: &Reach,
-    source: &Path,
-    destination: &Path,
-    judged: RenameDestination,
-) -> io::Result<()> {
-    let held = |path: &Path| {
-        #[cfg(target_os = "linux")]
-        if let Some(protected) = _reach.approve_storage(path, &path.to_string_lossy(), true, false)
-        {
-            return protected
-                .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error.to_string()))
-                .and_then(HeldPath::protected);
-        }
-        HeldPath::of(path)
-    };
-    let source = held(source)?;
-    let destination = held(destination)?;
-    rename_held(&source, &destination, judged)
-}
-
 /// Move one approved path without replacing a destination admission read as unbound.
-#[cfg(test)]
 fn rename_approved(source: &Path, destination: &Path, judged: RenameDestination) -> io::Result<()> {
     let source = HeldPath::of(source)?;
     let destination = HeldPath::of(destination)?;
-    rename_held(&source, &destination, judged)
-}
-
-fn rename_held(
-    source: &HeldPath,
-    destination: &HeldPath,
-    judged: RenameDestination,
-) -> io::Result<()> {
     match judged {
-        RenameDestination::Unbound => source.rename_to_new(destination),
-        RenameDestination::File | RenameDestination::Directory => source.rename_to(destination),
+        RenameDestination::Unbound => source.rename_to_new(&destination),
+        RenameDestination::File | RenameDestination::Directory => source.rename_to(&destination),
     }
 }
 
@@ -2458,7 +2363,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
         let kept = shared.join("ok.txt");
         std::fs::write(&kept, "kept").expect("a fixture file");
         let reach = crate::test_support::with_operator_home(&shared, || {
-            Reach::over_box(&shared, Some(&shared), Some(&shared), &box_root, &[])
+            Reach::over_box(&shared, Some(&shared), Some(&shared), &box_root, &[], &[])
                 .expect("the reachable set is usable")
         });
         std::fs::write(box_root.join("private/x"), "state").expect("a file in box state");

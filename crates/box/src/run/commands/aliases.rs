@@ -5,7 +5,7 @@ use std::fs::{File, Metadata, OpenOptions};
 use std::io;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::ptr::NonNull;
 use std::time::{Duration, Instant};
 
@@ -110,40 +110,12 @@ pub(super) fn contains(path: &Path, identities: &[(u64, u64)]) -> io::Result<boo
     )
 }
 
-#[cfg(target_os = "linux")]
-pub(super) fn contains_excluding(
-    path: &Path,
-    identities: &[(u64, u64)],
-    excluded: &[PathBuf],
-) -> io::Result<bool> {
-    contains_pruned_before_deadline(
-        path,
-        identities,
-        Instant::now() + SCAN_TIMEOUT,
-        &check_deadline,
-        excluded,
-    )
-}
-
 fn contains_before_deadline(
     path: &Path,
     identities: &[(u64, u64)],
     deadline: Instant,
     check: &impl Fn(Instant) -> io::Result<()>,
 ) -> io::Result<bool> {
-    contains_pruned_before_deadline(path, identities, deadline, check, &[])
-}
-
-fn contains_pruned_before_deadline(
-    path: &Path,
-    identities: &[(u64, u64)],
-    deadline: Instant,
-    check: &impl Fn(Instant) -> io::Result<()>,
-    excluded: &[PathBuf],
-) -> io::Result<bool> {
-    if excluded.iter().any(|root| path.starts_with(root)) {
-        return finish_before_deadline(deadline, check, Ok(false));
-    }
     let before = checked_io(deadline, check, || std::fs::symlink_metadata(path))?;
     if before.is_file() {
         return finish_before_deadline(
@@ -163,15 +135,7 @@ fn contains_pruned_before_deadline(
                 .custom_flags(DIRECTORY_FLAGS)
                 .open(path)
         })?;
-        let found = inspect(
-            &directory,
-            &before,
-            identities,
-            deadline,
-            check,
-            0,
-            (!excluded.is_empty()).then_some(Pruning { path, excluded }),
-        )?;
+        let found = inspect(&directory, &before, identities, deadline, check, 0)?;
         let after = checked_io(deadline, check, || std::fs::symlink_metadata(path))?;
         require_unchanged(&before, &after)?;
         finish_before_deadline(deadline, check, Ok(found))
@@ -210,12 +174,6 @@ fn finish_before_deadline<T>(
     result
 }
 
-#[derive(Clone, Copy)]
-struct Pruning<'a> {
-    path: &'a Path,
-    excluded: &'a [PathBuf],
-}
-
 fn inspect(
     directory: &File,
     before: &Metadata,
@@ -223,7 +181,6 @@ fn inspect(
     deadline: Instant,
     check: &impl Fn(Instant) -> io::Result<()>,
     depth: usize,
-    pruning: Option<Pruning<'_>>,
 ) -> io::Result<bool> {
     if depth >= MAX_DEPTH {
         return Err(io::Error::other("directory depth exceeds 128"));
@@ -232,19 +189,6 @@ fn inspect(
     require_unchanged(before, &opened)?;
     let stream = DirectoryStream::new(directory, deadline, check)?;
     while let Some(name) = stream.next(deadline, check)? {
-        let child_path = pruning.map(|scope| {
-            use std::os::unix::ffi::OsStrExt as _;
-            scope
-                .path
-                .join(std::ffi::OsStr::from_bytes(name.to_bytes()))
-        });
-        if pruning.is_some_and(|scope| {
-            child_path
-                .as_ref()
-                .is_some_and(|path| scope.excluded.iter().any(|root| path.starts_with(root)))
-        }) {
-            continue;
-        }
         let metadata = checked_io(deadline, check, || entry_metadata(directory, &name))?;
         match metadata.st_mode & libc::S_IFMT {
             libc::S_IFREG => {
@@ -277,12 +221,6 @@ fn inspect(
                     deadline,
                     check,
                     depth + 1,
-                    pruning
-                        .zip(child_path.as_deref())
-                        .map(|(scope, path)| Pruning {
-                            path,
-                            excluded: scope.excluded,
-                        }),
                 )? {
                     return finish_before_deadline(deadline, check, Ok(true));
                 }
@@ -397,8 +335,6 @@ impl DirectoryStream {
     ) -> io::Result<Option<CString>> {
         loop {
             let name = checked_io(deadline, check, || {
-                #[cfg(test)]
-                READDIR_CALLS.with(|count| count.set(count.get() + 1));
                 // SAFETY: the accessor gives this thread's errno; the directory stream is live.
                 let entry = unsafe {
                     #[cfg(target_os = "macos")]
@@ -439,19 +375,6 @@ impl Drop for DirectoryStream {
         // SAFETY: this stream came from fdopendir and is closed exactly once.
         unsafe { libc::closedir(self.0.as_ptr()) };
     }
-}
-
-#[cfg(test)]
-thread_local! {
-    static READDIR_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(all(test, target_os = "linux"))]
-pub(super) fn with_readdir_count<T>(inspect: impl FnOnce() -> T) -> (T, usize) {
-    let previous = READDIR_CALLS.with(|count| count.replace(0));
-    let result = inspect();
-    let calls = READDIR_CALLS.with(|count| count.replace(previous));
-    (result, calls)
 }
 
 #[cfg(test)]
@@ -609,7 +532,6 @@ mod tests {
                 Instant::now() + SCAN_TIMEOUT,
                 &check_deadline,
                 0,
-                None,
             )
             .is_err(),
             "changes after opening must refuse"
@@ -629,7 +551,6 @@ mod tests {
                 Instant::now() + SCAN_TIMEOUT,
                 &check_deadline,
                 MAX_DEPTH,
-                None,
             )
             .is_err(),
             "excessive depth must refuse"

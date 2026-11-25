@@ -438,6 +438,28 @@ class ReleaseBundleTests(unittest.TestCase):
                 else:
                     self.assertEqual((root / "run.log").read_text(), "started\n")
 
+    def test_the_release_page_names_the_installer_repository_only_for_another_repository(self):
+        for repository, named in [("strands-agents/box", False), ("example/box", True)]:
+            for prerelease in ("true", "false"):
+                with self.subTest(repository=repository, prerelease=prerelease), \
+                        tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    environment = {
+                        **os.environ, "NEW_TAG": "v0.3.0-preview.1", "LINUX_PREVIEW": "false",
+                        "PRERELEASE": prerelease, "PUBLISH_LINUX_X86": "true",
+                        "GITHUB_REPOSITORY": repository,
+                    }
+                    composed = subprocess.run(
+                        ["bash", "-c", workflow_command("Compose release body (install block)")],
+                        cwd=root, env=environment, capture_output=True, text=True,
+                    )
+                    self.assertEqual(composed.returncode, 0, composed.stdout + composed.stderr)
+                    body = (root / "body.md").read_text()
+                    self.assertEqual("BOX_GITHUB_REPO" in body, named)
+                    installer = f"curl -fsSL https://raw.githubusercontent.com/{repository}/main/install.sh |"
+                    setting = f"BOX_GITHUB_REPO={repository} " if named else ""
+                    self.assertIn(f"{installer} {setting}BOX_VERSION=0.3.0-preview.1 sh\n", body)
+
     def test_collection_requires_all_built_archives(self):
         triples = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
         for publish_x86 in [False, True]:
@@ -665,7 +687,7 @@ class ReleasePackageTests(unittest.TestCase):
     def header(self, machine="Advanced Micro Devices X86-64", loader="/lib64/ld-linux-x86-64.so.2", version="2.34"):
         return f"Machine: {machine}\nRequesting program interpreter: {loader}]\nName: GLIBC_{version}\n"
 
-    def test_x86_package_step_checks_all_four_executables_in_read_only_container(self):
+    def test_x86_package_step_checks_all_three_executables_in_read_only_container(self):
         result = self.run_step("Check the x86-64 Linux package", PACKAGE_HEADER=self.header())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(self.docker_arguments.read_text())[0], [
@@ -675,7 +697,7 @@ class ReleasePackageTests(unittest.TestCase):
         ])
         report = json.loads(result.stdout)
         self.assertEqual([item["binary"] for item in report], [
-            "box", "strands-box-sock-alias", "strands-box-contain-trampoline", "strands-box-storage-compiler",
+            "box", "strands-box-sock-alias", "strands-box-contain-trampoline",
         ])
         self.assertEqual({item["architecture"] for item in report}, {"x86_64"})
 

@@ -1,4 +1,4 @@
-# Box user guide
+# Box CLI guide
 
 Box runs a coding agent, such as Claude Code, in a box on your machine. The agent can change files
 in your project and reach what your profile allows, and the box stops everything else. This guide
@@ -30,6 +30,8 @@ shows how to set it up, run it, and change what the agent can reach.
   tool, or settings that a team shares.
 - [Plugins](plugins.md): what a plugin is, how to read a key from your password manager with one,
   and how to write one.
+- [Credentials](credentials.md): where a route's key comes from, such as a variable in your shell,
+  your AWS credentials, the credentials daemon, or a password manager.
 - [Starters](starters.md): what a starter is and where it lives, how to make a profile from one,
   and how to write a starter or a policy starter so your team gets one standard setup.
 - [Policies](policies.md): what a policy checks, where a run's rules come from, including the ones
@@ -40,8 +42,6 @@ shows how to set it up, run it, and change what the agent can reach.
 - [Install Box](install.md): install, upgrade, or remove a release.
 - [Get help from a coding agent](profiles.md#get-help-from-a-coding-agent): tell your agent
   `Run box help agent and follow it to create a profile.`
-
-- [Use experimental storage mounts on AgentCore Runtime](experimental-runtime-storage.md): build, deploy, and verify storage that arrives after Box starts.
 
 ## Reference
 
@@ -93,6 +93,7 @@ fixes keeps them in a README, linked here.
 - [`@box/bedrock`](../../resources/packs/bedrock/README.md): Amazon Bedrock
 - `@box/bedrock-mantle`: Amazon Bedrock's OpenAI-compatible endpoint, for Codex
 - `@box/anthropic`: the Anthropic API
+- [`@box/claude-subscription`](../../resources/packs/claude-subscription/README.md): a claude.ai subscription, for Claude Code
 - `@box/openai`: the OpenAI API, for Codex
 
 **Tools**
@@ -103,10 +104,11 @@ fixes keeps them in a README, linked here.
 - [`@box/git`](../../resources/packs/git/README.md)
 - [`@box/go`](../../resources/packs/go/README.md)
 - [`@box/node`](../../resources/packs/node/README.md)
-- `@box/npm`
+- [`@box/npm`](../../resources/packs/npm/README.md)
 - [`@box/npx`](../../resources/packs/npx/README.md)
 - [`@box/pnpm`](../../resources/packs/pnpm/README.md)
 - [`@box/pnpx`](../../resources/packs/pnpx/README.md)
+- [`@box/rg`](../../resources/packs/rg/README.md)
 - [`@box/uv`](../../resources/packs/uv/README.md)
 - [`@box/uvx`](../../resources/packs/uvx/README.md)
 - [`@box/yarn`](../../resources/packs/yarn/README.md)

@@ -34,14 +34,6 @@ pub enum ContainmentError {
         reason: String,
     },
 
-    /// Private storage control socket I/O failed without changing protocol validation errors.
-    #[doc(hidden)]
-    #[error("storage control socket failed: {source}")]
-    StorageControlIo {
-        /// The operating system error from the private control socket.
-        source: std::io::Error,
-    },
-
     /// Config contains a capability the backend cannot enforce.
     #[error("backend '{backend}' cannot enforce capability '{capability}'")]
     UnsupportedCapability {

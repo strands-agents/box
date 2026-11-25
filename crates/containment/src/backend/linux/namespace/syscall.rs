@@ -603,6 +603,21 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "statx",
         number: libc::SYS_statx,
     },
+    // The names of a file's extended attributes, and not their values: `getxattr` and `setxattr`
+    // stay refused. Python's `shutil.copy2` lists them and treats only `ENOTSUP`, `ENODATA` and
+    // `EINVAL` as "none", so the refusal's `EPERM` failed every copy that keeps metadata.
+    PermittedSyscall {
+        name: "listxattr",
+        number: libc::SYS_listxattr,
+    },
+    PermittedSyscall {
+        name: "llistxattr",
+        number: libc::SYS_llistxattr,
+    },
+    PermittedSyscall {
+        name: "flistxattr",
+        number: libc::SYS_flistxattr,
+    },
     PermittedSyscall {
         name: "rseq",
         number: libc::SYS_rseq,
@@ -1315,11 +1330,11 @@ fn renameat2_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
 }
 
 fn setresuid_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
-    exact_three_argument_rule(0)
+    unchanged_identity_rules()
 }
 
 fn setresgid_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
-    exact_three_argument_rule(u32::MAX as u64)
+    unchanged_identity_rules()
 }
 
 fn setpgid_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
@@ -1334,14 +1349,26 @@ fn setpgid_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
         .collect()
 }
 
-fn exact_three_argument_rule(value: u64) -> Result<Vec<SeccompRule>, ContainmentError> {
-    let conditions = (0..3)
-        .map(|index| {
-            SeccompCondition::new(index, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, value)
-                .map_err(filter_error)
+/// One rule for each way to name the workload's own id, `0` in its user namespace, or `-1` for
+/// "leave it", in each of the real, effective, and saved positions.
+fn unchanged_identity_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
+    const LEAVE: u64 = u32::MAX as u64;
+    (0..8u8)
+        .map(|combination| {
+            let conditions = (0..3u8)
+                .map(|index| {
+                    let value = if combination & (1 << index) == 0 {
+                        0
+                    } else {
+                        LEAVE
+                    };
+                    SeccompCondition::new(index, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, value)
+                        .map_err(filter_error)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            SeccompRule::new(conditions).map_err(filter_error)
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(vec![SeccompRule::new(conditions).map_err(filter_error)?])
+        .collect()
 }
 
 fn compile_filter(
@@ -1448,13 +1475,14 @@ mod tests {
     #[test]
     fn permit_filter_has_the_expected_workload_and_installer_entries() {
         let x86_entries = usize::from(cfg!(target_arch = "x86_64"));
-        assert_eq!(WORKLOAD_PERMITTED.len(), 118 + 19 * x86_entries);
+        assert_eq!(WORKLOAD_PERMITTED.len(), 121 + 19 * x86_entries);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 122 + 20 * x86_entries);
+        assert_eq!(rules.len(), 125 + 20 * x86_entries);
         assert!(rules.contains_key(&libc::SYS_seccomp));
-        assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
-        assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
+        // `0` or `-1` in each of three positions.
+        assert_eq!(rules[&libc::SYS_setresuid].len(), 8);
+        assert_eq!(rules[&libc::SYS_setresgid].len(), 8);
         // No flags, or RENAME_NOREPLACE; RENAME_EXCHANGE and RENAME_WHITEOUT match neither.
         assert_eq!(rules[&libc::SYS_renameat2].len(), 2);
         assert!(

@@ -82,7 +82,6 @@ const EXPERIMENTAL_FEATURES: &str = "experimental-features";
 
 /// The switch that selects native filesystem policy checks.
 const NATIVE_FILESYSTEM_POLICY: &str = "native-filesystem-policy";
-const LINUX_STORAGE_MOUNTS: &str = "linux-storage-mounts";
 
 /// The profile table that sets how much of the project a run reaches.
 pub const PROJECT: &str = "project";
@@ -191,7 +190,7 @@ const TOOL_TABLE_REFUSED_IN_TOOL: &[&str] = &["detect", "pack", EXTEND, INCLUDE,
 
 /// The keys of a `filesystem` table.
 const FILESYSTEM_KEYS: &[&str] = &[
-    "mounts",
+    "receive_mounts",
     "read",
     "write",
     "read_file",
@@ -211,7 +210,15 @@ const NETWORK_KEYS: &[&str] = &["contain_egress"];
 const STORAGE_KEYS: &[&str] = &["directories", "files", "hooks"];
 
 /// The keys of `[pack]`.
-const HEADER_KEYS: &[&str] = &["name", "version", "kind", "engine"];
+const HEADER_KEYS: &[&str] = &["name", "version", "kind"];
+
+/// The table of a pack, a plugin, or a profile that names what the file needs of the `box` that
+/// reads it. `box` checks it and refuses the file when it does not hold. It loads nothing.
+pub(crate) const REQUIRES: &str = "requires";
+
+/// The requirements that `[requires]` can name. `box` is checked first, so a file written for a
+/// later `box` names the version it needs, not a requirement that the later `box` added.
+const REQUIREMENTS: &[&str] = &["box"];
 
 /// The name of the profile's own layer.
 pub(crate) const THE_PROFILE: &str = "the profile";
@@ -455,7 +462,7 @@ pub struct Lookup {
     pub operator: PathBuf,
     /// The collections in the box home's `external/`, in folder-name order.
     pub collections: Vec<Collection>,
-    /// The version of `box` that a pack's `engine` floor is checked against.
+    /// The version of `box` that each file's `[requires] box` is checked against.
     pub version: &'static str,
 }
 
@@ -663,8 +670,10 @@ impl Lookup {
         let path = self.folder(name)?.join(PACK_FILE);
         let text = crate::files::read_regular(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        let table =
+        let mut table =
             toml::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+        take_requires(&mut table, "pack", self.version)
+            .map_err(|refusal| refusal.in_file(&path, &text).to_string())?;
         pack_layout(table, &text)
             .map(|(table, _)| table)
             .map_err(|refusal| refusal.in_file(&path, &text).to_string())
@@ -798,8 +807,7 @@ fn visit(
         )
         .in_file(&layer.path, &layer.text));
     }
-    check_kind(&mut layer, lookup.version)
-        .map_err(|refusal| refusal.in_file(&layer.path, &layer.text))?;
+    check_kind(&mut layer).map_err(|refusal| refusal.in_file(&layer.path, &layer.text))?;
     take_grammars(&mut layer, tool_pack)?;
     let key = if layer.shared { EXTEND } else { "packs" };
     let bases = imports_of(&layer.table, key).map_err(|reason| invalid(&layer.path, reason))?;
@@ -828,8 +836,10 @@ fn visit(
         })?;
         let path = folder.join(PACK_FILE);
         let (text, location) = read_pack(&path, &base, lookup)?;
-        let table: toml::Table =
+        let mut table: toml::Table =
             toml::from_str(&text).map_err(|error| invalid(&path, error.to_string()))?;
+        take_requires(&mut table, "pack", lookup.version)
+            .map_err(|refusal| refusal.in_file(&path, &text))?;
         let (table, program_input) =
             pack_layout(table, &text).map_err(|refusal| refusal.in_file(&path, &text))?;
         let policy = None;
@@ -1024,7 +1034,7 @@ fn check_limits(table: &toml::Table) -> Result<(), Refusal> {
     }
 }
 
-/// Refuse unknown experimental features and nonboolean switches.
+/// Refuse an experimental feature other than the boolean native filesystem policy switch.
 fn check_experimental_features(table: &toml::Table) -> Result<(), Refusal> {
     let Some(value) = table.get(EXPERIMENTAL_FEATURES) else {
         return Ok(());
@@ -1038,17 +1048,15 @@ fn check_experimental_features(table: &toml::Table) -> Result<(), Refusal> {
     refuse_unknown_keys(
         table,
         &[EXPERIMENTAL_FEATURES],
-        &[NATIVE_FILESYSTEM_POLICY, LINUX_STORAGE_MOUNTS, "when"],
+        &[NATIVE_FILESYSTEM_POLICY, "when"],
     )?;
-    for feature in [NATIVE_FILESYSTEM_POLICY, LINUX_STORAGE_MOUNTS] {
-        if let Some(value) = features.get(feature)
-            && !unwrapped(value).is_bool()
-        {
-            return Err(Refusal::at(
-                format!("`{EXPERIMENTAL_FEATURES}.{feature}` is `true` or `false`"),
-                &[EXPERIMENTAL_FEATURES, feature],
-            ));
-        }
+    if let Some(value) = features.get(NATIVE_FILESYSTEM_POLICY)
+        && !unwrapped(value).is_bool()
+    {
+        return Err(Refusal::at(
+            format!("`{EXPERIMENTAL_FEATURES}.{NATIVE_FILESYSTEM_POLICY}` is `true` or `false`"),
+            &[EXPERIMENTAL_FEATURES, NATIVE_FILESYSTEM_POLICY],
+        ));
     }
     Ok(())
 }
@@ -1101,7 +1109,8 @@ fn check_profile_filesystem(table: &toml::Table) -> Result<(), Refusal> {
         ));
     };
     let Some(key) = filesystem.keys().find(|key| {
-        FILESYSTEM_LISTS.contains(&key.as_str()) && !PROFILE_LISTS.contains(&key.as_str())
+        (FILESYSTEM_LISTS.contains(&key.as_str()) || key.as_str() == "receive_mounts")
+            && !PROFILE_LISTS.contains(&key.as_str())
     }) else {
         return refuse_unknown_keys(
             table,
@@ -1109,7 +1118,9 @@ fn check_profile_filesystem(table: &toml::Table) -> Result<(), Refusal> {
             &["deny", "deny_write", "when"],
         );
     };
-    let tables = if matches!(key.as_str(), "exec" | "metadata") {
+    let tables = if key == "receive_mounts" {
+        "a process's `[agent.filesystem]`, `[tool.<name>.filesystem]`, or `[mcp.<name>.filesystem]` table".to_string()
+    } else if matches!(key.as_str(), "exec" | "metadata") {
         "`[agent.filesystem]`".to_string()
     } else {
         "`[agent.filesystem]` or a `[tool.<name>.filesystem]` table".to_string()
@@ -1217,8 +1228,8 @@ fn take_grammars(layer: &mut Layer, tool_pack: bool) -> Result<(), Error> {
 }
 
 /// Refuse a key that belongs to the other kind of file or to neither, write a tool pack as its tool
-/// table, and check a pack's header against the `box` version `version`.
-fn check_kind(layer: &mut Layer, version: &str) -> Result<(), Refusal> {
+/// table, and check a pack's header.
+fn check_kind(layer: &mut Layer) -> Result<(), Refusal> {
     let refused: &[&str] = if layer.shared {
         &[
             "packs",
@@ -1402,17 +1413,58 @@ fn check_kind(layer: &mut Layer, version: &str) -> Result<(), Refusal> {
         .get("pack")
         .and_then(toml::Value::as_table)
         .ok_or("a pack needs a `[pack]` header with `name` and `version`")?;
-    check_header(header, "pack", &layer.name, version)
+    check_header(header, "pack", &layer.name)
+}
+
+/// Check the `[requires]` table of `table`, a `file` ("pack", "plugin", or "profile"), against
+/// the running `box`, `version`, and take the table out, so that nothing after this reads it.
+///
+/// `box` is checked first, and a requirement that this `box` does not know is refused after that.
+pub(crate) fn take_requires(
+    table: &mut toml::Table,
+    file: &str,
+    version: &str,
+) -> Result<(), Refusal> {
+    let Some(value) = table.remove(REQUIRES) else {
+        return Ok(());
+    };
+    let toml::Value::Table(requires) = &value else {
+        return Err(Refusal::at(
+            format!("`{REQUIRES}` is a table, such as `[{REQUIRES}]` with `box = \">=0.3.0\"`"),
+            &[REQUIRES],
+        ));
+    };
+    if let Some(requirement) = string_field(requires, "box", &format!("[{REQUIRES}]"))
+        .map_err(|reason| Refusal::at(reason, &[REQUIRES, "box"]))?
+    {
+        let needed =
+            floor(&requirement).map_err(|reason| Refusal::at(reason, &[REQUIRES, "box"]))?;
+        let this = release_of(version).unwrap_or_default();
+        if this < needed {
+            return Err(Refusal::at(
+                format!("this {file} needs box {requirement}, and this is box {version}"),
+                &[REQUIRES, "box"],
+            ));
+        }
+    }
+    if let Some(key) = requires
+        .keys()
+        .find(|key| !REQUIREMENTS.contains(&key.as_str()))
+    {
+        return Err(Refusal::at(
+            unknown_key(&format!("`[{REQUIRES}]`"), key, REQUIREMENTS),
+            &[REQUIRES, key],
+        ));
+    }
+    Ok(())
 }
 
 /// Refuse a `[pack]` or `[plugin]` header `header`, named `section`, that holds an unknown key,
-/// lacks `name` or `version`, names another file than `imported_as`, or needs a later `box` than
-/// `version`.
+/// lacks `name` or `version`, or names another file than `imported_as`.
 pub(crate) fn check_header(
     header: &toml::Table,
     section: &str,
     imported_as: &str,
-    version: &str,
 ) -> Result<(), Refusal> {
     let known = if section == plugin::HEADER {
         plugin::HEADER_KEYS
@@ -1453,16 +1505,6 @@ pub(crate) fn check_header(
             ),
             &[section, "name"],
         ));
-    }
-    if let Some(requirement) = string_field(header, "engine", &owner)? {
-        let needed = floor(&requirement)?;
-        let this = release_of(version).unwrap_or_default();
-        if this < needed {
-            return Err(Refusal::at(
-                format!("this {section} needs box {requirement}, and this is box {version}"),
-                &[section, "engine"],
-            ));
-        }
     }
     Ok(())
 }
@@ -2714,8 +2756,8 @@ fn is_agent_pack(table: &toml::Table) -> bool {
     pack_kind(table) == Some(AGENT_KIND)
 }
 
-/// Refuse profile-only filesystem settings in a pack's original tables.
-fn check_profile_settings_in_pack(table: &toml::Table) -> Result<(), Refusal> {
+/// Refuse native filesystem policy settings in a pack's original tables.
+fn check_native_policy_in_pack(table: &toml::Table) -> Result<(), Refusal> {
     if table.contains_key(EXPERIMENTAL_FEATURES) {
         return Err(Refusal::at(
             "a pack holds no `[experimental-features]`; write `[experimental-features]` in \
@@ -2823,7 +2865,7 @@ pub(crate) fn pack_layout(
         }
     };
     refuse_header_not_first(text, "pack", "a pack")?;
-    check_profile_settings_in_pack(&table)?;
+    check_native_policy_in_pack(&table)?;
     let is_table = |value: &toml::Value| match value {
         toml::Value::Table(_) => true,
         toml::Value::Array(rows) => !rows.is_empty() && rows.iter().all(toml::Value::is_table),
@@ -3537,7 +3579,7 @@ fn replace_pack_ingress(rows: &mut Vec<toml::Value>) {
 /// `[storage] directories`, or `[[storage.files]]`. Every other list is replaced, so `command` keeps its order.
 fn joins(at: &[String]) -> bool {
     is_filesystem_list(at)
-        || is_mount_list(at)
+        || is_receive_mounts(at)
         || at.last().is_some_and(|key| key == "dependency")
         || at == ["storage", "directories"]
         || matches!(at, [tool, _, storage, list] if tool == "tool" && storage == "storage" && (list == "directories" || list == "files"))
@@ -3967,8 +4009,6 @@ struct Resolver<'a, S> {
     declarations: BTreeMap<String, Declaration>,
     values: BTreeMap<String, String>,
     storage: BTreeMap<String, PathBuf>,
-    mounts: Vec<PathBuf>,
-    recipient_mounts: BTreeMap<String, Vec<PathBuf>>,
     credentials: Credentials,
     cache: BTreeMap<String, String>,
     active: Vec<String>,
@@ -4090,8 +4130,6 @@ pub(crate) fn expand(
         declarations,
         values,
         storage,
-        mounts: Vec::new(),
-        recipient_mounts: BTreeMap::new(),
         credentials,
         cache: BTreeMap::new(),
         active: Vec::new(),
@@ -4127,81 +4165,11 @@ pub(crate) fn expand(
         skipped: BTreeMap::new(),
         entries: Vec::new(),
     };
-    let mut incoming = toml::Value::Table(mount_declarations(&table));
-    resolver
-        .walk(&mut incoming, &mut Vec::new())
-        .map_err(refused)?;
-    for (recipient, filesystem) in mount_filesystems(incoming.as_table().expect("a table")) {
-        let Some(value) = filesystem.get("mounts") else {
-            continue;
-        };
-        let invalid = || {
-            refused(format!(
-                "`{recipient}.filesystem.mounts` is a list of absolute paths"
-            ))
-        };
-        let entries = value.as_array().ok_or_else(invalid)?;
-        let mut mounts = Vec::new();
-        for entry in entries {
-            let text = entry.as_str().ok_or_else(invalid)?;
-            let path = crate::host::expand_home(inputs.home, Path::new(text));
-            if !path.is_absolute()
-                || path == Path::new("/")
-                || text.split('/').any(|part| matches!(part, "." | ".."))
-                || text.contains(['*', '?', '\0'])
-            {
-                return Err(invalid());
-            }
-            if !mounts.contains(&path) {
-                mounts.push(path.clone());
-            }
-            if !resolver.mounts.contains(&path) {
-                resolver.mounts.push(path);
-            }
-        }
-        resolver.recipient_mounts.insert(recipient, mounts);
-    }
-    for (_, filesystem) in mount_filesystems_mut(&mut table) {
-        filesystem.remove("mounts");
-    }
     let mut table = resolver.fill(table).map_err(|reason| Unresolved {
         reason,
         absent: resolver.absent,
         tool: resolver.failed.take(),
     })?;
-    if !resolver.mounts.is_empty() {
-        if inputs.os != "linux" {
-            return Err(refused("filesystem mounts require Linux".into()));
-        }
-        if table
-            .get(EXPERIMENTAL_FEATURES)
-            .and_then(|features| features.get(LINUX_STORAGE_MOUNTS))
-            .and_then(toml::Value::as_bool)
-            != Some(true)
-        {
-            return Err(refused(
-                "filesystem mounts require `[experimental-features] linux-storage-mounts = true`"
-                    .into(),
-            ));
-        }
-    }
-    for (recipient, filesystem) in mount_filesystems_mut(&mut table) {
-        if let Some(mounts) = resolver
-            .recipient_mounts
-            .get(&recipient)
-            .filter(|mounts| !mounts.is_empty())
-        {
-            filesystem.insert(
-                "mounts".into(),
-                toml::Value::Array(
-                    mounts
-                        .iter()
-                        .map(|path| toml::Value::String(path.display().to_string()))
-                        .collect(),
-                ),
-            );
-        }
-    }
     fill_slot(&mut table).map_err(refused)?;
     let kept: BTreeSet<String> = table
         .get("tool")
@@ -4388,8 +4356,8 @@ pub fn write_grants(table: &toml::Table, home: &Path) -> Vec<PathBuf> {
 }
 
 /// Each link that the resolution of `path` goes through, as the real folder that holds it and the
-/// path it leads to. A missing path or an incoming root ends the list.
-fn links(path: &Path, incoming: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+/// path it leads to. A part of `path` that does not exist ends the list.
+fn links(path: &Path) -> Vec<(PathBuf, PathBuf)> {
     let mut found = Vec::new();
     let mut remaining = path.to_path_buf();
     let mut current = PathBuf::new();
@@ -4407,9 +4375,6 @@ fn links(path: &Path, incoming: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
             }
             Component::Normal(name) => {
                 let next = current.join(name);
-                if incoming.iter().any(|root| next.starts_with(root)) {
-                    break;
-                }
                 match std::fs::read_link(&next) {
                     Ok(target) => {
                         remaining = target.join(rest);
@@ -4476,6 +4441,37 @@ fn fills_beside(file: &StorageFile, target: &crate::mcp_config::Target) -> bool 
         })
 }
 
+/// The names in the `exclude` of a `[[storage.files]]` row: each one name of an entry, with no
+/// `/`, not `.` or `..`, and no `*`, `?`, or `[`, because a name is matched whole and not as a
+/// pattern.
+fn exclude_names(row: &toml::Table, at: &str) -> Result<Vec<String>, String> {
+    let wanted =
+        || format!("`{at} exclude` is a list of one or more file names, such as [\"mcp.json\"]");
+    let names = match row.get("exclude") {
+        None => return Ok(Vec::new()),
+        Some(toml::Value::Array(names)) if !names.is_empty() => names,
+        Some(_) => return Err(wanted()),
+    };
+    let mut excluded = Vec::new();
+    for (place, name) in names.iter().enumerate() {
+        let name = name.as_str().ok_or_else(wanted)?;
+        if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
+            return Err(format!(
+                "`{at} exclude[{place}]` = {name:?} is not one file name; it names an entry by \
+                 its name, such as \"mcp.json\", with no `/`"
+            ));
+        }
+        if name.contains(['*', '?', '[']) {
+            return Err(format!(
+                "`{at} exclude[{place}]` = {name:?} is a pattern; `exclude` matches each name \
+                 whole, so name each file, such as \"mcp.json\""
+            ));
+        }
+        excluded.push(name.to_string());
+    }
+    Ok(excluded)
+}
+
 fn string_field(table: &toml::Table, key: &str, owner: &str) -> Result<Option<String>, String> {
     match table.get(key) {
         None => Ok(None),
@@ -4514,102 +4510,7 @@ const FILESYSTEM_LISTS: &[&str] = &[
     "deny_write",
 ];
 
-fn mount_declarations(table: &toml::Table) -> toml::Table {
-    fn recipient(value: &toml::Value) -> Option<toml::Value> {
-        let filesystem = value.get("filesystem")?.as_table()?;
-        filesystem.get("mounts")?;
-        let mut selected = toml::Table::new();
-        if let Some(when) = value.get("when") {
-            selected.insert("when".into(), when.clone());
-        }
-        let fields = filesystem
-            .iter()
-            .filter(|(key, _)| matches!(key.as_str(), "mounts" | "when"))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-        selected.insert("filesystem".into(), toml::Value::Table(fields));
-        Some(toml::Value::Table(selected))
-    }
-    let mut selected = toml::Table::new();
-    if let Some(agent) = table.get("agent").and_then(recipient) {
-        selected.insert("agent".into(), agent);
-    }
-    for section in ["tool", "mcp"] {
-        if let Some(entries) = table.get(section).and_then(toml::Value::as_table) {
-            selected.insert(
-                section.into(),
-                toml::Value::Table(
-                    entries
-                        .iter()
-                        .filter_map(|(name, value)| {
-                            recipient(value).map(|value| (name.clone(), value))
-                        })
-                        .collect(),
-                ),
-            );
-        }
-    }
-    selected
-}
-
-fn mount_filesystems(table: &toml::Table) -> Vec<(String, &toml::Table)> {
-    let mut found = Vec::new();
-    if let Some(fs) = table
-        .get("agent")
-        .and_then(|agent| agent.get("filesystem"))
-        .and_then(toml::Value::as_table)
-    {
-        found.push(("agent".into(), fs));
-    }
-    for section in ["tool", "mcp"] {
-        if let Some(entries) = table.get(section).and_then(toml::Value::as_table) {
-            for (name, recipient) in entries {
-                if let Some(fs) = recipient.get("filesystem").and_then(toml::Value::as_table) {
-                    found.push((format!("{section}.{name}"), fs));
-                }
-            }
-        }
-    }
-    found
-}
-
-fn mount_filesystems_mut(table: &mut toml::Table) -> Vec<(String, &mut toml::Table)> {
-    let mut found = Vec::new();
-    for (section, value) in table {
-        if section == "agent" {
-            if let Some(fs) = value
-                .get_mut("filesystem")
-                .and_then(toml::Value::as_table_mut)
-            {
-                found.push(("agent".into(), fs));
-            }
-        } else if matches!(section.as_str(), "tool" | "mcp")
-            && let Some(entries) = value.as_table_mut()
-        {
-            for (name, recipient) in entries {
-                if let Some(fs) = recipient
-                    .get_mut("filesystem")
-                    .and_then(toml::Value::as_table_mut)
-                {
-                    found.push((format!("{section}.{name}"), fs));
-                }
-            }
-        }
-    }
-    found
-}
-
 impl<S: Sources> Resolver<'_, S> {
-    fn mounts_at(&self, at: &str) -> &[PathBuf] {
-        if at.starts_with("filesystem.") {
-            return &self.mounts;
-        }
-        at.rsplit_once(".filesystem.")
-            .and_then(|(recipient, _)| self.recipient_mounts.get(recipient))
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-
     /// `table` with every placeholder filled in, then each program checked.
     fn fill(&mut self, table: toml::Table) -> Result<toml::Table, String> {
         let mut value = toml::Value::Table(table);
@@ -4631,26 +4532,15 @@ impl<S: Sources> Resolver<'_, S> {
             .refusals(table)
             .roots
             .iter()
-            .map(|(root, _)| {
-                if crate::storage_mounts::depends(root, &self.mounts) {
-                    root.clone()
-                } else {
-                    resolved(root)
-                }
-            })
+            .map(|(root, _)| resolved(root))
             .collect();
         for (at, written, path) in &self.entries {
-            for (holder, target) in links(path, self.mounts_at(at)) {
+            for (holder, target) in links(path) {
                 if let Some(root) = roots.iter().find(|root| holder.starts_with(root)) {
                     return Err(format!(
                         "`{at}` = {written:?} resolves through a link to {}, inside {}, which \
                          the box can write; name a path with no link in it",
-                        if crate::storage_mounts::depends(path, &self.mounts) {
-                            target
-                        } else {
-                            canonical(path).unwrap_or(target)
-                        }
-                        .display(),
+                        canonical(path).unwrap_or(target).display(),
                         root.display()
                     ));
                 }
@@ -5278,12 +5168,14 @@ impl<S: Sources> Resolver<'_, S> {
                         | "set"
                         | "fill"
                         | "sync"
+                        | "exclude"
                         | "mode"
                 )
             }) {
                 return Err(format!(
                     "`{at}` holds the unknown key `{key}`; a row holds `source`, `target`, \
-                     `optional`, `when`, `kind`, `keep`, `set`, `fill`, `sync`, and `mode`"
+                     `optional`, `when`, `kind`, `keep`, `set`, `fill`, `sync`, `exclude`, and \
+                     `mode`"
                 ));
             }
             match row.get("mode") {
@@ -5347,6 +5239,21 @@ impl<S: Sources> Resolver<'_, S> {
                      `fill` for now"
                 ));
             }
+            let exclude = exclude_names(row, &at)?;
+            if !exclude.is_empty() && edit.is_some() {
+                return Err(format!(
+                    "`{at} exclude` works only on a whole copy of a folder, not on a row with \
+                     `kind`, `keep`, `set`, or `fill`"
+                ));
+            }
+            // Only a `sync` update checks a copy against `exclude` on each run. Without `sync`, an
+            // `exclude` added after the first copy would leave the named file in the box unseen.
+            if !exclude.is_empty() && !sync {
+                return Err(format!(
+                    "`{at} exclude` works only on a row with `sync = true`, which checks the copy \
+                     against it on each run"
+                ));
+            }
             let gate = row
                 .get("when")
                 .and_then(|when| when.get("variable"))
@@ -5386,6 +5293,7 @@ impl<S: Sources> Resolver<'_, S> {
                 at,
                 edit,
                 sync,
+                exclude,
             });
         }
         Ok(files)
@@ -5766,6 +5674,15 @@ impl<S: Sources> Resolver<'_, S> {
     fn walk(&mut self, value: &mut toml::Value, at: &mut Vec<String>) -> Result<(), String> {
         let here = at.join(".");
         self.tool = (at.len() >= 2 && at[0] == "tool").then(|| at[1].clone());
+        if is_receive_mounts(at) && self.inputs.os != "linux" {
+            return Err(format!(
+                "`{here}` is supported only on Linux; remove this key on {}",
+                self.inputs.os
+            ));
+        }
+        if is_receive_mounts(at) && !value.is_array() {
+            return Err(format!("`{here}` is a list of directory paths"));
+        }
         match value {
             toml::Value::String(text) => {
                 if !has_placeholder(text) {
@@ -5781,7 +5698,7 @@ impl<S: Sources> Resolver<'_, S> {
                          `file`"
                     ));
                 }
-                let path_field = is_storage_mount(at)
+                let path_field = is_receive_mounts(&at[..at.len().saturating_sub(1)])
                     || (is_command(at)
                         && (is_command_head(at)
                             || matches!(pieces(text).ok().as_deref(), Some([Piece::Name(first), ..]) if self.is_path_name(first))));
@@ -5835,14 +5752,11 @@ impl<S: Sources> Resolver<'_, S> {
                         .iter()
                         .filter_map(toml::Value::as_str)
                         .map(Path::new)
-                        .filter(|path| !crate::storage_mounts::depends(path, self.mounts_at(&here)))
                         .filter(|path| path.is_symlink())
                         .filter_map(canonical)
                         .collect();
                     kept.retain(|entry| {
-                        entry.as_str().is_some_and(|path| {
-                            crate::storage_mounts::depends(Path::new(path), self.mounts_at(&here))
-                        }) || !targets
+                        !targets
                             .iter()
                             .any(|target| Some(target.as_path()) == entry.as_str().map(Path::new))
                     });
@@ -5944,6 +5858,20 @@ impl<S: Sources> Resolver<'_, S> {
             }
             _ => {}
         }
+        if is_receive_mounts(at) {
+            let invalid = || format!("`{here}` is a list of directory paths");
+            let entries = value.as_array_mut().ok_or_else(invalid)?;
+            let mut selected = Vec::new();
+            for entry in entries.iter() {
+                let text = entry.as_str().ok_or_else(invalid)?.replace(WILDCARD, "*");
+                let path = crate::host::expand_home(self.inputs.home, Path::new(&text));
+                let path = toml::Value::String(utf8(&path).map_err(|error| error.to_string())?);
+                if !selected.contains(&path) {
+                    selected.push(path);
+                }
+            }
+            *entries = selected;
+        }
         Ok(())
     }
 
@@ -6034,23 +5962,10 @@ impl<S: Sources> Resolver<'_, S> {
             Some(rest) => self.inputs.home.join(rest),
             None => PathBuf::from(&path),
         };
-        let pending = crate::storage_mounts::depends(&expanded, self.mounts_at(at));
-        if optional
-            && (tool.is_none() || pending)
-            && !path.contains(WILDCARD)
-            && std::fs::metadata(&expanded).is_err()
-        {
-            return Ok(Vec::new());
-        }
-        if pending {
-            if path.contains(WILDCARD) {
-                return Err(incoming_glob(at));
-            }
-            self.entries
-                .push((at.to_string(), path.clone(), expanded.clone()));
-            return Ok(vec![path]);
-        }
         let Some(tool) = tool else {
+            if optional && std::fs::metadata(&expanded).is_err() {
+                return Ok(Vec::new());
+            }
             self.entries
                 .push((at.to_string(), path.clone(), expanded.clone()));
             if std::fs::symlink_metadata(&expanded).is_err() {
@@ -6063,7 +5978,7 @@ impl<S: Sources> Resolver<'_, S> {
         if self.states.contains(&expanded) {
             return Ok(vec![path]);
         }
-        let matches = matches(&expanded, self.mounts_at(at)).map_err(|()| incoming_glob(at))?;
+        let matches = matches(&expanded);
         if matches.is_empty() {
             self.dropped
                 .push((tool.to_string(), path.replace(WILDCARD, "*")));
@@ -6088,9 +6003,6 @@ impl<S: Sources> Resolver<'_, S> {
         at: &str,
         read_file: bool,
     ) -> Result<String, String> {
-        if crate::storage_mounts::depends(expanded, self.mounts_at(at)) {
-            return utf8(expanded).map_err(|error| error.to_string());
-        }
         let found = canonical(expanded).unwrap_or_else(|| expanded.to_path_buf());
         let spelling = if read_file && found.is_file() {
             expanded
@@ -6670,7 +6582,7 @@ impl<S: Sources> Resolver<'_, S> {
                 if !expanded.to_string_lossy().contains(WILDCARD) {
                     return Ok(vec![expanded]);
                 }
-                let mut found = matches(&expanded, &self.mounts).map_err(|()| incoming_glob(at))?;
+                let mut found = matches(&expanded);
                 found.sort_by(|a, b| newest(b).cmp(&newest(a)));
                 Ok(found)
             }
@@ -6711,15 +6623,9 @@ impl<S: Sources> Resolver<'_, S> {
 
 /// Each existing path that `pattern` names, where a `WILDCARD` matches any run of characters in one
 /// component, in name order.
-fn matches(pattern: &Path, mounts: &[PathBuf]) -> Result<Vec<PathBuf>, ()> {
+fn matches(pattern: &Path) -> Vec<PathBuf> {
     let mut found = vec![PathBuf::new()];
     for component in pattern.components() {
-        if found
-            .iter()
-            .any(|path| crate::storage_mounts::depends(path, mounts))
-        {
-            return Err(());
-        }
         let part = component.as_os_str().to_string_lossy();
         if !part.contains(WILDCARD) {
             found = found.into_iter().map(|path| path.join(&*part)).collect();
@@ -6741,20 +6647,10 @@ fn matches(pattern: &Path, mounts: &[PathBuf]) -> Result<Vec<PathBuf>, ()> {
             })
             .collect();
     }
-    if found
-        .iter()
-        .any(|path| crate::storage_mounts::depends(path, mounts))
-    {
-        return Err(());
-    }
-    Ok(found
+    found
         .into_iter()
         .filter(|path| std::fs::symlink_metadata(path).is_ok())
-        .collect())
-}
-
-fn incoming_glob(at: &str) -> String {
-    format!("`{at}` names a wildcard inside incoming storage; name each required path literally")
+        .collect()
 }
 
 /// The tool and the steps of a `tool.<name>.root` name, from the part after `tool.`.
@@ -6893,6 +6789,12 @@ fn refuse_unguarded_developer_dir(
     }
 }
 
+/// Whether `at` selects incoming mounts for one process rather than granting access.
+fn is_receive_mounts(at: &[String]) -> bool {
+    matches!(at, [agent, filesystem, key] if agent == "agent" && filesystem == "filesystem" && key == "receive_mounts")
+        || matches!(at, [section, _, filesystem, key] if (section == "tool" || section == "mcp") && filesystem == "filesystem" && key == "receive_mounts")
+}
+
 fn is_filesystem_list(at: &[String]) -> bool {
     match at {
         [filesystem, list] => {
@@ -7005,25 +6907,15 @@ fn is_backend_aws_region(at: &[String]) -> bool {
 /// Every other field is literal.
 fn takes_template(at: &[String], telemetry_kind: Option<&str>) -> bool {
     is_command(at)
-        || is_storage_mount(at)
         || is_destination(at)
         || is_backend_url(at)
         || is_backend_aws_region(at)
         || (is_telemetry_setting(at)
             && !(is_telemetry_destination(at) && telemetry_kind == Some(FILE_TELEMETRY_KIND)))
         || is_filesystem_list(&at[..at.len().saturating_sub(1)])
+        || is_receive_mounts(&at[..at.len().saturating_sub(1)])
         || at.last().is_some_and(|key| key == "when")
         || is_env_value(at)
-}
-
-fn is_mount_list(at: &[String]) -> bool {
-    matches!(at, [agent, filesystem, mounts] if agent == "agent" && filesystem == "filesystem" && mounts == "mounts")
-        || matches!(at, [section, _, filesystem, mounts] if (section == "tool" || section == "mcp") && filesystem == "filesystem" && mounts == "mounts")
-}
-
-/// Whether `at` is an incoming mount path in the profile.
-fn is_storage_mount(at: &[String]) -> bool {
-    is_mount_list(&at[..at.len().saturating_sub(1)])
 }
 
 /// Whether `at` is one variable of the `env` table of `[agent]`, a `[tool.<name>]`, or an
@@ -7810,50 +7702,86 @@ mod tests {
     }
 
     #[test]
-    fn an_engine_floor_is_checked_against_the_version_of_the_lookup() {
+    fn requires_is_checked_against_the_version_of_the_lookup_box_first() {
         let shelf = Shelf::new();
-        let text = "packs = [\"@box/p\"]";
-        for (floor, refused) in [(">=7.2.0", false), (">=7.2.1", true)] {
-            shelf.share_raw(
-                "p",
-                &format!(
-                    "[pack]\nname = \"@box/p\"\nversion = 1\nkind = \"support\"\nengine = \"{floor}\"\n"
-                ),
-            );
-            let lookup = Lookup {
-                vendored: Some(shelf.root.join("packs")),
-                operator: shelf.root.join("operator"),
-                collections: Vec::new(),
-                version: "7.2.0",
-            };
-            let chained = chain(
-                &toml::from_str(text).expect("TOML"),
-                text,
+        let lookup = Lookup {
+            vendored: Some(shelf.root.join("packs")),
+            operator: shelf.root.join("operator"),
+            collections: Vec::new(),
+            version: "7.2.0",
+        };
+        let chained = |profile: &str| {
+            chain(
+                &toml::from_str(profile).expect("TOML"),
+                profile,
                 &shelf.root.join("mine/profile.toml"),
                 None,
                 &lookup,
-            );
-            match chained {
-                Ok(_) => assert!(!refused, "{floor} is refused for box 7.2.0"),
-                Err(error) => {
-                    let reason = reason(error);
-                    assert!(refused, "{floor}: {reason}");
-                    assert!(
-                        reason.contains("and this is box 7.2.0"),
-                        "{floor}: {reason}"
-                    );
+            )
+            .map(|_| ())
+            .map_err(reason)
+        };
+        let header = "[pack]\nname = \"@box/p\"\nversion = 1\nkind = \"support\"\n";
+        let profile = "packs = [\"@box/p\"]";
+        for (requires, wanted) in [
+            ("box = \">=7.2.0\"", None),
+            (
+                "box = \">=7.2.1\"",
+                Some("this pack needs box >=7.2.1, and this is box 7.2.0"),
+            ),
+            ("box = \"7.2\"", Some("is not `>=X.Y.Z`")),
+            // A requirement that a later box added comes after the floor.
+            (
+                "box = \">=8.0.0\"\nlater = true",
+                Some("this pack needs box >=8.0.0, and this is box 7.2.0"),
+            ),
+            (
+                "box = \">=7.0.0\"\nlater = true",
+                Some("`[requires]` holds the unknown key `later`; `[requires]` holds `box`"),
+            ),
+            ("bx = \">=7.0.0\"", Some("did you mean `box`?")),
+        ] {
+            shelf.share_raw("p", &format!("{header}[requires]\n{requires}\n"));
+            match (chained(profile), wanted) {
+                (Ok(()), None) => {}
+                (Err(reason), Some(wanted)) => {
+                    assert!(reason.contains(wanted), "{requires}: {reason}")
                 }
+                (got, wanted) => panic!("{requires}: got {got:?}, wanted {wanted:?}"),
             }
         }
+        shelf.share_raw("p", &format!("{header}engine = \">=7.0.0\"\n"));
+        let reason = chained(profile).expect_err("the old key is refused");
+        assert!(
+            reason.contains("`[pack]` holds the unknown key `engine`"),
+            "{reason}"
+        );
+        shelf.share_raw("p", header);
+        let path = shelf.root.join("mine/profile.toml");
+        let parsed = |text: &str| crate::profile::Profile::parse(text, &path, lookup.version);
+        let refused = parsed("packs = [\"@box/p\"]\n[requires]\nbox = \">=9.0.0\"\nlater = 1\n")
+            .map(|_| ())
+            .map_err(self::reason)
+            .expect_err("a profile is checked too");
+        assert!(
+            refused.contains("this profile needs box >=9.0.0, and this is box 7.2.0"),
+            "{refused}"
+        );
+        let profile = parsed("packs = [\"@box/p\"]\n[requires]\nbox = \">=7.2.0\"\n")
+            .expect("a profile within its floor parses");
+        assert!(!profile.table.contains_key(REQUIRES), "parse takes it out");
+        profile
+            .layers(None, &lookup)
+            .expect("a profile within its floor loads");
     }
 
-    fn engine_outcome(version: &str, floor: &str) -> Result<(), String> {
+    fn floor_outcome(version: &str, floor: &str) -> Result<(), String> {
         let shelf = Shelf::new();
         let text = "packs = [\"@box/p\"]";
         shelf.share_raw(
             "p",
             &format!(
-                "[pack]\nname = \"@box/p\"\nversion = 1\nkind = \"support\"\nengine = \"{floor}\"\n"
+                "[pack]\nname = \"@box/p\"\nversion = 1\nkind = \"support\"\n[requires]\nbox = \"{floor}\"\n"
             ),
         );
         let lookup = Lookup {
@@ -7874,7 +7802,7 @@ mod tests {
     }
 
     #[test]
-    fn a_preview_version_counts_as_its_release_for_an_engine_floor() {
+    fn a_preview_version_counts_as_its_release_for_a_box_floor() {
         for (version, floor, refused) in [
             ("0.3.0-linux-preview.1", ">=0.1.0", false),
             ("0.3.0-linux-preview.1", ">=0.3.0", false),
@@ -7892,7 +7820,7 @@ mod tests {
                 Ok(())
             };
             assert_eq!(
-                engine_outcome(version, floor),
+                floor_outcome(version, floor),
                 expected,
                 "box {version} against {floor}"
             );
@@ -7910,7 +7838,7 @@ mod tests {
             "-linux-preview.1",
             "0.3.0+build.5",
         ] {
-            let reason = engine_outcome(version, ">=0.1.0").expect_err("a malformed version");
+            let reason = floor_outcome(version, ">=0.1.0").expect_err("a malformed version");
             assert!(
                 reason.contains("needs box >=0.1.0")
                     && reason.contains(&format!("this is box {version}")),
@@ -7920,7 +7848,7 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_engine_floor_is_refused_and_named() {
+    fn a_malformed_box_floor_is_refused_and_named() {
         for floor in [
             ">=",
             ">=abc",
@@ -7930,7 +7858,7 @@ mod tests {
             "0.3.0",
             "^0.3.0",
         ] {
-            let reason = engine_outcome("0.3.0", floor).expect_err("a malformed floor");
+            let reason = floor_outcome("0.3.0", floor).expect_err("a malformed floor");
             assert!(reason.contains("is not `>=X.Y.Z`"), "{floor}: {reason}");
         }
     }
@@ -8812,6 +8740,36 @@ mod tests {
             ),
             "{reason}"
         );
+    }
+
+    #[test]
+    fn incoming_mount_selections_join_packs_without_crossing_processes() {
+        let shelf = Shelf::new();
+        shelf.share(
+            "agent",
+            "[run]\ncommand = ['/bin/a']\n[filesystem]\nreceive_mounts = ['/mnt/agent']",
+        );
+        shelf.share(
+            "reader",
+            &test_tool_pack("reader", "[filesystem]\nreceive_mounts = ['/mnt/tool']"),
+        );
+        let merged = merge(&shelf.chain(
+            "packs = ['@box/agent', '@box/reader']\n[agent.filesystem]\nreceive_mounts = ['/mnt/agent', '/mnt/extra']\n[tool.reader.filesystem]\nreceive_mounts = []\n[mcp.local]\ntype = 'stdio'\ncommand = ['/bin/mcp']\nfilesystem.receive_mounts = ['/mnt/mcp']"
+        ).expect("pack chain")).expect("merge");
+        let selections = |process: &toml::Value| {
+            process["filesystem"]["receive_mounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry.as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            selections(&merged.table["agent"]),
+            ["/mnt/agent", "/mnt/extra"]
+        );
+        assert_eq!(selections(&merged.table["tool"]["reader"]), ["/mnt/tool"]);
+        assert_eq!(selections(&merged.table["mcp"]["local"]), ["/mnt/mcp"]);
     }
 
     #[test]

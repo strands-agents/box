@@ -325,10 +325,6 @@ class Installer(unittest.TestCase):
     keep: bool
     target: str
 
-    @property
-    def binaries(self):
-        return BINARIES + (("strands-box-storage-compiler",) if "-linux-" in self.target else ())
-
     def setUp(self):
         self.target = TARGET if platform.system() == "Darwin" else "aarch64-unknown-linux-gnu"
         self.root = Path(tempfile.mkdtemp(prefix="box-test-", dir="/var/tmp"))
@@ -401,7 +397,8 @@ with (captured / "transfers.jsonl").open("a") as log:
         executable(self.tools / "codesign", f"""#!{sys.executable}
 import os, pathlib, sys
 name = pathlib.Path(sys.argv[-1]).name
-identifier = "com.amazon.strands.box-cli" if name in ("box", "Box.app") else "com.amazon.strands.box"
+identifier = os.environ.get("TEST_CLI_IDENTIFIER" if name in ("box", "Box.app") else "TEST_HELPER_IDENTIFIER",
+                            "com.amazon.strands.box")
 if os.environ.get("TEST_BAD_SIGNATURE"): sys.exit(1)
 team = os.environ.get("TEST_TEAM", "{TEAM}")
 if "--display" in sys.argv:
@@ -439,15 +436,13 @@ exec /bin/mv "$@"
             shutil.rmtree(self.root)
 
     def release(self, version, extra=None, missing=None, metadata=None, release_json=None,
-                packs="packs", native=False, aliases=None, launcher=None, prefix="box-cli", legacy=False):
+                packs="packs", native=False, aliases=None, launcher=None, prefix="box-cli"):
         # Releases name the archive box-cli-v<version>-<triple>.tar.gz; earlier ones used box-.
         directory = self.feed / "releases" / version
         directory.mkdir(parents=True, exist_ok=True)
         archive = directory / f"{prefix}-v{version}-{self.target}.tar.gz"
         record = dict(box_version=version, box_commit="a" * 40,
                       core_version="0.1.0", core_commit="b" * 40, target=self.target)
-        if "-linux-" in self.target and not legacy:
-            record["storage_compiler"] = True
         record.update(metadata or {})
         payload = f"""#!/bin/sh
 printf '%s\\n' "$0" >> "$TEST_LOG"
@@ -476,8 +471,7 @@ if [ "$*" = "telemetry status" ]; then
 fi
 printf 'box {version}\\n'
 """.encode()
-        binaries = BINARIES if legacy else self.binaries
-        files = {name: payload for name in binaries}
+        files = {name: payload for name in BINARIES}
         files.update({"release.json": json.dumps(record).encode() if release_json is None else release_json,
                       "resources/config.toml": b'[starters]\nonly = []\n',
                       f"resources/{packs}/base/pack.toml": b'[pack]\nname = "@box/base"\n'})
@@ -512,7 +506,7 @@ printf 'box {version}\\n'
             for name, data in files.items():
                 entry = tarfile.TarInfo(name)
                 entry.size = len(data)
-                entry.mode = 0o755 if name.removeprefix("Box.app/Contents/MacOS/") in self.binaries else 0o644
+                entry.mode = 0o755 if name.removeprefix("Box.app/Contents/MacOS/") in BINARIES else 0o644
                 tar.addfile(entry, io.BytesIO(data))
             if native:
                 for name, target in (NATIVE_ALIASES if aliases is None else aliases).items():
@@ -553,6 +547,55 @@ except (OSError, ValueError, KeyError, TypeError): sys.exit(1)
             text = (self.tools / "mv").read_text().replace('exec /bin/mv "$@"',
                 '[ "$1" != -fh ] || {{ shift; set -- -fT "$@"; }}\nexec /bin/mv "$@"'.replace("{{", "{").replace("}}", "}"))
             (self.tools / "mv").write_text(text)
+
+    def assert_macos_identity_upgrade_and_rollback(self, native):
+        self.native_platform()
+        self.release("0.1.0", native=native)
+        self.run_install(TEST_CLI_IDENTIFIER="com.amazon.strands.box-cli")
+        self.assertEqual(self.current(), f"0.1.0-{self.target}")
+        self.release("0.2.0", native=native)
+        self.run_install()
+        self.assertEqual(self.current(), f"0.2.0-{self.target}")
+        launcher = self.home / ".local/bin/box"
+        self.assertEqual(subprocess.check_output([str(launcher), "--version"], env=self.env, text=True),
+                         "box 0.2.0\n")
+        self.run_install(BOX_VERSION="0.1.0", TEST_CLI_IDENTIFIER="com.amazon.strands.box-cli")
+        self.assertEqual(self.current(), f"0.1.0-{self.target}")
+        self.assertEqual(subprocess.check_output([str(launcher), "--version"], env=self.env, text=True),
+                         "box 0.1.0\n")
+        self.assertEqual(len((self.root / "gatekeeper-calls").read_text().splitlines()), 9)
+
+    def test_macos_shared_identity_upgrade_and_pinned_legacy_rollback(self):
+        """Signed flat releases upgrade to the Box identity and retain pinned legacy installs"""
+        self.assert_macos_identity_upgrade_and_rollback(native=False)
+
+    def test_native_macos_shared_identity_upgrade_and_pinned_legacy_rollback(self):
+        """Signed native apps upgrade to the Box identity and retain pinned legacy installs"""
+        self.assert_macos_identity_upgrade_and_rollback(native=True)
+
+    @category("Verification")
+    def test_macos_identity_compatibility_keeps_publisher_and_signature_refusals(self):
+        """Both layouts reject unknown identities and unsigned or untrusted publishers before execution"""
+        self.native_platform()
+        for native in (False, True):
+            self.release("0.1.0", native=native)
+            for changes in (
+                {"TEST_CLI_IDENTIFIER": "com.example.other"},
+                {"TEST_CLI_IDENTIFIER": "com.amazon.strands.box-cli.other"},
+                {"TEST_CLI_IDENTIFIER": "com.amazon.strands.box\nIdentifier=com.amazon.strands.box"},
+                {"TEST_HELPER_IDENTIFIER": "com.amazon.strands.box-cli"},
+                {"TEST_TEAM": "OTHER12345"},
+                {"TEST_BAD_SIGNATURE": "1"},
+                {"TEST_BAD_REQUIREMENT": "1"},
+                {"TEST_BAD_GATEKEEPER": "1"},
+                {"TEST_CLI_IDENTIFIER": "com.amazon.strands.box-cli", "TEST_TEAM": "OTHER12345"},
+                {"TEST_CLI_IDENTIFIER": "com.amazon.strands.box-cli", "TEST_BAD_SIGNATURE": "1"},
+                {"TEST_CLI_IDENTIFIER": "com.amazon.strands.box-cli", "TEST_BAD_REQUIREMENT": "1"},
+                {"TEST_CLI_IDENTIFIER": "com.amazon.strands.box-cli", "TEST_BAD_GATEKEEPER": "1"},
+            ):
+                with self.subTest(native=native, changes=changes):
+                    self.run_install(success=False, **changes)
+                    self.untouched()
 
     def test_native_bundle_installs_through_bin_symlink_and_preserves_aliases(self):
         """A native bundle keeps signed files, exact aliases, and the installed entry point"""
@@ -817,32 +860,6 @@ exec /bin/sh "$script"
                 self.assertEqual([call[3] for call in downloads],
                                  ["SHA256SUMS.txt", "box-cli-v0.1.0-x86_64-unknown-linux-gnu.tar.gz"])
 
-    @unittest.skipUnless(platform.system() == "Linux", "Linux helper packaging")
-    def test_linux_marked_package_requires_storage_compiler_before_execution(self):
-        """A marked package missing its compiler is refused before any program runs"""
-        self.release("0.1.0", missing="strands-box-storage-compiler")
-        result = self.run_install(success=False)
-        self.assertIn("bundle is missing strands-box-storage-compiler", result.stderr)
-        self.untouched()
-
-    @unittest.skipUnless(platform.system() == "Linux", "Linux helper packaging")
-    def test_linux_legacy_package_without_storage_marker_still_installs(self):
-        """A historical Linux package does not require the new compiler"""
-        self.release("0.1.0", legacy=True)
-        self.run_install()
-        release = self.home / f".strands/box/packages/0.1.0-{self.target}"
-        self.assertFalse((release / "strands-box-storage-compiler").exists())
-
-    @unittest.skipUnless(platform.system() == "Linux", "Linux helper packaging")
-    def test_linux_storage_compiler_marker_rejects_false_or_malformed_values(self):
-        """Only a true marker declares the compiler dependency"""
-        for value in (False, "true", 1, None, [], {}):
-            with self.subTest(value=value):
-                self.release("0.1.0", metadata={"storage_compiler": value})
-                result = self.run_install(success=False)
-                self.assertIn("storage_compiler must be true", result.stderr)
-                self.untouched()
-
     @unittest.skipUnless(platform.system() == "Linux", "Linux shell default")
     @category("PATH & shells")
     def test_linux_defaults_to_bash_when_shell_is_unset(self):
@@ -869,7 +886,7 @@ exec /bin/sh "$script"
         """Configured publisher and Gatekeeper checks accept all three programs"""
         result = self.run_install()
         calls = [json.loads(line) for line in (self.root / "gatekeeper-calls").read_text().splitlines()]
-        self.assertEqual(calls, list(self.binaries))
+        self.assertEqual(calls, list(BINARIES))
         self.assertNotIn("valid on disk", result.stderr)
         self.assertEqual(self.current(), f"0.1.0-{self.target}")
 
@@ -1028,10 +1045,10 @@ exec /bin/sh "$script"
     def test_unsigned_github_release_still_checks_download(self):
         """Unsigned GitHub downloads keep checksum and archive verification"""
         self.script.write_text((ROOT / "install.sh").read_text())
-        self.release("0.1.0", missing=self.binaries[1])
+        self.release("0.1.0", missing=BINARIES[1])
         result = self.run_install(success=False, BOX_GITHUB_REPO="someone/private-box",
                                   BOX_ALLOW_UNSIGNED="1")
-        self.assertIn(f"bundle is missing {self.binaries[1]}", result.stderr)
+        self.assertIn(f"bundle is missing {BINARIES[1]}", result.stderr)
         self.untouched()
         self.release("0.1.0")
         checksums = self.feed / "releases/0.1.0/SHA256SUMS.txt"
@@ -1060,10 +1077,13 @@ exec /bin/sh "$script"
         self.assertEqual(repeated.stderr, "box 0.1.0 is already installed.\n")
         self.assertEqual((self.home / ".zshrc").read_text().count("# >>> Box PATH >>>"), 1)
         self.release("0.2.0")
+        # An update or downgrade shows the first install's welcome, telemetry notice included.
+        welcome = first.stderr[first.stderr.index("\nbox run"):]
         upgraded = self.run_install()
-        self.assertEqual(upgraded.stderr, "Updated box 0.1.0 to 0.2.0.\n")
+        self.assertEqual(upgraded.stderr, "Updated box 0.1.0 to 0.2.0.\n" + welcome)
         self.assertEqual(self.current(), f"0.2.0-{self.target}")
-        self.run_install(BOX_VERSION="0.1.0")
+        downgraded = self.run_install(BOX_VERSION="0.1.0")
+        self.assertEqual(downgraded.stderr, "Updated box 0.2.0 to 0.1.0.\n" + welcome)
         self.assertEqual(self.current(), f"0.1.0-{self.target}")
         self.assertEqual(state.read_text(), "user data")
         self.assertTrue((self.home / f".strands/box/packages/0.2.0-{self.target}/box").is_file())
@@ -1158,7 +1178,7 @@ exec /bin/sh "$script"
         self.assertEqual((downloads / "SHA256SUMS.txt").read_text(),
                          f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {asset}\n")
         release = self.home / f".strands/box/packages/0.1.0-{self.target}"
-        files = {*self.binaries, "release.json", "resources/config.toml", "resources/packs/base/pack.toml",
+        files = {*BINARIES, "release.json", "resources/config.toml", "resources/packs/base/pack.toml",
                  *POLICY_FILES, STARTER_FILE, PLUGIN_FILE, GUIDE_FILE}
         expected = files | {"resources", "resources/packs", "resources/packs/base",
                             "resources/plugins", "resources/plugins/1password",
@@ -1174,7 +1194,7 @@ exec /bin/sh "$script"
                 assert stream is not None
                 self.assertEqual(installed.read_bytes(), stream.read(), name)
                 self.assertFalse(installed.is_symlink(), name)
-                self.assertEqual(stat.S_IMODE(installed.stat().st_mode), 0o755 if name in self.binaries else 0o644)
+                self.assertEqual(stat.S_IMODE(installed.stat().st_mode), 0o755 if name in BINARIES else 0o644)
         for directory in (release, *(p for p in release.rglob("*") if p.is_dir())):
             self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o755)
         current = self.home / ".strands/box/packages/current"
@@ -1267,7 +1287,7 @@ exec /bin/sh "$script"
     @category("Verification")
     def test_missing_files_and_wrong_metadata_refuse_before_execution(self):
         """Missing files and wrong version metadata are rejected"""
-        for missing in (*self.binaries, "release.json", "resources/config.toml", "resources/packs/base/pack.toml",
+        for missing in (*BINARIES, "release.json", "resources/config.toml", "resources/packs/base/pack.toml",
                         *POLICY_FILES, STARTER_FILE):
             with self.subTest(missing=missing):
                 self.release("0.1.0", missing=missing)

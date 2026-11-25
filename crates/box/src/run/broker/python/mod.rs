@@ -251,8 +251,9 @@ pub(super) async fn drive_monty(
             // A `fetch` with no egress keeps the network off by absence: fail closed at `125`
             // rather than report it as an undefined name.
             RunProgress::FunctionCall(call) if call.function_name == FETCH_NAME => {
-                eprintln!(
-                    "strands-box: monty fetch refused (no egress): principal=agent function={}",
+                ::diagnostics::diag!(
+                    B0502,
+                    "monty fetch refused (no egress): principal=agent function={}",
                     call.function_name
                 );
                 return PythonOutcome {

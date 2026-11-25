@@ -22,7 +22,6 @@ pub(crate) trait ContainmentBackend: Send + Sync + std::fmt::Debug {
         egress_handoff: Option<&std::os::unix::net::UnixStream>,
         confirm_fd: Option<std::os::fd::RawFd>,
         native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
-        storage_control_fd: Option<std::os::fd::RawFd>,
     ) -> Result<(), ContainmentError>;
 
     /// Report this backend's enforcement capability on the current host.

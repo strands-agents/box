@@ -43,7 +43,7 @@ pub(super) struct Reach {
     /// The canonical host identity that backs the home's visible spelling.
     home_source: String,
 
-    /// The one resolver over the agent's home, the operator home, and the workspace.
+    /// The one resolver over every hosted filesystem root.
     resolver: PathResolver,
 
     /// The deny floor: roots no path may resolve into, whatever policy says.
@@ -72,8 +72,9 @@ pub(super) struct Reach {
 
     /// The directory a relative path means: the workspace, when the box has one.
     working: Option<String>,
-    #[cfg(target_os = "linux")]
-    storage: Option<std::sync::Arc<box_shell::StorageView>>,
+
+    /// Canonical agent receiving roots retained from the run's filesystem approval.
+    receiving: Vec<String>,
 }
 
 impl Reach {
@@ -84,7 +85,7 @@ impl Reach {
         operator_home: Option<&Path>,
         working: Option<&Path>,
     ) -> io::Result<Self> {
-        Self::over_with_floor(home, operator_home, working, None, &[])
+        Self::over_with_floor(home, operator_home, working, None, &[], &[])
     }
 
     pub(super) fn over_box(
@@ -93,6 +94,7 @@ impl Reach {
         working: Option<&Path>,
         box_root: &Path,
         protected_sources: &[AuthoritySource],
+        receiving: &[PathBuf],
     ) -> io::Result<Self> {
         Self::over_with_floor(
             home,
@@ -100,6 +102,7 @@ impl Reach {
             working,
             Some(box_root),
             protected_sources,
+            receiving,
         )
     }
 
@@ -109,6 +112,7 @@ impl Reach {
         working: Option<&Path>,
         box_root: Option<&Path>,
         protected_sources: &[AuthoritySource],
+        receiving: &[PathBuf],
     ) -> io::Result<Self> {
         let home_text = utf8(home, "the agent's home")?;
 
@@ -161,6 +165,17 @@ impl Reach {
             })?;
             if !roots.iter().any(|root| canonical.starts_with(root)) {
                 roots.push(canonical);
+            }
+        }
+        // These paths already passed the agent's receiving-root approval; preserve that spelling.
+        let receiving = receiving
+            .iter()
+            .map(|root| utf8(root, "an approved receiving directory"))
+            .collect::<io::Result<Vec<_>>>()?;
+        for root in &receiving {
+            let root = Path::new(root);
+            if !roots.iter().any(|existing| root.starts_with(existing)) {
+                roots.push(root.to_path_buf());
             }
         }
         let mut resolver = PathResolver::over(roots).map_err(|refusal| {
@@ -219,28 +234,8 @@ impl Reach {
                 .map(|home| utf8(&home, "the operator home"))
                 .transpose()?,
             working: working_text,
-            #[cfg(target_os = "linux")]
-            storage: None,
+            receiving,
         })
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(super) fn with_storage(
-        mut self,
-        storage: Option<std::sync::Arc<box_shell::StorageView>>,
-    ) -> Self {
-        self.storage = storage;
-        self
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    pub(super) fn with_storage(self) -> Self {
-        self
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(super) fn storage(&self) -> Option<&std::sync::Arc<box_shell::StorageView>> {
-        self.storage.as_ref()
     }
 
     pub(super) fn with_commands(
@@ -337,7 +332,11 @@ impl Reach {
         ]
         .into_iter()
         .flatten()
-        {
+        .chain(
+            self.receiving
+                .iter()
+                .map(|root| (root.as_str(), root.as_str())),
+        ) {
             if roots
                 .iter()
                 .any(|(_, destination)| Path::new(candidate.1).starts_with(destination))
@@ -374,10 +373,6 @@ impl Reach {
         reported_as: &str,
         mutates: bool,
     ) -> Result<PathBuf, Refused> {
-        #[cfg(target_os = "linux")]
-        if let Some(protected) = self.approve_storage(named, reported_as, mutates, true) {
-            return protected.map(|held| held.logical().to_path_buf());
-        }
         if mutates
             && self
                 .installation
@@ -413,105 +408,6 @@ impl Reach {
         //
         self.refuse_forbidden(&approved, reported_as, mutates)?;
         Ok(approved)
-    }
-
-    /// Canonical logical spelling for policy; failures keep the authored name for a refusal.
-    #[cfg(target_os = "linux")]
-    pub(super) fn storage_policy_path(&self, path: &Path, follow: bool) -> PathBuf {
-        self.storage
-            .as_ref()
-            .filter(|storage| storage.contains(path))
-            .and_then(|storage| {
-                storage
-                    .resolve(path, follow)
-                    .ok()
-                    .filter(|held| storage.contains(held.logical()))
-            })
-            .map_or_else(|| path.to_path_buf(), |held| held.logical().to_path_buf())
-    }
-
-    /// Resolve and floor an incoming path using the exact protected object identity.
-    #[cfg(target_os = "linux")]
-    pub(super) fn approve_storage(
-        &self,
-        named: &Path,
-        reported_as: &str,
-        mutates: bool,
-        follow: bool,
-    ) -> Option<Result<box_shell::StoragePath, Refused>> {
-        let storage = self.storage.as_ref()?;
-        if !storage.contains(named) {
-            return None;
-        }
-        Some((|| {
-            let held = storage.resolve(named, follow).map_err(|error| {
-                let mut refused = Refused::new(
-                    reported_as,
-                    format!("protected storage is unavailable: {error}"),
-                );
-                refused.unresolved = error.kind() == io::ErrorKind::NotFound;
-                refused
-            })?;
-            if !storage.contains(held.logical()) {
-                return Err(Refused::new(
-                    reported_as,
-                    "storage symlink leaves the declared protected destinations",
-                ));
-            }
-            held.require_policy_name(named)
-                .map_err(|error| Refused::new(reported_as, error.to_string()))?;
-            let identity = held
-                .identity()
-                .map_err(|error| Refused::new(reported_as, error.to_string()))?;
-            let approved = held.logical();
-            if mutates
-                && self.installation.as_ref().is_some_and(|installation| {
-                    installation.refuses_projected_mutation(approved, identity)
-                })
-            {
-                return Err(Refused::new(reported_as, TRUSTED_EXECUTABLE));
-            }
-            if mutates
-                && let Some(refusal) = self.commands.projected_mutation_refusal(approved, identity)
-            {
-                return Err(Refused::new(reported_as, command_mutation_reason(refusal)));
-            }
-            for source in &self.forbidden_exactly {
-                use std::os::unix::fs::MetadataExt as _;
-                let source_identity = source
-                    .opened()
-                    .metadata()
-                    .map(|metadata| (metadata.dev(), metadata.ino()))
-                    .map_err(|error| Refused::new(reported_as, error.to_string()))?;
-                if source.path() == approved
-                    || identity == Some(source_identity)
-                    || (mutates
-                        && (source.path().starts_with(approved)
-                            || identity.is_some_and(|identity| {
-                                source
-                                    .path()
-                                    .ancestors()
-                                    .filter_map(disk_identity)
-                                    .any(|ancestor| ancestor == identity)
-                            })))
-                {
-                    return Err(Refused::new(reported_as, AUTHORITY_SOURCE));
-                }
-            }
-            if self.forbidden.iter().any(|root| approved.starts_with(root))
-                || held
-                    .ancestors()
-                    .iter()
-                    .chain(identity.iter())
-                    .any(|identity| self.forbidden_identities.contains(identity))
-            {
-                return Err(Refused::new(reported_as, BENEATH_THE_FLOOR));
-            }
-            if mutates && self.forbidden.iter().any(|root| root.starts_with(approved)) {
-                return Err(Refused::new(reported_as, ENCLOSES_BOX_STATE));
-            }
-            Ok(held)
-        })())
     }
 
     /// Refuse a canonical path that resolves into a root no policy may open.
@@ -593,14 +489,6 @@ impl Reach {
 
     /// Whether `named` lies under a root of this box's reachable set.
     fn is_inside_the_set(&self, named: &Path) -> bool {
-        #[cfg(target_os = "linux")]
-        if self
-            .storage
-            .as_ref()
-            .is_some_and(|storage| storage.contains(named))
-        {
-            return true;
-        }
         [
             Some(self.home.as_str()),
             self.shared.as_deref(),
@@ -608,6 +496,7 @@ impl Reach {
         ]
         .into_iter()
         .flatten()
+        .chain(self.receiving.iter().map(String::as_str))
         .any(|root| named.starts_with(root))
     }
 }
@@ -926,6 +815,7 @@ mod tests {
                 None,
                 &resolved.join("boxes/codex"),
                 &[],
+                &[],
             )
             .expect("the reachable set is usable")
         });
@@ -986,7 +876,7 @@ mod tests {
 
         for target in [home.clone(), home.join("note.txt")] {
             let reach = crate::test_support::with_operator_home(&resolved, || {
-                Reach::over_box(&home, Some(&resolved), None, &box_root, &[])
+                Reach::over_box(&home, Some(&resolved), None, &box_root, &[], &[])
                     .expect("the reachable set is declarable")
             });
             let spelled = target.to_str().expect("UTF-8");
@@ -1050,7 +940,7 @@ mod tests {
             Path::new("/System/Volumes/Data").join(box_directory.strip_prefix("/").unwrap());
 
         let reach = crate::test_support::with_operator_home(&resolved, || {
-            Reach::over_box(&resolved, Some(&resolved), None, &data_volume, &[])
+            Reach::over_box(&resolved, Some(&resolved), None, &data_volume, &[], &[])
                 .expect("the reachable set is declarable")
         });
         let spelled = target.to_str().expect("UTF-8");
@@ -1123,6 +1013,7 @@ mod tests {
                 None,
                 &resolved.join("box"),
                 &[source],
+                &[],
             )
             .expect("the reachable set is usable")
         });
@@ -1171,6 +1062,7 @@ mod tests {
                 None,
                 &resolved.join("box"),
                 &[source],
+                &[],
             )
             .expect("the reachable set is usable")
         });
@@ -1202,6 +1094,7 @@ mod tests {
                 Some(&resolved.join("workspace")),
                 &resolved.join("box"),
                 &[source],
+                &[],
             )
             .expect("the reachable set is usable")
         });
@@ -1253,7 +1146,8 @@ mod private_tree_mutation_tests {
         let box_root = home.join("grandparent/parent/dummy-box");
         std::fs::create_dir_all(box_root.join("private/child")).expect("dummy directories");
         std::fs::create_dir_all(home.join("sibling")).expect("sibling directory");
-        let reach = Reach::over_box(&home, None, None, &box_root, &[]).expect("reachable fixture");
+        let reach =
+            Reach::over_box(&home, None, None, &box_root, &[], &[]).expect("reachable fixture");
         (temporary, reach, box_root)
     }
 
@@ -1373,6 +1267,7 @@ mod linked_command_mutation_tests {
             .expect("executable command");
         std::fs::hard_link(&command, staging.join("alias")).expect("preexisting hard link");
         let record = Record {
+            enforcement: Default::default(),
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
@@ -1618,5 +1513,78 @@ mod linked_command_mutation_tests {
             ),
         );
         mutation_refused_for(&reach, &home.join("tools"), "tools", CONFIGURED_COMMAND);
+    }
+}
+
+#[cfg(test)]
+mod receiving_tests {
+    use super::*;
+
+    /// A receiving root joins every hosted view without admitting adjacent paths or hiding floors.
+    #[test]
+    fn receiving_roots_join_the_resolver_membership_and_shell_binds() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let workspace = root.join("workspace");
+        let state = root.join("state");
+        let selected = root.join("selected");
+        let neighbor = root.join("selected-neighbor");
+        for path in [&home, &workspace, &state, &selected, &neighbor] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::write(path.join("value"), "fixture").unwrap();
+        }
+        let policy = workspace.join("policy.dw");
+        std::fs::write(&policy, "permit(principal, action, resource);").unwrap();
+        let (authority, _) = AuthoritySource::read(&policy, "policy").unwrap();
+        std::fs::hard_link(&policy, selected.join("authority-alias")).unwrap();
+        std::os::unix::fs::symlink(&neighbor, selected.join("escape")).unwrap();
+        std::os::unix::fs::symlink(&state, selected.join("state-alias")).unwrap();
+        let reach = Reach::over_box(
+            &home,
+            Some(&home),
+            Some(&workspace),
+            &state,
+            &[authority],
+            std::slice::from_ref(&selected),
+        )
+        .unwrap();
+        let value = selected.join("value");
+        assert!(reach.names_a_host_path(&value));
+        assert_eq!(reach.approve(&value, "value").unwrap(), value);
+        assert_eq!(reach.approve_mutation(&value, "value").unwrap(), value);
+        let selected_text = selected.to_str().unwrap();
+        assert!(
+            reach
+                .shell_binds()
+                .contains(&(selected_text, selected_text))
+        );
+        assert!(!reach.names_a_host_path(&neighbor));
+        for path in [
+            neighbor.join("value"),
+            selected.join("escape/value"),
+            selected.join("authority-alias"),
+            selected.join("state-alias/value"),
+        ] {
+            assert!(
+                reach.approve(&path, "refused").is_err(),
+                "{}",
+                path.display()
+            );
+            assert!(
+                reach.approve_mutation(&path, "refused").is_err(),
+                "{}",
+                path.display()
+            );
+        }
+        let ordinary =
+            Reach::over_box(&home, Some(&home), Some(&workspace), &state, &[], &[]).unwrap();
+        assert!(!ordinary.names_a_host_path(&value));
+        assert!(ordinary.approve(&value, "unselected").is_err());
+        assert!(
+            !ordinary
+                .shell_binds()
+                .contains(&(selected_text, selected_text))
+        );
     }
 }

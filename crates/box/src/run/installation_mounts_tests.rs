@@ -1011,7 +1011,6 @@ fn namespace_mounts_on_any_protected_device_refuse_the_inventory() {
             names: vec![fixture.installed.clone()],
             opened: File::open(&fixture.installed).unwrap(),
             identity: (device, fixture.identity().1),
-            verification: None,
         };
         let error = aliases_with_reader(
             &[binary(fixture.identity().0), binary(libc::makedev(0, 4))],

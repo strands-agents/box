@@ -24,11 +24,6 @@ Two helper programs connect the trusted process to the sandboxes. The trampoline
 to itself, then becomes the program that will run there. The alias runs inside the agent's sandbox
 and sends requests to the broker.
 
-With experimental Linux storage mounts enabled, a storage worker observes incoming mounts and
-`strands-box-storage-compiler` prepares restricted attachments from the original filesystem lists.
-These trusted helpers keep unprepared storage outside the sandboxes. See
-[storage that arrives after startup](containment.md#storage-that-arrives-after-startup).
-
 [Each box has one trusted process](decisions.md#one-trusted-process-per-box), which holds that
 box's policy engine, interpreters, gateway, certificate authority, and secrets. A shared process
 would expose every box's plaintext secrets and signing keys to one memory-safety failure.
@@ -175,7 +170,7 @@ The caller cannot select another socket. Tools and local MCP servers have no ali
 | Broker | The trusted process, its own thread | The whole run | Nothing. It routes each request. |
 | Strands Shell | The trusted process | One command | Asks policy for `shell:exec` or `shell:spawn`, and `fs:*` for interpreted file operations |
 | Monty | The trusted process | One script | Asks policy for `fs:*` for file operations |
-| Egress gateway | The trusted process | The whole run | Asks policy for `net:connect`, `http:request`, and `mcp:call` for remote servers |
+| Egress gateway | The trusted process | The whole run | Asks policy for `net:connect`, `http:request`, `websocket:connect`, and `mcp:call` for remote servers |
 | MCP broker | The trusted process, within the broker | The whole run | Asks policy for `shell:spawn` to start a local server, then `mcp:call` for requests |
 | Collector | The trusted process | Opens before the policy engine; drains after shutdown | Records decisions |
 | Trampoline | Outside the sandbox | Until it becomes the contained program | Nothing |
@@ -250,8 +245,10 @@ and the write cannot redirect the operation because
 [the resolved token binds the object](decisions.md#a-resolved-token-binds-the-object-it-names).
 
 The reachable paths check runs after policy and can still refuse the operation. It rejects paths
-outside the operator's home, the agent's home, and the workspace. It also rejects paths inside the
-box directory and the configuration and policy files loaded for this run. A policy permit cannot
+outside the operator's home, the agent's home, the workspace, and the approved directories selected
+by `[agent.filesystem] receive_mounts` in `box.toml`. Tool and local MCP selections do not expand
+this set. The check also rejects paths inside the box directory and the configuration and policy
+files loaded for this run. A policy permit cannot
 override these restrictions.
 
 That check does not protect credentials elsewhere in the operator's home. An `fs:read` permit with
@@ -289,7 +286,8 @@ interpreters are part of the code the operator must trust.
 3. It runs the programs of the declared secret sources to read the secrets of telemetry targets,
    and opens the collector to record the steps that follow. A read that fails here is on stderr
    alone.
-4. It installs the policy. Parsing or validation errors stop startup. Box also
+4. It installs the policy, in log-only mode when the `policy` table says so, and prints one line on
+   stderr naming what a log-only run exposes. Parsing or validation errors stop startup. Box also
    [rejects rules it can prove will never match](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns).
    It warns when it finds a rule that may never match but cannot prove it.
    Box then binds each experimental tool grammar to the program file of each `[tool]` it covers,
@@ -313,11 +311,17 @@ interpreters are part of the code the operator must trust.
    event metadata, the host-wide event count, and each volume's history identifier, and that a
    root process can delete any volume's event history. A selected stdio MCP server gets it before
    the agent starts, and again when the server starts.
+   On Linux, `filesystem.receive_mounts` adds a line naming each selected directory and the
+   whole-directory read, write, and execution contract. The line states that future mounts keep
+   the trusted publisher's options. Local servers also get this disclosure before the agent starts
+   and again when the server starts.
 
    On Linux, `interpreter aliases for configured access` lists preserved interpreter spellings
    before the runtime-minimum section. Each line maps a spelling to a file the process's existing
    grants authorize. These mappings add no executable or library access. The
    [configuration reference](../user/config.md#agentfilesystem-and-toolnamefilesystem) shows the output.
+   Each disclosure line starts with `strands-box: note[<code>]:`, and
+   [Message codes](../user/message-codes.md) explains each code.
 7. It starts the trampoline, which becomes the agent, and waits for the workload to end.
 
 Before a selected Linux workload starts, native filesystem setup probes whether the kernel can transfer path-only file handles.

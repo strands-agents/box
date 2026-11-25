@@ -19,6 +19,7 @@
 //! | [`ingress`] | `[[agent.ingress]]`: where callers reach the agent |
 //! | [`limits`] | `[limits.shell]`: the execution timeout of one Shell submission |
 //! | `env` | which environment names a process may set, and which Core owns |
+//! | [`mounts`] | the incoming mount declarations and their platform checks |
 //! | [`mcp`] | `[mcp.<name>]`: which local MCP servers exist, and how each starts |
 //! | [`secret_source`] | `[secret-source.<scheme>]`: which host program reads a secret for a scheme |
 //! | [`telemetry`] | `[telemetry.<label>]`: where a box's decision records go |
@@ -34,9 +35,9 @@ pub(crate) mod grammar;
 pub(crate) mod ingress;
 pub(crate) mod limits;
 pub(crate) mod mcp;
+pub(crate) mod mounts;
 pub(crate) mod process;
 pub(crate) mod secret_source;
-pub(crate) mod storage;
 pub(crate) mod telemetry;
 
 use std::collections::BTreeMap;
@@ -49,6 +50,7 @@ use policy::{Policy, PolicyEngine, ToolGrammars};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{BoxError, ConfigError};
+use crate::run::contain::boundary::RuntimeReach;
 
 #[cfg(test)]
 use self::egress::routes_for;
@@ -166,12 +168,17 @@ pub(crate) fn read_remote_mcp_servers(path: &Path) -> Result<Vec<RemoteMcpServer
     Ok(servers)
 }
 
+/// One process table, with its diagnostic name and typed containment role.
+pub(crate) struct ProcessTable {
+    pub(crate) name: String,
+    pub(crate) spec: ProcessSpec,
+    pub(crate) runtime_reach: RuntimeReach,
+}
+
 /// Each process table of one configuration, with what judges its filesystem lists.
 pub(crate) struct ProcessTables {
-    /// Provider roots whose filesystem rules are compiled when storage arrives.
-    pub(crate) storage_roots: Vec<PathBuf>,
-    /// `[agent]`, each `[tool.<name>]`, and each stdio `[mcp.<name>]`, by table name.
-    pub(crate) tables: Vec<(String, ProcessSpec)>,
+    /// `[agent]`, each `[tool.<name>]`, and each stdio `[mcp.<name>]`, with their roles.
+    pub(crate) tables: Vec<ProcessTable>,
     /// The policy file of the configuration.
     pub(crate) policy: Option<PathBuf>,
     /// Whether the configuration declares a stdio MCP server.
@@ -189,27 +196,25 @@ impl ProcessTables {
         declares_stdio_mcp: bool,
         secret_source: &BTreeMap<String, SecretSourceEntry>,
     ) -> Self {
-        let agent = agent.into_iter().map(|spec| ("[agent]".to_string(), spec));
+        let agent = agent
+            .into_iter()
+            .map(|spec| ("[agent]".to_string(), spec, RuntimeReach::Agent));
         let tools = tool
             .iter()
-            .map(|(label, spec)| (format!("[tool.{label}]"), spec));
+            .map(|(label, spec)| (format!("[tool.{label}]"), spec, RuntimeReach::Leaf));
         let servers = contained_mcp
             .iter()
-            .map(|(label, server)| (format!("[mcp.{label}]"), &server.spec));
-        let tables: Vec<_> = agent
-            .chain(tools)
-            .chain(servers)
-            .map(|(table, spec)| (table, spec.clone()))
-            .collect();
-        let storage_roots = tables
-            .iter()
-            .flat_map(|(_, spec)| spec.filesystem.mounts.iter().cloned())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
+            .map(|(label, server)| (format!("[mcp.{label}]"), &server.spec, RuntimeReach::Leaf));
         Self {
-            storage_roots,
-            tables,
+            tables: agent
+                .chain(tools)
+                .chain(servers)
+                .map(|(name, spec, runtime_reach)| ProcessTable {
+                    name,
+                    spec: spec.clone(),
+                    runtime_reach,
+                })
+                .collect(),
             policy,
             declares_stdio_mcp,
             source_paths: secret_source::protected_paths(secret_source),
@@ -616,6 +621,10 @@ impl RunContract {
                     &self.file.gateway,
                     &telemetry,
                     holds_secret_source_keys(&self.file.secret_source, &egress, &remote_mcp),
+                    self.file
+                        .policy
+                        .as_ref()
+                        .map_or(Enforcement::Enforce, |key| key.enforcement),
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 file_attributes: self.file.file_attributes,
@@ -626,6 +635,11 @@ impl RunContract {
                 box_dir: root.root().to_path_buf(),
                 name: self.file.name.clone(),
                 policy: policy.as_ref().map(|source| source.origin.clone()),
+                enforcement: self
+                    .file
+                    .policy
+                    .as_ref()
+                    .map_or(Enforcement::Enforce, |key| key.enforcement),
                 agent: self.file.agent.clone(),
                 tool: self.file.tool.clone(),
                 secret_source: self.file.secret_source.clone(),
@@ -712,6 +726,10 @@ pub(crate) struct Record {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) policy: Option<PathBuf>,
 
+    /// How the policy's verdicts apply; absent means they are enforced.
+    #[serde(default, skip_serializing_if = "Enforcement::is_enforce")]
+    pub(crate) enforcement: Enforcement,
+
     /// The agent this box runs, as `[agent]` declared it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) agent: Option<ProcessSpec>,
@@ -740,8 +758,8 @@ pub(crate) struct Record {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) remote_mcp: BTreeMap<String, EgressEntry>,
 
-    /// The MCP servers this box declares, from `box.toml`'s `[mcp.<name>]` tables. See the box
-    /// contract in `box/AGENTS.md`.
+    /// The MCP servers declared by `box.toml`'s `[mcp.<name>]` tables, described in
+    /// `crates/box/README.md#the-interface`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) mcp: Vec<crate::record::config::mcp::McpServer>,
 
@@ -830,9 +848,11 @@ fn is_true(value: &bool) -> bool {
 /// The record version of a record whose telemetry targets name `mcp_tool_calls`, so an older build
 /// refuses the box rather than resuming it with those records dropped.
 const TOOL_CALLS_RECORD_VERSION: u32 = 40;
-
-/// Storage admission declarations must never be ignored by an older Box build.
-const STORAGE_MOUNTS_RECORD_VERSION: u32 = 42;
+/// The record version of a record whose policy applies in log-only mode, so an older build refuses
+/// the box rather than enforcing a policy the operator asked to trial.
+const LOG_ONLY_RECORD_VERSION: u32 = 41;
+/// The record version that preserves nonempty incoming mount declarations.
+const MOUNTS_RECORD_VERSION: u32 = 42;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -846,8 +866,6 @@ pub(crate) struct ExperimentalFeatures {
     pub(crate) ingress: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) secret_sources: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) linux_storage_mounts: bool,
 }
 
 impl ExperimentalFeatures {
@@ -856,7 +874,6 @@ impl ExperimentalFeatures {
             && !self.tool_grammars
             && !self.ingress
             && !self.secret_sources
-            && !self.linux_storage_mounts
     }
 
     fn record_version(&self) -> u32 {
@@ -868,9 +885,6 @@ impl ExperimentalFeatures {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
-        if self.linux_storage_mounts && !cfg!(target_os = "linux") {
-            return Err(ConfigError::StorageUnavailable);
-        }
         if self.native_filesystem_policy
             && !cfg!(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
@@ -904,10 +918,16 @@ fn record_version<'a>(
     gateway: &Gateway,
     targets: &BTreeMap<String, telemetry::TelemetryEntry>,
     secret_source_keys: bool,
+    enforcement: Enforcement,
 ) -> u32 {
     let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
-    if features.linux_storage_mounts {
-        STORAGE_MOUNTS_RECORD_VERSION
+    if specs
+        .clone()
+        .any(|spec| !spec.filesystem.receive_mounts.is_empty())
+    {
+        MOUNTS_RECORD_VERSION
+    } else if enforcement.is_log_only() {
+        LOG_ONLY_RECORD_VERSION
     } else if telemetry::names_tool_calls(targets) {
         TOOL_CALLS_RECORD_VERSION
     } else if secret_source_keys {
@@ -1098,6 +1118,12 @@ const REMOVED_MCP_FILESYSTEM_EXEC: RemovedKey = RemovedKey {
                   macOS, so it states no `exec` list; only `[agent.filesystem]` takes `exec`",
 };
 
+/// The unpublished protected-view prototype does not have an active replacement.
+const REMOVED_LINUX_STORAGE_MOUNTS: RemovedKey = RemovedKey {
+    key: "[experimental-features] linux-storage-mounts",
+    replacement: "remove this key; select incoming mounts with filesystem.receive_mounts on Linux; no experimental feature flag is required",
+};
+
 /// The filesystem lists a leaf table no longer states, per `box.toml` section.
 const REMOVED_LEAF_FILESYSTEM_LISTS: [(&str, [(&str, &RemovedKey); 2]); 2] = [
     (
@@ -1133,6 +1159,13 @@ fn refuse_removed_keys(text: &str, path: &Path) -> Result<(), ConfigError> {
         key: removed.key,
         replacement: removed.replacement,
     };
+    if table
+        .get("experimental-features")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|features| features.contains_key("linux-storage-mounts"))
+    {
+        return Err(refuse(&REMOVED_LINUX_STORAGE_MOUNTS));
+    }
     for removed in &REMOVED_TOP_LEVEL_KEYS {
         if table.contains_key(removed.key.trim_matches(['[', ']'])) {
             return Err(refuse(removed));
@@ -1235,7 +1268,8 @@ impl Record {
             DENY_WRITE_RECORD_VERSION,
             SECRET_SOURCE_RECORD_VERSION,
             TOOL_CALLS_RECORD_VERSION,
-            STORAGE_MOUNTS_RECORD_VERSION,
+            LOG_ONLY_RECORD_VERSION,
+            MOUNTS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1271,6 +1305,7 @@ impl Record {
             &record.gateway,
             &record.telemetry,
             holds_secret_source_keys(&record.secret_source, &record.egress, &record.remote_mcp),
+            record.enforcement,
         );
         if record.version != expected {
             return Err(ConfigError::RecordVersion {
@@ -1280,9 +1315,6 @@ impl Record {
         }
         BoxName::parse(&record.name)?;
         record.gateway.validate()?;
-        if record.experimental_features.linux_storage_mounts && !cfg!(target_os = "linux") {
-            return Err(ConfigError::StorageUnavailable);
-        }
         record.validate_processes()?;
         record.declared_sources()?;
         Ok(record)
@@ -1291,12 +1323,8 @@ impl Record {
     /// Every process table, judged on its own shape.
     fn validate_processes(&self) -> Result<(), ConfigError> {
         if let Some(agent) = &self.agent {
-            storage::validate(
-                &agent.filesystem.mounts,
-                &self.experimental_features,
-                &self.box_dir,
-            )?;
             agent.validate("[agent]")?;
+            mounts::validate_selection(agent, "[agent]", &self.experimental_features)?;
             agent.validate_native_policy(
                 "[agent]",
                 self.experimental_features.native_filesystem_policy,
@@ -1304,12 +1332,12 @@ impl Record {
             agent.validate_ingress_selection("[agent]", self.experimental_features.ingress)?;
         }
         for (label, tool) in &self.tool {
-            storage::validate(
-                &tool.filesystem.mounts,
-                &self.experimental_features,
-                &self.box_dir,
-            )?;
             tool.validate(&format!("[tool.{label}]"))?;
+            mounts::validate_selection(
+                tool,
+                &format!("[tool.{label}]"),
+                &self.experimental_features,
+            )?;
             tool.validate_native_policy(
                 &format!("[tool.{label}]"),
                 self.experimental_features.native_filesystem_policy,
@@ -1320,12 +1348,12 @@ impl Record {
             )?;
         }
         for (name, contained) in &self.contained_mcp {
-            storage::validate(
-                &contained.spec.filesystem.mounts,
-                &self.experimental_features,
-                &self.box_dir,
-            )?;
             contained.spec.validate(&format!("[mcp.{name}]"))?;
+            mounts::validate_selection(
+                &contained.spec,
+                &format!("[mcp.{name}]"),
+                &self.experimental_features,
+            )?;
             contained.spec.validate_native_policy(
                 &format!("[mcp.{name}]"),
                 self.experimental_features.native_filesystem_policy,
@@ -1600,6 +1628,86 @@ pub(crate) fn trailing_arguments(argv: &[OsString]) -> Result<Vec<String>, Confi
         .collect()
 }
 
+/// How a box applies its policy's verdicts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Enforcement {
+    /// A denial blocks the action.
+    #[default]
+    Enforce,
+    /// A `forbid` or a missing `permit` is recorded as a would-deny and the action goes ahead.
+    LogOnly,
+}
+
+impl Enforcement {
+    /// Whether policy denials are recorded and let through.
+    pub(crate) fn is_log_only(self) -> bool {
+        self == Self::LogOnly
+    }
+
+    /// The `box.toml` spelling.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Enforce => "enforce",
+            Self::LogOnly => "log_only",
+        }
+    }
+
+    fn is_enforce(&self) -> bool {
+        *self == Self::Enforce
+    }
+}
+
+/// `box.toml`'s `policy` key: a path, or a `[policy]` table that also names how it applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PolicyKey {
+    source: PathBuf,
+    enforcement: Enforcement,
+}
+
+/// The `[policy]` table form of [`PolicyKey`].
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyTable {
+    source: PathBuf,
+    #[serde(default)]
+    enforcement: Enforcement,
+}
+
+impl<'de> Deserialize<'de> for PolicyKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Key;
+        impl<'de> serde::de::Visitor<'de> for Key {
+            type Value = PolicyKey;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter
+                    .write_str("a policy file path, or a table with `source` and `enforcement`")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, path: &str) -> Result<PolicyKey, E> {
+                Ok(PolicyKey {
+                    source: PathBuf::from(path),
+                    enforcement: Enforcement::Enforce,
+                })
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<PolicyKey, A::Error> {
+                let table =
+                    PolicyTable::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(PolicyKey {
+                    source: table.source,
+                    enforcement: table.enforcement,
+                })
+            }
+        }
+        deserializer.deserialize_any(Key)
+    }
+}
+
 // ── The wire record: the config file as the operator writes it ─────────────────
 
 /// One config file, as written by the operator.
@@ -1629,10 +1737,10 @@ struct ConfigFile {
     /// The caller-selected absolute directory that holds Box state.
     box_dir: PathBuf,
 
-    /// Path to the Dogwood policy file, relative to the config file's directory unless
-    /// absolute. Absent means no authored policy, and nothing is granted.
+    /// The Dogwood policy file, relative to the config file's directory unless absolute, and how
+    /// its verdicts apply. Absent means no authored policy, and nothing is granted.
     #[serde(default)]
-    policy: Option<PathBuf>,
+    policy: Option<PolicyKey>,
 
     /// The agent this box runs.
     #[serde(default)]
@@ -1686,13 +1794,15 @@ impl ConfigFile {
             path: path.to_path_buf(),
             source,
         })?;
+        #[cfg(not(target_os = "linux"))]
+        mounts::refuse_unsupported_config(text, path)?;
         file.validate()?;
         Ok(file)
     }
 
     /// The policy path, resolved against the config file's directory.
     fn policy_path(&self, config_path: &Path) -> Option<PathBuf> {
-        let policy = self.policy.as_ref()?;
+        let policy = &self.policy.as_ref()?.source;
         if policy.is_absolute() {
             return Some(policy.clone());
         }
@@ -1724,12 +1834,8 @@ impl ConfigFile {
         BoxName::parse(&self.name)?;
         self.gateway.validate()?;
         if let Some(agent) = &self.agent {
-            storage::validate(
-                &agent.filesystem.mounts,
-                &self.experimental_features,
-                &self.box_dir,
-            )?;
             agent.validate("[agent]")?;
+            mounts::validate_selection(agent, "[agent]", &self.experimental_features)?;
             agent.validate_native_policy(
                 "[agent]",
                 self.experimental_features.native_filesystem_policy,
@@ -1738,12 +1844,12 @@ impl ConfigFile {
         }
         for (label, tool) in &self.tool {
             validate_tool_label(label)?;
-            storage::validate(
-                &tool.filesystem.mounts,
-                &self.experimental_features,
-                &self.box_dir,
-            )?;
             tool.validate(&format!("[tool.{label}]"))?;
+            mounts::validate_selection(
+                tool,
+                &format!("[tool.{label}]"),
+                &self.experimental_features,
+            )?;
             tool.validate_native_policy(
                 &format!("[tool.{label}]"),
                 self.experimental_features.native_filesystem_policy,
@@ -1754,12 +1860,12 @@ impl ConfigFile {
             )?;
         }
         for (name, contained) in crate::record::config::mcp::contained_specs(&self.mcp) {
-            storage::validate(
-                &contained.spec.filesystem.mounts,
-                &self.experimental_features,
-                &self.box_dir,
-            )?;
             contained.spec.validate(&format!("[mcp.{name}]"))?;
+            mounts::validate_selection(
+                &contained.spec,
+                &format!("[mcp.{name}]"),
+                &self.experimental_features,
+            )?;
             contained.spec.validate_native_policy(
                 &format!("[mcp.{name}]"),
                 self.experimental_features.native_filesystem_policy,
@@ -1782,7 +1888,8 @@ impl ConfigFile {
             &BTreeMap::new(),
             agent_ingress(self.agent.as_ref()),
         )?;
-        validate_egress(&self.egress, &self.declared_sources()?)
+        validate_egress(&self.egress, &self.declared_sources()?)?;
+        Ok(())
     }
 
     /// Every declared `ProcessSpec` beside the table that declared it.
@@ -1821,7 +1928,6 @@ fn validate_tool_label(label: &str) -> Result<(), ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::process::Filesystem;
     use super::*;
 
     #[test]
@@ -1863,6 +1969,7 @@ mod tests {
                             &Gateway::default(),
                             &stored.telemetry,
                             false,
+                            Enforcement::Enforce,
                         ),
                         expected_version
                     );
@@ -1919,6 +2026,7 @@ mod tests {
                 &Gateway::default(),
                 &stored.telemetry,
                 false,
+                Enforcement::Enforce,
             ),
             MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
         );
@@ -2071,6 +2179,7 @@ mod tests {
     /// A stored record with the given agent and egress entries, and nothing else.
     fn record(agent: Option<ProcessSpec>, egress: BTreeMap<String, EgressEntry>) -> Record {
         Record {
+            enforcement: Default::default(),
             version: RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
@@ -2319,7 +2428,6 @@ native-filesystem-policy = false
                         tool_grammars: true,
                         ingress: false,
                         secret_sources: false,
-                        linux_storage_mounts: false,
                     };
                     for override_value in [None, Some(false)] {
                         spec.native_filesystem_policy = override_value;
@@ -2338,6 +2446,7 @@ native-filesystem-policy = false
                                     &Gateway::default(),
                                     &BTreeMap::new(),
                                     false,
+                                    Enforcement::Enforce,
                                 ),
                                 27
                             );
@@ -3129,7 +3238,10 @@ native-filesystem-policy = false
         )
         .expect("valid");
 
-        assert_eq!(config.policy, Some(PathBuf::from("box.cedar")));
+        assert_eq!(
+            config.policy.map(|key| key.source),
+            Some(PathBuf::from("box.cedar"))
+        );
         assert_eq!(config.egress.len(), 1);
     }
 
@@ -3473,242 +3585,17 @@ env = {}
                     telemetry::TelemetryEntry::file("/tmp/records.jsonl", Some(include)),
                 )]),
                 false,
+                Enforcement::Enforce,
             )
         };
         assert_eq!(version(true), TOOL_CALLS_RECORD_VERSION);
         assert_eq!(version(false), RECORD_VERSION);
     }
 
-    #[test]
-    fn storage_selection_cannot_silently_enter_an_ordinary_record() {
-        let mut stored = record(None, BTreeMap::new());
-        let ordinary = toml::to_string(&stored).unwrap();
-        assert!(!ordinary.contains("[storage]"));
-        assert!(!ordinary.contains("linux-storage-mounts"));
-        assert_eq!(
-            Record::parse(&ordinary, Path::new("record.toml")).unwrap(),
-            stored
-        );
-        stored.experimental_features.linux_storage_mounts = true;
-        stored.agent = Some(ProcessSpec {
-            command: vec!["/bin/echo".into()],
-            filesystem: Filesystem {
-                mounts: vec![PathBuf::from("/mnt/data"), PathBuf::from("/mnt/shared")],
-                ..Default::default()
-            },
-            ..agent(&["/bin/echo"])
-        });
-        let expected = record_version(
-            &stored.box_id,
-            stored.file_attributes,
-            stored.monty,
-            &stored.experimental_features,
-            &stored.limits,
-            stored.agent.iter().chain(stored.tool.values()),
-            &stored.mcp,
-            stored.agent.as_ref(),
-            false,
-            &stored.gateway,
-            &stored.telemetry,
-            false,
-        );
-        assert_eq!(expected, STORAGE_MOUNTS_RECORD_VERSION);
-        let wrong_version = toml::to_string(&stored).unwrap();
-        assert!(matches!(
-            Record::parse(&wrong_version, Path::new("record.toml")),
-            Err(ConfigError::RecordVersion {
-                expected: STORAGE_MOUNTS_RECORD_VERSION,
-                ..
-            })
-        ));
-        stored.version = STORAGE_MOUNTS_RECORD_VERSION;
-        let selected = toml::to_string(&stored).unwrap();
-        assert!(selected.contains("linux-storage-mounts = true"));
-        assert!(selected.contains("/mnt/data"));
-        let parsed = Record::parse(&selected, Path::new("record.toml"));
-        if cfg!(target_os = "linux") {
-            assert_eq!(parsed.unwrap(), stored);
-        } else {
-            assert!(matches!(parsed, Err(ConfigError::StorageUnavailable)));
-        }
-    }
-
-    #[test]
-    fn storage_mounts_are_selected_per_process_without_inheritance() {
-        let text = r#"name = "storage"
-box_dir = "/var/lib/box"
-[experimental-features]
-linux-storage-mounts = true
-[agent]
-command = ["/bin/echo"]
-[agent.filesystem]
-mounts = ["/mnt/shared", "/mnt/agent"]
-[tool.reader]
-command = ["/bin/echo"]
-[tool.reader.filesystem]
-mounts = ["/mnt/shared"]
-[tool.ordinary]
-command = ["/bin/echo"]
-[mcp.server]
-type = "stdio"
-command = ["/bin/echo"]
-[mcp.server.filesystem]
-mounts = ["/mnt/server"]
-"#;
-        let parsed = ConfigFile::parse(text, Path::new("box.toml"));
-        if !cfg!(target_os = "linux") {
-            assert!(matches!(parsed, Err(ConfigError::StorageUnavailable)));
-            return;
-        }
-        let file = parsed.unwrap();
-        let mut stored = record(file.agent, BTreeMap::new());
-        stored.experimental_features = file.experimental_features;
-        stored.tool = file.tool;
-        stored.contained_mcp = mcp::contained_specs(&file.mcp);
-        stored.version = STORAGE_MOUNTS_RECORD_VERSION;
-        let text = toml::to_string(&stored).unwrap();
-        assert!(!text.contains("[storage]"));
-        let stored = Record::parse(&text, Path::new("record.toml")).unwrap();
-        let tables = stored.process_tables();
-        assert_eq!(
-            tables.storage_roots,
-            ["/mnt/agent", "/mnt/server", "/mnt/shared"].map(PathBuf::from)
-        );
-        for (table, expected) in [
-            ("[agent]", vec!["/mnt/shared", "/mnt/agent"]),
-            ("[tool.reader]", vec!["/mnt/shared"]),
-            ("[tool.ordinary]", vec![]),
-            ("[mcp.server]", vec!["/mnt/server"]),
-        ] {
-            let spec = &tables
-                .tables
-                .iter()
-                .find(|(name, _)| name == table)
-                .unwrap()
-                .1;
-            assert_eq!(
-                spec.filesystem.mounts,
-                expected.into_iter().map(PathBuf::from).collect::<Vec<_>>()
-            );
-            assert!(
-                spec.filesystem.entries().next().is_none(),
-                "declaring mounts grants no access"
-            );
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn storage_preflight_defers_only_the_recipient_mounts() {
-        let temporary = tempfile::tempdir().unwrap();
-        let source = temporary.path().canonicalize().unwrap().join("source");
-        let selected_agent = ProcessSpec {
-            command: vec!["/bin/echo".into()],
-            filesystem: Filesystem {
-                mounts: vec![source.clone()],
-                ..Default::default()
-            },
-            ..agent(&["/bin/echo"])
-        };
-        let tool = ProcessSpec {
-            command: vec!["/bin/echo".into()],
-            filesystem: Filesystem {
-                read: vec![source.join("required")],
-                ..Default::default()
-            },
-            ..agent(&["/bin/echo"])
-        };
-        let mut stored = record(Some(selected_agent), BTreeMap::new());
-        stored.tool.insert("reader".into(), tool.clone());
-        let commands = crate::run::commands::ConfiguredCommands::load(&stored).unwrap();
-        let tables = stored.process_tables();
-        assert_eq!(tables.storage_roots, vec![source.clone()]);
-        let check = |spec: &ProcessSpec| {
-            crate::run::contain::boundary::storage::validate_source_preflight(
-                spec,
-                "[tool.reader]",
-                &tables,
-                &[],
-                &commands,
-            )
-        };
-        let error =
-            check(&tool).expect_err("the agent declaration must not defer a tool's missing path");
-        assert!(error.to_string().contains("does not exist"), "{error}");
-        let mut selected = tool;
-        selected.filesystem.mounts.push(source);
-        check(&selected).expect("the tool's own declaration defers its missing path");
-    }
-
-    #[test]
-    fn storage_mounts_on_each_recipient_require_the_experimental_flag() {
-        for (table, fields) in [
-            ("agent", "command = [\"/bin/echo\"]"),
-            ("tool.reader", "command = [\"/bin/echo\"]"),
-            ("mcp.server", "type = \"stdio\"\ncommand = [\"/bin/echo\"]"),
-        ] {
-            let text = format!(
-                "name = \"storage\"\nbox_dir = \"/var/lib/box\"\n[{table}]\n{fields}\n[{table}.filesystem]\nmounts = [\"/mnt/data\"]\n"
-            );
-            assert!(
-                matches!(
-                    ConfigFile::parse(&text, Path::new("box.toml")),
-                    Err(ConfigError::Storage { .. })
-                ),
-                "{table}"
-            );
-            let empty = text.replace("[\"/mnt/data\"]", "[]");
-            ConfigFile::parse(&empty, Path::new("box.toml")).unwrap();
-        }
-    }
-
-    #[test]
-    fn storage_mounts_reject_the_removed_global_table_and_old_record_version() {
-        let text =
-            "name = \"storage\"\nbox_dir = \"/var/lib/box\"\n[storage]\nmounts = [\"/mnt/data\"]\n";
-        assert!(matches!(
-            ConfigFile::parse(text, Path::new("box.toml")),
-            Err(ConfigError::Parse { .. })
-        ));
-        let mut stored = record(None, BTreeMap::new());
-        stored.experimental_features.linux_storage_mounts = true;
-        stored.version = 41;
-        assert!(matches!(
-            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
-            Err(ConfigError::RecordVersion { found: 41, .. })
-        ));
-    }
-
-    #[test]
-    fn storage_config_requires_selection_and_a_linux_build() {
-        let text = "name = \"storage\"\nbox_dir = \"/var/lib/box\"\n[agent]\ncommand = [\"/bin/echo\"]\n[agent.filesystem]\nmounts = [\"/mnt/data\"]\n";
-        assert!(matches!(
-            ConfigFile::parse(text, Path::new("box.toml")),
-            Err(ConfigError::Storage { .. })
-        ));
-        let selected = format!("{text}[experimental-features]\nlinux-storage-mounts = true\n");
-        let parsed = ConfigFile::parse(&selected, Path::new("box.toml"));
-        if cfg!(target_os = "linux") {
-            assert_eq!(
-                parsed.unwrap().agent.unwrap().filesystem.mounts,
-                vec![PathBuf::from("/mnt/data")]
-            );
-        } else {
-            assert!(matches!(parsed, Err(ConfigError::StorageUnavailable)));
-        }
-        assert!(
-            ConfigFile::parse(
-                &selected.replace("linux-storage-mounts", "linux-storage-mount"),
-                Path::new("box.toml")
-            )
-            .is_err()
-        );
-    }
-
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, STORAGE_MOUNTS_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, MOUNTS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -4492,6 +4379,11 @@ mounts = ["/mnt/server"]
     /// Write a box.toml whose body (the `[egress.*]`/`[mcp.*]` tables) is `body`, run it through
     /// `into_request`, and return the stored record or the configuration error.
     fn record_from_config(body: &str) -> Result<Record, crate::error::BoxError> {
+        record_from_config_with("policy = \"policy.dw\"\n", body)
+    }
+
+    /// [`record_from_config`] with `policy` as the configuration's `policy` key.
+    fn record_from_config_with(policy: &str, body: &str) -> Result<Record, crate::error::BoxError> {
         let directory = tempfile::tempdir().expect("configuration directory");
         crate::test_support::with_operator_home(directory.path(), || {
             let workspace = directory.path().join("workspace");
@@ -4514,7 +4406,7 @@ mounts = ["/mnt/server"]
             std::fs::write(
                 &config_path,
                 format!(
-                    "name = \"codex\"\nbox_dir = {:?}\npolicy = \"policy.dw\"\n{body}",
+                    "name = \"codex\"\nbox_dir = {:?}\n{policy}{body}",
                     box_directory.display().to_string(),
                 ),
             )
@@ -4547,6 +4439,74 @@ mounts = ["/mnt/server"]
         record
     }
 
+    /// **A `[policy]` table names the file and how its verdicts apply.** `enforcement = "log_only"`
+    /// is stored, round trips, and needs its own record version, so a build that would enforce the
+    /// trial refuses the box. The string form and `enforcement = "enforce"` store the same record, which
+    /// leaves the key out.
+    #[test]
+    fn a_log_only_policy_is_stored_at_its_own_record_version() {
+        let tool = "[tool.python3]\ncommand = [\"python3\"]\n";
+        let pinned = |policy: &str| {
+            let mut record =
+                record_from_config_with(policy, tool).expect("the configuration loads");
+            record.box_id = "box-0123456789abcdef".to_string();
+            record.box_dir = PathBuf::from("/var/lib/boxes/codex");
+            record.policy = Some(PathBuf::from("/etc/boxes/policy.dw"));
+            record
+        };
+        let string = pinned("policy = \"policy.dw\"\n");
+        assert_eq!(string.enforcement, Enforcement::Enforce);
+        assert_eq!(string.version, RECORD_VERSION);
+        assert!(!string.to_toml().unwrap().contains("enforcement"));
+        assert_eq!(
+            pinned("[policy]\nsource = \"policy.dw\"\nenforcement = \"enforce\"\n"),
+            string
+        );
+        assert_eq!(pinned("[policy]\nsource = \"policy.dw\"\n"), string);
+
+        let mut trial = pinned("[policy]\nsource = \"policy.dw\"\nenforcement = \"log_only\"\n");
+        assert_eq!(trial.enforcement, Enforcement::LogOnly);
+        assert_eq!(trial.version, LOG_ONLY_RECORD_VERSION);
+        let text = trial.to_toml().unwrap();
+        assert!(text.contains("enforcement = \"log_only\""), "{text}");
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml")).unwrap(),
+            trial
+        );
+
+        trial.version = TOOL_CALLS_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&trial.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                expected: LOG_ONLY_RECORD_VERSION,
+                ..
+            })
+        ));
+    }
+
+    /// **A `[policy]` table without `source`, with an unknown `enforcement`, or with an unknown key
+    /// is refused**, like any other bad key.
+    #[test]
+    fn a_bad_policy_table_is_refused() {
+        for (table, says) in [
+            ("[policy]\nenforcement = \"log_only\"\n", "source"),
+            (
+                "[policy]\nsource = \"policy.dw\"\nenforcement = \"log-only\"\n",
+                "log_only",
+            ),
+            (
+                "[policy]\nsource = \"policy.dw\"\nmode = \"log_only\"\n",
+                "mode",
+            ),
+        ] {
+            let document = format!("name = \"codex\"\nbox_dir = {LOAD_BOX_DIR:?}\n{table}");
+            let refusal = toml::from_str::<ConfigFile>(&document)
+                .expect_err("the table is refused")
+                .to_string();
+            assert!(refusal.contains(says), "{table}: {refusal}");
+        }
+    }
+
     /// **`monty` is on by default, and only `monty = false` changes the record.** An absent key and
     /// an explicit `true` store the same record, which leaves the key out. `false` is stored, round
     /// trips, and needs version 37, so a build that would run Monty refuses the box.
@@ -4577,23 +4537,28 @@ mounts = ["/mnt/server"]
     }
 
     /// **The process tables of a configuration are `[agent]`, each `[tool.<name>]`, and each
-    /// stdio `[mcp.<name>]`**, for a stored record and for the file that offline schema generation
-    /// reads.
+    /// stdio `[mcp.<name>]`**, with an agent or leaf role, for a stored record and for the file that
+    /// offline schema generation reads.
     #[test]
     fn the_process_tables_are_the_agent_each_tool_and_each_stdio_mcp_server() {
         const BODY: &str = "[agent]\ncommand = [\"/bin/bash\"]\n\
              [tool.build]\ncommand = [\"/usr/bin/make\"]\n\
              [mcp.local]\ntype = \"stdio\"\ncommand = [\"mcp-server-fetch\"]\n\
              [mcp.remote]\ntype = \"http\"\ndestinations = [\"mcp.example.com\"]\n";
-        let names = |tables: &ProcessTables| {
+        let roles = |tables: &ProcessTables| {
             tables
                 .tables
                 .iter()
-                .map(|(table, _)| table.clone())
+                .map(|table| (table.name.clone(), table.runtime_reach))
                 .collect::<Vec<_>>()
         };
+        let expected = [
+            ("[agent]".to_string(), RuntimeReach::Agent),
+            ("[tool.build]".to_string(), RuntimeReach::Leaf),
+            ("[mcp.local]".to_string(), RuntimeReach::Leaf),
+        ];
         let stored = pinned_record(BODY).process_tables();
-        assert_eq!(names(&stored), ["[agent]", "[tool.build]", "[mcp.local]"]);
+        assert_eq!(roles(&stored), expected);
         assert!(stored.declares_stdio_mcp);
         assert_eq!(
             stored.policy.as_deref(),
@@ -4608,12 +4573,12 @@ mounts = ["/mnt/server"]
         )
         .unwrap();
         let (_, _, read) = read_secret_sources(&path).unwrap();
-        assert_eq!(names(&read), ["[agent]", "[tool.build]", "[mcp.local]"]);
+        assert_eq!(roles(&read), expected);
         assert!(read.declares_stdio_mcp);
         assert_eq!(read.policy, None);
         // A configuration with no stdio server searches no program directory.
         let none = pinned_record("[agent]\ncommand = [\"/bin/bash\"]\n").process_tables();
-        assert_eq!(names(&none), ["[agent]"]);
+        assert_eq!(roles(&none), [("[agent]".to_string(), RuntimeReach::Agent)]);
         assert!(!none.declares_stdio_mcp);
 
         // Each path that a secret source protects goes with the tables, so each judgement of a

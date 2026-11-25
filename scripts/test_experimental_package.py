@@ -212,7 +212,6 @@ class BuildFeatureTests(unittest.TestCase):
                     for required in ("--locked", "--release", "strands-box-cli", "strands-box", "strands-box-containment",
                                      "box", "strands-box-sock-alias", "strands-box-contain-trampoline"):
                         self.assertIn(required, args)
-                    self.assertEqual("strands-box-storage-compiler" in args, target in TARGETS[1:])
                     self.assertEqual(args[args.index("--target") + 1], target)
 
     def test_workflow_receipt_binds_archive_features_and_selected_sdk(self):
