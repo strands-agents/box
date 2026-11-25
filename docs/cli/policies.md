@@ -94,7 +94,8 @@ A route in a pack works the same way. That's how `@box/anthropic` lets the agent
 `api.anthropic.com`. A tool, an MCP server, `[project] access`, `[storage]`, `[filesystem] deny`,
 and `deny_write` also write the rules they need, in a pack or the profile, and `box` always forbids
 changes to `~/.strands/box` outside the run's storage directories and its tools' storage, to
-`~/.local/bin`, and to the profile's own files.
+`~/.local/bin` and each folder on your `PATH` whose `box` links to the running `box`, and to the profile's
+own files.
 [Generated policy](policies-reference.md#generated-policy) lists each rule, what it allows or
 forbids, and the setting that writes it.
 
@@ -157,7 +158,8 @@ rule, a path in your home directory starts with `~/`, such as `~/src/shared-lib`
 by checking filesystem grants, not your rules. It refuses a profile or pack whose `write` entry
 reaches `~/.strands/box`, `~/.local/bin`, the folders `box` and its packs are installed in, or a
 program the box runs. The rules it writes forbid the shell to change `~/.strands/box`,
-`~/.local/bin`, the profile's files, and each `deny_write` folder, but nothing else in your home.
+`~/.local/bin`, each folder on your `PATH` whose `box` links to the running `box` (such as Homebrew's
+`bin`), the profile's files, and each `deny_write` folder, but nothing else in your home.
 `box` doesn't read the rules you write, so a broad write rule opens the rest, and the run starts
 with no warning:
 
