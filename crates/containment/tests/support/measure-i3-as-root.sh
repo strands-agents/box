@@ -8,8 +8,8 @@
 #   cargo build -p strands-box-containment --all-features --bins
 #   sudo crates/containment/tests/support/measure-i3-as-root.sh
 #
-# Every probe must print `probe ok` and the script must exit 0. Record the macOS build, the
-# architecture and the result in crates/containment/AGENTS.md.
+# Every probe must print `probe ok` and the script must exit 0. Include the macOS build,
+# architecture, and result in the pull request that uses this measurement.
 #
 # `--control` is the other half, and it also needs root. Refused-as-root alone does not say WHAT
 # refused, so the control runs `chroot(2)` as root OUTSIDE any box: it must succeed there.

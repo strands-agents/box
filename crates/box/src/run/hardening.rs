@@ -1,8 +1,7 @@
 //! Refuse another process the trusted process's memory
 //! (docs/design/decisions.md#the-trusted-processs-memory-is-a-defended-asset).
 //!
-//! What each mechanism buys, the four gaps it does *not* close, and why `mlockall` is
-//! absent are measured in the crate's `AGENTS.md`. Read it before changing what is applied.
+//! The crate's `AGENTS.md` summarizes the hardening limits and the `mlockall` constraint.
 //!
 //! **There is no opt-out.** Every mechanism here applies unconditionally, and no environment
 //! variable declines one.
