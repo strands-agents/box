@@ -110,8 +110,8 @@ async fn first_request(
     }
 
     // A plain `http://` request: the same decisions, with no TLS and no CONNECT ack.
-    let handshake =
-        (websocket::classify(&request) != Handshake::None).then(|| request.method().clone());
+    let handshake = (!matches!(websocket::classify(&mut request), Handshake::None))
+        .then(|| request.method().clone());
     let max_body = state.config.response_limits.max_body_bytes;
     let Ok(parsed) = http1::read_request(&head, request.into_body(), max_body).await else {
         return Ok(WorkloadResponse::bare(400));
@@ -213,8 +213,7 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
     let completion = ResponseCompletion::default();
     let (completion, pending) = (&completion, &Cell::new(None));
     serve(client, completion, |mut request, head| async move {
-        let handshake = websocket::classify(&request);
-        let upgrade = (handshake == Handshake::WebSocket).then(|| hyper::upgrade::on(&mut request));
+        let handshake = websocket::classify(&mut request);
         let max_body = state.config.response_limits.max_body_bytes;
         let parsed = match http1::read_request(&head, request.into_body(), max_body).await {
             Ok(parsed) => parsed,
@@ -223,31 +222,24 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
             }
         };
         let forwarded = l7::forward_tls(
-            parsed,
+            (parsed, handshake),
             upstream,
             backend.as_ref(),
             &connect,
             state,
             correlation,
             completion,
-            handshake,
         )
         .await;
         let mut response = answered(&connect, backend.as_ref(), forwarded);
-        if let (Some(upgrade), Some(relay)) = (upgrade, response.relay.take()) {
-            pending.set(Some((upgrade, relay)));
-        }
+        pending.set(response.relay.take());
         Ok(response)
     })
     .await?;
-    if let Some((upgrade, relay)) = pending.take() {
-        let workload = upgrade
-            .await
-            .map_err(|e| ProxyError::Io(format!("WebSocket upgrade: {e}")))?;
-        let limit = state.config.upstream_read_deadline;
-        websocket::run(TokioIo::new(workload), TokioIo::new(relay), limit).await;
+    match pending.take() {
+        Some(relay) => relay.serve(state.config.upstream_read_deadline).await,
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Serve one request with hyper, and record the release outcome once the response is written.

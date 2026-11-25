@@ -5,6 +5,7 @@ use zeroize::Zeroizing;
 
 use crate::boundary::HeaderMap;
 use crate::error::{ProxyError, Result};
+use crate::proxy::websocket::{self, Key};
 
 /// A parsed HTTP/1.1 request read off the wire.
 #[derive(Debug)]
@@ -274,23 +275,15 @@ where
     })
 }
 
-/// Check the upstream's final response head and return its body without collecting it.
+/// Check the upstream's final response head and return its body without collecting it. `handshake`
+/// is the key of the request's WebSocket handshake.
 pub(crate) fn read_response_head<B>(
     response: hyper::Response<B>,
-    websocket: bool,
+    handshake: Option<&Key>,
 ) -> Result<(ResponseHead, B)> {
     let (mut head, body) = response.into_parts();
     let status = head.status.as_u16();
-    if status == 101 && !websocket {
-        return Err(ProxyError::Intercept(
-            "HTTP protocol upgrades are not supported".to_string(),
-        ));
-    }
-    if status == 101 && !switches_to_websocket(&head.headers) {
-        return Err(ProxyError::Intercept(
-            "a 101 reply to a WebSocket handshake did not switch to WebSocket".to_string(),
-        ));
-    }
+    websocket::check_reply(handshake, status, &head.headers)?;
     let mut headers = HeaderMap::from_pairs(head.headers.iter().map(|(name, value)| {
         (
             name.as_str().to_string(),
@@ -298,7 +291,7 @@ pub(crate) fn read_response_head<B>(
         )
     }));
     let framing = explicit_body_framing(&headers)?;
-    if websocket && framing.is_none() && !matches!(status, 101 | 204 | 304) {
+    if handshake.is_some() && framing.is_none() && !matches!(status, 101 | 204 | 304) {
         return Err(ProxyError::Intercept(
             "a reply to a WebSocket handshake has no body framing".to_string(),
         ));
@@ -318,14 +311,6 @@ pub(crate) fn read_response_head<B>(
         },
         body,
     ))
-}
-
-fn switches_to_websocket(headers: &hyper::HeaderMap) -> bool {
-    let mut upgrades = headers.get_all(hyper::header::UPGRADE).iter();
-    matches!(
-        (upgrades.next().map(|value| value.to_str().map(str::trim)), upgrades.next()),
-        (Some(Ok(protocol)), None) if protocol.eq_ignore_ascii_case("websocket")
-    )
 }
 
 /// Build a [`HeaderMap`] from parsed httparse headers (preserving order + casing).
@@ -390,7 +375,7 @@ pub(super) fn write_request(
     target: &str,
     headers: &HeaderMap,
     body_len: usize,
-    websocket: bool,
+    handshake: Option<&Key>,
 ) -> Result<Zeroizing<String>> {
     let nominated = connection_nominated_headers(headers)?;
     // The head buffer is where the attached credential is serialized, so it is wiped on drop. The
@@ -410,7 +395,7 @@ pub(super) fn write_request(
         }
         push_header_line(&mut out, name, value);
     }
-    out.push_str(if websocket {
+    out.push_str(if handshake.is_some() {
         "Upgrade: websocket\r\nConnection: Upgrade\r\n"
     } else {
         "Connection: close\r\n"
@@ -587,7 +572,7 @@ mod tests {
         let headers = HeaderMap::from_pairs([("Host".to_string(), "h".to_string())]);
 
         for method in ["GET", "HEAD", "DELETE", "OPTIONS", "get"] {
-            let head = write_request(method, "/zen", &headers, 0, false).unwrap();
+            let head = write_request(method, "/zen", &headers, 0, None).unwrap();
             assert!(
                 !head.to_ascii_lowercase().contains("content-length"),
                 "{method} with no body must omit Content-Length: {}",
@@ -600,7 +585,7 @@ mod tests {
         }
 
         for method in ["POST", "PUT", "PATCH"] {
-            let head = write_request(method, "/x", &headers, 0, false).unwrap();
+            let head = write_request(method, "/x", &headers, 0, None).unwrap();
             assert!(
                 head.contains("Content-Length: 0"),
                 "{method} frames its empty body so the origin does not wait: {}",
@@ -609,7 +594,7 @@ mod tests {
         }
 
         // A GET that does carry a body is framed — the omission is for a *bodyless* request only.
-        let with_body = write_request("GET", "/x", &headers, 5, false).unwrap();
+        let with_body = write_request("GET", "/x", &headers, 5, None).unwrap();
         assert!(with_body.contains("Content-Length: 5"));
     }
 
@@ -699,7 +684,7 @@ mod tests {
     fn write_refreshes_content_length() {
         let mut headers = HeaderMap::new();
         headers.append("Content-Length", "9999"); // stale
-        let s = write_request("POST", "/", &headers, 3, false).unwrap();
+        let s = write_request("POST", "/", &headers, 3, None).unwrap();
         assert!(s.contains("Content-Length: 3\r\n"));
         assert!(!s.contains("9999"));
     }
@@ -726,7 +711,7 @@ mod tests {
             ("X-End-To-End".to_string(), "keep".to_string()),
         ]);
 
-        let wire = write_request("POST", "/", &headers, 4, false)
+        let wire = write_request("POST", "/", &headers, 4, None)
             .unwrap()
             .to_ascii_lowercase();
         for removed in [

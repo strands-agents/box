@@ -2,21 +2,64 @@ use std::cell::Cell;
 use std::time::Duration;
 
 use hyper::header::HeaderMap as WireHeaders;
+use hyper::upgrade::{OnUpgrade, Upgraded};
+use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::Instant;
 
-use crate::boundary::HeaderMap;
+use crate::error::{ProxyError, Result};
 
 const ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Handshake {
     None,
-    WebSocket,
+    WebSocket(Upgrade),
     Malformed(&'static str),
 }
 
-pub(crate) fn classify<B: hyper::body::Body>(request: &hyper::Request<B>) -> Handshake {
+/// The `Sec-WebSocket-Key` of a handshake that `classify` accepted.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Key(String);
+
+/// A valid handshake: its key, and the workload connection that a `101` switches.
+pub(crate) struct Upgrade {
+    key: Key,
+    workload: OnUpgrade,
+}
+
+impl Upgrade {
+    pub(crate) fn key(&self) -> &Key {
+        &self.key
+    }
+
+    /// The relay between the workload and `upstream`, the upstream connection that switched.
+    pub(crate) fn relay(self, upstream: Upgraded) -> Relay {
+        Relay {
+            workload: self.workload,
+            upstream,
+        }
+    }
+}
+
+/// Both connections of a WebSocket whose `101` passed `check_reply`.
+pub(crate) struct Relay {
+    workload: OnUpgrade,
+    upstream: Upgraded,
+}
+
+impl Relay {
+    /// Copy bytes in both directions until both sides close or `limit` passes with no traffic.
+    pub(crate) async fn serve(self, limit: Duration) -> Result<()> {
+        let workload = self
+            .workload
+            .await
+            .map_err(|e| ProxyError::Io(format!("WebSocket upgrade: {e}")))?;
+        run(TokioIo::new(workload), TokioIo::new(self.upstream), limit).await;
+        Ok(())
+    }
+}
+
+pub(crate) fn classify<B: hyper::body::Body>(request: &mut hyper::Request<B>) -> Handshake {
     let headers = request.headers();
     if !tokens(headers, "upgrade").any(|token| token.eq_ignore_ascii_case("websocket")) {
         return Handshake::None;
@@ -34,7 +77,11 @@ pub(crate) fn classify<B: hyper::body::Body>(request: &hyper::Request<B>) -> Han
     } else if !request.body().is_end_stream() {
         "websocket: handshake carries a body"
     } else {
-        return Handshake::WebSocket;
+        let key = Key(one(headers, "sec-websocket-key")
+            .unwrap_or_default()
+            .to_string());
+        let workload = hyper::upgrade::on(request);
+        return Handshake::WebSocket(Upgrade { key, workload });
     })
 }
 
@@ -54,17 +101,29 @@ fn one<'a>(headers: &'a WireHeaders, name: &str) -> Option<&'a str> {
     }
 }
 
-pub(crate) fn accepts(key: &str, reply: &HeaderMap) -> bool {
+/// Refuse a `101` reply unless it switches to WebSocket and answers `key`, the handshake's key.
+pub(crate) fn check_reply(key: Option<&Key>, status: u16, reply: &WireHeaders) -> Result<()> {
+    if status != 101 {
+        return Ok(());
+    }
+    let refuse = |reason: &str| Err(ProxyError::Intercept(reason.to_string()));
+    let Some(Key(key)) = key else {
+        return refuse("HTTP protocol upgrades are not supported");
+    };
+    if !one(reply, "upgrade").is_some_and(|protocol| protocol.eq_ignore_ascii_case("websocket")) {
+        return refuse("a 101 reply to a WebSocket handshake did not switch to WebSocket");
+    }
     let digest = ring::digest::digest(
         &ring::digest::SHA1_FOR_LEGACY_USE_ONLY,
         format!("{key}{ACCEPT_GUID}").as_bytes(),
     );
-    let expected = base64(digest.as_ref());
-    let mut accepts = reply
-        .iter()
-        .filter(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-accept"))
-        .map(|(_, value)| value.trim());
-    matches!((accepts.next(), accepts.next()), (Some(value), None) if value == expected)
+    // A field that `Connection` names is stripped before the reply reaches the workload.
+    let stripped = tokens(reply, "connection")
+        .any(|option| option.eq_ignore_ascii_case("sec-websocket-accept"));
+    if stripped || one(reply, "sec-websocket-accept") != Some(base64(digest.as_ref()).as_str()) {
+        return refuse("a 101 reply to a WebSocket handshake has the wrong Sec-WebSocket-Accept");
+    }
+    Ok(())
 }
 
 fn base64(bytes: &[u8]) -> String {
@@ -146,16 +205,19 @@ mod tests {
                 .header("Sec-WebSocket-Version", "13")
                 .header("Sec-WebSocket-Key", KEY),
         );
-        classify(&request.body(Empty::<Bytes>::new()).unwrap())
+        classify(&mut request.body(Empty::<Bytes>::new()).unwrap())
     }
 
     #[test]
-    fn a_valid_handshake_is_classified() {
-        assert_eq!(handshake(|request| request), Handshake::WebSocket);
-        let plain = hyper::Request::get("/")
+    fn a_valid_handshake_is_classified_with_its_key() {
+        let key = Key(KEY.to_string());
+        assert!(
+            matches!(handshake(|request| request), Handshake::WebSocket(upgrade) if *upgrade.key() == key)
+        );
+        let mut plain = hyper::Request::get("/")
             .body(Empty::<Bytes>::new())
             .unwrap();
-        assert_eq!(classify(&plain), Handshake::None);
+        assert!(matches!(classify(&mut plain), Handshake::None));
     }
 
     #[test]
@@ -176,14 +238,14 @@ mod tests {
             request.headers_mut().unwrap().remove("Sec-WebSocket-Key");
             request
         })));
-        let with_body = hyper::Request::get("/")
+        let mut with_body = hyper::Request::get("/")
             .header("Upgrade", "websocket")
             .header("Connection", "Upgrade")
             .header("Sec-WebSocket-Version", "13")
             .header("Sec-WebSocket-Key", KEY)
             .body(Full::new(Bytes::from_static(b"x")))
             .unwrap();
-        assert!(malformed(classify(&with_body)));
+        assert!(malformed(classify(&mut with_body)));
     }
 
     #[test]
@@ -200,21 +262,67 @@ mod tests {
         }
     }
 
+    const ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
+
+    fn reply(pairs: &[(&'static str, &'static str)]) -> WireHeaders {
+        let mut headers = WireHeaders::new();
+        for (name, value) in pairs {
+            headers.append(*name, hyper::header::HeaderValue::from_static(value));
+        }
+        headers
+    }
+
+    fn refusal(key: Option<&str>, status: u16, pairs: &[(&'static str, &'static str)]) -> String {
+        let key = key.map(|key| Key(key.to_string()));
+        match check_reply(key.as_ref(), status, &reply(pairs)) {
+            Ok(()) => String::new(),
+            Err(error) => error.to_string(),
+        }
+    }
+
     #[test]
     fn only_the_accept_for_the_key_is_accepted() {
-        let reply = |values: &[&str]| {
-            HeaderMap::from_pairs(
-                values
+        let upgrade = ("Upgrade", "websocket");
+        let wrong = "has the wrong Sec-WebSocket-Accept";
+        let with = |accepts: &[&'static str]| {
+            let mut pairs = vec![upgrade];
+            pairs.extend(
+                accepts
                     .iter()
-                    .map(|value| ("Sec-WebSocket-Accept".to_string(), value.to_string())),
-            )
+                    .map(|accept| ("Sec-WebSocket-Accept", *accept)),
+            );
+            pairs
         };
-        assert!(accepts(KEY, &reply(&["s3pPLMBiTxaQ9kYGzzhZRbK+xOo="])));
-        assert!(!accepts(KEY, &reply(&[])));
-        assert!(!accepts(KEY, &reply(&["s3pPLMBiTxaQ9kYGzzhZRbK+xOo=x"])));
-        assert!(!accepts("other", &reply(&["s3pPLMBiTxaQ9kYGzzhZRbK+xOo="])));
-        let twice = ["s3pPLMBiTxaQ9kYGzzhZRbK+xOo="; 2];
-        assert!(!accepts(KEY, &reply(&twice)));
+        assert_eq!(refusal(Some(KEY), 101, &with(&[ACCEPT])), "");
+        assert!(refusal(Some(KEY), 101, &with(&[])).contains(wrong));
+        assert!(refusal(Some(KEY), 101, &with(&["s3pPLMBiTxaQ9kYGzzhZRbK+xOo=x"])).contains(wrong));
+        assert!(refusal(Some("other"), 101, &with(&[ACCEPT])).contains(wrong));
+        assert!(refusal(Some(KEY), 101, &with(&[ACCEPT, ACCEPT])).contains(wrong));
+        let mut nominated = with(&[ACCEPT]);
+        nominated.push(("Connection", "Upgrade, Sec-WebSocket-Accept"));
+        assert!(refusal(Some(KEY), 101, &nominated).contains(wrong));
+    }
+
+    #[test]
+    fn a_101_must_switch_to_websocket_exactly_once() {
+        let accept = ("Sec-WebSocket-Accept", ACCEPT);
+        let switch = "did not switch to WebSocket";
+        assert!(refusal(Some(KEY), 101, &[accept]).contains(switch));
+        assert!(refusal(Some(KEY), 101, &[("Upgrade", "h2c"), accept]).contains(switch));
+        let twice = [("Upgrade", "websocket"), ("Upgrade", "websocket"), accept];
+        assert!(refusal(Some(KEY), 101, &twice).contains(switch));
+        assert_eq!(
+            refusal(Some(KEY), 101, &[("Upgrade", "WebSocket"), accept]),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_101_without_a_handshake_is_refused_and_other_statuses_pass() {
+        let switched = [("Upgrade", "websocket"), ("Sec-WebSocket-Accept", ACCEPT)];
+        assert!(refusal(None, 101, &switched).contains("HTTP protocol upgrades are not supported"));
+        assert_eq!(refusal(None, 200, &[]), "");
+        assert_eq!(refusal(Some(KEY), 403, &[]), "");
     }
 
     async fn relayed(limit: Duration, script: impl Future<Output = ()>, ends: [DuplexStream; 2]) {
