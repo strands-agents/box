@@ -1090,6 +1090,8 @@ fn select_choice(
         typed = choices[index].as_bytes().to_vec();
     }
     let mut refilter = filter && !typed.is_empty();
+    // Whether Enter already warned that the typed text matches no choice; the next Enter keeps it.
+    let mut warned = false;
     let top = std::cell::Cell::new(selected.unwrap_or(0));
     loop {
         let shown: Vec<usize> = if filter {
@@ -1356,12 +1358,13 @@ fn select_choice(
             key @ (Key::Enter | Key::Tab) if filter || matches!(key, Key::Enter) => {
                 let line = if name_entry && let Some(index) = selected {
                     format!("\0{}", choices[index])
-                } else if filter {
-                    let Some(index) = selected else {
-                        notice = "  No match. Pick one from the list.".to_string();
-                        continue;
-                    };
+                } else if filter && let Some(index) = selected {
                     choices[shown[index]].to_string()
+                } else if filter && !warned {
+                    let value = String::from_utf8_lossy(&typed).trim().to_string();
+                    notice = format!("  {value} isn't on the list. Press Enter again to use it.");
+                    warned = true;
+                    continue;
                 } else if !typed.is_empty() {
                     String::from_utf8(typed)
                         .map_err(|source| {
@@ -1488,6 +1491,7 @@ fn select_choice(
                     selected = None;
                 }
                 refilter = filter;
+                warned = false;
                 notice.clear();
                 while typed.pop().is_some_and(|byte| byte & 0xc0 == 0x80) {}
             }
@@ -1496,6 +1500,7 @@ fn select_choice(
                     selected = None;
                 }
                 refilter = filter;
+                warned = false;
                 notice.clear();
                 typed.push(byte);
             }
@@ -2267,13 +2272,18 @@ mod tests {
     }
 
     #[test]
-    fn a_value_that_matches_no_suggestion_is_refused() {
-        // Enter with no match keeps asking, so the corrected text answers.
+    fn a_value_that_matches_no_suggestion_needs_a_second_enter() {
+        // The first Enter only warns, so an edit after it answers with a listed value.
         assert_eq!(
             suggested(b"us-west-9\r\x7f2\r", None).as_deref(),
             Some("us-west-2")
         );
-        let mut input = b"us-west-9\r".as_slice();
+        assert_eq!(
+            suggested(b"us-west-9\r\r", None).as_deref(),
+            Some("us-west-9")
+        );
+        // An edit after the warning asks for the second Enter again.
+        let mut input = b"us-west-9\rx\x7f\r".as_slice();
         let mut output = Vec::new();
         let result = suggest(
             &mut Terminal::new(&mut input, &mut output),
