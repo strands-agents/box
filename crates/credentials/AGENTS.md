@@ -44,6 +44,13 @@ request edits, never a credential accessor or an authorization. Keep backend pro
 - Keep named-profile region resolution tied to that profile for STS, independently of the route's
   signing region. The current SDK feature selection excludes SSO and `aws login`.
 
+## credsd
+
+- The route kind is the credsd type: `RouteSpec::signed_aws` over `credsd://` resolves session
+  credentials per request; `RouteSpec::opaque` reads one `access_token` at open, holds it for the
+  run, and refuses any `token_type` but `Bearer`, compared without case. Routes of one vault that name one token share one read.
+  `credsd_preflight` checks each listed credential's kind against the list it gets.
+
 ## Declared source programs
 
 - Run from `/`, with no shell or stdin and a composed environment. The trusted process's inherited

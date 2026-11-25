@@ -8,8 +8,8 @@ use crate::model::RouteKind;
 use std::sync::Arc;
 
 use crate::sources::{
-    AmbientFallbackPolicy, AwsCredentialProvider, CREDSD_SCHEME, default_aws_provider,
-    is_bare_aws_default_chain, resolve_credsd_socket,
+    AmbientFallbackPolicy, AwsCredentialProvider, CREDSD_SCHEME, CredsdClient, credsd_access_token,
+    default_aws_provider, is_bare_aws_default_chain, resolve_credsd_socket,
 };
 use crate::{
     Backend, CredentialDiagnostic, CredentialError, Destination, DestinationPattern, InjectMode,
@@ -225,8 +225,15 @@ impl Vault {
             credsd_socket: None,
         };
         // A `credsd://` route needs a socket, resolved and validated absolute once here — a relative
-        // path is a configuration error the vault refuses at open, not a runtime failure.
-        let mut declares_credsd = false;
+        // path is a configuration error the vault refuses at open, not a runtime failure. It is
+        // resolved before any route, because an opaque `credsd://` route reads its token at open.
+        let declares_credsd = routes.iter().any(|route| match route.kind() {
+            RouteKind::SignedAws { config, .. } => config.scheme() == CREDSD_SCHEME,
+            _ => route.credential_ref().scheme() == CREDSD_SCHEME,
+        });
+        if declares_credsd {
+            vault.credsd_socket = Some(resolve_credsd_socket(credsd_socket_config.as_deref())?);
+        }
         let mut phantoms = Vec::new();
         let mut skipped = Vec::new();
         // Every minted phantom, to enforce vault-wide uniqueness: a collision is a
@@ -235,6 +242,9 @@ impl Vault {
         // The phantom each credential minted, keyed by its reference and prefix. Routes that name
         // one credential share its phantom, so one placeholder works at every destination it serves.
         let mut minted: Vec<(Locator, String, PhantomToken)> = Vec::new();
+        // Each `credsd://` token this open read, keyed by its reference, so every route that names
+        // one token reads it once.
+        let mut credsd_tokens: Vec<(Locator, Secret)> = Vec::new();
 
         // Mint a unique phantom, failing closed on a vault-wide collision. The caller records the
         // per-destination `phantoms` mapping, so a shared phantom is recorded at each host it serves.
@@ -258,9 +268,6 @@ impl Vault {
             match route.kind() {
                 // A signed route carries a config block resolved at use, not a secret held here.
                 RouteKind::SignedAws { config, scope } => {
-                    if config.scheme() == CREDSD_SCHEME {
-                        declares_credsd = true;
-                    }
                     vault
                         .signed_aws
                         .push((route.destination().clone(), (config.clone(), scope.clone())));
@@ -288,7 +295,7 @@ impl Vault {
                     phantom_prefix,
                 } => {
                     if let Some(secret) = Self::classify_resolve(
-                        vault.resolve_secret(route),
+                        vault.resolve_secret_once(route, &mut credsd_tokens),
                         route,
                         missing,
                         &mut skipped,
@@ -352,10 +359,6 @@ impl Vault {
                     }
                 }
             }
-        }
-
-        if declares_credsd {
-            vault.credsd_socket = Some(resolve_credsd_socket(credsd_socket_config.as_deref())?);
         }
 
         // Eagerly validate the bare default chain at open, so a broken chain (an unreadable profile,
@@ -440,7 +443,41 @@ impl Vault {
         Ok(())
     }
 
-    /// Resolve one opaque route's secret through the backend, auditing the attempt.
+    /// Resolve one opaque route's secret, reading a `credsd://` token once for every route that names it:
+    /// the first route reads the daemon and records the read, and each later one takes a copy.
+    fn resolve_secret_once(
+        &self,
+        route: &RouteSpec,
+        read: &mut Vec<(Locator, Secret)>,
+    ) -> Result<Secret> {
+        let locator = route.credential_ref();
+        if locator.scheme() != CREDSD_SCHEME {
+            return self.resolve_secret(route);
+        }
+        let copy = |secret: &Secret| {
+            Secret::new(
+                zeroize::Zeroizing::new(secret.as_str().to_owned()),
+                &route.reference_display(),
+            )
+        };
+        if let Some((_, secret)) = read.iter().find(|(earlier, _)| earlier == locator) {
+            return copy(secret);
+        }
+        let request_id = RequestId::new(LOAD_CORRELATION);
+        let secret = crate::audit_resolve(
+            self.emitter.as_ref(),
+            &self.tenant,
+            locator.scheme(),
+            &route.reference_display(),
+            &request_id,
+            || self.resolve_credsd_token(route),
+        )?;
+        read.push((locator.clone(), copy(&secret)?));
+        Ok(secret)
+    }
+
+    /// Resolve one route's secret through the backend, auditing the attempt. The backend has no
+    /// credsd source, so a box-owned `credsd://` route is refused here.
     fn resolve_secret(&self, route: &RouteSpec) -> Result<Secret> {
         let locator = route.credential_ref();
         let request_id = RequestId::new(LOAD_CORRELATION);
@@ -452,6 +489,31 @@ impl Vault {
             &request_id,
             || self.backend.resolve_secret(locator),
         )
+    }
+
+    /// Read a `credsd://<credential>` route's access token once, for the run.
+    ///
+    /// A declared secret source reads its secret once before the workload starts, and a credsd token
+    /// follows the same model: the vault holds it for the run and does not refresh it. A token that
+    /// names an expiry warns once at open, so an operator learns why a long run stops working.
+    fn resolve_credsd_token(&self, route: &RouteSpec) -> Result<Secret> {
+        let credential = crate::legs::credsd_credential(route.credential_ref())?;
+        let socket = self.credsd_socket().ok_or_else(|| {
+            CredentialError::KeystoreAccess(format!(
+                "no credsd socket was resolved for credential {credential:?}"
+            ))
+        })?;
+        let token = credsd_access_token(&CredsdClient::new(socket.to_path_buf()), credential)?;
+        // The expiry is the daemon's text, so it is quoted like every other daemon value.
+        if let Some(expires_at) = &token.expires_at {
+            self.warn_at_open(&format!(
+                "credsd://{credential} for {destination} reads a token that expires at \
+                 {expires_at:?}; the box reads it when the box starts and does not refresh it \
+                 during the run",
+                destination = route.destination_display(),
+            ));
+        }
+        Ok(token.token)
     }
 
     /// The tenant this vault is bound to. Read by the acquisition audit, which is what makes a record
@@ -1178,5 +1240,186 @@ mod tests {
                 .expect("the recorder mutex is not poisoned")
                 .push(record);
         }
+    }
+
+    // --- credsd token routes -------------------------------------------------
+
+    /// A fake credsd that answers one connection with `response`, at a socket unique to the test.
+    fn credsd_answering_once(name: &str, response: String) -> PathBuf {
+        use std::io::{BufRead, Write};
+        let path =
+            std::env::temp_dir().join(format!("credsd-vault-{name}-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind the socket");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept one connection");
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut request = Vec::new();
+            let _ = reader.read_until(b'\n', &mut request);
+            let _ = stream.write_all(response.as_bytes());
+        });
+        path
+    }
+
+    /// An `access_token` reply, with `expires_at` as written (a JSON string or `null`).
+    fn token_reply(expires_at: &str) -> String {
+        format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"credential\":\"gh\",\"material\":{{\"type\":\"access_token\",\"token\":\"ghp_vault_example\",\"token_type\":\"Bearer\"}},\"expires_at\":{expires_at}}}}}\n"
+        )
+    }
+
+    /// An opaque `credsd://` route on `host`, attached as a bearer token.
+    fn credsd_token_route(host: &str) -> RouteSpec {
+        RouteSpec::opaque(
+            DestinationPattern::parse(host).unwrap(),
+            Locator::parse_uri("credsd://github").unwrap(),
+            InjectMode::header("Bearer {}", None).unwrap(),
+        )
+    }
+
+    /// An opaque `credsd://` route reads its token at open, with one audit record, and a token that
+    /// names an expiry warns that the box does not refresh it.
+    #[test]
+    fn a_credsd_token_route_reads_at_open_and_warns_on_an_expiry() {
+        drain_captured_warnings();
+        let socket = credsd_answering_once("expiring", token_reply("\"2027-01-01T00:00:00Z\""));
+        let recorder = Recorder::new();
+        let opened = Vault::open_with_emitter(
+            VaultConfig::new(Backend::local(), "t")
+                .credsd_socket(socket.clone())
+                .route(credsd_token_route("expiring.example.com"))
+                .require_every_route(),
+            Box::new(recorder.clone()),
+        )
+        .expect("the token route opens");
+        assert_eq!(opened.phantoms().len(), 1, "a token route mints a phantom");
+
+        let records = recorder.records();
+        assert_eq!(records.len(), 1, "one read, one record");
+        assert!(records[0].ok);
+        assert_eq!(records[0].source, "credsd");
+        assert_eq!(
+            records[0].credential_ref, "credsd://github",
+            "the record names the environment, as a signed credsd route's does"
+        );
+
+        let warnings = drain_captured_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("credsd://github")
+                    && warning.contains("expiring.example.com")
+                    && warning.contains("2027-01-01T00:00:00Z")
+                    && warning.contains("does not refresh")),
+            "{warnings:?}"
+        );
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    /// A token with no expiry opens with no warning.
+    #[test]
+    fn a_credsd_token_that_never_expires_opens_with_no_warning() {
+        drain_captured_warnings();
+        let socket = credsd_answering_once("forever", token_reply("null"));
+        let _opened = Vault::open(
+            VaultConfig::new(Backend::local(), "t")
+                .credsd_socket(socket.clone())
+                .route(credsd_token_route("forever.example.com"))
+                .require_every_route(),
+        )
+        .expect("the token route opens");
+        assert!(
+            drain_captured_warnings().is_empty(),
+            "a token that never expires needs no warning"
+        );
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    /// A token route whose environment serves AWS credentials fails the open, so no route loads
+    /// with a credential it cannot attach.
+    #[test]
+    fn a_credsd_token_route_that_reads_aws_credentials_fails_the_open() {
+        let socket = credsd_answering_once(
+            "aws",
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"material\":{\"type\":\"session_credentials\",\"access_key_id\":\"ASIAX\",\"secret_access_key\":\"vaultSecretExample\",\"session_token\":\"tok\"}}}\n".to_string(),
+        );
+        let error = Vault::open(
+            VaultConfig::new(Backend::local(), "t")
+                .credsd_socket(socket.clone())
+                .route(credsd_token_route("aws.example.com")),
+        )
+        .expect_err("AWS material is no token");
+        let message = error.to_string();
+        assert!(
+            message.contains("session_credentials") && message.contains("access_token"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("vaultSecretExample"),
+            "no material: {message}"
+        );
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    /// Every route that names one credsd token shares one read: the fake daemon answers one
+    /// connection, so a second read would fail the open.
+    #[test]
+    fn routes_that_name_one_credsd_token_read_it_once() {
+        let socket = credsd_answering_once("shared", token_reply("null"));
+        let recorder = Recorder::new();
+        let opened = Vault::open_with_emitter(
+            VaultConfig::new(Backend::local(), "t")
+                .credsd_socket(socket.clone())
+                .route(credsd_token_route("first.example.com"))
+                .route(credsd_token_route("second.example.com"))
+                .require_every_route(),
+            Box::new(recorder.clone()),
+        )
+        .expect("both routes open on one read");
+        assert_eq!(recorder.records().len(), 1, "one read, one record");
+        let phantoms = opened.phantoms();
+        assert_eq!(phantoms.len(), 2);
+        assert_eq!(
+            phantoms[0].token(),
+            phantoms[1].token(),
+            "one token, one placeholder"
+        );
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    /// A box-owned `credsd://` route is refused at open: only an opaque route reads a credsd token,
+    /// and no daemon is contacted for it.
+    #[test]
+    fn a_box_owned_credsd_route_is_refused() {
+        let socket = std::env::temp_dir().join(format!(
+            "credsd-vault-box-owned-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind the socket");
+        listener
+            .set_nonblocking(true)
+            .expect("a nonblocking listener");
+        let error = Vault::open(
+            VaultConfig::new(Backend::local(), "t")
+                .credsd_socket(socket.clone())
+                .route(RouteSpec::box_owned(
+                    DestinationPattern::parse("api.github.com").unwrap(),
+                    Locator::parse_uri("credsd://github").unwrap(),
+                    InjectMode::header("Bearer {}", None).unwrap(),
+                )),
+        )
+        .expect_err("a box-owned credsd route has no source");
+        assert!(
+            error
+                .to_string()
+                .contains("no credential source registered for scheme \"credsd\""),
+            "{error}"
+        );
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "no daemon is contacted"
+        );
+        let _ = std::fs::remove_file(&socket);
     }
 }

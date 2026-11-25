@@ -154,6 +154,7 @@ is what you intended.
 | `B0211` | note | Box gives a process with native egress no proxy and no certificate authority, so its client uses its own defaults. | No action when the program trusts its own roots. See [Network](mcp.md#network). |
 | `B0212` | warning | A process's write grant reaches the program it runs, so the process can replace that program. | Move the program out of the writable grant, or narrow the grant. See [what is refused](config.md#what-is-refused). |
 | `B0213` | note | The policy runs in log-only mode, so each denial is recorded and the action goes ahead. | Use log-only mode only to trial a policy where it is acceptable that the policy protects nothing. See [log-only mode](policy.md#log-only-mode). |
+| `B0214` | warning | A credsd route names no secret.type, so it signs with AWS credentials. | Set `secret.type = "aws"`, or `"token"` for a token. A later release requires the key. See [credential sources](egress.md#credential-sources). |
 
 <a id="b03"></a>
 

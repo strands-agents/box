@@ -77,7 +77,7 @@ pub(super) const BEARER_PREFIX: &str = "Bearer ";
 pub(super) const AWS_SCHEME: &str = "aws";
 
 /// The locator scheme naming a credsd credential source, whose type the daemon reports per request.
-pub(super) const CREDSD_SCHEME: &str = "credsd";
+pub(crate) const CREDSD_SCHEME: &str = "credsd";
 
 /// The locator scheme that provisions a phantom into the workload's environment.
 pub(super) const ENV_SCHEME: &str = "env://";
@@ -611,6 +611,7 @@ impl RunContract {
                         .policy
                         .as_ref()
                         .map_or(Enforcement::Enforce, |key| key.enforcement),
+                    egress::holds_secret_type(&egress, &remote_mcp),
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 file_attributes: self.file.file_attributes,
@@ -839,6 +840,9 @@ const TOOL_CALLS_RECORD_VERSION: u32 = 40;
 const LOG_ONLY_RECORD_VERSION: u32 = 41;
 /// The record version that preserves nonempty incoming mount declarations.
 const MOUNTS_RECORD_VERSION: u32 = 42;
+/// The record version of a record whose egress or remote MCP secret names a `secret.type`, so an
+/// older build refuses the box rather than signing a token route's reference as AWS.
+const SECRET_TYPE_RECORD_VERSION: u32 = 43;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -905,9 +909,12 @@ fn record_version<'a>(
     targets: &BTreeMap<String, telemetry::TelemetryEntry>,
     secret_source_keys: bool,
     enforcement: Enforcement,
+    secret_type: bool,
 ) -> u32 {
     let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
-    if specs
+    if secret_type {
+        SECRET_TYPE_RECORD_VERSION
+    } else if specs
         .clone()
         .any(|spec| !spec.filesystem.receive_mounts.is_empty())
     {
@@ -1256,6 +1263,7 @@ impl Record {
             TOOL_CALLS_RECORD_VERSION,
             LOG_ONLY_RECORD_VERSION,
             MOUNTS_RECORD_VERSION,
+            SECRET_TYPE_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1292,6 +1300,7 @@ impl Record {
             &record.telemetry,
             holds_secret_source_keys(&record.secret_source, &record.egress, &record.remote_mcp),
             record.enforcement,
+            egress::holds_secret_type(&record.egress, &record.remote_mcp),
         );
         if record.version != expected {
             return Err(ConfigError::RecordVersion {
@@ -2015,6 +2024,7 @@ mod tests {
                             &stored.telemetry,
                             false,
                             Enforcement::Enforce,
+                            false,
                         ),
                         expected_version
                     );
@@ -2072,6 +2082,7 @@ mod tests {
                 &stored.telemetry,
                 false,
                 Enforcement::Enforce,
+                false,
             ),
             MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
         );
@@ -2555,6 +2566,7 @@ native-filesystem-policy = false
                                     &BTreeMap::new(),
                                     false,
                                     Enforcement::Enforce,
+                                    false,
                                 ),
                                 27
                             );
@@ -3467,6 +3479,7 @@ native-filesystem-policy = false
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        kind: None,
                         aws: None,
                     }),
                 },
@@ -3694,6 +3707,7 @@ env = {}
                 )]),
                 false,
                 Enforcement::Enforce,
+                false,
             )
         };
         assert_eq!(version(true), TOOL_CALLS_RECORD_VERSION);
@@ -3703,7 +3717,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, MOUNTS_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, SECRET_TYPE_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -3993,6 +4007,7 @@ env = {}
                             param: None,
                             inject: None,
                             phantom_prefix: None,
+                            kind: None,
                             aws: None,
                         }),
                     },
@@ -4012,6 +4027,7 @@ env = {}
                             param: None,
                             inject: None,
                             phantom_prefix: None,
+                            kind: None,
                             aws: None,
                         }),
                     },
@@ -4046,6 +4062,7 @@ env = {}
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        kind: None,
                         aws: None,
                     }),
                 },
@@ -4103,6 +4120,7 @@ env = {}
                     param: None,
                     inject: None,
                     phantom_prefix: None,
+                    kind: None,
                     aws: None,
                 }),
             },
@@ -5156,7 +5174,7 @@ command = ["mcp-server-fetch"]
 
         // credsd preflight: the credsd source is visible over the union of both maps.
         assert_eq!(
-            egress::credsd_credentials(&record.egress, &record.remote_mcp),
+            egress::credsd_credentials(&record.egress, &record.remote_mcp).signed,
             vec!["prod-inference"],
             "the preflight must see a credsd source declared only on a remote MCP server"
         );
@@ -5500,6 +5518,57 @@ command = ["mcp-server-fetch"]
         assert_eq!(placeholders, [Some("GH_TOKEN"), Some("TOOLS_TOKEN")]);
     }
 
+    /// **A `secret.type` key beside log-only mode takes the higher version**, so a build that reads
+    /// log-only records but not `secret.type` refuses the box.
+    #[test]
+    fn a_secret_type_beside_log_only_mode_stores_the_secret_type_version() {
+        let record = record_from_config_with(
+            "[policy]\nsource = \"policy.dw\"\nenforcement = \"log_only\"\n",
+            "[egress.github]\ndestinations = [\"api.github.com\"]\n\
+             secret.ref = \"credsd://github\"\nsecret.type = \"token\"\nsecret.inject = \"always\"\n",
+        )
+        .expect("the configuration loads");
+        assert_eq!(record.enforcement, Enforcement::LogOnly);
+        assert_eq!(record.version, SECRET_TYPE_RECORD_VERSION);
+    }
+
+    /// **A `secret.type` key needs its own record version**, above every other, so an older build
+    /// refuses the box rather than signing a token route's reference as AWS. A credsd route with no
+    /// type keeps the version an earlier build stored.
+    #[test]
+    fn a_secret_type_key_stores_its_own_record_version() {
+        let route = |kind: &str| {
+            format!(
+                "monty = false\n[egress.github]\ndestinations = [\"api.github.com\"]\n\
+                 secret.ref = \"credsd://github\"\nsecret.inject = \"always\"\n{kind}"
+            )
+        };
+        let untyped = pinned_record(
+            "[egress.bedrock]\ndestinations = [\"bedrock-runtime.us-west-2.amazonaws.com\"]\n\
+             secret.ref = \"credsd://prod\"\n",
+        );
+        assert_eq!(untyped.version, RECORD_VERSION);
+        let stored = pinned_record(&route("secret.type = \"token\"\n"));
+        assert_eq!(stored.version, SECRET_TYPE_RECORD_VERSION);
+        assert_eq!(SECRET_TYPE_RECORD_VERSION, 43);
+        let text = stored.to_toml().unwrap();
+        assert!(text.contains("type = \"token\""), "{text}");
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+        let mut forged = stored.clone();
+        forged.version = MONTY_OFF_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&forged.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                expected: SECRET_TYPE_RECORD_VERSION,
+                ..
+            })
+        ));
+    }
+
     /// **A `secret.env` key alone needs the secret source record version**, and a configuration
     /// without one keeps the version that an earlier build stored.
     #[test]
@@ -5513,23 +5582,10 @@ command = ["mcp-server-fetch"]
         };
         let plain = pinned_record(&route(""));
         assert_eq!(plain.version, RECORD_VERSION);
-        // The key needs the switch, on each operating system.
-        let refused = load(&route(&format!("secret.env = {variable:?}\n")))
-            .expect_err("the switch is off")
-            .to_string();
-        assert!(
-            refused.contains(
-                "secret.env is experimental: set `secret-sources = true` in \
-                 `[experimental-features]` to load it"
-            ),
-            "{refused}"
-        );
-        let stored = pinned_record(&format!(
-            "{SECRET_SOURCES_ON}{}",
-            route(&format!("secret.env = {variable:?}\n"))
-        ));
+        // The key needs no switch, and still stores the version an older build refuses.
+        let stored = pinned_record(&route(&format!("secret.env = {variable:?}\n")));
         assert_eq!(stored.version, SECRET_SOURCE_RECORD_VERSION);
-        assert!(stored.experimental_features.secret_sources);
+        assert!(!stored.experimental_features.secret_sources);
         let text = stored.to_toml().unwrap();
         assert_eq!(
             Record::parse(&text, Path::new("record.toml"))
@@ -5604,10 +5660,10 @@ command = ["mcp-server-fetch"]
         );
     }
 
-    /// **A stored `secret.env` key needs the stored switch**: a record that holds the key while
-    /// its switch is off builds no route.
+    /// **A stored `secret.env` key builds its route with the stored switch off**: the key is not
+    /// part of the experimental feature.
     #[test]
-    fn a_stored_placeholder_variable_key_needs_the_stored_switch() {
+    fn a_stored_placeholder_variable_key_needs_no_stored_switch() {
         let variable = present_variable();
         let mut stored = record(
             None,
@@ -5626,22 +5682,14 @@ command = ["mcp-server-fetch"]
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        kind: None,
                         aws: None,
                     }),
                 },
             )]),
         );
         stored.version = SECRET_SOURCE_RECORD_VERSION;
-        let error = match stored.egress_routes() {
-            Ok(_) => panic!("the stored switch is off"),
-            Err(error) => error,
-        };
-        assert!(
-            error.to_string().contains("secret.env is experimental"),
-            "{error}"
-        );
-        stored.experimental_features.secret_sources = true;
-        let routes = stored.egress_routes().expect("the stored switch is on");
+        let routes = stored.egress_routes().expect("the stored switch is off");
         assert_eq!(routes[0].provisioned_name(), Some(variable.as_str()));
     }
 
@@ -5710,6 +5758,7 @@ command = ["mcp-server-fetch"]
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        kind: None,
                         aws: None,
                     }),
                 },
