@@ -1,0 +1,10 @@
+[project]
+name = "textstats"
+version = "0.1.0"
+description = "Small text statistics."
+requires-python = ">=3.10"
+dependencies = []
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"

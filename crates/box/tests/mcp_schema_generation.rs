@@ -486,6 +486,64 @@ fn generate_schema_uses_the_selected_config_outside_the_operator_home() {
 }
 
 #[test]
+fn generate_schema_leaves_out_a_tool_whose_schema_does_not_generate() {
+    let home = tempfile::tempdir().expect("an operator home");
+    let root = tempfile::tempdir().expect("a configuration tree");
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).expect("create the server directory");
+    let config = root.path().join("box.toml");
+    std::fs::write(
+        &config,
+        "name = \"repro\"\nbox_dir = \"/nonexistent/schema-generation\"\n[mcp.repro]\ntype = \"stdio\"\ncommand = [\"repro-mcp\"]\n",
+    )
+    .expect("write the config");
+    let tools = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+            "tools": [
+                {"name": "get_zone", "inputSchema": {"type": "object",
+                    "properties": {"zone_id": {"type": "string"}}}},
+                {"name": "create_account", "inputSchema": {"type": "object",
+                    "properties": {"account": {"$ref": "#/$defs/create-account"}},
+                    "$defs": {"create-account": {"type": "object"}}}}
+            ]
+        }
+    });
+    install_server_response(&bin, "repro-mcp", &tools);
+
+    let output = Command::new(box_binary())
+        .args([
+            "policy",
+            "generate-schema",
+            "--config",
+            "box.toml",
+            "--output-dir",
+            "schemas",
+        ])
+        .env("HOME", home.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .current_dir(root.path())
+        .output()
+        .expect("run the schema command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(
+        stderr.trim(),
+        "strands-box: warning[B0403]: MCP server \"repro\" tool \"create_account\" is left out, \
+         and its calls are refused: unexpected token `-`"
+    );
+    let actions = std::fs::read_to_string(root.path().join("schemas/actions.cedarschema"))
+        .expect("read actions");
+    assert!(
+        actions.contains(r#"action "get_zone" appliesTo"#),
+        "{actions}"
+    );
+    assert!(!actions.contains(r#"action "create_account""#), "{actions}");
+}
+
+#[test]
 fn generate_schema_uses_an_absolute_command_instead_of_a_path_decoy() {
     let home = tempfile::tempdir().expect("an operator home");
     let workspace = home.path().join("workspace");

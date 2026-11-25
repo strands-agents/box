@@ -697,6 +697,8 @@ Use `RunOptions::terminal` to supply the workload's terminal and `RunOptions::on
 to start host threads after hardening and signal registration, before workload setup.
 Use `RunOptions::policy_decisions` to receive each policy decision in memory as the box makes it
 (see [Policy decisions for a library caller](#policy-decisions-for-a-library-caller)).
+Use `RunOptions::events` to learn, in memory, why the box itself failed
+(see [Run events for a library caller](#run-events-for-a-library-caller)).
 Use `RunOptions::box_id` to give a new box your own ID, such as
 `my-app-3f9a1c0e7b2d4a6f`: a prefix of 1 to 15 letters, digits, `.`, `_`, or `-`, then `-` and 16
 lowercase hexadecimal digits. Box stores it, prints it, and labels telemetry with it. A box that
@@ -768,6 +770,33 @@ receive it as their `include` lists select. `recv` waits for the next decision. 
 ended and the channel is empty, it returns an error, and `try_recv` and `recv_timeout` return
 `Disconnected`, so the reader above stops with the run. While the run goes on, they return `Empty`
 and `Timeout` instead.
+
+## Run events for a library caller
+
+A program that runs a box through the library can learn what happened to the run without reading
+its stderr or a records file. Make a channel with `run_events()`, pass its sender in
+`RunOptions::events`, and read the receiver after `run` returns.
+
+```rust
+let (sender, receiver) = strands_box::run_events();
+let code = strands_box::run(config, workload, strands_box::RunOptions {
+    events: Some(sender),
+    ..Default::default()
+});
+while let Ok(event) = receiver.try_recv() {
+    match event {
+        strands_box::RunEvent::Refused { code } => eprintln!("box failed: {code:?}"),
+        _ => {}
+    }
+}
+```
+
+When the box itself ends the run, before or after its workload starts, it sends one
+`RunEvent::Refused` with the [message code](../../docs/user/message-codes.md) of the failure's
+stderr line, such as `B0101` or `B0114`. The code holds no path, host, or message; the message
+still goes to stderr. An error or warning in a run that keeps going, and a workload that exits
+non-zero, send nothing. The channel is unbounded, so no event is dropped. `RunEvent` may gain
+variants, so match it with a wildcard arm.
 
 ## Running
 

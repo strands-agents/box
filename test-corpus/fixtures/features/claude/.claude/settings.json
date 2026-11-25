@@ -1,0 +1,36 @@
+{
+  "theme": "dark-daltonized",
+  "outputStyle": "probe-style",
+  "spinnerTipsEnabled": false,
+  "model": "claude-probe-model",
+  "apiKeyHelper": "/bin/echo feature-probe-key",
+  "env": {
+    "MAX_THINKING_TOKENS": "4321",
+    "FEATURE_PROBE_TOKEN": "feature-probe-key"
+  },
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(feature-probe-allow:*)"
+    ],
+    "deny": [
+      "Bash(feature-probe-deny:*)"
+    ],
+    "additionalDirectories": [
+      "/feature-probe-directory"
+    ],
+    "disableBypassPermissionsMode": "disable"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/probe-hook.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

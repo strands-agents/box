@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "plugins": {
+    "probe-plugin@probe-marketplace": [
+      {
+        "scope": "user",
+        "installPath": "{home}/.claude/plugins/cache/probe-marketplace/probe-plugin/1.0.0",
+        "version": "1.0.0"
+      }
+    ]
+  }
+}

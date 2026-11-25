@@ -72,6 +72,8 @@ jobs:
               - 'test-corpus/**'
               # crates/cli/app/src/profile_tests.rs reads it.
               - 'docs/cli/troubleshooting.md'
+              # crates/cli/app/src/explain.rs builds it into `box explain`.
+              - 'docs/user/message-codes.md'
               - '.github/workflows/cli-test.yml'
               # The CLI's scripts and their tests. resources.rs reads macos-release-cli.py.
               - 'scripts/check-prose.sh'

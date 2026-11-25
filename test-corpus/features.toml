@@ -1,0 +1,770 @@
+# Feature checks: each tests one row of the per-agent feature checklist (`CHECKLIST` in
+# test_features.py) for one agent.
+# `run_corpus.py --layer features` runs them. Each check gets its own temporary HOME, so it reads
+# the host setup in its fixture and never the operator's own. Fields:
+#
+#   id       The name --ids takes.
+#   row      The checklist row, as a key of `CHECKLIST` names it. The check of each agent
+#            that only calls the model is not a row of the checklist, and names "Model call".
+#   harness  The agent: "claude", "codex", or "kiro".
+#   with     The packs `box profile create --with` makes the check's profile from.
+#   options  Inputs the runner sets with `--option` when it makes the profile.
+#   agent_env
+#            Variables the runner adds to the profile's `[agent.env]` after it makes the profile.
+#            A value can hold {home} and {workspace}.
+#   needs    Programs the check needs on PATH. A missing one makes the check SKIP.
+#   host     A folder under test-corpus/fixtures/features/. The runner copies it into the HOME. A
+#            path or a text file in it can hold {home}, {workspace}, and {workspace.dashed}.
+#   args     What the runner passes to the agent after `--`.
+#   stdin    Lines the runner writes to the agent's standard input.
+#   until    Text. When an output line holds it, the runner closes stdin, and stops the agent when
+#            it does not exit ten seconds later. A check with no `stdin` gets an empty stdin from
+#            the start.
+#   holds, lacks
+#            Patterns, where `*` matches anything. One output line must hold each `holds` pattern,
+#            and no output line can hold a `lacks` pattern.
+#   storage_holds, storage_lacks
+#            A path in the profile's storage and a pattern, or a list of them, for the file's
+#            content. In `storage_lacks`, an empty pattern means that the path must not exist. In
+#            `storage_holds` and `workspace_holds`, a `*` in the path names many files, and one
+#            of them must hold the pattern.
+#   workspace_holds
+#            As `storage_holds`, for a path in the workspace.
+#   host_edit
+#            A path in the HOME and its new content. The runner writes it after the first run, and
+#            runs the agent again. The patterns test the second run.
+#   system   true when the check needs `system_file`. The runner writes it with sudo only when
+#            BOX_FEATURES_SYSTEM=1, never replaces a file, and removes what it wrote.
+#   system_file
+#            The file's path on macOS (`macos`) and on Linux (`linux`), and its `content`.
+#   model    true when the check calls the model. It needs the agent's model credential: a Kiro
+#            API key for Kiro CLI, and a Bedrock API key for the others.
+#   expect   The result on the bench today. No expect means GREEN. `{ verdict = "red", reason = "..." }` records a
+#            row that is not done.
+#   note     What the check shows and does not show.
+#
+# An entry with no pattern is SKIP `no-check`: it records a row that has no test.
+#
+# Three kinds of check call no model:
+# - Codex `app-server` answers JSON-RPC requests on its standard input. `thread/start` reports the
+#   settings a session gets, and `skills/list` reports the skills.
+# - Claude Code `-p x --output-format stream-json --verbose` prints an `init` event before its
+#   first model request. The event lists the skills, commands, subagents, output style, permission
+#   mode, MCP servers, and plugins. The request then fails, because the key is a stand-in.
+# - `--version` starts the agent after the box fills the profile's storage, so the check reads the
+#   box's copy of the host setup.
+#
+# Kiro CLI reports nothing before it signs in, so a check that reads its report calls the model.
+# The Kiro CLI section says how.
+
+# ---- Claude Code ----
+
+[[feature]]
+id = "claude-instructions"
+row = "Instructions"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["--version"]
+storage_holds = { "config/CLAUDE.md" = "feature-probe-instructions-one" }
+
+[[feature]]
+id = "claude-instructions-sync"
+row = "Instructions"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["--version"]
+host_edit = { ".claude/CLAUDE.md" = "feature-probe-instructions-two\n" }
+storage_holds = { "config/CLAUDE.md" = "feature-probe-instructions-two" }
+storage_lacks = { "config/CLAUDE.md" = "feature-probe-instructions-one" }
+note = "The host's CLAUDE.md changes between two runs, and the box's copy follows it."
+
+[[feature]]
+id = "claude-skills"
+row = "Skills"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["-p", "x", "--output-format", "stream-json", "--verbose"]
+until = '"subtype":"init"'
+holds = ['"skills":[*"probe-skill"']
+
+[[feature]]
+id = "claude-commands"
+row = "Commands (saved prompts)"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["-p", "x", "--output-format", "stream-json", "--verbose"]
+until = '"subtype":"init"'
+holds = ['"slash_commands":[*"probe-command"']
+
+[[feature]]
+id = "claude-subagents"
+row = "Subagents"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["-p", "x", "--output-format", "stream-json", "--verbose"]
+until = '"subtype":"init"'
+holds = ['"agents":[*"probe-agent"']
+
+[[feature]]
+id = "claude-output-styles"
+row = "Output styles"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["-p", "x", "--output-format", "stream-json", "--verbose"]
+until = '"subtype":"init"'
+holds = ['"output_style":"probe-style"']
+note = "The host's settings.json selects the style, and the style's file is in ~/.claude/output-styles."
+
+[[feature]]
+id = "claude-themes-keybindings"
+row = "Themes, keybindings"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["--version"]
+storage_holds = { "config/themes/probe-theme.json" = "feature-probe-theme", "config/keybindings.json" = "feature-probe-keybinding", "config/settings.json" = '"theme":*"dark-daltonized"' }
+
+[[feature]]
+id = "claude-agent-memory"
+row = "Agent memory"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["--version"]
+storage_holds = { "config/projects/{workspace.dashed}/memory/MEMORY.md" = "feature-probe-memory" }
+
+[[feature]]
+id = "claude-preferences"
+row = "Preferences file"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["--version"]
+storage_holds = { "config/settings.json" = ['"outputStyle":*"probe-style"', '"spinnerTipsEnabled":*false'] }
+storage_lacks = { "config/settings.json" = "apiKeyHelper" }
+
+[[feature]]
+id = "claude-model-choice"
+row = "Model choice"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["--version"]
+storage_holds = { "config/settings.json" = '"model":*"claude-probe-model"' }
+note = "Shows that the host's `model` key reaches the box's settings.json. It does not show that Claude Code asks for that model, or that the starter reads the provider and the region from the host."
+
+[[feature]]
+id = "claude-environment-variables"
+row = "Environment variables"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["--version"]
+storage_holds = { "config/settings.json" = '"MAX_THINKING_TOKENS":*"4321"' }
+storage_lacks = { "config/settings.json" = "FEATURE_PROBE_TOKEN" }
+note = "Tests the `env` keys of settings.json. It does not test a variable from the shell that runs box."
+
+[[feature]]
+id = "claude-credential-helpers"
+row = "Credential helpers, provider keys"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["--version"]
+storage_lacks = { "config/settings.json" = ["apiKeyHelper", "feature-probe-key"], "config/.claude.json" = ["primaryApiKey", "feature-probe-key"] }
+
+[[feature]]
+id = "claude-login"
+row = "Login"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["--version"]
+storage_lacks = { "config/.credentials.json" = "", "config/.claude.json" = ["oauthAccount", "feature-probe-login"] }
+
+[[feature]]
+id = "claude-permission-rules"
+row = "Permission rules"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["--version"]
+storage_holds = { "config/settings.json" = ['"allow":*"Bash(feature-probe-allow:*)"', '"deny":*"Bash(feature-probe-deny:*)"'] }
+storage_lacks = { "config/settings.json" = ["additionalDirectories", "disableBypassPermissionsMode"] }
+
+[[feature]]
+id = "claude-permission-mode"
+row = "Permission rules"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["-p", "x", "--output-format", "stream-json", "--verbose"]
+until = '"subtype":"init"'
+holds = ['"permissionMode":"acceptEdits"']
+
+[[feature]]
+id = "claude-hooks"
+row = "Hooks"
+harness = "claude"
+with = "claude,bedrock"
+options = ["claude.import-hooks=true"]
+needs = ["claude"]
+host = "claude"
+args = ["-p", "x", "--output-format", "stream-json", "--verbose"]
+until = '"subtype":"init"'
+workspace_holds = { "hook-marker.txt" = "feature-probe-hook" }
+note = "A SessionStart script hook from the host's settings.json writes hook-marker.txt in the workspace."
+
+[[feature]]
+id = "claude-mcp-servers"
+row = "MCP servers"
+harness = "claude"
+with = "claude,bedrock"
+options = ["claude.import-mcp=true"]
+needs = ["claude"]
+host = "claude"
+args = ["-p", "x", "--output-format", "stream-json", "--verbose"]
+until = '"subtype":"init"'
+holds = ['"mcp_servers":[*"name":"probe-mcp"']
+storage_holds = { "config/.claude.json" = '"mcpServers":*"probe-mcp"' }
+note = "The server is /bin/cat, which answers nothing. The check shows that Claude Code lists the imported server, not that a server works."
+
+[[feature]]
+id = "claude-plugins"
+row = "Plugins, extensions"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["-p", "x", "--output-format", "stream-json", "--verbose"]
+until = '"subtype":"init"'
+holds = ['"subtype":"init"', '"plugins":[*"probe-plugin"']
+expect = { verdict = "red", reason = 'the output does not hold *plugins*' }
+note = "The claude pack copies no plugin folder."
+
+[[feature]]
+id = "claude-app-state"
+row = "App state (onboarding, trust)"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["--version"]
+storage_holds = { "config/.claude.json" = ['"hasCompletedOnboarding":*true', '"hasTrustDialogAccepted":*true'] }
+
+[[feature]]
+id = "claude-sessions"
+row = "Sessions and resume"
+harness = "claude"
+note = "No check. A session is kept in the box only, and a test of resume needs two runs that call the model."
+
+[[feature]]
+id = "claude-org-managed"
+row = "Org-managed settings"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+host = "claude"
+args = ["-p", "x", "--output-format", "stream-json", "--verbose"]
+until = '"subtype":"init"'
+system = true
+system_file = { macos = "/Library/Application Support/ClaudeCode/managed-settings.json", linux = "/etc/claude-code/managed-settings.json", content = '{"permissions":{"defaultMode":"plan"}}' }
+holds = ['"permissionMode":"plan"']
+expect = { verdict = "error", log = 'managed-settings.json" is refused' }
+note = "The host's settings.json asks for acceptEdits, and the managed settings file wins. Today the box does not start on a Mac that has the file: the pack grants the folder and the file in it, and the box refuses the file's grant as one that lies inside the folder's."
+
+[[feature]]
+id = "claude-hello"
+row = "Model call"
+harness = "claude"
+with = "claude,bedrock"
+needs = ["claude"]
+args = ["-p", "Reply with the word BOX-OK and nothing else.", "--output-format", "stream-json", "--verbose"]
+model = true
+holds = ['"result":"BOX-OK']
+note = "The one check that calls Claude Code's model: the agent reaches it through the box."
+
+# ---- Codex ----
+
+[[feature]]
+id = "codex-instructions"
+row = "Instructions"
+harness = "codex"
+with = "codex,bedrock-mantle"
+needs = ["codex"]
+host = "codex"
+args = ["app-server"]
+stdin = [
+    '{"method":"initialize","id":1,"params":{"clientInfo":{"name":"box-feature-checks","title":"Box feature checks","version":"0.0.0"}}}',
+    '{"method":"initialized"}',
+    '{"method":"thread/start","id":2,"params":{}}',
+]
+until = '"id":2'
+holds = ['"instructionSources":[*/home/AGENTS.md']
+storage_holds = { "home/AGENTS.md" = "feature-probe-instructions" }
+
+[[feature]]
+id = "codex-skills"
+row = "Skills"
+harness = "codex"
+with = "codex,bedrock-mantle"
+needs = ["codex"]
+host = "codex"
+args = ["app-server"]
+stdin = [
+    '{"method":"initialize","id":1,"params":{"clientInfo":{"name":"box-feature-checks","title":"Box feature checks","version":"0.0.0"}}}',
+    '{"method":"initialized"}',
+    '{"method":"thread/start","id":2,"params":{}}',
+    '{"method":"skills/list","id":3,"params":{}}',
+]
+until = '"id":3'
+holds = ['"name":"probe-codex-skill"', '"name":"probe-agents-skill"']
+note = "One skill comes from ~/.codex/skills and one from ~/.agents/skills."
+
+[[feature]]
+id = "codex-commands"
+row = "Commands (saved prompts)"
+harness = "codex"
+with = "codex,bedrock-mantle"
+needs = ["codex"]
+host = "codex"
+args = ["app-server"]
+stdin = [
+    '{"method":"initialize","id":1,"params":{"clientInfo":{"name":"box-feature-checks","title":"Box feature checks","version":"0.0.0"}}}',
+    '{"method":"initialized"}',
+    '{"method":"config/read","id":2,"params":{}}',
+]
+until = '"id":2'
+holds = ['"presets":{*"input":"feature-probe-command"']
+
+[[feature]]
+id = "codex-subagents"
+row = "Subagents"
+harness = "codex"
+with = "codex,bedrock-mantle"
+needs = ["codex"]
+host = "codex"
+args = ["--version"]
+storage_holds = { "home/agents/probe-agent.toml" = "feature-probe-agent" }
+expect = { verdict = "green" }
+note = "The codex pack copies ~/.codex/agents into private storage."
+
+[[feature]]
+id = "codex-themes-keybindings"
+row = "Themes, keybindings"
+harness = "codex"
+with = "codex,bedrock-mantle"
+needs = ["codex"]
+host = "codex"
+args = ["--version"]
+storage_holds = { "home/config.toml" = "feature-probe-theme" }
+
+[[feature]]
+id = "codex-agent-memory"
+row = "Agent memory"
+harness = "codex"
+with = "codex,bedrock-mantle"
+needs = ["codex"]
+host = "codex"
+args = ["--version"]
+storage_holds = { "home/memories/probe-memory.md" = "feature-probe-memory" }
+expect = { verdict = "red", reason = "storage has no file home/memories/probe-memory.md" }
+note = "The codex pack does not copy ~/.codex/memories."
+
+[[feature]]
+id = "codex-preferences"
+row = "Preferences file"
+harness = "codex"
+with = "codex,bedrock-mantle"
+needs = ["codex"]
+host = "codex"
+args = ["--version"]
+storage_holds = { "home/config.toml" = "file_opener" }
+expect = { verdict = "red", reason = "storage file home/config.toml does not hold" }
+note = "The codex pack keeps only `model` from the host's config.toml."
+
+[[feature]]
+id = "codex-model-choice"
+row = "Model choice"
+harness = "codex"
+with = "codex,bedrock-mantle"
+needs = ["codex"]
+host = "codex"
+args = ["app-server"]
+stdin = [
+    '{"method":"initialize","id":1,"params":{"clientInfo":{"name":"box-feature-checks","title":"Box feature checks","version":"0.0.0"}}}',
+    '{"method":"initialized"}',
+    '{"method":"thread/start","id":2,"params":{}}',
+]
+until = '"id":2'
+holds = ['"model":"openai.gpt-5.4"']
+note = "The host's config.toml names the model, and a new session reports it."
+
+[[feature]]
+id = "codex-environment-variables"
+row = "Environment variables"
+harness = "codex"
+note = "No check. The codex pack passes no Codex variable from the shell into the box."
+
+[[feature]]
+id = "codex-credential-helpers"
+row = "Credential helpers, provider keys"
+harness = "codex"
+with = "codex,bedrock-mantle"
+needs = ["codex"]
+host = "codex"
+args = ["--version"]
+storage_lacks = { "home/config.toml" = ["feature-probe-key", "model_providers"] }
+
+[[feature]]
+id = "codex-login"
+row = "Login"
+harness = "codex"
+with = "codex,bedrock-mantle"
+needs = ["codex"]
+host = "codex"
+args = ["--version"]
+# AGENTS.md shows that the copy ran, so the absent auth.json is a choice and not an empty storage.
+storage_holds = { "home/AGENTS.md" = "" }
+storage_lacks = { "home/auth.json" = "" }
+
+[[feature]]
+id = "codex-permission-rules"
+row = "Permission rules"
+harness = "codex"
+with = "codex,bedrock-mantle"
+needs = ["codex"]
+host = "codex-rules"
+args = ["--version"]
+storage_holds = { "home/rules/default.rules" = "feature-probe-rule" }
+
+[[feature]]
+id = "codex-hooks"
+row = "Hooks"
+harness = "codex"
+with = "codex,bedrock-mantle"
+options = ["codex.import-hooks=true"]
+needs = ["codex"]
+host = "codex"
+args = ["--version"]
+storage_holds = { "home/hooks.json" = "probe-hook" }
+note = "Shows that the box's hooks.json holds the host's script hook. It does not show that Codex runs the hook."
+
+[[feature]]
+id = "codex-mcp-servers"
+row = "MCP servers"
+harness = "codex"
+with = "codex,bedrock-mantle"
+options = ["codex.import-mcp=true"]
+needs = ["codex"]
+host = "codex"
+args = ["--version"]
+storage_holds = { "home/config.toml" = "probe-mcp" }
+note = "Shows that the box's config.toml declares the host's server. It does not show that Codex starts the server."
+
+[[feature]]
+id = "codex-plugins"
+row = "Plugins, extensions"
+harness = "codex"
+note = "No check. The codex pack copies no plugin folder."
+
+[[feature]]
+id = "codex-app-state"
+row = "App state (onboarding, trust)"
+harness = "codex"
+with = "codex,bedrock-mantle"
+needs = ["codex"]
+host = "codex"
+args = ["--version"]
+storage_holds = { "home/config.toml" = 'trust_level = "trusted"' }
+note = "The Codex pack imports the current workspace's trust choice."
+
+[[feature]]
+id = "codex-sessions"
+row = "Sessions and resume"
+harness = "codex"
+note = "No check. A session is kept in the box only, and a test of resume needs two runs that call the model."
+
+[[feature]]
+id = "codex-org-managed"
+row = "Org-managed settings"
+harness = "codex"
+with = "codex,bedrock-mantle"
+options = ["agent.skip-permissions=true"]
+needs = ["codex"]
+host = "codex"
+args = ["app-server"]
+stdin = [
+    '{"method":"initialize","id":1,"params":{"clientInfo":{"name":"box-feature-checks","title":"Box feature checks","version":"0.0.0"}}}',
+    '{"method":"initialized"}',
+    '{"method":"thread/start","id":2,"params":{}}',
+]
+until = '"id":2'
+system = true
+system_file = { macos = "/etc/codex/requirements.toml", linux = "/etc/codex/requirements.toml", content = "allowed_approval_policies = [\"on-request\"]\n" }
+holds = ['"approvalPolicy":"on-request"']
+note = "The profile turns approval prompts off, and the organization's requirements turn them on again."
+
+[[feature]]
+id = "codex-org-managed-absent"
+row = "Org-managed settings"
+harness = "codex"
+with = "codex,bedrock-mantle"
+options = ["agent.skip-permissions=true"]
+needs = ["codex"]
+host = "codex"
+args = ["app-server"]
+stdin = [
+    '{"method":"initialize","id":1,"params":{"clientInfo":{"name":"box-feature-checks","title":"Box feature checks","version":"0.0.0"}}}',
+    '{"method":"initialized"}',
+    '{"method":"thread/start","id":2,"params":{}}',
+]
+until = '"id":2'
+holds = ['"approvalPolicy":"never"']
+note = "The control for codex-org-managed: with no requirements file, the profile's option decides."
+
+[[feature]]
+id = "codex-hello"
+row = "Model call"
+harness = "codex"
+with = "codex,bedrock-mantle"
+needs = ["codex"]
+args = ["-c", "model=openai.gpt-5.4", "exec", "--skip-git-repo-check", "--json", "Reply with the word BOX-OK and nothing else."]
+model = true
+holds = ['"text":"BOX-OK']
+expect = { verdict = "red", reason = 'the output does not hold *BOX-OK*' }
+note = "The one check that calls Codex's model: the agent reaches it through the box. --json keeps the prompt's own text out of the pattern's reach. Today the role that the workloads job assumes may not call Bedrock's OpenAI-compatible endpoint, so the request gets a 403 and the check is red. The record cannot tell that refusal from another failed turn."
+
+# ---- Kiro CLI ----
+# Kiro CLI reports nothing about a session until it signs in, and a stand-in key does not sign in.
+# So each check that reads Kiro CLI's own report is a `model` check: it gets the Kiro API key and
+# runs one turn of a prompt that asks for one word. `--output-format stream-json` prints the
+# session's commands, its model, and the steering files it reads. KIRO_DUMP_REQUESTS writes each
+# model request as JSON, so a check can read the text that reached the model.
+
+[[feature]]
+id = "kiro-instructions"
+row = "Instructions"
+harness = "kiro"
+with = "kiro"
+options = ["kiro.sign-in=api-key", "agent.skip-permissions=true"]
+needs = ["kiro-cli"]
+host = "kiro"
+agent_env = { KIRO_DUMP_REQUESTS = "1", KIRO_DUMP_REQUESTS_DIR = "{workspace}/requests" }
+args = ["--trust-workspace", "--output-format", "stream-json", "Reply with the word BOX-OK and nothing else."]
+model = true
+holds = ['"steeringDocuments":[*/.kiro/steering/*probe-steering.md"']
+workspace_holds = { "requests/*/*.json" = "<user-rule id=*probe-steering>*feature-probe-instructions-one" }
+note = "Kiro CLI names the host's steering file as one it reads, and the file's text is in the model request."
+
+[[feature]]
+id = "kiro-instructions-sync"
+row = "Instructions"
+harness = "kiro"
+with = "kiro"
+options = ["kiro.sign-in=api-key", "agent.skip-permissions=true"]
+needs = ["kiro-cli"]
+host = "kiro"
+agent_env = { KIRO_DUMP_REQUESTS = "1", KIRO_DUMP_REQUESTS_DIR = "{workspace}/requests" }
+args = ["--trust-workspace", "--output-format", "stream-json", "Reply with the word BOX-OK and nothing else."]
+model = true
+host_edit = { ".kiro/steering/probe-steering.md" = "feature-probe-instructions-two\n" }
+workspace_holds = { "requests/*/*.json" = "<user-rule id=*probe-steering>*feature-probe-instructions-two" }
+note = "The host's steering file changes between two runs, and the second run's model request holds the new text."
+
+[[feature]]
+id = "kiro-skills"
+row = "Skills"
+harness = "kiro"
+with = "kiro"
+options = ["kiro.sign-in=api-key", "agent.skip-permissions=true"]
+needs = ["kiro-cli"]
+host = "kiro"
+args = ["--trust-workspace", "--output-format", "stream-json", "Reply with the word BOX-OK and nothing else."]
+model = true
+holds = ['"availableCommands":[*"name":"probe-skill","description":"feature-probe-skill"']
+
+[[feature]]
+id = "kiro-commands"
+row = "Commands (saved prompts)"
+harness = "kiro"
+with = "kiro"
+options = ["kiro.sign-in=api-key", "agent.skip-permissions=true"]
+needs = ["kiro-cli"]
+host = "kiro"
+args = ["--trust-workspace", "--output-format", "stream-json", "Reply with the word BOX-OK and nothing else."]
+model = true
+holds = ['"availableCommands":[*"name":"probe-command"']
+
+[[feature]]
+id = "kiro-subagents"
+row = "Subagents"
+harness = "kiro"
+with = "kiro"
+options = ["kiro.sign-in=api-key"]
+needs = ["kiro-cli"]
+host = "kiro"
+args = ["--version"]
+storage_holds = { "home/.kiro/agents/probe-agent.json" = "feature-probe-agent" }
+expect = { verdict = "red", reason = "storage has no file home/.kiro/agents/probe-agent.json" }
+note = "The kiro pack does not copy ~/.kiro/agents: an agent's file can name hooks and MCP servers."
+
+[[feature]]
+id = "kiro-themes-keybindings"
+row = "Themes, keybindings"
+harness = "kiro"
+note = "No check. The kiro pack copies no theme or keybinding file, and sets the theme from KIRO_TERMINAL_THEME."
+
+[[feature]]
+id = "kiro-agent-memory"
+row = "Agent memory"
+harness = "kiro"
+note = "No check. The kiro pack copies no memory of Kiro CLI's."
+
+[[feature]]
+id = "kiro-preferences"
+row = "Preferences file"
+harness = "kiro"
+with = "kiro"
+options = ["kiro.sign-in=api-key"]
+needs = ["kiro-cli"]
+host = "kiro"
+args = ["--version"]
+storage_holds = { "home/.kiro/settings/cli.json" = ['"chat.enableContextUsageIndicator":*true', '"app.disableAutoupdates":*true'] }
+storage_lacks = { "home/.kiro/settings/cli.json" = ["chat.defaultAgent", "chat.agentEngine"] }
+note = "From the host's cli.json, only chat.defaultModel and chat.enableContextUsageIndicator come in, and the pack turns updates off."
+
+[[feature]]
+id = "kiro-model-choice"
+row = "Model choice"
+harness = "kiro"
+with = "kiro"
+options = ["kiro.sign-in=api-key", "agent.skip-permissions=true"]
+needs = ["kiro-cli"]
+host = "kiro"
+args = ["--trust-workspace", "--output-format", "stream-json", "Reply with the word BOX-OK and nothing else."]
+model = true
+holds = ['"category":"model","type":"select","currentValue":"claude-sonnet-4.5"']
+note = "The host's cli.json names the model, and the session reports it. With no chat.defaultModel, Kiro CLI 3.4.0 reports auto, so a model that does not come in makes the check red."
+
+[[feature]]
+id = "kiro-environment-variables"
+row = "Environment variables"
+harness = "kiro"
+note = "No check. The kiro pack passes only KIRO_TERMINAL_THEME and KIRO_RUNTIME_DIR from the shell into the box."
+
+[[feature]]
+id = "kiro-credential-helpers"
+row = "Credential helpers, provider keys"
+harness = "kiro"
+note = "No check. Kiro CLI has no credential helper, and with kiro.sign-in = \"api-key\" the agent holds only a stand-in for the key."
+
+[[feature]]
+id = "kiro-login"
+row = "Login"
+harness = "kiro"
+with = "kiro"
+options = ["kiro.sign-in=api-key"]
+needs = ["kiro-cli"]
+host = "kiro"
+args = ["--version"]
+# cli.json shows that the copy ran, so the absent login is a choice and not an empty storage.
+storage_holds = { "home/.kiro/settings/cli.json" = "" }
+storage_lacks = { "home/.local/share/kiro-cli/data.sqlite3" = "", "home/Library/Application Support/kiro-cli/data.sqlite3" = "" }
+note = "Kiro CLI keeps a login in data.sqlite3, on Linux and on macOS, and the box copies neither."
+
+[[feature]]
+id = "kiro-permission-rules"
+row = "Permission rules"
+harness = "kiro"
+with = "kiro"
+options = ["kiro.sign-in=api-key"]
+needs = ["kiro-cli"]
+host = "kiro"
+args = ["--version"]
+storage_holds = { "home/.kiro/agents/probe-agent.json" = "feature-probe-allow" }
+expect = { verdict = "red", reason = "storage has no file home/.kiro/agents/probe-agent.json" }
+note = "Kiro CLI keeps the tools an agent may run without asking in the agent's file, and the kiro pack does not copy ~/.kiro/agents."
+
+[[feature]]
+id = "kiro-hooks"
+row = "Hooks"
+harness = "kiro"
+with = "kiro"
+options = ["kiro.sign-in=api-key"]
+needs = ["kiro-cli"]
+host = "kiro"
+args = ["--version"]
+storage_holds = { "home/.kiro/agents/probe-agent.json" = "probe-hook" }
+expect = { verdict = "red", reason = "storage has no file home/.kiro/agents/probe-agent.json" }
+note = "Kiro CLI keeps hooks in an agent's file, and the kiro pack does not copy ~/.kiro/agents. A hook that came in would not run: Kiro CLI starts it through /bin/sh, which the box does not run."
+
+[[feature]]
+id = "kiro-mcp-servers"
+row = "MCP servers"
+harness = "kiro"
+with = "kiro"
+options = ["kiro.sign-in=api-key"]
+needs = ["kiro-cli"]
+host = "kiro"
+args = ["--version"]
+storage_holds = { "home/.kiro/settings/mcp.json" = "probe-mcp" }
+expect = { verdict = "red", reason = "storage has no file home/.kiro/settings/mcp.json" }
+note = "The kiro pack does not copy ~/.kiro/settings/mcp.json."
+
+[[feature]]
+id = "kiro-plugins"
+row = "Plugins, extensions"
+harness = "kiro"
+note = "No check. The kiro pack brings in no Kiro power."
+
+[[feature]]
+id = "kiro-app-state"
+row = "App state (onboarding, trust)"
+harness = "kiro"
+note = "No check. The kiro pack copies no app state, and a model check trusts its workspace with --trust-workspace."
+
+[[feature]]
+id = "kiro-sessions"
+row = "Sessions and resume"
+harness = "kiro"
+note = "No check. A session is kept in the box only, and a test of resume needs two runs that call the model."
+
+[[feature]]
+id = "kiro-org-managed"
+row = "Org-managed settings"
+harness = "kiro"
+note = "No check. A test needs a Kiro sign-in that an organization manages."
+
+[[feature]]
+id = "kiro-hello"
+row = "Model call"
+harness = "kiro"
+with = "kiro"
+options = ["kiro.sign-in=api-key", "agent.skip-permissions=true"]
+needs = ["kiro-cli"]
+args = ["--trust-workspace", "--output-format", "stream-json", "Reply with the word BOX-OK and nothing else."]
+model = true
+holds = ['"finalText":"BOX-OK']
+note = "Kiro CLI reaches Kiro's service through the box with the key the box adds. finalText keeps the prompt's own text out of the pattern's reach."

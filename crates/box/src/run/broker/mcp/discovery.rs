@@ -335,16 +335,21 @@ impl DiscoveryRegistry {
         let server = catalog_server(&catalog);
         #[cfg(test)]
         self.run_staging_hook(&server);
-        let tools = catalog.tool_count();
         let staged = self.stage_with_test_faults(catalog);
         let outcome = match staged {
-            Ok(CatalogStage::Accepted { .. }) => {
+            Ok(CatalogStage::Accepted { tools }) => {
+                let left_out = report_omitted(&self.catalogs, &server);
+                let detail = if left_out == 0 {
+                    format!("{tools} tools")
+                } else {
+                    format!("{tools} tools, {left_out} left out")
+                };
                 self.coordinator.control(
                     telemetry::ControlRecord::completed(
                         telemetry::ControlOperation::SchemaInstalled,
                         &server,
                     )
-                    .detailed(&format!("{tools} tools")),
+                    .detailed(&detail),
                 );
                 StagedList::Released
             }
@@ -597,6 +602,15 @@ impl DiscoveryRegistry {
 
 fn catalog_server(catalog: &CompleteCatalog) -> String {
     catalog.server().to_string()
+}
+
+/// Warn about each tool that staging left out of `server` since the last report, and count them.
+pub(crate) fn report_omitted(catalogs: &ToolCatalogs, server: &str) -> usize {
+    let omitted = catalogs.take_omitted(server);
+    for tool in &omitted {
+        ::diagnostics::diag!(B0403, "{tool}");
+    }
+    omitted.len()
 }
 
 /// The JSON-RPC error a client receives when its server's discovery failed.

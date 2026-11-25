@@ -1,0 +1,6 @@
+{
+  "chat.defaultModel": "claude-sonnet-4.5",
+  "chat.enableContextUsageIndicator": true,
+  "chat.defaultAgent": "probe-agent",
+  "chat.agentEngine": "v2"
+}
