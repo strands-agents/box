@@ -31,6 +31,7 @@ struct Observation {
     journal: Journal,
     interval: DecisionInterval,
     next: Instant,
+    /// `Confirmed` once Core recorded that the workload started, which ends startup.
     launch: LaunchOutcome,
     core_outcome: Option<CoreOutcome>,
 }
@@ -216,7 +217,7 @@ impl Observation {
 
     fn read(&mut self) {
         self.journal.read(|record| match record {
-            Record::BoxStarted(started_at) => {
+            Record::WorkloadStarted(started_at) => {
                 if matches!(self.launch, LaunchOutcome::Unknown) {
                     self.launch = LaunchOutcome::Confirmed(started_at);
                 }
@@ -659,7 +660,8 @@ mod tests {
     }
 
     fn append_start(path: &Path) {
-        append_control(path, "box_started", "ok", Some("1700000001234567890"));
+        append_control(path, "box_started", "ok", Some("1700000000000000000"));
+        append_control(path, "workload_started", "ok", Some("1700000001234567890"));
     }
 
     fn append_control(path: &Path, operation: &str, outcome: &str, timestamp: Option<&str>) {
@@ -778,8 +780,8 @@ mod tests {
             let path = directory.path().join("records.jsonl");
             let (mut session, events) = capture(LaunchOutcome::Unknown);
             let journal = Journal::start(&path).unwrap();
-            append_control(&path, "box_started", "ok", timestamp);
-            append_control(&path, "box_started", "ok", Some("1700000009876543210"));
+            append_control(&path, "workload_started", "ok", timestamp);
+            append_control(&path, "workload_started", "ok", Some("1700000009876543210"));
             session.observe(journal, catalog());
             session.finish(Instant::now(), ExitOutcome::Zero);
             let run = events.try_recv().unwrap();
@@ -879,12 +881,35 @@ mod tests {
     }
 
     #[test]
+    fn a_box_whose_workload_never_starts_sends_its_run_at_completion_without_launch_or_latency() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("records.jsonl");
+        let (mut session, events) = capture(LaunchOutcome::Unknown);
+        session.observe(Journal::start(&path).unwrap(), catalog());
+        append_control(&path, "box_started", "ok", Some("1700000001234567890"));
+        assert!(
+            events.recv_timeout(Duration::from_millis(2500)).is_err(),
+            "startup is not over until the workload starts"
+        );
+        append_control(&path, "box_stopped", "refused", None);
+        session.finish(Instant::now(), ExitOutcome::Nonzero);
+        let event = events.try_recv().unwrap();
+        assert_eq!(
+            event["data"],
+            json!({"box_launched":null,"failure_reason":null,"startup_latency_ms":null})
+        );
+        assert_empty_polling(&events);
+        assert_shutdown(&events, &event, "nonzero", Some("refused"));
+    }
+
+    #[test]
     fn startup_without_a_usable_timestamp_still_precedes_shutdown() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("records.jsonl");
         let (mut session, events) = capture(LaunchOutcome::Unknown);
         session.observe(Journal::start(&path).unwrap(), catalog());
         append_control(&path, "box_started", "ok", None);
+        append_control(&path, "workload_started", "ok", None);
         session.finish(Instant::now(), ExitOutcome::Zero);
         let event = events.try_recv().unwrap();
         assert_eq!(

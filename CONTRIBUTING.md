@@ -177,6 +177,13 @@ agent and model.
 `just test-engine` builds the CLI and runs its suite that drives a real engine. `just prose`
 checks the prose of the CLI's docs, and `just check` runs it.
 
+CI also checks the telemetry endpoint override separately, because the CLI's test dependencies
+enable `test-transport` in the combined suite:
+
+```sh
+cargo test --locked -p strands-box-cli-telemetry --no-default-features --test endpoint_override
+```
+
 Title the pull request as a conventional commit with a lowercase subject, such as
 `fix(cli): refuse a profile with no agent`. The title becomes the commit on `main`.
 [crates/cli/AGENTS.md](crates/cli/AGENTS.md#pull-request-title) lists the types and scopes.

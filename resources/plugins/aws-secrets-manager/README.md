@@ -115,7 +115,7 @@ each key.
 - On Linux, the box closes a folder that the plugin lists only if it exists when the box starts. For each one that doesn't, the box prints a line such as this one:
 
   ```text
-  strands-box: [secret-source.aws-secretsmanager]: `deny` entry "/var/run/secrets/eks.amazonaws.com" names /run/secrets/eks.amazonaws.com, which does not exist when the box starts, so no sandbox denies it in this run
+  strands-box: note[B0203]: [secret-source.aws-secretsmanager]: `deny` entry "/var/run/secrets/eks.amazonaws.com" names /run/secrets/eks.amazonaws.com, which does not exist when the box starts, so no sandbox denies it in this run
   ```
 
   The box doesn't close that folder in that run, unless `aws` makes it while the box reads your secrets. Expect the line for the two EKS token folders, which exist only in an EKS pod, and for `~/.aws` when you have none. See the [plugin reference](../../../docs/cli/plugins-reference.md#protect).

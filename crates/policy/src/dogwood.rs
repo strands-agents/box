@@ -166,13 +166,17 @@ impl Drop for DogwoodEngine {
         let mut pending = match self.pending_outcomes.get_mut() {
             Ok(pending) => std::mem::take(pending),
             Err(_) => {
-                eprintln!("policy: warn: pending outcome lock poisoned; kept outcomes are lost");
+                diagnostics::diag!(
+                    P0301,
+                    "pending outcome lock poisoned; kept outcomes are lost"
+                );
                 return;
             }
         };
         if let Err(error) = self.submit_pending(&mut pending) {
-            eprintln!(
-                "policy: warn: {} kept outcome(s) not recorded at shutdown: {error}",
+            diagnostics::diag!(
+                P0301,
+                "{} kept outcome(s) not recorded at shutdown: {error}",
                 pending.len()
             );
         }
@@ -643,14 +647,17 @@ impl DogwoodEngine {
             Err(_) => Err("pending outcome lock poisoned".to_string()),
         };
         if let Err(error) = recorded {
-            eprintln!("policy: warn: an earlier outcome is not recorded yet: {error}; denying");
+            diagnostics::diag!(
+                P0202,
+                "an earlier outcome is not recorded yet: {error}; denying"
+            );
             return (Decision::internal_fault(), None, None);
         }
         let identity = request.identity();
         let conformed_arguments = match self.conformed_arguments(request, &identity) {
             Ok(arguments) => arguments,
             Err(error) => {
-                eprintln!("policy: warn: {error}; denying");
+                diagnostics::diag!(P0202, "{error}; denying");
                 return (Decision::internal_fault(), None, None);
             }
         };
@@ -687,7 +694,7 @@ impl DogwoodEngine {
             .map(|_| ()),
         };
         if let Err(error) = gate {
-            eprintln!("policy: warn: {error}; denying");
+            diagnostics::diag!(P0202, "{error}; denying");
             return (Decision::internal_fault(), None, None);
         }
         // A tool call's `input` is built once, so its `::request` and `::response` carry one value.
@@ -729,7 +736,7 @@ impl DogwoodEngine {
                 tool_input,
             ),
             Err(error) => {
-                eprintln!("policy: warn: {error}; denying");
+                diagnostics::diag!(P0202, "{error}; denying");
                 (Decision::internal_fault(), None, None)
             }
         }
@@ -886,7 +893,13 @@ impl DogwoodEngine {
         if std::thread::current().name() == Some("linux-native-policy")
             && std::env::var("BOX_NATIVE_TEST_FAULT").as_deref() == Ok("policy-lock")
         {
-            eprintln!("NATIVE_TEST_FAULT=policy-lock");
+            #[allow(
+                clippy::print_stderr,
+                reason = "a test-harness protocol line, not a message"
+            )]
+            {
+                eprintln!("NATIVE_TEST_FAULT=policy-lock");
+            }
             loop {
                 std::thread::park();
             }
@@ -923,7 +936,7 @@ impl DogwoodEngine {
         let attribution = match attribution {
             Ok(attribution) => attribution,
             Err(error) => {
-                eprintln!("policy: warn: {error}; denying");
+                diagnostics::diag!(P0202, "{error}; denying");
                 return Ok((Some(Decision::internal_fault()), offset));
             }
         };
@@ -931,7 +944,7 @@ impl DogwoodEngine {
         let mut errors = response.diagnostics().errors().peekable();
         if errors.peek().is_some() {
             let joined = errors.collect::<Vec<_>>().join("; ");
-            eprintln!("policy: warn: dogwood evaluation failed: {joined}; denying");
+            diagnostics::diag!(P0201, "dogwood evaluation failed: {joined}; denying");
             return Ok((
                 Some(Decision::Deny {
                     reason: DenyReason::InternalFault,
@@ -2307,7 +2320,7 @@ fn with_fields(
 fn outcome_action_id(outcome: &Outcome<'_>) -> &'static str {
     match outcome {
         Outcome::Connect { .. } => action::NET_CONNECT,
-        Outcome::Http { .. } => action::HTTP_REQUEST,
+        Outcome::Http { websocket, .. } => crate::schema::http_action_id(*websocket),
         Outcome::ShellRun { .. } => action::SHELL_EXEC,
         Outcome::ShellSpawn { .. } => action::SHELL_SPAWN,
         // The response names the SAME coarse action as the request, so a rule joining
@@ -2358,14 +2371,15 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
             path,
             body_bytes,
             intercepted,
-        } => vec![
-            (attr::HOST, Value::String((*host).to_string())),
-            (attr::PORT, Value::Int(i64::from(*port))),
-            (attr::METHOD, Value::String((*method).to_string())),
-            (attr::PATH, Value::String((*path).to_string())),
-            (attr::BODY_BYTES, Value::Int(clamp(*body_bytes))),
-            (attr::INTERCEPTED, Value::Bool(*intercepted)),
-        ],
+            websocket,
+        } => http_fields(
+            host,
+            *port,
+            method,
+            path,
+            (!websocket).then(|| clamp(*body_bytes)),
+            *intercepted,
+        ),
         Request::McpCall {
             server,
             method,
@@ -2488,20 +2502,18 @@ fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
             path,
             delivery,
             intercepted,
+            websocket,
             ..
-        } => vec![
-            (attr::HOST, Value::String((*host).to_string())),
-            (attr::PORT, Value::Int(i64::from(*port))),
-            (attr::METHOD, Value::String((*method).to_string())),
-            (attr::PATH, Value::String((*path).to_string())),
+        } => http_fields(
+            host,
+            *port,
+            method,
+            path,
             // The DELIVERED count, carried on the schema's `body_bytes`. A budget rule
             // sums this, so it must be what left the box, not what was offered.
-            (
-                attr::BODY_BYTES,
-                Value::Int(clamp(delivery.accepted_bytes())),
-            ),
-            (attr::INTERCEPTED, Value::Bool(*intercepted)),
-        ],
+            (!websocket).then(|| clamp(delivery.accepted_bytes())),
+            *intercepted,
+        ),
         Outcome::ShellRun {
             command,
             program,
@@ -2596,6 +2608,25 @@ fn output_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
         }
         _ => Vec::new(),
     }
+}
+
+fn http_fields(
+    host: &str,
+    port: u16,
+    method: &str,
+    path: &str,
+    body_bytes: Option<i64>,
+    intercepted: bool,
+) -> Vec<(&'static str, Value)> {
+    let mut fields = vec![
+        (attr::HOST, Value::String(host.to_string())),
+        (attr::PORT, Value::Int(i64::from(port))),
+        (attr::METHOD, Value::String(method.to_string())),
+        (attr::PATH, Value::String(path.to_string())),
+    ];
+    fields.extend(body_bytes.map(|bytes| (attr::BODY_BYTES, Value::Int(bytes))));
+    fields.push((attr::INTERCEPTED, Value::Bool(intercepted)));
+    fields
 }
 
 /// Narrow a byte count to Cedar's `Long`, saturating rather than wrapping.
@@ -3917,6 +3948,7 @@ when temporal {
             delivery: crate::Delivery::Completed { bytes },
             status: Some(200),
             intercepted: true,
+            websocket: false,
         }
     }
 
@@ -3928,6 +3960,7 @@ when temporal {
             path: "/v1",
             body_bytes: 10,
             intercepted: true,
+            websocket: false,
         }
     }
 
@@ -4002,6 +4035,7 @@ when temporal {
                         delivery: crate::Delivery::Completed { bytes: 10 },
                         status: Some(200),
                         intercepted: true,
+                        websocket: false,
                     }
                 )
                 .is_err(),
@@ -4103,6 +4137,7 @@ when temporal {
             delivery: crate::Delivery::Completed { bytes: 150 },
             status: Some(200),
             intercepted: true,
+            websocket: false,
         };
         let request_id = permitted_http_request(&engine);
         engine
@@ -4226,6 +4261,11 @@ when temporal {{
         let minute = grow_history(&counting_window(60), EVENTS);
         let day = grow_history(&counting_window(24 * 3600), EVENTS);
         for (name, growth) in [("60 s window", &minute), ("24 h window", &day)] {
+            // Past the harness capture, so a hand run shows the measurement.
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "a test measurement, not a box message"
+            )]
             let _ = writeln!(
                 std::io::stderr().lock(),
                 "NFR-06 {name}: {} bytes after {} events, {} bytes after {EVENTS}; reopen {:?} then \

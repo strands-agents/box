@@ -27,7 +27,15 @@ const STOP_WAIT: Duration = Duration::from_secs(1);
 const WATCH_INTERVAL: Duration = Duration::from_millis(25);
 
 fn failure(reason: impl ToString) -> BoxError {
-    SuperviseError::Control {
+    SuperviseError::Native {
+        reason: reason.to_string(),
+    }
+    .into()
+}
+
+/// A failure of native enforcement after the workload started.
+fn run_failure(reason: impl ToString) -> BoxError {
+    SuperviseError::NativeDuringRun {
         reason: reason.to_string(),
     }
     .into()
@@ -53,7 +61,7 @@ impl State {
         // Keep the first error until stop has joined the worker that reported it.
         let reason = self.fatal_reason.get_or_init(|| reason.to_string());
         self.stopped.store(true, Ordering::Release);
-        let _ = self.fatal.send(failure(reason));
+        let _ = self.fatal.send(run_failure(reason));
     }
 }
 #[derive(Clone)]
@@ -147,7 +155,8 @@ impl FileMonitor {
     }
     pub(crate) fn stop(&mut self) -> Result<(), BoxError> {
         self.registration.0.stopped.store(true, Ordering::Release);
-        let workers = std::mem::take(&mut *self.registration.0.workers.lock().map_err(failure)?);
+        let workers =
+            std::mem::take(&mut *self.registration.0.workers.lock().map_err(run_failure)?);
         let deadline = Instant::now() + STOP_WAIT;
         let mut incomplete = false;
         for worker in workers {
@@ -168,10 +177,10 @@ impl FileMonitor {
             incomplete = true;
         }
         if let Some(reason) = self.registration.0.fatal_reason.get() {
-            return Err(failure(reason));
+            return Err(run_failure(reason));
         }
         if incomplete {
-            return Err(failure(
+            return Err(run_failure(
                 "native worker did not stop within the shutdown bound",
             ));
         }
@@ -258,8 +267,12 @@ impl Registration {
                             };
                             match response {
                                 Ok(response) => {
+                                    // A test-harness protocol line, not a message.
                                     #[cfg(feature = "test-support")]
-                                    eprintln!("NATIVE_RESEARCH_EVENT={response}");
+                                    #[allow(clippy::print_stderr)]
+                                    {
+                                        eprintln!("NATIVE_RESEARCH_EVENT={response}");
+                                    }
                                     #[cfg(not(feature = "test-support"))]
                                     let _ = response;
                                 }
@@ -273,10 +286,14 @@ impl Registration {
                                         |error| error.raw_os_error() == Some(libc::ENOENT),
                                     ) =>
                                 {
+                                    // A test-harness protocol line, not a message.
                                     #[cfg(feature = "test-support")]
-                                    eprintln!(
-                                        "NATIVE_RESEARCH_EVENT={{\"outcome\":\"cancelled\"}}"
-                                    );
+                                    #[allow(clippy::print_stderr)]
+                                    {
+                                        eprintln!(
+                                            "NATIVE_RESEARCH_EVENT={{\"outcome\":\"cancelled\"}}"
+                                        );
+                                    }
                                 }
                                 Err(error) => return Err(error),
                             }
@@ -344,8 +361,9 @@ pub(crate) fn preflight() -> Result<(), BoxError> {
         let supported = probe::path_handles().map_err(failure)?;
         let _ = PATH_HANDLES.set(supported);
         if !supported {
-            eprintln!(
-                "strands-box: native filesystem policy: this kernel cannot transfer O_PATH handles; path-only opens are refused"
+            ::diagnostics::diag!(
+                B0801,
+                "native filesystem policy: this kernel cannot transfer O_PATH handles; path-only opens are refused"
             );
         }
     }

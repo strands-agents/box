@@ -1239,6 +1239,7 @@ mod linked_command_mutation_tests {
             .expect("executable command");
         std::fs::hard_link(&command, staging.join("alias")).expect("preexisting hard link");
         let record = Record {
+            enforcement: Default::default(),
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,

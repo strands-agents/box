@@ -1,7 +1,8 @@
 //! The stdio MCP fetch server fixture that the MCP cases share.
 //!
 //! Each case keeps its own `FETCH_PROGRAM` name as a literal in its own file, because the Linux CI step
-//! that pre-creates the MCP fixture paths finds the names with a grep over `tests/containment/*.rs`.
+//! that pre-creates the MCP fixture paths (`containment-deterministic.yml`, *Pre-create the Linux MCP
+//! fixture paths*) greps each case file for it.
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;

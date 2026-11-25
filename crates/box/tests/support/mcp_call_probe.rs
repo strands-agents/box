@@ -19,6 +19,9 @@
 //! Exit 0 and print the result text on a `result`; exit 1 and print the error on a JSON-RPC error, a
 //! policy `Denied`, or a transport failure.
 
+// A test probe's stderr is the probe's own output to its test, not a Box Core message.
+#![allow(clippy::print_stderr)]
+
 #[path = "../../src/run/broker/protocol.rs"]
 mod shell_protocol;
 

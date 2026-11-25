@@ -201,7 +201,7 @@ and output reach Claude Code as on your machine.
 
 A script gets at most 1 MiB of the event. A larger event, such as a `PostToolUse` event for a
 big file write, can make a script hang or see an empty event, and the run may print
-`strands-box: stdin is more than 1048576 bytes`. For hooks that read large events, raise both
+`strands-box: warning[B1201]: stdin is more than 1048576 bytes`. For hooks that read large events, raise both
 limits in the profile:
 
 ```toml
@@ -338,6 +338,9 @@ back on, remove
   [Scoped](../../policies/scoped/README.md) allows. A condition that
   lists commands must also name each setup command; `box runs history <box-id> --deny --action
   shell:exec` lists the ones a run refused.
+- The agent in the box can change `.claude/settings.json`, `.claude/settings.local.json`, and
+  `.mcp.json` in your project, and Claude Code uses them the next time you run it there.
+  For more info, check [the limitations section](../../../docs/cli/limitations.md#the-agent-can-plant-code-that-runs-outside-the-box-later).
 
 ## Troubleshooting
 

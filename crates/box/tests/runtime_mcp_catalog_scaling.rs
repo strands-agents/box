@@ -1,5 +1,7 @@
 //! Catalog timing in a separate test binary, without concurrent policy-staging workloads.
 
+// The measurement line a test helper writes to stderr is test output, not a Box Core message.
+#![allow(clippy::disallowed_methods)]
 #![cfg(unix)]
 
 use std::io::Write as _;

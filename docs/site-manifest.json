@@ -95,6 +95,17 @@
       }
     },
     {
+      "id": "credentials",
+      "source": "docs/cli/credentials.md",
+      "slug": "credentials",
+      "title": "Credentials",
+      "description": "Where a route's key comes from: a shell variable, AWS credentials, the credentials daemon, or a password manager.",
+      "nav": {
+        "group": "Use Box",
+        "order": 6
+      }
+    },
+    {
       "id": "troubleshooting",
       "source": "docs/cli/troubleshooting.md",
       "slug": "troubleshooting",
@@ -279,6 +290,17 @@
       "nav": {
         "group": "Reference",
         "order": 14
+      }
+    },
+    {
+      "id": "message-codes",
+      "source": "docs/user/message-codes.md",
+      "slug": "reference/message-codes",
+      "title": "Message codes",
+      "description": "Read the message format Box writes to stderr, and what each message code means and asks you to do.",
+      "nav": {
+        "group": "Reference",
+        "order": 15
       }
     },
     {

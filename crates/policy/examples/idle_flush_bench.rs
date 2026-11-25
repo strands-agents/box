@@ -244,6 +244,10 @@ fn main() {
     benchmark::run()
 }
 #[cfg(not(feature = "experimental-idle-flush"))]
+#[allow(
+    clippy::print_stderr,
+    reason = "a bench example prints its own usage, not a box message"
+)]
 fn main() {
     eprintln!("Enable experimental-idle-flush to run this prototype benchmark.");
     std::process::exit(2)

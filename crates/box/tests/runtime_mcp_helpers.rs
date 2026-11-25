@@ -1,5 +1,7 @@
 //! Native imports and child access through a declared Linux stdio server.
 
+// Lines a test helper writes to stderr are test output, not Box Core messages.
+#![allow(clippy::print_stderr)]
 #![cfg(target_os = "linux")]
 
 use std::io::ErrorKind;

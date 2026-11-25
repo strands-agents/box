@@ -116,7 +116,9 @@ eval "$(aws configure export-credentials --format env)"
 ```
 
 The keys end with the sign-in session, so run this again in each new terminal and after you sign
-in again. [Which AWS profiles work](profiles-reference.md#aws-credentials) is in the reference. To
+in again. To skip the export, keep the sign-in in
+[the credentials daemon](credentials.md#the-credentials-daemon) instead.
+[AWS credentials](credentials.md#aws-credentials) says which AWS profiles work. To
 sign in with a Bedrock API key instead, see
 [Sign in with a Bedrock API key](../../resources/packs/bedrock/README.md#sign-in-with-a-bedrock-api-key).
 

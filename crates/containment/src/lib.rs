@@ -32,3 +32,7 @@ pub use platform::Platform;
 
 /// Containment operation result.
 pub type Result<T> = std::result::Result<T, ContainmentError>;
+
+/// The voice of the messages the containment library prints; only the Linux supervisors print.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const DIAGNOSTIC_SOURCE: diagnostics::Source = diagnostics::Source::StrandsBox;

@@ -29,6 +29,8 @@ and follow it in place of the page's interactive `box profile create` step.
 - For Box Core, offer to run `cargo build --release -p strands-box -p strands-box-containment`
   here, then copy the three binaries into `~/box-tutorial/box-core` the way the "Build from source"
   section of `docs/user/getting-started.md` does.
+- A Box message on stderr carries a code, such as `B0201` in `strands-box: note[B0201]: ...`.
+  [`docs/user/message-codes.md`](../../../docs/user/message-codes.md) explains each code.
 
 ## After setup
 

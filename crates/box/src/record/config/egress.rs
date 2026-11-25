@@ -433,6 +433,42 @@ fn validate_pairs(
             patterns.push((name, destination.clone(), pattern));
         }
     }
+    // The gateway dials a backend directly, so a backend host that another entry re-routes or
+    // declares as a remote MCP server would skip that entry's re-route or its `mcp:call` decisions.
+    for &(origin, name, entry) in entries {
+        for backend in &entry.backends {
+            let Ok(target) = backend.target() else {
+                continue;
+            };
+            for &(other_origin, other_name, other) in entries {
+                if (other_origin, other_name) == (origin, name)
+                    || (other.backends.is_empty() && other.protocol != Protocol::Mcp)
+                {
+                    continue;
+                }
+                if other
+                    .destinations
+                    .iter()
+                    .any(|d| host_pattern_covers(d, &target.host))
+                {
+                    let what = if other.protocol == Protocol::Mcp {
+                        "declares as a remote MCP server, so its tool calls would reach the \
+                         backend with no `mcp:call` decision"
+                    } else {
+                        "re-routes to its own backend, so the dial would skip that re-route"
+                    };
+                    return Err(ConfigError::Credential {
+                        host: backend.url.clone(),
+                        reason: format!(
+                            "`{name}` re-routes to backend host {:?}, which `{other_name}` {what}; \
+                             a backend host may not be another entry's re-routed or MCP host",
+                            target.host
+                        ),
+                    });
+                }
+            }
+        }
+    }
     // A host that re-routes to a backend may be covered by no other entry, on any port, because the
     // gateway matches a re-route by host alone (port-blind). The exact-host collision is caught in the
     // loop above; this also catches a `*` or `*.suffix` entry that covers the backend host on a
@@ -661,6 +697,7 @@ impl Placement {
 pub(crate) struct EgressEntry {
     /// The destinations this entry governs. Each is a host, `host:port`, a path prefix or `/*`
     /// suffix, or a `*.`/bare `*` wildcard, in any combination.
+    #[serde(deserialize_with = "destinations_without_trailing_dot")]
     pub(crate) destinations: Vec<String>,
 
     /// What the destination speaks. `mcp` tells the gateway to parse JSON-RPC frames and raise
@@ -684,6 +721,7 @@ pub(crate) struct EgressEntry {
 pub(crate) struct EgressBackend {
     /// The backend to dial, as a `scheme://host[:port][/prefix]` URL. The path prefix joins in front
     /// of the agent's request path; a query or fragment is refused.
+    #[serde(deserialize_with = "destination_without_trailing_dot")]
     pub(crate) url: String,
 
     /// The credential the backend connection presents. It takes the full `EgressSecret` vocabulary
@@ -1139,6 +1177,22 @@ impl EgressEntry {
             );
         }
 
+        let host = host_of(destination);
+        if let Some(reason) = not_a_canonical_host(host.strip_prefix("*.").unwrap_or(host)) {
+            return refuse(&format!(
+                "destination host {host:?} is not the spelling the gateway matches a connection \
+                 against: {reason}"
+            ));
+        }
+        if self.protocol == Protocol::Mcp
+            && self.pattern(destination)?.as_written().starts_with('*')
+        {
+            return refuse(
+                "a remote MCP server destination may not be a wildcard: the gateway recognizes a \
+                 remote MCP server by its exact host, so name each host",
+            );
+        }
+
         // Port 0 survives `DestinationPattern::parse`, which only range-checks the u16. Nothing
         // listens there, so a destination naming it declares a secret for a request that cannot
         if let Some(port) = declared_port(destination)
@@ -1410,6 +1464,13 @@ impl EgressBackend {
         let host = host_of(authority);
         if host.is_empty() {
             return Err(format!("backend url {:?} names no host", self.url));
+        }
+        if let Some(reason) = not_a_canonical_host(host) {
+            return Err(format!(
+                "backend url {:?} names host {host:?}, which the gateway cannot dial as written: \
+                 {reason}",
+                self.url
+            ));
         }
         // An omitted port takes the scheme default; an explicitly written one must parse to 1..=65535.
         // A backend url is not range-checked by `DestinationPattern::parse` (unlike a destination), so
@@ -1699,13 +1760,60 @@ pub(crate) fn host_of(destination: &str) -> &str {
     }
 }
 
+/// `destination` with the trailing dots of its host removed, as `egress_gateway::normalize_host`
+/// removes them from a connecting host.
+pub(crate) fn without_trailing_dot(destination: &str) -> String {
+    let host = host_of(destination);
+    if matches!(host.trim_end_matches('.'), "" | "*") {
+        return destination.to_string();
+    }
+    let start = host.as_ptr().addr() - destination.as_ptr().addr();
+    let end = start + host.len();
+    format!(
+        "{}{}{}",
+        &destination[..start],
+        host.trim_end_matches('.'),
+        &destination[end..]
+    )
+}
+
+fn destination_without_trailing_dot<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(|destination| without_trailing_dot(&destination))
+}
+
+pub(crate) fn destinations_without_trailing_dot<'de, D>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer).map(|destinations| {
+        destinations
+            .iter()
+            .map(|destination| without_trailing_dot(destination))
+            .collect()
+    })
+}
+
+/// Why `host` is not a spelling the gateway can compare a connecting host with, or `None` when it
+/// is one or an IP address.
+fn not_a_canonical_host(host: &str) -> Option<&'static str> {
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return None;
+    }
+    super::unbindable_host_name(host)
+}
+
 /// The host key the config-time collision check and the runtime match must agree on: an IP in its
-/// canonical form, otherwise the lowercased DNS name, because `connect::same_host` compares a DNS
-/// name case-insensitively and an IP through `IpAddr`.
+/// canonical form, otherwise the DNS name as `egress_gateway::normalize_host` gives it, because
+/// `connect::same_host` compares a DNS name that way and an IP through `IpAddr`.
 fn normalized_host(host: &str) -> String {
     host.parse::<std::net::IpAddr>()
         .map(|ip| ip.to_string())
-        .unwrap_or_else(|_| host.to_ascii_lowercase())
+        .unwrap_or_else(|_| egress_gateway::normalize_host(host))
 }
 
 #[cfg(test)]
@@ -2291,6 +2399,250 @@ mod tests {
             error.to_string().contains("letters, digits"),
             "the refusal must name the character rule: {error}"
         );
+    }
+
+    #[test]
+    fn a_destination_host_the_gateway_cannot_connect_to_is_refused() {
+        for (destination, reason) in [
+            (".api.example.com", "an empty label"),
+            ("api..example.com", "an empty label"),
+            ("bücher.example", "punycode (xn--)"),
+            ("*.bücher.example", "punycode (xn--)"),
+            ("*..example.com", "an empty label"),
+            ("user@api.example.com", "a character other than"),
+            ("api%2eexample.com", "a character other than"),
+            ("api\u{3002}example.com", "punycode (xn--)"),
+            ("10.5", "ends in a number"),
+            ("0x7f.1", "ends in a number"),
+            ("0177.0.0.1", "ends in a number"),
+            ("2130706433", "ends in a number"),
+            ("10.5:8443/v1", "ends in a number"),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com",
+                "longer than DNS allows",
+            ),
+        ] {
+            let plain =
+                format!("[egress.a]\ndestinations = [{destination:?}]\nsecret.ref = \"env://A\"\n");
+            let error = load(&plain).expect_err(destination).to_string();
+            assert!(error.contains(reason), "{destination:?}: {error}");
+            assert!(
+                error.contains("not the spelling"),
+                "{destination:?}: {error}"
+            );
+            if destination.starts_with('*') {
+                continue;
+            }
+            let rerouted = format!(
+                "[egress.a]\ndestinations = [{destination:?}]\n\
+                 [[egress.a.backends]]\nurl = \"https://gw.example.com\"\n"
+            );
+            let error = load(&rerouted).expect_err(destination).to_string();
+            assert!(error.contains(reason), "{destination:?} re-routed: {error}");
+        }
+    }
+
+    #[test]
+    fn a_canonical_destination_host_is_accepted() {
+        for destination in [
+            "xn--bcher-kva.example",
+            "*.xn--bcher-kva.example",
+            "API.Example.com",
+            "api.example.com:8443/v1/",
+            "my_host.internal",
+            "10.0.0.1",
+        ] {
+            load(&format!(
+                "[egress.a]\ndestinations = [{destination:?}]\nsecret.ref = \"env://A\"\n"
+            ))
+            .expect(destination);
+        }
+        load(
+            "[egress.a]\ndestinations = [\"xn--bcher-kva.example\"]\n\
+             [[egress.a.backends]]\nurl = \"https://xn--bcher-kva.example/github\"\n",
+        )
+        .expect("a punycode re-route loads");
+    }
+
+    #[test]
+    fn a_remote_mcp_destination_the_gateway_cannot_match_is_refused() {
+        for (destination, reason) in [
+            ("bücher.example", "punycode (xn--)"),
+            ("*.example.com", "may not be a wildcard"),
+            ("*.example.com:8931", "may not be a wildcard"),
+            ("10.5", "ends in a number"),
+            ("0x7f.1:8931", "ends in a number"),
+        ] {
+            let error = load(&format!(
+                "[egress.tools]\nprotocol = \"mcp\"\ndestinations = [{destination:?}]\n"
+            ))
+            .expect_err(destination)
+            .to_string();
+            assert!(error.contains(reason), "{destination:?}: {error}");
+        }
+        load("[egress.tools]\nprotocol = \"mcp\"\ndestinations = [\"MCP.Example.com:8931\"]\n")
+            .expect("a mixed-case MCP host loads");
+    }
+
+    #[test]
+    fn a_backend_url_host_the_gateway_cannot_dial_is_refused() {
+        for (url, reason) in [
+            ("https://bücher.example", "punycode (xn--)"),
+            ("https://.gw.example.com", "an empty label"),
+            ("https://gw..example.com:8443", "an empty label"),
+            ("https://*.example.com", "a character other than"),
+            ("https://10.5", "ends in a number"),
+            ("https://0x7f.1/x", "ends in a number"),
+            ("https://0177.0.0.1:8443", "ends in a number"),
+            ("https://2130706433", "ends in a number"),
+        ] {
+            let error = load(&format!(
+                "[egress.a]\ndestinations = [\"api.example.com\"]\n\
+                 [[egress.a.backends]]\nurl = {url:?}\n"
+            ))
+            .expect_err(url)
+            .to_string();
+            assert!(error.contains(reason), "{url:?}: {error}");
+            assert!(error.contains("cannot dial as written"), "{url:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_trailing_dot_on_a_host_is_stripped_at_load() {
+        for (written, loaded) in [
+            ("api.github.com.", "api.github.com"),
+            ("API.GitHub.com..", "API.GitHub.com"),
+            ("api.github.com.:8443/v1", "api.github.com:8443/v1"),
+            ("*.example.com.", "*.example.com"),
+            ("10.0.0.1:8443", "10.0.0.1:8443"),
+        ] {
+            let entries = load(&format!(
+                "[egress.a]\ndestinations = [{written:?}]\nsecret.ref = \"env://A\"\n"
+            ))
+            .expect(written);
+            assert_eq!(entries["a"].destinations, [loaded], "{written:?}");
+        }
+        let entries = load(
+            "[egress.tools]\nprotocol = \"mcp\"\ndestinations = [\"mcp.example.com.\"]\n\
+             [egress.a]\ndestinations = [\"api.example.com.\"]\n\
+             [[egress.a.backends]]\nurl = \"https://gw.example.com./github\"\n",
+        )
+        .expect("trailing-dot hosts load");
+        assert_eq!(entries["tools"].destinations, ["mcp.example.com"]);
+        assert_eq!(entries["a"].destinations, ["api.example.com"]);
+        let backend = &entries["a"].backends[0];
+        assert_eq!(backend.url, "https://gw.example.com/github");
+        assert_eq!(backend.target().unwrap().host, "gw.example.com");
+    }
+
+    #[test]
+    fn a_zone_id_destination_is_refused() {
+        load("[egress.a]\ndestinations = [\"fe80::1%eth0\"]\nsecret.ref = \"env://A\"\n")
+            .expect_err("a zone ID is not a destination host");
+    }
+
+    #[test]
+    fn a_refusal_names_the_host_as_written() {
+        for (destination, written) in [("*.", "\"*.\""), (".", "\".\""), ("..:443", "\"..\"")] {
+            let error = load(&format!(
+                "[egress.a]\ndestinations = [{destination:?}]\nsecret.ref = \"env://A\"\n"
+            ))
+            .expect_err(destination)
+            .to_string();
+            assert!(error.contains(written), "{destination:?}: {error}");
+            assert!(!error.contains("every host"), "{destination:?}: {error}");
+        }
+        let error = load(
+            "[egress.a]\ndestinations = [\"api.example.com\"]\n\
+             [[egress.a.backends]]\nurl = \"https://./x\"\n",
+        )
+        .expect_err("an all-dot backend host")
+        .to_string();
+        assert!(error.contains("names host \".\""), "{error}");
+    }
+
+    #[test]
+    fn a_trailing_dot_spelling_collides_with_the_bare_host() {
+        let error = load(
+            "[egress.a]\ndestinations = [\"api.example.com\"]\nsecret.ref = \"env://A\"\n\
+             [egress.b]\ndestinations = [\"api.example.com.\"]\nsecret.ref = \"env://B\"\n",
+        )
+        .expect_err("the two spellings name one host")
+        .to_string();
+        assert!(error.contains("`b` overlaps `a`"), "{error}");
+        let error = load(
+            "[egress.a]\nprotocol = \"mcp\"\ndestinations = [\"mcp.example.com\"]\n\
+             [egress.b]\nprotocol = \"mcp\"\ndestinations = [\"mcp.example.com.\"]\n",
+        )
+        .expect_err("two MCP servers on one host")
+        .to_string();
+        assert!(
+            error.contains("both name host \"mcp.example.com\""),
+            "{error}"
+        );
+        let error = load(
+            "[egress.a]\ndestinations = [\"api.example.com\"]\n\
+             [[egress.a.backends]]\nurl = \"https://gw1.example.com./a\"\n\
+             [egress.b]\ndestinations = [\"gw1.example.com\"]\n\
+             [[egress.b.backends]]\nurl = \"https://gw2.example.com\"\n",
+        )
+        .expect_err("a trailing-dot backend host is another entry's re-routed host")
+        .to_string();
+        assert!(
+            error.contains("`a` re-routes to backend host \"gw1.example.com\""),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_dotted_re_route_beside_a_bare_direct_entry_is_refused() {
+        let error = load(
+            "[egress.api]\ndestinations = [\".api.example.com\"]\n\
+             [[egress.api.backends]]\nurl = \"https://gw.example.com\"\n\
+             [egress.direct]\ndestinations = [\"api.example.com\"]\nsecret.ref = \"env://A\"\n",
+        )
+        .expect_err("the dotted re-route is refused")
+        .to_string();
+        assert!(error.contains("an empty label"), "{error}");
+    }
+
+    #[test]
+    fn a_backend_host_another_entry_re_routes_is_refused() {
+        let error = load(
+            "[egress.a]\ndestinations = [\"api.example.com\"]\n\
+             [[egress.a.backends]]\nurl = \"https://gw1.example.com/a\"\n\
+             [egress.b]\ndestinations = [\"gw1.example.com\"]\n\
+             [[egress.b.backends]]\nurl = \"https://gw2.example.com\"\n",
+        )
+        .expect_err("a backend chain is refused")
+        .to_string();
+        assert!(
+            error
+                .contains("`a` re-routes to backend host \"gw1.example.com\", which `b` re-routes"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_backend_host_that_is_a_remote_mcp_server_is_refused() {
+        for mcp in ["mcp.example.com", "*.example.com"] {
+            let protocol = if mcp.contains('*') { "http" } else { "mcp" };
+            let text = format!(
+                "[egress.a]\ndestinations = [\"api.github.com\"]\n\
+                 [[egress.a.backends]]\nurl = \"https://mcp.example.com\"\n\
+                 [egress.tools]\nprotocol = {protocol:?}\ndestinations = [{mcp:?}]\n\
+                 secret.ref = \"env://T\"\n"
+            );
+            if protocol == "mcp" {
+                let error = load(&text).expect_err(mcp).to_string();
+                assert!(
+                    error.contains("which `tools` declares as a remote MCP server"),
+                    "{error}"
+                );
+            } else {
+                load(&text).expect("a plain credential entry over the backend host still loads");
+            }
+        }
     }
 
     /// `host_of` keeps a bare IPv6 whole rather than truncating it at the last colon.

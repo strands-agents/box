@@ -318,7 +318,7 @@ fn a_policy_naming_a_grammar_action_starts_with_its_grammar_and_the_switch() {
     );
     assert!(
         stderr(&output).contains(
-            "strands-box: [tool.git]: a spawn of `git` is decided by its tool grammar, and no \
+            "strands-box: note[B0208]: [tool.git]: a spawn of `git` is decided by its tool grammar, and no \
              `shell:spawn` rule applies to it"
         ),
         "startup names the tool that its grammar decides: {}",
@@ -350,7 +350,7 @@ fn a_left_out_tools_grammar_is_disclosed_for_the_installed_tool_it_decides() {
     assert!(text.contains("[tool.optional_git] left out: "), "{text}");
     assert!(
         text.contains(
-            "strands-box: [tool.system_git]: a spawn of `git` is decided by its tool grammar, \
+            "strands-box: note[B0208]: [tool.system_git]: a spawn of `git` is decided by its tool grammar, \
              and no `shell:spawn` rule applies to it"
         ),
         "startup names the installed tool that the left-out grammar decides: {text}"
@@ -377,6 +377,40 @@ fn a_forbid_on_a_grammar_action_denies_the_command_that_raises_it() {
         "{output:?}"
     );
     assert_grammar_decision(&box_, "push");
+}
+
+/// **In log-only mode a forbidden grammar action runs, and is recorded as that action's denial,
+/// not enforced.**
+#[test]
+fn a_log_only_box_runs_a_forbidden_grammar_action_and_records_it_unenforced() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let home = support::fixture::short_temporary_home();
+    let box_ = Request::with_config(
+        "grammar-log-only",
+        GIT_WITHOUT_PUSH,
+        &format!("{}{GRAMMAR}{SWITCH_ON}", git_tool(home.path())),
+    )
+    .env("PATH", &tools_first(home.path()))
+    .log_only()
+    .expect();
+    let git = git_program(home.path()).display().to_string();
+
+    let output = in_the_shell(&box_, &format!("{git} push origin"));
+
+    assert!(
+        stdout(&output).contains("|status=0"),
+        "the push ran: {output:?}"
+    );
+    assert_grammar_decision(&box_, "push");
+    let text = std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl"))
+        .expect("the records");
+    assert!(
+        text.contains(r#""key":"strands.box.policy.enforced","value":{"boolValue":false}"#),
+        "the push's denial is recorded unenforced: {text}"
+    );
 }
 
 #[test]
@@ -620,7 +654,7 @@ fn a_grammar_decides_the_name_the_agent_types_when_the_command_names_the_linked_
     assert!(started.status.success(), "{}", stderr(&started));
     assert!(
         stderr(&started).contains(
-            "strands-box: [tool.npm]: a spawn of `npm` is decided by its tool grammar, and no \
+            "strands-box: note[B0208]: [tool.npm]: a spawn of `npm` is decided by its tool grammar, and no \
              `shell:spawn` rule applies to it"
         ),
         "startup names the program the grammar binds: {}",
@@ -732,7 +766,7 @@ fn a_bare_name_runs_the_tool_that_declares_it_when_another_file_is_first_on_path
     assert!(started.status.success(), "{}", stderr(&started));
     assert!(
         stderr(&started).contains(&format!(
-            "strands-box: [tool.git]: a bare `git` in the Shell runs {git}\n"
+            "strands-box: note[B0208]: [tool.git]: a bare `git` in the Shell runs {git}\n"
         )),
         "startup names the file a bare `git` runs: {}",
         stderr(&started)

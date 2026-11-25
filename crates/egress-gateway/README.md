@@ -65,7 +65,7 @@ kinds, and the proxy presents each one immediately before its effect:
 | Attempt | Fields | Reported when |
 |---|---|---|
 | `EffectAttempt::Connect` | `host`, `port`, `address`, `http_visibility` | before one upstream socket opens, once per pinned address |
-| `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes` | after the request is serialized, before it is written |
+| `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes`, `websocket` | after the request is serialized, before it is written |
 | `EffectAttempt::ResponseRelease` | `host`, `port`, `method`, `path`, `status` | after header controls and required catalog capture, before the workload receives bytes |
 
 No attempt carries a header, a body, or credential material. `path` excludes the
@@ -247,6 +247,8 @@ certificate that does not parse as a root is skipped. `upstream_read_deadline` s
 upstream TLS, request transmission, and complete response receipt.
 Arriving chunks do not reset it. If delivery has started, expiry closes the incomplete response.
 Once upstream receipt finishes, this deadline does not bound the final workload write.
+After a WebSocket opens, the same value is also its idle limit. The gateway ends both connections
+when no byte moves in either direction for that long, and each byte starts the wait again.
 `box.toml` exposes no key for it.
 
 Responses stream through bounded buffers, including credentialed responses and ordinary HTTP MCP

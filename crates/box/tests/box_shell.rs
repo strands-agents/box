@@ -937,7 +937,7 @@ fn the_mount_scope_is_a_floor_policy_cannot_widen() {
 /// rather than implying. `[[bind]]` used to carry it — a bind kept its mount point, so a policy
 /// checked into a repository named `/workspace` on every clone — and the shared operator home
 /// removed binds. A path in an authored policy is a host path, so it holds only on the machine that
-/// wrote it. `box/AGENTS.md` records this.
+/// wrote it.
 #[test]
 fn the_shell_reaches_workload_files_under_the_workloads_own_spelling() {
     if !fixture::namespace_launcher_is_usable() {
@@ -2815,13 +2815,13 @@ zsh -lc 'touch "{leaf_write}"'
         "the selected touch leaf must write the credential cache: {output:?}"
     );
     let read_announcement = errors
-        .find("strands-box: [tool.wc]: exposes ~/.aws (read)")
+        .find("strands-box: note[B0202]: [tool.wc]: exposes ~/.aws (read)")
         .expect("the read announcement is present");
     let write_announcement = errors
-        .find("strands-box: [tool.touch]: exposes ~/.aws/sso/cache (write)")
+        .find("strands-box: note[B0202]: [tool.touch]: exposes ~/.aws/sso/cache (write)")
         .expect("the write announcement is present");
     let started_at = errors
-        .find("strands-box: starting workload")
+        .find("strands-box: note[B0302]: starting workload")
         .expect("the workload start line is present");
     assert!(
         read_announcement < started_at && write_announcement < started_at,

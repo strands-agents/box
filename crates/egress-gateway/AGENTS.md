@@ -1,187 +1,55 @@
-# Egress Gateway Agent Guidance
+# Egress gateway guidance
 
-Applies to `crates/egress-gateway/**`. Follow the
-[repository guidance](../../AGENTS.md) first.
+Policy reaches this crate through mandatory `EffectInterceptor`; capabilities can mutate or refuse,
+never authorize. Keep dependency direction `policy -> egress-gateway -> credentials`.
+The root freeze covers this facade.
 
-**Interface-frozen.** The `pub use` façade is frozen, and two of its
-properties are foundational premises: `EffectInterceptor` is the single authorization source, and
-`CapabilitySet` is a deny-only floor *beneath* policy, not a second authority. Get
-the user's approval before you change either; a defect fix behind the current shape needs none. Do
-not rename during the freeze.
+## Boundary traps
 
-## Public Contract
+- Decide the host before DNS, then each pinned address before dialing. The decided address must be
+  the dialed address. Policy owns metadata-address rules; the gateway's own-listener refusal is a
+  separate, exact deny-only guard, not a destination list to grow.
+- Bind intercepted HTTP authority to the admitted CONNECT destination. The CONNECT phantom check
+  is best-effort because SDKs omit it; the kernel's proxy routing supplies the boundary.
+- Keep the `host.box.internal` spelling aligned with Box. Its loopback plaintext credential
+  exception requires exact routes and no backend; it does not generalize to arbitrary HTTP hosts.
+- Log the pre-mutation `workload_path`, never the credential-bearing rewritten target. Attempts
+  carry no secret headers or bodies. Avoid `Debug` on request/header containers.
+- Keep `escapes_backend_prefix` strict under a backend `path_prefix`. Policy judges the canonical
+  path, but a backend can fold a spelling the gateway keeps into `..` after the join. So the rule
+  refuses every segment that starts with `..` once each `%20`, `%2B`, and `+` is removed, whatever
+  follows. This covers path parameters (`..;`), leading and trailing spaces, and suffixes a backend
+  strips (`..::$INDEX_ALLOCATION`, `..+`). It also refuses a raw `;` and named escaped octets: a
+  second decode (`%252e`), an escaped delimiter (`%2F`, `%5C`, `%3B`), a control octet, and an octet
+  at or above `0x80`. The octet list is a denylist, so a new backend fold needs a new entry. Benign
+  escapes such as `%3A` in a Bedrock model ID, and `%20` inside a name, still pass.
+- Reserve enough header and coalesced-body capacity before copying secrets. Reallocation leaves
+  un-wiped prefixes despite `Zeroizing`. `Target::path`/`query` and the CA library's private key
+  remain wiping gaps; do not turn partial wiping into a completeness claim.
+- Upstream bytes need `ResponseRelease`; `WorkloadResponse::bare` and `refusal` are only for static,
+  secret-free gateway responses. Scrub before release, preserving cross-chunk matches and refusing
+  encoded bodies the scrubber cannot inspect. After a WebSocket upgrade, bytes pass unscrubbed.
+- Keep the upstream deadline through body receipt and downstream backpressure. After downstream
+  abandonment, drain upstream within the same runtime and connection slot so the outcome records
+  actual completion or failure, not merely the last successful downstream write.
+- Preserve both capability pattern checks. Collision detection counts setters, not query strips;
+  a strip and add deliberately share a target. Decode query keys before stripping them.
+- A WebSocket relay requires a validated handshake and matching `101` response. Keep ordinary
+  responses `Connection: close`; hyper's `keep_alive(false)` also disables upgrades. Accept TLS
+  on `Upgraded`, retaining hyper's buffered bytes or the early ClientHello disappears.
+- Shutdown must self-connect over `BoundTransport`. Reducing it to a TCP port deadlocks `Drop`
+  when the listener is an AF_UNIX socket.
 
-The façade exports 37 names (`src/lib.rs`): 31 unconditional, and 6 behind the default-on
-`tls-intercept` feature — `BackendDial`, `HostRoots`, `MitmConfig`, `MitmHandle`, `MitmInterceptor`,
-`ResponseLimits` — which stay behind it. `BackendDial` is a `MitmConfig.backends` entry, and
-`HostRoots` what `MitmHandle::upstream_host_roots` reports, both consumed by `strands-box`'s
-`run/hosted.rs`. `ReplyObserver` is exported for `policy`'s egress adapter, which
-records how an HTTP MCP tool call ended. `audit::Decision` exits as `AuditDecision`. `normalize_host`
-and `is_bindable_host` are the one host spelling, exported for `policy::spelling`, which refuses a
-host literal no bound host can equal. A 38th name needs a named external caller.
+## TCP latency
 
-- Keep implementation modules private, re-export the supported surface from `src/lib.rs`, and keep
-  `#![warn(missing_docs, unreachable_pub)]` enabled.
-- **Keep authorization out of this crate.** The authored policy decides, reached only through
-  `EffectInterceptor`; the engine is Dogwood (`ENGINE_ID = "dogwood-0.1.0"`). Never add an allow or
-  deny authority here, and never let a capability return an allow. `AuditDecision` carries `Allow`
-  and `Deny` and authorizes nothing.
-- Do not depend on `policy`. The direction is `policy -> egress-gateway`.
-- Preserve `CapabilitySet::validate` as the startup gate, and keep `apply_to_request` and
-  `apply_to_response` socket-free.
-- Keep interception side effects outside capabilities, domain decisions behind `EffectInterceptor`,
-  and audit behind `Emitter`.
-- Add a public item only for a concrete external consumer.
+Keep `TCP_NODELAY` on accepted and upstream TCP sockets under the root rule. Historical paired
+measurements found about 50 ms extra latency on small HTTPS requests to four Cloudflare origins
+and 17 ms to Bedrock without it (macOS release build, four pairs each). On Linux loopback, a stream
+emitting every 10 ms delivered its first chunk at about 53 ms without it and 10.5 ms with it
+(two passes of 30 requests). These measurements justify the option, not a performance guarantee.
 
-The seam is `EffectInterceptor::intercept`, taking an `&EffectAttempt` and returning a
-`Box<dyn EffectPermit>` (`src/effect.rs`). It speaks `io::Result`, never `ProxyError`, and a denial is
-`io::ErrorKind::PermissionDenied`. There are exactly three attempt kinds — `Connect`, `HttpRequest`,
-`ResponseRelease` — each admitted before its effect and each reporting a terminal `EffectOutcome`.
-`record_outcome` and `mark_indeterminate` consume `self: Box<Self>`, and `ClaimedEffectPermit`'s
-`Drop` calls `mark_indeterminate`, so one permit makes one terminal transition even on a panic.
-`ResponseRelease` carries routing and status only; `HttpRequest` retains `body_bytes`.
+## Verification beyond the root gates
 
-### One thing here is deliberately not authorization
-
-The gateway holds no destination deny list. A metadata or link-local address is refused by a policy
-`forbid` on `context.input.ip4` or `context.input.ip6`, decided on the pinned address
-([metadata protection is policy](../../docs/design/decisions.md#the-ssrf-and-metadata-floor-is-compiled-beneath-policy)).
-
-- **`host.box.internal` adds two exact, approved rules.** `is_own_listener` refuses a dial to the
-  gateway's own address before policy (deny-only; do not grow it into a list), and the plaintext
-  floor admits a credential only for `HOST_LOOPBACK_NAME` mapped to loopback, with no backend and
-  every matching route naming it exactly. Keep this spelling equal to `strands-box`'s
-  ([own listener](../../docs/design/decisions.md#the-gateway-never-dials-its-own-listener),
-  [credentials require TLS](../../docs/design/decisions.md#a-secret-rides-only-tls)).
-- **`CapabilitySet` holds the credential mutators, not a second authority.** A capability returns
-  its mutations or a fault, and it has **no allow**. The fold applies the mutations only in the
-  *absence* of a fault.
-
-## Security Invariants
-
-- Decide every connection and transport twice: the host before resolution, and each resolved,
-  pinned address before its socket opens. The address decided is the address dialed.
-- `open_upstream` authorizes through `EffectInterceptor` before the socket opens.
-- One capability fault denies the exchange, at any position in the fold.
-- Apply request mutations only when the fold has no fault and no collision.
-- Use the same pinned addresses for resolution and for the upstream connection.
-- Keep an intercepted HTTP authority bound to the admitted CONNECT destination.
-- `CredentialCapability` checks the destination-bound phantom before it attaches material. The vault
-  owns the check: a `Strict` route (the default) makes an absent or mismatched phantom a fault; an
-  `Advisory` route warns and attaches the secret anyway. The destination binding still gates
-  injection in both modes. An advisory injection carries the vault's non-secret reason via
-  `Attachment::advisory_reason` onto `InterceptedRequest::advisory_note`, and the request leg
-  journals it on the allow `EgressDecision` (destination, reason, correlation).
-- Keep secret-bearing headers and body content out of effect attempts.
-- Keep audit values to routing, decision, reason, and correlation data.
-- Fail startup on duplicate per-pattern capabilities. There is no visibility check, because
-  [no connection is opaque](../../docs/design/decisions.md#no-connection-is-opaque-to-the-boundary).
-  Do not re-add a visibility gate.
-- The dependency direction stays `egress-gateway -> credentials`.
-
-## Internal Ownership
-
-The capability modules carry no authority.
-
-- `ControlSet`, `Control`, `Cx`, and `Visibility` are gone, because
-  [policy is the only authority](../../docs/design/decisions.md#the-authored-policy-is-the-only-decision-authority).
-  Read `src/capability/`.
-
-## Known naming debt (fact, not a plan)
-
-Three divergences from `docs/conventions.md` are live, and none is license to rename:
-
-- No root noun: 37 exports, no single type reached by one verb, `Interceptor` a one-method port, and
-  `MitmInterceptor::start` taking three arguments and returning `MitmHandle`.
-- A bare `Emitter` export; `credentials` demoted its same-named trait to `pub(crate)`.
-- `Mitm*` states the mechanism, and `ProxyError`'s "proxy" strings diverge from the crate name.
-
-## Sources Of Truth
-
-Behavior: `src/**`, `tests/**`. Decisions: [docs/design/decisions.md](../../docs/design/decisions.md).
-Conventions: `docs/conventions.md`.
-
-## Measured bypasses and footguns
-
-- Hand policy the pinned `SocketAddr` unchanged. `policy/src/address.rs` unwraps the four IPv6
-  transition encodings to the IPv4 address they carry; a forbid on `169.254.*` reopens through
-  three spellings if that unwrapping is lost.
-- Keep `Arc<dyn EffectInterceptor>` mandatory in `MitmInterceptor::start` and `start_with`,
-  and never add `start_without_policy()` or an `Option` form.
-- Use `WorkloadResponse::refusal` and `WorkloadResponse::bare` only for static, secret-free,
-  proxy-originated bytes. Upstream bytes always need a `ResponseRelease` permit.
-- Keep the CONNECT `Proxy-Authorization` check best-effort; SDKs omit the header. Never weaken the
-  `ProxyOnly` kernel pin, the real anti-hijack defence.
-- Report the pre-mutation `workload_path` in every `emit_decision` and `deny`. Never read
-  `req.target.path`; a `UrlPath` credential makes it the secret.
-- Keep `estimate_head_capacity` a correctness bound; `headers + 64` under-counted a plain
-  `POST /v1/messages` by 6 bytes in 500 of 500 runs.
-- Allocate `head.len() + body.len()` up front in the coalesce path; reuse relocated in 300 of 300
-  runs. Treat head-buffer guards as security tests, because one added header line leaks a credential
-  into freed heap silently.
-- Never derive `Debug` on `HeaderMap` or `InterceptedRequest`, and never unwrap a value out of
-  `Zeroizing`; one `eprintln!` then prints live credentials.
-- Residual: `Target::path` and `Target::query` are plain `String`, so a `UrlPath` or `QueryParam`
-  credential leaves un-wiped bytes.
-- Residual: the CA private key is not `Zeroizing`, because `rcgen` holds it; the daemon's memory
-  protection is its boundary
-  ([memory is a defended asset](../../docs/design/decisions.md#the-trusted-processs-memory-is-a-defended-asset)).
-  Only the public cert reaches disk, at `0o400`.
-- Apply response header controls before release, and scrub each body chunk before delivery.
-  Preserve credential order, cross-chunk matching, and encoded-body refusals.
-  The workload follows a redirect, so each hop is a new request that policy decides.
-- Stream ordinary and credentialed responses through one bounded lifecycle. Keep `tools/list`
-  capture bounded and attempt schema staging before release. Preserve staging failure behavior
-  and the request body cap.
-- Retain the absolute upstream deadline through body receipt, including downstream backpressure.
-  Track source completion separately from writes; a flushed prefix followed by failure is incomplete.
-- Record the HTTP request outcome at upstream response completion, failure, or the absolute
-  deadline. After downstream abandonment, retain and drain the upstream within the connection's
-  runtime and slot. Preserve known status and the existing uncertain-outcome semantics for HTTP MCP.
-- Keep both pattern checks: `CapabilitySet` applies only the credentials whose pattern matches, and
-  `CredentialCapability::on_request` and `on_response` check again. Without them, a two-route box
-  has a mutation-collision outage.
-- Count only `SetHeader`, `RewritePath`, and `AddQueryParam` in collision detection; `StripQueryParam`
-  shares its `MutationTarget`, so counting a strip makes a route collide with itself. The surfaced
-  fault is the first one, deterministic only through one-capability-per-pattern.
-- Decode the key in `strip_query_param`, because the workload picks the spelling and `a%2Fb`, `a%2fb`,
-  and `a+b` are one key. Leave a malformed `%` escape verbatim. `AddQueryParam` appends, so keep
-  `StripQueryParam` beside it.
-- Accept TLS on hyper's `Upgraded` stream, which replays the bytes hyper read after the CONNECT. A
-  downcast to the socket must keep `Parts::read_buf`, or the `ClientHello` is lost.
-- Keep `BoundTransport`, and self-connect in `shutdown()` over the bound transport; a `u16`
-  deadlocks `Drop`'s `join()` under the AF_UNIX pin, where `env_vars()` omits `HTTP(S)_PROXY`.
-- Keep `MAX_CACHED_LEAVES = 64` and clear the cache on reaching it; each entry holds a leaf key for
-  the daemon's lifetime, so a wildcard-host policy otherwise leaks without bound.
-- Refuse an unframed message on a reusable connection when keep-alive lands. hyper's client reads an
-  unframed reply to EOF, correct only while the close delimits.
-- Keep `TCP_NODELAY` on the socket that `open_upstream` returns. A request is up to three small
-  writes: the TLS `Finished`, the head, and the body. Nagle's algorithm holds a small write until
-  the origin acknowledges the write before it. Without the option, a one-segment HTTPS request took
-  about 50 ms longer on four origins behind Cloudflare, and 17 ms longer on Bedrock. Each number is
-  the median of 4 alternated pairs (macOS, release build). For an 8 KiB `POST`, which is several
-  segments on those paths, the measurement resolved no change. The call is best-effort: after a
-  failure, the next read or write reports the dead socket.
-- Keep `TCP_NODELAY` on the TCP socket that the gateway accepts from the client. `Socket::into_async`
-  sets it. A streamed response is a series of small writes, and Nagle's algorithm holds a small
-  write until the client acknowledges the write before it. The measurement used a response that
-  sends a chunk every 10 ms, on Linux loopback. Without the option, the first chunk reached the
-  client after about 53 ms. With the option, it arrived after 10.5 ms (2 alternated passes of 30
-  requests, release build, gateway only). The response ended at the same time in both, and macOS
-  loopback showed no difference. The call is best-effort, and the AF_UNIX transport has no such
-  option. The upstream socket also passes through `into_async`, so it gets a second call that
-  changes nothing.
-
-## Change Checklist
-
-```text
-cargo build -p strands-box-egress-gateway --all-features
-cargo build -p strands-box-egress-gateway --no-default-features
-cargo test -p strands-box-egress-gateway --all-features
-cargo clippy -p strands-box-egress-gateway --all-targets --all-features -- -D warnings
-cargo fmt --all -- --check
-RUSTDOCFLAGS="-D warnings" cargo doc -p strands-box-egress-gateway --all-features --no-deps
-```
-
-Run the repository-required artifact critics unless the user limits validation. Do not modify
-`Cargo.lock`.
+Also build with `--no-default-features` to keep the TLS feature boundary intact, and run rustdoc
+with warnings denied. Secret-buffer, response-release, and shutdown tests protect boundaries;
+retain them when changing transport plumbing.
