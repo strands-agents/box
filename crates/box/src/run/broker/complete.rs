@@ -86,8 +86,9 @@ impl DiscoveryCoordinator {
                 // A rule still pending degrades the servers it waits for, and the box runs on
                 // (docs/design/decisions.md#a-server-whose-discovery-a-policy-denies-degrades-alone).
                 Ok(degraded) if !degraded.is_empty() => {
-                    eprintln!(
-                        "strands-box: warning: a per-tool rule never loaded for {degraded:?}; the \
+                    ::diagnostics::diag!(
+                        B0402,
+                        "a per-tool rule never loaded for {degraded:?}; the \
                          calls it decides are refused — check its tool and argument names against \
                          what the server declares, permit the server's tools/list, or remove the \
                          rule"

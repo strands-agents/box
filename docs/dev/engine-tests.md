@@ -106,6 +106,14 @@ These measurements cover macOS arm64. The
 also targets Node 26.13.0 with bundled npm 11.20.0 and with npm 12.2.1; those combinations have
 no result yet. These checks establish no coverage for pnpm 11 or other Python versions.
 
+Manual MCP checks on Linux aarch64 ran one `@modelcontextprotocol/server-memory` server per
+run through Claude Code, and through Codex on Node 26.13.1. With Node 22.22.2, 24.22.1, and
+26.13.1, bundled npm, Bun 1.4.4 and 1.4.5, and native pnpm 12.16.1, 12.21.0, and 12.23.0 pass.
+Bun 1.3.4 fails. npm, and pnpm 10.34.9 or 11.28.13 on Node 24.22.1, fail when installed in a
+separate npm prefix. The
+`@box/npx`, `@box/bunx`, and `@box/pnpx` pack comments list the exact pairs. These runs are not
+part of the engine suite.
+
 Local checks also pass with uv 0.10.11. Bun 1.3.4 fails while it inspects the current directory
 inside the sandbox. Use Bun 1.4.4 for this suite. The uv pack uses an installed Python and
 disables Python downloads.

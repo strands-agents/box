@@ -1,4 +1,4 @@
-# Policy
+# Policy language
 
 A policy is the `policy.dw` file of `permit` and `forbid` rules that decides each request the
 workload makes through the box's trusted process (the part of Box that runs outside the box and
@@ -112,7 +112,7 @@ Three refusals look like a denial, and no `permit` lifts them:
 
 ## The actions
 
-The box ships ten actions in four categories, and generates one more for each MCP tool it
+The box ships eleven actions in four categories, and generates one more for each MCP tool it
 discovers. Each experimental [tool grammar](config.md#toolnamegrammar) adds its own `Tool::<name>`
 actions. [The action vocabulary](policy/actions.md) lists the fields of each one.
 
@@ -120,7 +120,8 @@ actions. [The action vocabulary](policy/actions.md) lists the fields of each one
   `fs:read`, `fs:write`, `fs:delete`, `fs:move`, and the reserved `fs:other`.
 - **[Network](policy/actions.md#network)**: an outbound call through the egress gateway. Each call
   is two decisions: `net:connect` for the connection, before TLS, and `http:request` for each
-  request inside it, after TLS on an HTTPS connection.
+  request inside it, after TLS on an HTTPS connection. A WebSocket handshake is
+  `websocket:connect` in place of `http:request`.
 - **[Shell](policy/actions.md#shell)**: a command line in Strands Shell, judged once after the
   shell resolves its first word to a program. `shell:exec` for a program the shell implements, such
   as `cat` or `grep`, and `shell:spawn` for a program of the surrounding OS, such as `git`, and for
@@ -454,6 +455,67 @@ when {
 
 A permit on the name doesn't admit `127.0.0.1:4259`, and a wildcard host permit includes the name.
 
+## Log-only mode
+
+Log-only mode trials a policy without enforcing it. Box decides every action as usual, but a denial
+from a `forbid`, or from no `permit` matching, doesn't block: the action goes ahead and Box records
+what the policy would have denied. Use it to see what a new or generated policy would block on real
+work before you enforce it.
+
+Turn it on with the table form of the `policy` key in `box.toml`:
+
+```toml
+[policy]
+source      = "policy.dw"
+enforcement = "log_only"      # "enforce" is the default
+```
+
+Each would-deny is recorded as a denial that Box didn't enforce, and it names every rule that would
+have blocked the action, across all its steps, so one trial finds them all. The `policy_installed`
+record states the mode on every run. [A decision](telemetry.md#a-decision) lists the keys.
+
+To list what a trial would have denied, filter the decision records on
+`strands.box.policy.would_deny.ids`. This prints each record's action, resource, and the rules
+that would have blocked it:
+
+```sh
+jq -r 'select(.resourceLogs) | .resourceLogs[].scopeLogs[]
+  | select(.scope.name == "strands-box.policy") | .logRecords[]
+  | .attributes | map({(.key): (.value | if has("arrayValue") then (.arrayValue.values | map(.stringValue) | join(","))
+      elif has("boolValue") then .boolValue else .stringValue end)}) | add
+  | select(has("strands.box.policy.would_deny.ids"))
+  | "\(.["strands.box.policy.action"]) \(.["strands.box.policy.resource"]) \(.["strands.box.policy.would_deny.ids"])"' \
+  <box_dir>/private/telemetry/records.jsonl
+```
+
+A line such as `fs:move ~/agent-home/b.txt no-read-a,no-move-onto-b` is a move that ran in the
+trial, and that the rules `no-read-a` and `no-move-onto-b` would block once you enforce the policy.
+
+Some denials still block in log-only mode, so a missing or broken policy doesn't fail open:
+
+- a policy that isn't installed yet (`policy_pending`);
+- a rule that fails to evaluate (`internal_fault`);
+- an MCP tool whose rule can never validate;
+- the reachable-paths floor, the sandbox, and credential isolation, which aren't policy.
+
+An action log-only mode lets through really happens, so history records its real outcome. A later
+rule that depends on it, such as "allow `git push` only after `npm test` passed", sees what actually
+ran. After the first would-deny, a run can take a path an enforcing run wouldn't, so decisions after
+`first_flip` are an approximation.
+
+**A box keeps one history across modes.** When you switch the same box from `log_only` to
+`enforce`, the enforcing run inherits what the trial did, because those actions really happened. A
+budget over the last hour counts the bytes a trial sent, and an "only after the tests passed" rule
+is met by a trial's test run. To start enforcing with no trial behind it, run the trial in its own
+`box_dir`, or [start with fresh history](#start-with-fresh-history-after-a-dogwood-upgrade) before
+you enforce.
+
+**The policy protects nothing during a trial.** On the Shell and Monty path the policy is the only
+thing between the workload and your home directory, credential files, and cloud metadata. The egress
+gateway attaches each bound credential to a request the policy would deny. Box prints this on stderr
+at startup. Run trials only where that's acceptable, such as a disposable VM or a host with no
+credentials you care about.
+
 ## History persistence and process crashes
 
 Box batches policy-history writes by default. Accepted events affect decisions during
@@ -528,7 +590,7 @@ on a policy with a rule it can prove will never match (the refusals call such a 
 has run before keeps its state.
 
 ```text
-strands-box: error: policy file /Users/you/box-tutorial/my-box/policy.dw will not load: <refusal>
+strands-box: error[B0103]: policy file /Users/you/box-tutorial/my-box/policy.dw will not load: <refusal>
 ```
 
 Each refusal below is the text after `will not load: `. Two numberings appear. `rule N` counts from
@@ -541,7 +603,7 @@ with the line and column in the file, and often a hint in parentheses, such as
 When the box suspects a rule is inert but cannot prove it, it prints a warning and starts:
 
 ```text
-strands-box: warning: <finding>
+policy: warning[<code>]: <finding>
 ```
 
 ### The rule does not parse
@@ -978,7 +1040,7 @@ policy writes a cap as a permit: rule @id("write_budget") (rule 2) carries a tem
 startup:
 
 ```text
-strands-box: warning: rule @id("write_budget") (rule 2) carries a temporal clause beside rule @id("project_writes") (rule 1), which also permits that action; the budget is inert for every request the other rule admits, so write a cap as a forbid
+policy: warning[P0103]: rule @id("write_budget") (rule 2) carries a temporal clause beside rule @id("project_writes") (rule 1), which also permits that action; the budget is inert for every request the other rule admits, so write a cap as a forbid
 ```
 
 **Loads**, with no warning, when the temporal `permit` is the only permit for its action, or when
@@ -1006,7 +1068,7 @@ refuses when the record says the box has run but the history is missing or empty
 record says it has not run but the history holds events:
 
 ```text
-strands-box: error: policy staging failed: the box record is committed, but the history /Users/dev/.box/<name>/private/dogwood.redb is absent. Wipe the box directory to start again.
+strands-box: error[B0105]: policy staging failed: the box record is committed, but the history /Users/dev/.box/<name>/private/dogwood.redb is absent. Wipe the box directory to start again.
 ```
 
 A first run that stops after Box stores the record and before it opens the history leaves the box
@@ -1022,15 +1084,15 @@ The run also refuses history stamped more than five minutes ahead of the system 
 happens when the clock moved back after the box last ran, or when someone edited the history file:
 
 ```text
-strands-box: error: policy staging failed: policy staging history failure: durable timestamp <t> is <n> ns ahead of the current clock <now>, exceeding the maximum allowed future skew of 300000000000 ns; refusing the operation rather than issuing future-dated timestamps
+strands-box: error[B0103]: policy staging failed: policy staging history failure: durable timestamp <t> is <n> ns ahead of the current clock <now>, exceeding the maximum allowed future skew of 300000000000 ns; refusing the operation rather than issuing future-dated timestamps
 ```
 
 If the clock moves back more than five minutes during a run, the box denies each request and prints
-`policy: warn: durable timestamp ...; denying` on stderr. Requests are decided again once the clock
-is within five minutes of the newest history timestamp. If an action finished while the clock was
-that far back, the box keeps its record and prints
-`policy: warn: an earlier outcome is not recorded yet: ...; denying` for each request until the
-record is saved. Once the clock is within five minutes again, the box retries it when another
+`policy: warning[P0202]: durable timestamp ...; denying` on stderr. Requests are decided again once
+the clock is within five minutes of the newest history timestamp. If an action finished while the
+clock was that far back, the box keeps its record and prints
+`policy: warning[P0202]: an earlier outcome is not recorded yet: ...; denying` for each request
+until the record is saved. Once the clock is within five minutes again, the box retries it when another
 request or completed outcome arrives, or when the run shuts down. Requests are decided normally
 after the record is saved. If the run ends while the clock
 is still more than five minutes behind, or the process is killed, that action doesn't count toward

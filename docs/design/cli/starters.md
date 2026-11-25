@@ -227,8 +227,8 @@ replaces that value, and the step does not check that the two agree.
 ### Without a terminal
 
 `box` asks only when stdin and stderr are terminals
-([decisions](decisions.md#box-asks-only-at-a-terminal)). A detected answer is the same with and
-without one. Without one:
+([decisions](decisions.md#box-asks-only-at-a-terminal)). A detected answer is the answer without
+one, and the preset of its question at one. Without one:
 
 - An input with a `default` takes the default, including an input in `ask`. The step writes the
   default of an input with a `warning` to the profile.

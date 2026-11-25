@@ -19,7 +19,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, feature/native-filesystem-core, feature/linux-native-launch-prep, feature/linux-native-kernel, feature/linux-native-operations]
+    branches: [main, feature/native-filesystem-core, feature/linux-native-launch-prep, feature/linux-native-kernel, feature/linux-native-operations, feature/storage-*]
     types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
@@ -111,6 +111,7 @@ jobs:
               - 'docs/site-manifest.json'
               - 'docs/site-manifest-retirements.json'
               - 'docs/user/**/*.md'
+              - 'docs/cli/**/*.md'
               - 'crates/box/tests/site_manifest.rs'
               - '.github/workflows/ci.yml'
             containment:

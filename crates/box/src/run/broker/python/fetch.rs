@@ -167,8 +167,9 @@ pub(super) async fn fetch_through_gateway(
         // This floor fires before the gateway is contacted, so the gateway journals nothing for it;
         // record the deny to the operator's stderr so it stays reconstructable (Tenet 4). A gateway
         // net:connect/http:request denial is journaled by the gateway itself.
-        eprintln!(
-            "strands-box: monty fetch refused before transport (SSRF floor): principal=agent url={} reason={error}",
+        ::diagnostics::diag!(
+            B0503,
+            "monty fetch refused before transport (SSRF floor): principal=agent url={} reason={error}",
             request.url
         );
         return ExtFunctionResult::Error(MontyException::new(

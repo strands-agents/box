@@ -42,7 +42,7 @@ struct LockedRun {
 impl LockedRun {
     fn announce_credential_stores(&self) -> Result<(), BoxError> {
         let operator_home = crate::record::layout::operator_home_directory()?;
-        let mut stderr = std::io::stderr().lock();
+        let mut stderr = ::diagnostics::stderr().lock();
         write_credential_stores(&self.record, &operator_home, &mut stderr)
             .map_err(|source| ConfigError::Disclosure { source })?;
         Ok(())
@@ -68,9 +68,10 @@ fn write_credential_stores(
     for (table, spec) in tables {
         for (kind, spelling) in spec.credential_store_entries(operator_home) {
             let spelling: String = spelling.chars().flat_map(char::escape_default).collect();
-            writeln!(
-                output,
-                "strands-box: {table}: exposes {spelling} ({})",
+            ::diagnostics::diag!(
+                into output,
+                B0202,
+                "{table}: exposes {spelling} ({})",
                 kind.key()
             )?;
         }
@@ -101,7 +102,7 @@ pub(super) fn prepare_native(config: &Path, has_callback: bool) -> Result<Native
     let guard = crate::run::native_enforcement::EntryGuard::prepare(enabled);
     if guard.is_err() {
         crate::run::native_enforcement::EntryGuard::prepare(false).map_err(|source| {
-            crate::error::SuperviseError::Control {
+            crate::error::SuperviseError::Native {
                 reason: format!("native filesystem capability removal failed: {source}"),
             }
         })?;
@@ -142,9 +143,10 @@ fn write_grammar_disclosures(
             }));
     for (table, program) in tables {
         if programs.contains(program) {
-            writeln!(
-                output,
-                "strands-box: {table}: a spawn of `{program}` is decided by its tool grammar, and \
+            ::diagnostics::diag!(
+                into output,
+                B0208,
+                "{table}: a spawn of `{program}` is decided by its tool grammar, and \
                  no `shell:spawn` rule applies to it"
             )?;
         }
@@ -166,15 +168,17 @@ fn write_monty_disclosures(
     for name in ["python3", "python"] {
         if !record.monty && !names.declared.contains_key(name) {
             match crate::run::contain::executable::find_on(name, search_path) {
-                Some(path) => writeln!(
-                    output,
-                    "strands-box: monty = false and no [tool] answers `{name}`, so a bare \
+                Some(path) => ::diagnostics::diag!(
+                    into output,
+                    B0208,
+                    "monty = false and no [tool] answers `{name}`, so a bare \
                      `{name}` in the Shell runs {}, the file `PATH` finds",
                     escaped(&path.to_string_lossy())
                 )?,
-                None => writeln!(
-                    output,
-                    "strands-box: monty = false and neither a [tool] nor `PATH` has `{name}`, so \
+                None => ::diagnostics::diag!(
+                    into output,
+                    B0208,
+                    "monty = false and neither a [tool] nor `PATH` has `{name}`, so \
                      a bare `{name}` in the Shell is not found"
                 )?,
             }
@@ -182,9 +186,10 @@ fn write_monty_disclosures(
         if record.monty {
             for (label, spec) in &record.tool {
                 if bound_name(spec) == Some(name) {
-                    writeln!(
-                        output,
-                        "strands-box: [tool.{label}]: not used for a bare `{name}`, because Monty \
+                    ::diagnostics::diag!(
+                        into output,
+                        B0208,
+                        "[tool.{label}]: not used for a bare `{name}`, because Monty \
                          answers it; set monty = false at the top of box.toml to use the tool"
                     )?;
                 }
@@ -205,10 +210,31 @@ fn write_left_out_tools(
             .chars()
             .flat_map(char::escape_default)
             .collect();
-        writeln!(
-            output,
-            "strands-box: {} left out: {program} not found",
+        ::diagnostics::diag!(
+            into output,
+            B0207,
+            "{} left out: {program} not found",
             tool.table
+        )?;
+    }
+    Ok(())
+}
+
+/// Disclose that a log-only box lets its policy's denials through, and what that exposes.
+fn write_log_only_disclosure(
+    enforcement: crate::record::config::Enforcement,
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    if enforcement.is_log_only() {
+        ::diagnostics::diag!(
+            into output,
+            B0213,
+            "the policy runs in log-only mode: each denial is recorded with \
+             enforced = false and the action goes ahead. The policy protects nothing in this run: \
+             the Shell and Monty can read the operator's home, credential files, and cloud \
+             metadata, and the gateway attaches each bound credential to a request the policy \
+             would deny. The sandbox, the reachable-paths floor, and credential isolation still \
+             apply. Trial a policy only where that is acceptable."
         )?;
     }
     Ok(())
@@ -221,9 +247,10 @@ fn write_tool_call_disclosures(
 ) -> std::io::Result<()> {
     for (label, entry) in &record.telemetry {
         if entry.takes_tool_calls() {
-            writeln!(
-                output,
-                "strands-box: [telemetry.{label}] names mcp_tool_calls, so {} receives each MCP tool \
+            ::diagnostics::diag!(
+                into output,
+                B0209,
+                "[telemetry.{label}] names mcp_tool_calls, so {} receives each MCP tool \
                  call's arguments and output in clear text, including any secret a tool takes or \
                  returns",
                 entry.shown_destination()
@@ -240,18 +267,20 @@ fn write_bare_name_disclosures(
 ) -> std::io::Result<()> {
     let escaped = |text: &str| -> String { text.chars().flat_map(char::escape_default).collect() };
     for (name, (path, tables)) in &names.declared {
-        writeln!(
-            output,
-            "strands-box: {}: a bare `{}` in the Shell runs {}",
+        ::diagnostics::diag!(
+            into output,
+            B0208,
+            "{}: a bare `{}` in the Shell runs {}",
             tables.join(", "),
             escaped(name),
             escaped(&path.to_string_lossy())
         )?;
     }
     for (name, tables) in &names.passed_over {
-        writeln!(
-            output,
-            "strands-box: {}: runs another program path, so a bare `{}` in the Shell runs \
+        ::diagnostics::diag!(
+            into output,
+            B0208,
+            "{}: runs another program path, so a bare `{}` in the Shell runs \
              the file of `[tool.{}]`, whose label is that name",
             tables.join(", "),
             escaped(name),
@@ -259,9 +288,10 @@ fn write_bare_name_disclosures(
         )?;
     }
     for (name, tables) in &names.shared {
-        writeln!(
-            output,
-            "strands-box: {}: these tables run different program paths, so a bare `{}` \
+        ::diagnostics::diag!(
+            into output,
+            B0208,
+            "{}: these tables run different program paths, so a bare `{}` \
              in the Shell runs the file that `PATH` finds",
             tables.join(", "),
             escaped(name)
@@ -301,10 +331,10 @@ pub(crate) async fn execute(
             }
             Some(
                 guard
-                    .map_err(|source| crate::error::SuperviseError::Control {
+                    .map_err(|source| crate::error::SuperviseError::Native {
                         reason: format!("native filesystem setup failed: {source}"),
                     })?
-                    .ok_or_else(|| crate::error::SuperviseError::Control {
+                    .ok_or_else(|| crate::error::SuperviseError::Native {
                         reason: "native filesystem interception requires CAP_BPF and CAP_PERFMON"
                             .to_string(),
                     })?,
@@ -320,7 +350,7 @@ pub(crate) async fn execute(
     locked.announce_credential_stores()?;
     // No collector exists yet, so a read that fails here is stated on stderr alone.
     let (fetched, secrets) =
-        off_the_worker(move || secrets.fetch_telemetry(std::io::stderr())).await;
+        off_the_worker(move || secrets.fetch_telemetry(::diagnostics::stderr())).await;
     let secrets = secrets?;
     let collector = telemetry::open(&locked.root, &locked.record, &secrets)?;
     let name = locked.root.name().to_string();
@@ -387,16 +417,25 @@ async fn hosted(
     let sources: Vec<Policy> = locked.policy.into_iter().collect();
     let subject = telemetry::policy_subject(&sources);
     let operator = crate::record::config::policy_operator()?;
-    let policy = match HostedBox::prepare_policy(&locked.root, &operator, sources, locked.grammars)
-    {
+    let enforcement = locked.record.enforcement;
+    let policy = match HostedBox::prepare_policy(
+        &locked.root,
+        &operator,
+        sources,
+        locked.grammars,
+        enforcement,
+    ) {
         Ok(engine) => {
             for warning in engine.warnings() {
-                eprintln!("strands-box: warning: {warning}");
+                ::diagnostics::diag!({ warning.code() }, "{warning}");
             }
-            collector.control(telemetry::ControlRecord::completed(
-                telemetry::ControlOperation::PolicyInstalled,
-                &subject,
-            ));
+            collector.control(
+                telemetry::ControlRecord::completed(
+                    telemetry::ControlOperation::PolicyInstalled,
+                    &subject,
+                )
+                .enforcing(enforcement.as_str()),
+            );
             engine
         }
         Err(refusal) => {
@@ -440,32 +479,36 @@ async fn hosted(
     write_grammar_disclosures(
         &locked.record,
         &locked.grammar_programs,
-        std::io::stderr().lock(),
+        ::diagnostics::stderr().lock(),
     )
     .map_err(|source| ConfigError::Disclosure { source })?;
     let search_path = crate::run::contain::executable::host_search_path();
     let names = commands.bare_names(&locked.record, &search_path);
-    write_bare_name_disclosures(&names, std::io::stderr().lock())
+    write_bare_name_disclosures(&names, ::diagnostics::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;
     write_monty_disclosures(
         &locked.record,
         &names,
         &search_path,
-        std::io::stderr().lock(),
+        ::diagnostics::stderr().lock(),
     )
     .map_err(|source| ConfigError::Disclosure { source })?;
     // Read each other secret that a declared source holds, after the checks above, which need
     // none, so no vault program runs for a box that one of them stops. The checks of
     // `HostedBox::open` come after this read.
-    let (fetched, secrets) = off_the_worker(move || secrets.fetch_routes(std::io::stderr())).await;
+    let (fetched, secrets) =
+        off_the_worker(move || secrets.fetch_routes(::diagnostics::stderr())).await;
     for read in &fetched {
         collector.control(read.record());
     }
     let secrets = secrets?;
 
-    write_tool_call_disclosures(&locked.record, std::io::stderr().lock())
+    write_tool_call_disclosures(&locked.record, ::diagnostics::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;
-    eprintln!("strands-box: starting workload");
+    write_log_only_disclosure(enforcement, ::diagnostics::stderr().lock())
+        .map_err(|source| ConfigError::Disclosure { source })?;
+    ::diagnostics::diag!(B0302, "starting workload");
+    let control = Arc::clone(&collector);
     let hosted = HostedBox::open(
         &locked.root,
         &locked.record,
@@ -503,7 +546,7 @@ async fn hosted(
             },
             &site,
         )?;
-        eprintln!("{}", boundary.disclosure());
+        boundary.disclose();
     }
     for (label, contained) in &locked.record.contained_mcp {
         let table = format!("[mcp.{label}]");
@@ -513,12 +556,17 @@ async fn hosted(
             .ok_or_else(|| ConfigError::Contract {
                 reason: format!("{table} has no reach judged for this run"),
             })?;
-        eprintln!("strands-box: {table} starts on demand; approved direct filesystem grants:");
-        for grant in &reach.grants {
-            eprintln!("{}", grant.disclosure());
-        }
+        let grants: String = reach
+            .grants
+            .iter()
+            .map(|grant| format!("\n{}", grant.disclosure()))
+            .collect();
+        ::diagnostics::diag!(
+            B0201,
+            "{table} starts on demand; approved direct filesystem grants:{grants}"
+        );
         if cfg!(target_os = "macos") && contained.spec.file_watching {
-            eprintln!("{}", file_watching_disclosure(&table));
+            ::diagnostics::diag!(B0206, "{}", file_watching_disclosure(&table));
         }
     }
     let boundary = Boundary::translate(
@@ -538,8 +586,24 @@ async fn hosted(
         },
         &site,
     )?;
-    eprintln!("{}", boundary.disclosure());
-    let contained = Contained::spawn(boundary, &locked.root, hosted, terminal, signals).await?;
+    boundary.disclose();
+    // The record waits for the trampoline's `exec` to succeed, so a containment or `exec` failure
+    // after the spawn writes none.
+    let name = locked.root.name().to_string();
+    let contained = Contained::spawn(
+        boundary,
+        &locked.root,
+        hosted,
+        terminal,
+        signals,
+        move || {
+            control.control(telemetry::ControlRecord::completed(
+                telemetry::ControlOperation::WorkloadStarted,
+                &name,
+            ));
+        },
+    )
+    .await?;
     contained.wait().await
 }
 
@@ -622,7 +686,7 @@ fn prepare_contract(
     // this run starts and no other. The `left out` lines and a refusal of that choice come after
     // the record is stored.
     let (SettledTools { record, left_out }, secrets) = settle_tools(&request.record, |record| {
-        SecretSources::check(record, &request.sources, std::io::stderr())
+        SecretSources::check(record, &request.sources, ::diagnostics::stderr())
     })?;
     if existed {
         root.initialize()?;
@@ -636,14 +700,15 @@ fn prepare_contract(
     if !existed || !project_matches_record(&request, &root)? {
         crate::run::configure::write(&root, &request, &owned)?;
         let state = if existed { "updated" } else { "created" };
-        eprintln!(
-            "strands-box: box {} {state} · config {}",
+        ::diagnostics::diag!(
+            B0301,
+            "box {} {state} · config {}",
             root.box_id(),
             config.display()
         );
     } else if crate::run::broker::aliases::is_stale(&root, &aliased) {
         crate::run::broker::aliases::materialize(&root, &aliased, &owned)?;
-        eprintln!("strands-box: box {} alias image refreshed", root.box_id());
+        ::diagnostics::diag!(B0301, "box {} alias image refreshed", root.box_id());
     }
 
     request.verify_sources()?;
@@ -651,7 +716,7 @@ fn prepare_contract(
     // The grammars of the record as written decide a program by its name, for a left-out tool too.
     let grammar_programs = grammar_programs(&request.record);
     let left_out = left_out?;
-    write_left_out_tools(&left_out, std::io::stderr().lock())
+    write_left_out_tools(&left_out, ::diagnostics::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;
     let locked = LockedRun {
         root,
@@ -699,6 +764,7 @@ mod tests {
 
     fn record_with(agent: Option<ProcessSpec>, tools: BTreeMap<String, ProcessSpec>) -> Record {
         Record {
+            enforcement: Default::default(),
             version: RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
@@ -754,9 +820,29 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(output).expect("the announcement is UTF-8"),
-            "strands-box: [tool.aws-suite]: exposes ~/.aws (read)\n\
-             strands-box: [tool.aws-suite]: exposes ~/.aws/sso/cache (write)\n"
+            "strands-box: note[B0202]: [tool.aws-suite]: exposes ~/.aws (read)\n\
+             strands-box: note[B0202]: [tool.aws-suite]: exposes ~/.aws/sso/cache (write)\n"
         );
+    }
+
+    /// Only a log-only box is disclosed, and the line names what the trial exposes.
+    #[test]
+    fn startup_discloses_log_only_mode_and_what_it_exposes() {
+        use crate::record::config::Enforcement;
+        let mut enforcing = Vec::new();
+        write_log_only_disclosure(Enforcement::Enforce, &mut enforcing).expect("writes");
+        assert!(enforcing.is_empty());
+        let mut trial = Vec::new();
+        write_log_only_disclosure(Enforcement::LogOnly, &mut trial).expect("writes");
+        let text = String::from_utf8(trial).expect("UTF-8");
+        for named in [
+            "log-only mode",
+            "credential",
+            "Shell and Monty",
+            "goes ahead",
+        ] {
+            assert!(text.contains(named), "{named}: {text}");
+        }
     }
 
     /// Only a target that names `mcp_tool_calls` is disclosed, because only it receives the values.
@@ -780,7 +866,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(output).expect("the disclosure is UTF-8"),
-            "strands-box: [telemetry.local] names mcp_tool_calls, so /tmp/records.jsonl receives each \
+            "strands-box: note[B0209]: [telemetry.local] names mcp_tool_calls, so /tmp/records.jsonl receives each \
              MCP tool call's arguments and output in clear text, including any secret a tool takes \
              or returns\n"
         );
@@ -821,11 +907,11 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(output).expect("the disclosure is UTF-8"),
-            "strands-box: [tool.brew_npm]: a spawn of `npm` is decided by its tool grammar, and \
+            "strands-box: note[B0208]: [tool.brew_npm]: a spawn of `npm` is decided by its tool grammar, and \
              no `shell:spawn` rule applies to it\n\
-             strands-box: [tool.npm]: a spawn of `npm` is decided by its tool grammar, and no \
+             strands-box: note[B0208]: [tool.npm]: a spawn of `npm` is decided by its tool grammar, and no \
              `shell:spawn` rule applies to it\n\
-             strands-box: [mcp.wrapped]: a spawn of `npm` is decided by its tool grammar, and no \
+             strands-box: note[B0208]: [mcp.wrapped]: a spawn of `npm` is decided by its tool grammar, and no \
              `shell:spawn` rule applies to it\n"
         );
     }
@@ -854,7 +940,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(output).expect("the disclosure is UTF-8"),
-            "strands-box: [tool.system_git]: a spawn of `git` is decided by its tool grammar, \
+            "strands-box: note[B0208]: [tool.system_git]: a spawn of `git` is decided by its tool grammar, \
              and no `shell:spawn` rule applies to it\n"
         );
     }
@@ -879,7 +965,7 @@ mod tests {
 
         assert_eq!(
             lines(&record, &none, empty),
-            "strands-box: [tool.python3]: not used for a bare `python3`, because Monty answers \
+            "strands-box: note[B0208]: [tool.python3]: not used for a bare `python3`, because Monty answers \
              it; set monty = false at the top of box.toml to use the tool\n"
         );
 
@@ -896,7 +982,7 @@ mod tests {
         };
         assert_eq!(
             lines(&record, &answered, empty),
-            "strands-box: monty = false and neither a [tool] nor `PATH` has `python`, so a bare \
+            "strands-box: note[B0208]: monty = false and neither a [tool] nor `PATH` has `python`, so a bare \
              `python` in the Shell is not found\n"
         );
 
@@ -909,7 +995,7 @@ mod tests {
         assert_eq!(
             lines(&record, &answered, bin.path().as_os_str()),
             format!(
-                "strands-box: monty = false and no [tool] answers `python`, so a bare `python` in \
+                "strands-box: note[B0208]: monty = false and no [tool] answers `python`, so a bare `python` in \
                  the Shell runs {}, the file `PATH` finds\n",
                 python.display()
             )
@@ -938,11 +1024,11 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(output).expect("the disclosure is UTF-8"),
-            "strands-box: [tool.git], [tool.git_status]: a bare `git` in the Shell runs \
+            "strands-box: note[B0208]: [tool.git], [tool.git_status]: a bare `git` in the Shell runs \
              /Dev/usr/bin/git\n\
-             strands-box: [tool.brew_git]: runs another program path, so a bare `git` in the Shell \
+             strands-box: note[B0208]: [tool.brew_git]: runs another program path, so a bare `git` in the Shell \
              runs the file of `[tool.git]`, whose label is that name\n\
-             strands-box: [tool.brew_node], [tool.node]: these tables run different program paths, \
+             strands-box: note[B0208]: [tool.brew_node], [tool.node]: these tables run different program paths, \
              so a bare `node` in the Shell runs the file that `PATH` finds\n"
         );
     }
@@ -965,8 +1051,8 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(output).expect("the disclosure is UTF-8"),
-            "strands-box: [tool.tsx] left out: tsx not found\n\
-             strands-box: [tool.node] left out: /opt/node/bin/node\\u{1b}[2J not found\n"
+            "strands-box: note[B0207]: [tool.tsx] left out: tsx not found\n\
+             strands-box: note[B0207]: [tool.node] left out: /opt/node/bin/node\\u{1b}[2J not found\n"
         );
     }
 
@@ -1058,7 +1144,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(output).expect("the announcement is UTF-8"),
-            "strands-box: [tool.aws-suite]: exposes ~/.aws/\\u{1b}[2J\\u{202e} (read)\n"
+            "strands-box: note[B0202]: [tool.aws-suite]: exposes ~/.aws/\\u{1b}[2J\\u{202e} (read)\n"
         );
     }
 }

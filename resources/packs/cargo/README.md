@@ -5,9 +5,10 @@ toolchain's own `cargo`.
 
 ## Where cargo keeps its files
 
-cargo keeps the packages it downloads in your project's `.cargo` folder (its `CARGO_HOME`), and its
-build output in `target` (`CARGO_TARGET_DIR`). Add them to the project's `.gitignore`, as
-`/.cargo` and `/target`.
+cargo keeps the packages it downloads in its own folder in the profile's storage (its `CARGO_HOME`),
+`~/.strands/box/storage/<profile>/default/tool/cargo/cargo`, which the agent cannot write, and its
+build output in the project's `target` (`CARGO_TARGET_DIR`). Add `/target` to the project's
+`.gitignore`.
 
 To find your toolchains, `box` reads `RUSTUP_HOME` and `CARGO_HOME` from the shell where you run
 `box`, and uses `~/.rustup` and `~/.cargo` when they aren't set. They set the pack's `rust.home`
@@ -52,6 +53,11 @@ another compiler on macOS, set those names in `[tool.cargo.env]` in your profile
 
 The agent can write `.cargo/config.toml` in your project, and `cargo` on your machine runs what it
 says. Check that file before you run `cargo` outside the box.
+
+A `build.rs` or a proc macro can change cargo's `CARGO_HOME` in storage, and every project of the
+profile then builds with what it changed. The agent cannot run a program that `cargo install` puts
+there, and cannot read a crate's source there, such as a file that a compiler note names. To read
+the sources, run `cargo vendor` to copy them into the project.
 
 In the box, rustup's home is cargo's own folder in the profile's storage,
 `~/.strands/box/storage/<profile>/default/tool/cargo/rustup`. It links to your own toolchains and

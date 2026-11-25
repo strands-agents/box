@@ -1,8 +1,3 @@
----
-reader: Someone who changes what box does on this computer for every profile, such as the menus that box profile create shows or the activity banner, and needs the tables and keys of config.toml.
-belongs: Every table and key of ~/.strands/box/config.toml and of a collection's collection.toml, and what box does without the file. How to build a starter menu or a policy menu for a team goes to starters.md, a key that one profile sets goes to profiles-reference.md, and where the file sits among the other files goes to files.md.
----
-
 # Box config reference
 
 `~/.strands/box/config.toml` holds the settings that apply to every profile on this computer. You

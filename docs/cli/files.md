@@ -1,8 +1,3 @@
----
-reader: Someone who wants to know where Box keeps its files, where a profile, pack, starter, or policy of their own goes, what Box writes by itself, and what's safe to delete or copy.
-belongs: Where each file lives, who writes it, and what it's for, with a link to the page that explains what goes in it. What goes in a profile, pack, starter, or policy goes to profiles.md, packs.md, starters.md, or policies.md. Each command and flag goes to cli.md. A fix after an error goes to troubleshooting.md.
----
-
 # Where Box keeps its files
 
 Box reads your settings from two places. Your Box folder, `~/.strands/box`, holds what you use in every
@@ -59,7 +54,8 @@ when the project has none. Keep `.box` a folder: `box run` stops when
 it's a file or a link.
 
 The tools the agent runs still write their own files in the project, such as caches and build
-output, so add those to the project's `.gitignore`.
+output, so add those to the project's `.gitignore`
+([Tools write into the project](limitations.md#tools-write-into-the-project)).
 
 ## Custom packs, starters, and policies
 
@@ -152,6 +148,10 @@ Each run has a folder in `~/.strands/box/r/`, named by its box ID, such as `b-5b
 holds the settings and rules the run used (`box.toml` and `policy.dw`), a record of what the box
 allowed and stopped (`records.jsonl`), and the box's own state. The box ID lets you
 [run in the same box again](cli.md#run-in-the-same-box-again).
+
+[Terminal runs](cli.md#box-run) append the Box messages they receive, including warnings, to
+`box.log`. Only your account can read it, and it has no size limit. The agent's output stays on
+the terminal.
 
 A new run that fails before the box starts leaves no folder. Every other run folder stays until you
 clean it up, and storage stays until you delete it.

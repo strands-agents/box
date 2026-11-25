@@ -16,7 +16,7 @@ const ATTRIBUTE_LIMIT: usize = 1024;
 /// One observed Core lifecycle record or policy decision.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Record {
-    BoxStarted(Option<SystemTime>),
+    WorkloadStarted(Option<SystemTime>),
     BoxStopped(CoreOutcome),
     Decision(Decision),
 }
@@ -199,7 +199,7 @@ impl Journal {
             if byte == b'\n' {
                 let result = parse_line(&self.pending, &mut |record| {
                     if count_decisions
-                        || matches!(record, Record::BoxStarted(_) | Record::BoxStopped(_))
+                        || matches!(record, Record::WorkloadStarted(_) | Record::BoxStopped(_))
                     {
                         visit(record);
                     }
@@ -277,15 +277,15 @@ fn parse_record(
     let attributes = &record["attributes"];
     if scope == Some("strands-box.control") {
         let operation = attribute(attributes, "strands.box.control.operation")?;
-        if !matches!(operation, Some("box_started" | "box_stopped")) {
+        if !matches!(operation, Some("workload_started" | "box_stopped")) {
             return Ok(());
         }
         match (
             operation,
             attribute(attributes, "strands.box.control.outcome")?,
         ) {
-            (Some("box_started"), Some("ok")) => {
-                visit(Record::BoxStarted(timestamp(record)));
+            (Some("workload_started"), Some("ok")) => {
+                visit(Record::WorkloadStarted(timestamp(record)));
             }
             (Some("box_stopped"), Some("ok")) => {
                 visit(Record::BoxStopped(CoreOutcome::Ok));
@@ -355,7 +355,7 @@ mod tests {
                     "timeUnixNano":"1794528000123456789",
                     "observedTimeUnixNano":"1794528009987654321",
                     "attributes":[
-                        {"key":"strands.box.control.operation", "value":{"stringValue":"box_started"}},
+                        {"key":"strands.box.control.operation", "value":{"stringValue":"workload_started"}},
                         {"key":"strands.box.control.outcome", "value":{"stringValue":"ok"}}
                     ]
                 }]
@@ -364,7 +364,7 @@ mod tests {
     }
 
     fn started() -> Record {
-        Record::BoxStarted(Some(UNIX_EPOCH + Duration::new(1_794_528_000, 123_456_789)))
+        Record::WorkloadStarted(Some(UNIX_EPOCH + Duration::new(1_794_528_000, 123_456_789)))
     }
 
     fn stopped(outcome: &str) -> Value {
@@ -468,7 +468,7 @@ mod tests {
             .unwrap()
             .remove("timeUnixNano");
         append(&path, &line(&absent));
-        assert_eq!(collect(&mut journal), vec![Record::BoxStarted(None)]);
+        assert_eq!(collect(&mut journal), vec![Record::WorkloadStarted(None)]);
         for timestamp in [
             json!(null),
             json!(""),
@@ -484,7 +484,7 @@ mod tests {
             let mut value = record();
             value["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["timeUnixNano"] = timestamp;
             append(&path, &line(&value));
-            assert_eq!(collect(&mut journal), vec![Record::BoxStarted(None)]);
+            assert_eq!(collect(&mut journal), vec![Record::WorkloadStarted(None)]);
         }
         for nanos in [1, u64::MAX] {
             let mut value = record();
@@ -493,7 +493,7 @@ mod tests {
             append(&path, &line(&value));
             assert_eq!(
                 collect(&mut journal),
-                vec![Record::BoxStarted(Some(
+                vec![Record::WorkloadStarted(Some(
                     UNIX_EPOCH + Duration::from_nanos(nanos)
                 ))]
             );

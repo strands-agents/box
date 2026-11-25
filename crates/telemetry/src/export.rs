@@ -224,7 +224,7 @@ impl TargetExporter {
             self.dropped
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if self.reports_failures {
-                eprintln!("strands-box: telemetry export failed: {error}");
+                diagnostics::diag!(T0102, "telemetry export failed: {error}");
             }
         }
         outcome

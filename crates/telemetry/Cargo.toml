@@ -10,6 +10,7 @@ name = "telemetry"
 path = "src/lib.rs"
 
 [dependencies]
+diagnostics = { package = "strands-box-diagnostics", path = "../diagnostics" }
 thiserror = "2"
 # `O_NOFOLLOW` on the file target's open, so a planted link cannot redirect the audit trail.
 libc = "0.2"
@@ -56,3 +57,6 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 [lints.rust]
 unused_must_use = "deny"
+
+[lints.clippy]
+print_stderr = "warn"

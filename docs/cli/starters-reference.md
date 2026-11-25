@@ -1,8 +1,3 @@
----
-reader: Someone who writes or reads a starter or a policy starter, knows the key they want, and needs what it does and where it goes.
-belongs: A key of starter.toml or policy.toml, and the rules for it. The [starters] and [policy-starters] menus in config.toml go to config.md. A task goes to starters.md, a rule in policy.dw goes to policies.md, and a fix after an error goes to troubleshooting.md.
----
-
 # Starter reference
 
 This page lists every key that a `starter.toml` and a policy starter's `policy.toml` can hold, and

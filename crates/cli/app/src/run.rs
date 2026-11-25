@@ -502,6 +502,8 @@ pub struct Launcher {
 pub struct Launch {
     name: String,
     home: PathBuf,
+    /// The box home, when `BOX_HOME` moves it from `~/.strands/box`.
+    box_home: Option<PathBuf>,
     reused: bool,
     moved: Option<(PathBuf, PathBuf)>,
     profile_name: String,
@@ -1285,6 +1287,8 @@ impl Launcher {
             Ok(Launch {
                 name: instance.name.clone(),
                 home: home.clone(),
+                box_home: (self.host.box_home != default_box_home(&self.host.home))
+                    .then(|| self.host.box_home.clone()),
                 reused,
                 moved,
                 profile_name: name.to_string(),
@@ -2470,6 +2474,67 @@ impl Launch {
         &self.journal
     }
 
+    /// A fresh run that failed before Box Core wrote any state, which `box` removes.
+    fn unused(&self, code: ExitCode) -> bool {
+        !self.reused
+            && code != ExitCode::SUCCESS
+            && self
+                .config
+                .with_file_name("box")
+                .read_dir()
+                .is_ok_and(|mut entries| entries.next().is_none())
+    }
+
+    fn reuse_instruction(&self) -> String {
+        format!("box: to reuse this box run: {}", self.reuse_command())
+    }
+
+    /// The `box runs history` command for this run, with `--deny` when `deny` is set. When
+    /// `BOX_HOME` moves the box home, the command sets it too, so it also works in a shell that
+    /// does not have it. A box home that a shell word cannot hold as typed is left out.
+    pub(crate) fn history_command(&self, deny: bool) -> String {
+        let box_home = self
+            .box_home
+            .as_deref()
+            .and_then(Path::to_str)
+            .filter(|path| banner::clean(path) == *path)
+            .map(|path| {
+                if path
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_./:-".contains(&byte))
+                {
+                    format!("BOX_HOME={path} ")
+                } else {
+                    format!("BOX_HOME='{}' ", path.replace('\'', "'\\''"))
+                }
+            })
+            .unwrap_or_default();
+        let deny = if deny { " --deny" } else { "" };
+        format!("{box_home}box runs history {}{deny}", self.name)
+    }
+
+    /// The command that runs this profile in this box again.
+    fn reuse_command(&self) -> String {
+        let argument = &self.policy.argument;
+        let id = self.name();
+        if banner::clean(argument) != *argument
+            || argument.contains('\\')
+            || self.profile.to_str().is_none()
+        {
+            format!("repeat your command with --box-id {id} before any --")
+        } else if argument
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_./:-".contains(&byte))
+        {
+            format!("box run {argument} --box-id {id}")
+        } else {
+            format!(
+                "box run '{}' --box-id {id}",
+                argument.replace('\'', "'\\''")
+            )
+        }
+    }
+
     fn report(&self) {
         let name = &self.profile_name;
         for (link, why) in self.not_copied() {
@@ -2529,9 +2594,9 @@ impl Launch {
                 "box: running profile {name} with box ID {id} (records: {})",
                 self.journal().display()
             );
-            eprintln!("box: to reuse this box run: box run {name} --box-id {id}");
+            eprintln!("{}", self.reuse_instruction());
         }
-        eprintln!("box: policy history: box runs history {id}");
+        eprintln!("box: policy history: {}", self.history_command(false));
     }
 
     /// The options every Box Core run of this launch starts from: its box ID, and defaults otherwise.
@@ -2592,8 +2657,7 @@ impl Launch {
                 self.run_options(),
             ))
         };
-        if !self.reused
-            && !result.as_ref().is_ok_and(|code| *code == ExitCode::SUCCESS)
+        if self.unused(*result.as_ref().unwrap_or(&ExitCode::FAILURE))
             && let Some(directory) = self.config.parent()
             && std::fs::remove_dir(directory.join("box")).is_ok()
             && let Err(error) = remove_if_present(directory)

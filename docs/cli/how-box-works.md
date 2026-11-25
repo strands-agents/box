@@ -108,6 +108,7 @@ of the key, and Box puts the real key in as the request leaves for one of the ro
 
 The model provider's pack sets this up for the model key. For another service, you add a route to
 the profile ([Give the agent a token for another service](profiles.md#give-the-agent-a-token-for-another-service)).
+[Credentials](credentials.md) lists every place a key can come from.
 
 ## Runs and box IDs
 

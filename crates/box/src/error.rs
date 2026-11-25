@@ -11,6 +11,172 @@ impl BoxError {
     pub(crate) fn is_not_running(&self) -> bool {
         matches!(self.0, Internal::Daemon(DaemonError::NotRunning))
     }
+
+    /// The message code of this refusal (docs/user/message-codes.md), or an uncoded error for a
+    /// Box defect the reader can only report.
+    pub(crate) fn code(&self) -> ::diagnostics::Kind {
+        self.0.code()
+    }
+}
+
+/// An uncoded error: a Box defect, not a cause the reader can fix.
+const DEFECT: ::diagnostics::Kind = ::diagnostics::Kind::Uncoded(::diagnostics::Severity::Error);
+
+impl Internal {
+    /// One exhaustive match, so a new variant does not compile until it has a code.
+    fn code(&self) -> ::diagnostics::Kind {
+        use ::diagnostics::Code;
+        match self {
+            Self::Config(error) => error.code(),
+            Self::Layout(error) => match error {
+                LayoutError::NoOperatorHome
+                | LayoutError::UnsafeDirectory { .. }
+                | LayoutError::Remove { .. }
+                | LayoutError::ReadDirectory { .. }
+                | LayoutError::Create { .. }
+                | LayoutError::NotADirectory { .. } => Code::B0105.into(),
+            },
+            Self::Daemon(error) => match error {
+                DaemonError::NotRunning
+                | DaemonError::Busy
+                | DaemonError::AlreadyRunning { .. }
+                | DaemonError::Lock { .. } => Code::B0106.into(),
+                DaemonError::LiveParse { .. } => Code::B0105.into(),
+                // Its one use refuses a directory grant that reaches the gateway's CA key.
+                DaemonError::Refused { .. } => Code::B0102.into(),
+                DaemonError::NoProxyPort => Code::B0110.into(),
+            },
+            Self::Executable(error) => match error {
+                ExecutableError::NotExecutable { .. }
+                | ExecutableError::NotOnPath { .. }
+                | ExecutableError::RelativeProgram { .. }
+                | ExecutableError::NotUtf8 { .. } => Code::B0107.into(),
+            },
+            Self::Trampoline(error) => match error {
+                TrampolineError::Missing { .. }
+                | TrampolineError::NotExecutable { .. }
+                | TrampolineError::Open { .. }
+                | TrampolineError::Invalid { .. }
+                | TrampolineError::Materialize { .. } => Code::B0107.into(),
+                TrampolineError::UnsupportedPlatform { .. }
+                | TrampolineError::StatusPipe { .. }
+                | TrampolineError::StatusRead { .. }
+                | TrampolineError::SetupIncomplete
+                | TrampolineError::SetupFailed { .. } => Code::B0108.into(),
+                TrampolineError::StatusProtocol { .. }
+                | TrampolineError::Environment { .. }
+                | TrampolineError::WorkloadPath { .. } => DEFECT,
+            },
+            Self::Installation(error) => match error {
+                InstallationError::Locate { .. }
+                | InstallationError::Invalid { .. }
+                | InstallationError::Changed { .. } => Code::B0107.into(),
+            },
+            Self::Supervise(error) => match error {
+                SuperviseError::Spawn { .. } | SuperviseError::Native { .. } => Code::B0108.into(),
+                SuperviseError::NativeDuringRun { .. } => Code::B1003.into(),
+                SuperviseError::Callback { .. } => Code::B0112.into(),
+                SuperviseError::Ingress { .. } => Code::B0704.into(),
+                SuperviseError::AlsoShutdown { outcome, .. } => outcome.code(),
+                SuperviseError::NoProcessId
+                | SuperviseError::Wait { .. }
+                | SuperviseError::Signal { .. }
+                | SuperviseError::Diagnostics { .. }
+                | SuperviseError::Control { .. } => DEFECT,
+            },
+            Self::Shell(error) => match error {
+                ShellError::Missing { .. }
+                | ShellError::NotExecutable { .. }
+                | ShellError::Materialize { .. } => Code::B0107.into(),
+                ShellError::Bind { .. } | ShellError::Serve { .. } => Code::B0111.into(),
+            },
+            Self::McpSchema(error) => match error {
+                McpSchemaError::WorkingDirectory { .. }
+                | McpSchemaError::Discover { .. }
+                | McpSchemaError::Credential { .. }
+                | McpSchemaError::UnsupportedPlacement { .. }
+                | McpSchemaError::Policy(_)
+                | McpSchemaError::Write { .. } => Code::B0109.into(),
+            },
+            Self::Policy(_) | Self::PolicyStaging(_) | Self::GrammarBinding(_) => {
+                Code::B0103.into()
+            }
+            Self::HistoryDisagreesWithRecord { .. } => Code::B0105.into(),
+            Self::HistoryFlush(_) => Code::P0303.into(),
+            Self::Credential(_) | Self::CredentialProjection(_) => Code::B0104.into(),
+            Self::Proxy(_) => Code::B0110.into(),
+            Self::Containment(_) => Code::B0108.into(),
+            Self::Telemetry(_) => Code::T0103.into(),
+            #[cfg(target_os = "linux")]
+            Self::Relay(error) => match error {
+                RelayError::ControlPair { .. }
+                | RelayError::Receive { .. }
+                | RelayError::NoDescriptor
+                | RelayError::Accept { .. } => Code::B0110.into(),
+                RelayError::Ingress(_) => Code::B0704.into(),
+            },
+            Self::McpDiscovery(error) => match error {
+                McpDiscoveryError::Thread { .. } | McpDiscoveryError::NoOutcome => {
+                    Code::B0109.into()
+                }
+            },
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            Self::NativeFilesystem(error) => match error {
+                NativeFilesystemError::Runtime
+                | NativeFilesystemError::Sdk
+                | NativeFilesystemError::Allocation
+                | NativeFilesystemError::Deadlines
+                | NativeFilesystemError::Subscriptions
+                | NativeFilesystemError::ExistingChildren
+                | NativeFilesystemError::Muting
+                | NativeFilesystemError::Client { .. }
+                | NativeFilesystemError::Paths { .. }
+                | NativeFilesystemError::BootstrapIdentity { .. } => Code::B0108.into(),
+                NativeFilesystemError::Shutdown { .. }
+                | NativeFilesystemError::Reply
+                | NativeFilesystemError::Sequence
+                | NativeFilesystemError::Outcome { .. }
+                | NativeFilesystemError::Panic
+                | NativeFilesystemError::Tracking => Code::B1003.into(),
+            },
+        }
+    }
+}
+
+impl ConfigError {
+    /// The message code of this refusal; one exhaustive match.
+    pub(crate) fn code(&self) -> ::diagnostics::Kind {
+        use ::diagnostics::Code;
+        match self {
+            Self::ExperimentalFeatureUnavailable { .. }
+            | Self::Contract { .. }
+            | Self::Process { .. }
+            | Self::ToolGrammar { .. }
+            | Self::ToolSelection { .. }
+            | Self::Mcp { .. }
+            | Self::Telemetry { .. }
+            | Self::Workspace { .. }
+            | Self::Read { .. }
+            | Self::Parse { .. }
+            | Self::BoxName { .. }
+            | Self::EmptyWorkload
+            | Self::SuppliedIdentity { .. }
+            | Self::RemovedKey { .. }
+            | Self::NotUtf8 { .. } => Code::B0101.into(),
+            Self::AuthorityRead { .. }
+            | Self::AuthorityChanged { .. }
+            | Self::Filesystem { .. } => Code::B0102.into(),
+            Self::PolicyRead { .. } | Self::PolicyInvalid { .. } => Code::B0103.into(),
+            Self::Credential { .. }
+            | Self::SecretSource { .. }
+            | Self::SecretFetch { .. }
+            | Self::Locator { .. } => Code::B0104.into(),
+            Self::RecordVersion { .. }
+            | Self::RecordIdentity { .. }
+            | Self::IdentityMismatch { .. } => Code::B0105.into(),
+            Self::Disclosure { .. } | Self::RecordWrite { .. } => DEFECT,
+        }
+    }
 }
 
 impl std::fmt::Display for BoxError {
@@ -81,6 +247,10 @@ pub(crate) enum Internal {
         history: PathBuf,
         found: HistoryFound,
     },
+
+    /// The policy history could not be flushed when the box stopped.
+    #[error("{0}")]
+    HistoryFlush(policy::PolicyError),
 
     #[error("credential setup failed: {0}")]
     Credential(#[from] credentials::CredentialError),
@@ -601,6 +771,34 @@ pub(crate) enum SuperviseError {
 
     #[error("workload process control failed: {reason}")]
     Control { reason: String },
+
+    /// A library caller's `on_ready` callback refused the run.
+    #[error("workload process control failed: on_ready callback failed: {source}")]
+    Callback { source: std::io::Error },
+
+    /// An `[[agent.ingress]]` listener could not be bound or relayed.
+    #[error("workload process control failed: {reason}")]
+    Ingress { reason: String },
+
+    /// Native filesystem policy could not be set up or kept running.
+    #[cfg_attr(not(feature = "native-filesystem-policy"), allow(dead_code))]
+    #[error("workload process control failed: {reason}")]
+    Native { reason: String },
+
+    /// Native filesystem policy failed after the workload started, or did not stop cleanly.
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "native-filesystem-policy")),
+        allow(dead_code)
+    )]
+    #[error("workload process control failed: {reason}")]
+    NativeDuringRun { reason: String },
+
+    /// The run failed, and its shutdown failed too; the run's failure names the code.
+    #[error("workload process control failed: {outcome}; shutdown also failed: {shutdown}")]
+    AlsoShutdown {
+        outcome: Box<BoxError>,
+        shutdown: Box<BoxError>,
+    },
 }
 
 /// How far containment got before it failed.
@@ -718,6 +916,165 @@ mod tests {
                 error.to_string().contains(expected),
                 "{error} must mention {expected:?}"
             );
+        }
+    }
+
+    /// Each refusal names the code of its cause, and a Box defect names none.
+    #[test]
+    fn refusals_name_their_code() {
+        use ::diagnostics::{Code, Kind, Severity};
+        let cases: [(BoxError, Kind); 23] = [
+            (
+                SuperviseError::NativeDuringRun {
+                    reason: "native request deadline exceeded".into(),
+                }
+                .into(),
+                Code::B1003.into(),
+            ),
+            (
+                SuperviseError::Diagnostics {
+                    source: std::io::Error::other("replay"),
+                }
+                .into(),
+                Kind::Uncoded(Severity::Error),
+            ),
+            (ConfigError::EmptyWorkload.into(), Code::B0101.into()),
+            (
+                SuperviseError::Callback {
+                    source: std::io::Error::other("refused"),
+                }
+                .into(),
+                Code::B0112.into(),
+            ),
+            (
+                SuperviseError::Ingress {
+                    reason: "binding the ingress 127.0.0.1:8080: in use".into(),
+                }
+                .into(),
+                Code::B0704.into(),
+            ),
+            (
+                SuperviseError::AlsoShutdown {
+                    outcome: Box::new(DaemonError::NoProxyPort.into()),
+                    shutdown: Box::new(
+                        Internal::HistoryFlush(policy::PolicyError::Evaluation("full".into()))
+                            .into(),
+                    ),
+                }
+                .into(),
+                Code::B0110.into(),
+            ),
+            (
+                Internal::HistoryFlush(policy::PolicyError::Evaluation("full".into())).into(),
+                Code::P0303.into(),
+            ),
+            (
+                SuperviseError::Wait {
+                    source: std::io::Error::other("gone"),
+                }
+                .into(),
+                Kind::Uncoded(Severity::Error),
+            ),
+            (
+                ConfigError::PolicyRead {
+                    path: "policy.dw".into(),
+                    source: std::io::Error::other("gone"),
+                }
+                .into(),
+                Code::B0103.into(),
+            ),
+            (
+                Internal::Policy(policy::PolicyError::UnknownAction("x".into())).into(),
+                Code::B0103.into(),
+            ),
+            (
+                ConfigError::Credential {
+                    host: "api.example.com".into(),
+                    reason: "no locator".into(),
+                }
+                .into(),
+                Code::B0104.into(),
+            ),
+            (
+                Internal::CredentialProjection("unset".into()).into(),
+                Code::B0104.into(),
+            ),
+            (
+                Internal::HistoryDisagreesWithRecord {
+                    committed: true,
+                    history: "history".into(),
+                    found: HistoryFound::Absent,
+                }
+                .into(),
+                Code::B0105.into(),
+            ),
+            (
+                ExecutableError::NotOnPath {
+                    program: "claude".into(),
+                }
+                .into(),
+                Code::B0107.into(),
+            ),
+            (McpDiscoveryError::NoOutcome.into(), Code::B0109.into()),
+            (DaemonError::NoProxyPort.into(), Code::B0110.into()),
+            (
+                Internal::Telemetry(telemetry::TelemetryError::Config {
+                    reason: "no target".into(),
+                })
+                .into(),
+                Code::T0103.into(),
+            ),
+            (
+                ConfigError::Filesystem {
+                    table: "[agent]".into(),
+                    entry: "~/.ssh".into(),
+                    reason: "a credential store".into(),
+                }
+                .into(),
+                Code::B0102.into(),
+            ),
+            (
+                ConfigError::RecordVersion {
+                    found: 9,
+                    expected: 1,
+                }
+                .into(),
+                Code::B0105.into(),
+            ),
+            (
+                DaemonError::AlreadyRunning { name: "b".into() }.into(),
+                Code::B0106.into(),
+            ),
+            (
+                TrampolineError::SetupFailed {
+                    stage: SetupStage::Apply,
+                    detail: None,
+                }
+                .into(),
+                Code::B0108.into(),
+            ),
+            (
+                ShellError::Bind {
+                    source: std::io::Error::other("in use"),
+                }
+                .into(),
+                Code::B0111.into(),
+            ),
+            (
+                TrampolineError::StatusProtocol {
+                    reason: "byte 9".into(),
+                }
+                .into(),
+                Kind::Uncoded(Severity::Error),
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.code(), expected, "{error}");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let relay: BoxError = RelayError::Ingress(ingress::IngressError::NotReady).into();
+            assert_eq!(relay.code(), Code::B0704.into(), "{relay}");
         }
     }
 

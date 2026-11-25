@@ -1220,7 +1220,7 @@ entry with no secret.
 SDK default credential chain, so the box carries the host's ambient identity from the environment, a
 static-keys profile, a web identity, the container endpoint, or instance metadata. The "Next" list
 that `box profile create` prints names an `[egress.<name>]` route that signs this way, and Box Core
-warns on each request for any site that uses the bare form. `box` adds no refusal over `~/.aws`.
+warns once at startup for any site that uses the bare form. `box` adds no refusal over `~/.aws`.
 
 A bare `aws://` reads the same AWS configuration, and runs the same `credential_process` in Box
 Core's trusted process, as the `aws://<profile>` form that `box` already accepts. So a bare route
@@ -1232,7 +1232,7 @@ stays refused. A policy rule does not enter into it: Box Core enforces `[agent.f
 and this floor in the OS, below policy.
 
 **Rejected.** Refuse the bare form, and make the operator write `aws://<profile>`. A named profile
-is a narrower identity, but Box Core supports and discloses the bare form and warns on each request,
+is a narrower identity, but Box Core supports and discloses the bare form and warns once at startup,
 so refusing it blocks an operator whose host identity is an instance role, a container endpoint, or
 a web identity, which no profile file holds.
 
@@ -1251,8 +1251,8 @@ can be wider than a named profile and which the operator cannot narrow in the pr
 floor stops a box from writing the default credential paths, but not a config file that
 `AWS_CONFIG_FILE` or `AWS_SHARED_CREDENTIALS_FILE` moves elsewhere, nor a store the operator names
 exactly; keeping those out of a write grant is the invoker's. A route that an operator adds by
-editing `profile.toml`, or that a pack adds after create, is disclosed only by Box Core's warning on
-each signed request, not by the create "Next" list. The shipped Bedrock packs sign with a bare
+editing `profile.toml`, or that a pack adds after create, is disclosed only by Box Core's startup
+warning, not by the create "Next" list. The shipped Bedrock packs sign with a bare
 route by default, so on a cloud machine a Bedrock profile signs as the machine's own role unless the
 operator picks a key.
 
@@ -1408,8 +1408,8 @@ could interrupt the agent. Restart the agent without a banner: Box Core allows o
 to start a run in each `box` process.
 
 **Cost.** A crash or a failure to start the banner disables it for the rest of the run.
-A stuck update can leave the banner frozen. `box` shows saved messages after it restores the
-terminal and keeps only the first 32 KiB. Temporary output delays do not stop the agent.
+A stuck update can leave the banner frozen. `box` shows recent errors after it restores the
+terminal. Temporary output delays do not stop the agent.
 Final output waits are limited so a blocked terminal cannot hold up normal shutdown indefinitely.
 A disconnected terminal still stops the run.
 
@@ -1544,9 +1544,8 @@ process can then read FSEvents, which discloses names of paths it cannot read
 because the disclosure reaches past the process's own grants.
 
 **Cost.** A pack that sets the key discloses names for its program in every profile that names
-the pack, and the profile does not say so. Box Core's startup line does, but a run in a terminal
-shows it only when the run fails, as for `file-attributes`. Otherwise the operator sees the key
-only in `box profile show --full`.
+the pack, and the profile does not say so. The operator can see the key in `box profile show --full`
+or read Box Core's startup line in the terminal run's [log](../../cli/files.md#profile-storage-and-runs).
 
 <a id="only-a-profile-turns-off-a-tools-network-containment"></a>
 ### Only a profile turns off a tool's network containment
@@ -1587,8 +1586,8 @@ agent keeps between runs, such as its configuration directory and its temporary 
 the workspace: tried first, and each directory that a run started in got new folders.
 `<workspace>/.claude-config` and `<workspace>/.tmp` failed the same way.
 
-**Cost.** A tool pack's `CARGO_HOME`, `CARGO_TARGET_DIR`, or `npm_config_cache` are paths in
-the workspace, so that tool writes there. A tool's `TMPDIR`, which `box` sets, is its own
+**Cost.** A tool pack's cache or build output, such as `CARGO_TARGET_DIR` or `@box/node`'s
+`npm_config_cache`, can be a path in the workspace, so that tool writes there. A tool's `TMPDIR`, which `box` sets, is its own
 folder `tool-tmp/<tool>` in the run's directory, beside the box folder, emptied when the run
 starts. So it adds nothing to the workspace, and neither the agent, another tool, nor another run
 can read or change a tool's temporary files. The agent and the tools still share the workspace.
@@ -1908,8 +1907,11 @@ folder, so an entry there that is not a profile goes too.
 <a id="box-asks-only-at-a-terminal"></a>
 ### A starter answers from the host first, and `box` asks only at a terminal
 
-A starter first answers what the agent's host settings decide, at a terminal and without one
-([detection](detection.md)). `box` then asks only when stdin and stderr are terminals. With no
+A starter first answers what the agent's host settings decide ([detection](detection.md)). `box`
+then asks only when stdin and stderr are terminals. At a terminal it still asks each question that
+detection answered, with the detected choice as the preset, because detection reads no key, so a
+choice whose only sign is a key, such as the Anthropic API or a Claude subscription, has no
+`detect`. With no
 terminal, `box profile reset` and `box profile clean` refuse unless the operator gives
 `--no-ask`, and a starter takes defaults or stops with the flag that answers
 ([starters](starters.md#without-a-terminal)). The policy question has no default there, so it
@@ -1917,10 +1919,11 @@ stops `box` until `--policy` answers it. A profile that runs the agent the way t
 it is worth more than one script writing the same profile on every machine.
 
 **Rejected.** Remove without asking when there is no terminal: a script could then delete a
-profile by accident. Detection only as the prompt's default: the operator would confirm each
-detected answer at a terminal, but a script would then get a different profile than a terminal on
-the same host. Earlier this entry rejected a starter that answers before it asks, because only a
-prompt could name a provider; a starter's choices now name it.
+profile by accident. Skip a question that detection answered at a terminal: a Bedrock setting
+then hid the API-key choices, and only Review showed what was picked. Detection only as the
+prompt's default, with no answer without a terminal: a script would then get a different profile
+than Enter at a terminal on the same host. Earlier this entry rejected a starter that answers
+before it asks, because only a prompt could name a provider; a starter's choices now name it.
 
 **Cost.** One script writes different profiles on two hosts whose agent settings differ, and no
 one confirms the detected answers. A script that removes state passes `--no-ask`, and a script

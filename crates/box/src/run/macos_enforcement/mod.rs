@@ -306,6 +306,8 @@ struct Context {
 }
 
 impl Context {
+    // `MACOS_FILE_DIAGNOSTIC` lines are a protocol the native filesystem tests read, not messages.
+    #[allow(clippy::print_stderr)]
     fn diagnostic(&self, event: &RawEvent, origin: &str, reason: &str) {
         let reported = |bytes: &[u8; 4096]| {
             path(bytes).ok().map(|value| {
@@ -416,9 +418,10 @@ impl Context {
                             &pending.decision,
                         )
                     } else {
-                        EffectiveDecision::enforcement_deny(
+                        EffectiveDecision::refused_check(
                             pending.action,
                             &pending.path,
+                            &pending.decision,
                             "native-filesystem-policy",
                             &refusal,
                         )
@@ -479,7 +482,8 @@ impl Context {
                     },
                     &error.to_string(),
                 );
-                eprintln!(
+                ::diagnostics::diag!(
+                    B0803,
                     "macOS file request denied: event={}, pid={}, supervisor={}, path={:?}: {error}",
                     event.kind,
                     event.pid,
@@ -589,7 +593,8 @@ impl FileMonitor {
         if client.is_null() {
             return Err(startup_error(error));
         }
-        eprintln!(
+        ::diagnostics::diag!(
+            B0804,
             "macOS file enforcement ready: five filesystem authorization events; deadline failures deny"
         );
         Ok(Self {
@@ -672,7 +677,7 @@ impl FileMonitor {
 impl Drop for FileMonitor {
     fn drop(&mut self) {
         if let Err(error) = self.stop() {
-            eprintln!("{error}");
+            ::diagnostics::diag!(error, "{error}");
         }
     }
 }

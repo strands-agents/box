@@ -167,6 +167,58 @@ impl Panel {
         Paragraph::new(lines).render(area, &mut self.buffer);
     }
 
+    /// Put the `box runs history` command for the current view in the bottom border, at the
+    /// right, as a copy target, since the table cuts reasons and keeps only the latest rows. A
+    /// command that does not fit whole is left out.
+    fn history(&mut self, banner: &Banner) {
+        let Some(history) = banner
+            .history
+            .as_ref()
+            .filter(|_| self.buffer.area.height >= 3)
+        else {
+            return;
+        };
+        let command = if banner.activity == ActivityView::AllOperations {
+            history.all.clone()
+        } else {
+            history.denials.clone()
+        };
+        let copied = banner.copied.as_ref().is_some_and(|(copied, at)| {
+            *copied == command && at.elapsed() < Duration::from_secs(2)
+        });
+        let label = if copied { "Copied" } else { "Full list" };
+        let room = usize::from(self.buffer.area.width).saturating_sub(4);
+        let width = display_width(&command);
+        let Some(label) = [format!(" {label}: "), " ".to_string()]
+            .into_iter()
+            .find(|prefix| display_width(prefix) + width < room)
+        else {
+            return;
+        };
+        let text = format!("{label}{command} ");
+        let row = self.buffer.area.height - 2;
+        // Line the label up with the activity table's left edge, which is what it lists, and
+        // move it left only as far as it needs to fit.
+        let table = section_areas(self.buffer.area)[1].x.saturating_sub(1);
+        let start = table.min(self.buffer.area.width - 2 - display_width(&text) as u16);
+        let command_start = start + display_width(&label) as u16;
+        // The same quiet color as the file paths and the table's column names.
+        self.buffer.set_string(
+            start,
+            row,
+            &label,
+            Style::default().fg(if copied { ACCENT } else { MUTED }),
+        );
+        self.buffer.set_string(
+            command_start,
+            row,
+            format!("{command} "),
+            Style::default().fg(MUTED),
+        );
+        self.files
+            .push((Rect::new(command_start, row, width as u16, 1), command));
+    }
+
     pub(super) fn hover(&mut self, position: Option<(usize, u16)>) {
         let Some((column, row)) = position else {
             return;
@@ -234,6 +286,7 @@ impl Banner {
         let [policy, activity] = sections(&mut panel.buffer);
         let entries = self.entries();
         panel.file_paths(self, policy);
+        panel.history(self);
         activity_table(
             &entries,
             self.activity,
@@ -830,5 +883,63 @@ mod tests {
         assert!(rows[3].contains("host-0.example"));
         assert_eq!(rows[3][decision..].split_whitespace().next(), Some("DENY"));
         assert_eq!(rows[3][reason..decision].trim(), "no permit matched");
+    }
+
+    #[test]
+    fn the_full_view_offers_the_history_command_for_its_view_in_the_bottom_border() {
+        let mut banner = sample(1);
+        banner.history = Some(crate::run::banner::HistoryCommands {
+            all: "box runs history b-0123".into(),
+            denials: "box runs history b-0123 --deny".into(),
+        });
+        let border = |panel: &Panel| {
+            text(panel)
+                .lines()
+                .nth(usize::from(BANNER_ROWS) - 2)
+                .unwrap()
+                .to_string()
+        };
+        for (view, command) in [
+            (ActivityView::TopDenials, "box runs history b-0123 --deny"),
+            (
+                ActivityView::LatestDenials,
+                "box runs history b-0123 --deny",
+            ),
+            (ActivityView::AllOperations, "box runs history b-0123"),
+        ] {
+            banner.activity = view;
+            let panel = banner.view(120, false);
+            let row = border(&panel);
+            assert!(row.starts_with('╰') && row.ends_with("─╯"), "{row}");
+            assert!(row.contains(&format!("─ Full list: {command} ─")), "{row}");
+            let table = section_areas(panel.buffer.area)[1].x;
+            let label = row.chars().position(|c| c == 'F').unwrap() as u16;
+            assert_eq!(label, table, "{row}");
+            let (area, _) = panel.files.last().unwrap();
+            assert_eq!(panel.buffer[(area.x, area.y)].fg, MUTED);
+            assert!(panel.buffer[(area.x, area.y)].modifier.is_empty());
+            let (area, target) = panel.files.last().unwrap();
+            assert_eq!(target, command);
+            assert_eq!(area.y, BANNER_ROWS - 2);
+            assert_eq!(usize::from(area.width), command.len());
+            let shown: String = (area.x..area.right())
+                .map(|x| panel.buffer[(x, area.y)].symbol())
+                .collect();
+            assert_eq!(shown, command);
+        }
+
+        banner.activity = ActivityView::TopDenials;
+        banner.copied = Some(("box runs history b-0123 --deny".into(), Instant::now()));
+        assert!(border(&banner.view(120, false)).contains(" Copied: box runs history"));
+        banner.copied = None;
+
+        let narrow = banner.view(36, false);
+        assert!(border(&narrow).contains(" box runs history b-0123 --deny ─╯"));
+        assert!(!border(&narrow).contains("Full list"));
+        let tiny = banner.view(30, false);
+        assert!(!text(&tiny).contains("box runs history"));
+        assert_eq!(tiny.files.len(), 2);
+        assert!(banner.view(120, true).files.is_empty());
+        assert!(!text(&banner.view(120, true)).contains("box runs history"));
     }
 }

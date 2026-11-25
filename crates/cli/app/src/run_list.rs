@@ -148,7 +148,7 @@ fn write_text(output: &mut impl Write, runs: &[SavedRun], profile: Option<&str>)
             "{}\t{}\t{}",
             run.profile.as_deref().unwrap_or("unknown").escape_debug(),
             run.updated
-                .map(|time| time.to_rfc3339_opts(SecondsFormat::AutoSi, true))
+                .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
                 .as_deref()
                 .unwrap_or("unknown"),
             run.id.escape_debug()

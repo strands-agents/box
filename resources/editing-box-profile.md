@@ -247,6 +247,7 @@ when { context.input.host like "*dynamodb*" };
 | `fs:move` | `path`, and `operation`: `rename` |
 | `net:connect` | `host`, `port`, and optional `ip4`, `ip6` |
 | `http:request` | `host`, `port`, `method`, `path` (the URL path), `body_bytes`, `intercepted` |
+| `websocket:connect` | The `http:request` fields without `body_bytes`, for a WebSocket handshake |
 | `shell:exec` | `program`, `command`, `arg_count`, `cwd`, and optional `arg1`, `arg2` |
 | `shell:spawn` | The `shell:exec` fields, `program_path`, and optional `credential_reads` |
 | `mcp:call` | `server`, `method`, and optional `tool`, `prompt`, `uri` |
@@ -273,7 +274,8 @@ is 2. The box decides a program that a tool table declares, such as `npm` from `
 5. To refuse one case of something that is permitted, write a `forbid`. A narrow `permit` does not
    limit a broad one.
 6. A host needs both `net:connect` and `http:request`. A route in `profile.toml` writes both, so
-   prefer a route to hand-written network permits.
+   prefer a route to hand-written network permits. A WebSocket also needs a permit on
+   `websocket:connect`, which a route does not write.
 7. Keep the `shell_commands` and `dev_null` rules of the copied `policy.dw` unless the operator
    asks to change them.
 8. An `fs:*` rule decides only the Shell and Monty. The agent's own file tools, each tool, and
@@ -944,6 +946,7 @@ host source alone does not update an existing ordinary copy.
 | `kind` | `json` or `toml` when selecting or rewriting structured values |
 | `keep` | Array of key paths to retain, such as `[["theme"], ["spinnerVerbs", "mode"]]`; requires `kind` |
 | `sync` | Copy changed host files on every run; cannot combine with `kind`, `keep`, `set`, or `fill` |
+| `exclude` | File or folder names a folder copy leaves out at any depth, such as `["mcp.json"]`, also on each `sync`; one whole name each, matched without regard to case, no `/` and no `*`, `?`, or `[`; needs `sync = true`; cannot combine with `kind`, `keep`, `set`, or `fill`, and refused for a source that is one file |
 | `fill` | Add missing selected values on every run; requires `keep` and `kind = "json"` or `"toml"`, and cannot have `set` |
 
 Active rows cannot have equal or nested targets. A profile row does not replace an inherited

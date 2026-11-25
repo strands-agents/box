@@ -2,6 +2,11 @@
 
 #![warn(missing_docs, unreachable_pub)]
 
+/// The voice of this crate's stderr messages, which `diagnostics::diag!` reads.
+// Only the TLS interception code prints.
+#[cfg(feature = "tls-intercept")]
+const DIAGNOSTIC_SOURCE: diagnostics::Source = diagnostics::Source::StrandsBox;
+
 mod audit;
 mod boundary;
 mod capability;

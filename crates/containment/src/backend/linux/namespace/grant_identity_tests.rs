@@ -1,5 +1,8 @@
 //! Mounted grant identity regressions.
 
+// Forked children report their failure to the harness on the raw handle; these are not box messages.
+#![allow(clippy::disallowed_methods)]
+
 use std::io::{Read as _, Write as _};
 use std::os::fd::AsRawFd as _;
 use std::os::unix::net::{UnixListener, UnixStream};

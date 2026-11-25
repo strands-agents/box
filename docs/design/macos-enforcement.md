@@ -120,6 +120,20 @@ The opt-in top-level [`file-attributes`](../user/config.md#file-attributes) key 
 
 Tests on macOS 27.0.1 with Box revision `08bc940b` produced these results without the setting. The setting uses the broader write rule measured in that investigation. It permits the change of group ownership the investigation found and the other changes listed above. See the [timestamp compatibility investigation](https://github.com/strands-agents/box/issues/89) for follow-up.
 
+### An older OpenMP runtime stops at start
+
+OpenMP's runtime, libomp, records each process that loads it in a small object named `__KMP_REGISTERED_LIB_<pid>`. The macOS profile allows no POSIX shared memory, so whether a program starts depends on the libomp it bundles:
+
+| libomp from | In a box on macOS |
+|---|---|
+| LLVM 12 to 15 | Stops at start with `OMP: Error #179: Function Can't open SHM2 failed:` and `OMP: System error #1: Operation not permitted`. torch 2.6.0 bundles one. |
+| LLVM 16 and 17 | Tries a file in `/tmp` next. Box refuses any grant to write `/tmp`, so the runtime should stop with `Can't open TEMP`. This is read from LLVM's source, not measured. |
+| LLVM 18 and later | Starts. On macOS it skips shared memory and falls back to a file in `/tmp` or an environment variable. torch 2.7.0 bundles LLVM 20's runtime, and torch 2.7 and 2.11 were measured starting in a box. |
+
+Use torch 2.7.0 or later, or build the program against libomp from LLVM 18 or later. Otherwise, run it outside the box. In the [#379](https://github.com/strands-agents/box/issues/379) report, torch 2.6.0 also printed four `Error in cpuinfo: sysctlbyname(...) failed` lines, for `hw.physicalcpu_max`, `hw.logicalcpu_max`, `hw.packages`, and `hw.cacheconfig`. They don't stop it.
+
+Box doesn't allow the object, because Seatbelt can't tie the name to the box's own processes. A rule that matched it would let a workload create, read, overwrite, or delete the object of any process its macOS user runs, including one that hasn't started yet, and the object stays after the box exits. In [#533](https://github.com/strands-agents/box/pull/533), objects planted from a box made later host processes that load torch 2.6 stop with `OMP: Error #15`. The same rule would let two boxes pass data through one object. #379 tracks the old runtime.
+
 ### What the sandbox does not provide
 
 Allowed writes change real files, and the sandbox does not undo them when the program exits. Process restrictions also do not set resource budgets or make an allowed script safe.

@@ -128,6 +128,12 @@ impl Server {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             assert!(validator().is_valid(&body), "{body}");
             for event in events_in(body) {
+                assert_eq!(
+                    request.headers["user-agent"],
+                    format!("box/{}", event["context"]["box_version"].as_str().unwrap()),
+                    "{}",
+                    event["event"]
+                );
                 completed |= event["event"] == "shutdown/1";
                 events.push(event);
             }

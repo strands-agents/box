@@ -263,9 +263,10 @@ impl Drop for Audit<'_> {
             let effective = if self.allowed || !decision.is_allow() {
                 EffectiveDecision::from_policy(action(*operation), resource, decision)
             } else {
-                EffectiveDecision::enforcement_deny(
+                EffectiveDecision::refused_check(
                     action(*operation),
                     resource,
+                    decision,
                     "native-filesystem-policy",
                     &self.reason,
                 )
@@ -333,7 +334,10 @@ pub(super) fn file_request(
     let Some(mut operations) = operations(flags as u64) else {
         static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!("strands-box: native filesystem interception refused unsupported open flags");
+            ::diagnostics::diag!(
+                B0802,
+                "native filesystem interception refused unsupported open flags"
+            );
         }
         audit.refused("unsupported open flags");
         notify::reply(listener, request.id, libc::EACCES)?;

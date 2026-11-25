@@ -5,8 +5,7 @@
 //! shared a 2,572-line file and no types: every field here is a `String`, an `Option<String>`, a
 //! `bool`, or a `Vec<OsString>`, and the domain types are built from them afterwards.
 //!
-//! The verb set is a frozen surface. Read `strands-box --help` for the live list rather than
-//! trusting a comment — the root `AGENTS.md` row for it has been stale twice.
+//! The verb set is a frozen surface. Read `strands-box --help` for the live list.
 
 use std::ffi::OsString;
 use std::path::PathBuf;

@@ -21,7 +21,7 @@ const RESTART: &str = "profile changes need a restart (configuration changed); p
 pub(super) struct ProfilePolicy {
     launcher: Launcher,
     /// What `box run` was given: a profile name, or the path of a profile file.
-    argument: String,
+    pub(super) argument: String,
     /// The folder that holds the profile and its policy files.
     folder: PathBuf,
     /// The folder the watcher watches: the profiles folder, or the profile file's own folder.

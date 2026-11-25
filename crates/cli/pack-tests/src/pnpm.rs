@@ -88,6 +88,13 @@ fn an_npm_global_pnpm_reads_its_program_its_dist_and_its_package_json() {
     } else {
         "/etc/hosts"
     };
+    // A package's .bin shim starts with #!/bin/sh. Box resolves the folder, so /bin is /usr/bin on
+    // a merged-/usr Linux, and keeps the file name.
+    let shell = std::fs::canonicalize("/bin")
+        .expect("/bin")
+        .join("sh")
+        .display()
+        .to_string();
     let package = "brew/lib/node_modules/pnpm";
     for program in ["pnpm.cjs", "pnpm.mjs"] {
         let (read, read_file) = npm_global_pnpm_reads(program);
@@ -103,6 +110,7 @@ fn an_npm_global_pnpm_reads_its_program_its_dist_and_its_package_json() {
         assert_eq!(
             read_file,
             [
+                shell.clone(),
                 format!("{package}/bin/{program}"),
                 format!("{package}/package.json"),
                 hosts.to_string(),
