@@ -309,6 +309,10 @@ interpreters are part of the code the operator must trust.
    event metadata, the host-wide event count, and each volume's history identifier, and that a
    root process can delete any volume's event history. A selected stdio MCP server gets it before
    the agent starts, and again when the server starts.
+   On Linux, `filesystem.receive_mounts` adds a line naming each selected directory and the
+   whole-directory read, write, and execution contract. The line states that future mounts keep
+   the trusted publisher's options. Local servers also get this disclosure before the agent starts
+   and again when the server starts.
 
    On Linux, `interpreter aliases for configured access` lists preserved interpreter spellings
    before the runtime-minimum section. Each line maps a spelling to a file the process's existing

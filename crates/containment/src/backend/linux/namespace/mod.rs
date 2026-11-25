@@ -156,6 +156,11 @@ impl ContainmentBackend for NamespaceBackend {
         confirm_fd: Option<std::os::fd::RawFd>,
         native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
     ) -> Result<(), ContainmentError> {
+        if native_filesystem_handoff.is_some() && !config.receiving_mounts().is_empty() {
+            return Err(unenforceable(
+                "incoming mounts cannot be combined with native filesystem policy checks",
+            ));
+        }
         // Repeat live pathname validation at this backend's last safe point, per the
         // `ContainmentBackend` contract.
         config.require_live_path_identities()?;
@@ -650,6 +655,39 @@ mod tests {
 
     /// The default request shape this backend accepts: every reach mode isolated,
     /// which is also `ContainmentConfig::new`'s default.
+    #[test]
+    fn receiving_mounts_refuse_a_native_filesystem_handoff_before_setup() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().canonicalize().unwrap().join("selected");
+        std::fs::create_dir(&path).unwrap();
+        let directory = std::fs::File::open(&path).unwrap();
+        let config = ContainmentConfig::new()
+            .receive_mounts_from(&path, &directory)
+            .unwrap();
+        let (handoff, _other) = std::os::unix::net::UnixStream::pair().unwrap();
+        // The absent path bounds both calls before any namespace operation, even if the
+        // incompatibility guard regresses. The guarded call must refuse this combination first.
+        std::fs::rename(&path, path.with_file_name("moved")).unwrap();
+        let error = NamespaceBackend::new()
+            .apply(&config, None, None, Some(&handoff))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "incoming mounts cannot be combined with native filesystem policy checks"
+            ),
+            "{error}"
+        );
+        let error = NamespaceBackend::new()
+            .apply(&config, None, None, None)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot inspect approved incoming mount"),
+            "{error}"
+        );
+    }
+
     fn acceptable() -> ContainmentConfig {
         ContainmentConfig::new()
     }

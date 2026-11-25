@@ -32,6 +32,10 @@ impl DirectoryPin {
         )
     }
 
+    pub(super) fn file(&self) -> &File {
+        &self.file
+    }
+
     fn from_file(file: File) -> io::Result<Self> {
         let metadata = file.metadata()?;
         if !metadata.is_dir() {

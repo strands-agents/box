@@ -1107,7 +1107,7 @@ const REMOVED_MCP_FILESYSTEM_EXEC: RemovedKey = RemovedKey {
 /// The unpublished protected-view prototype does not have an active replacement.
 const REMOVED_LINUX_STORAGE_MOUNTS: RemovedKey = RemovedKey {
     key: "[experimental-features] linux-storage-mounts",
-    replacement: "remove this key; incoming mount forwarding is not available in this build",
+    replacement: "remove this key; select incoming mounts with filesystem.receive_mounts on Linux; no experimental feature flag is required",
 };
 
 /// The filesystem lists a leaf table no longer states, per `box.toml` section.
@@ -1875,21 +1875,6 @@ impl ConfigFile {
             agent_ingress(self.agent.as_ref()),
         )?;
         validate_egress(&self.egress, &self.declared_sources()?)?;
-        let contained = mcp::contained_specs(&self.mcp);
-        if self
-            .agent
-            .iter()
-            .chain(self.tool.values())
-            .chain(contained.values().map(|server| &server.spec))
-            .any(|spec| !spec.filesystem.receive_mounts.is_empty())
-        {
-            return Err(ConfigError::Contract {
-                reason:
-                    "cannot start Box with `filesystem.receive_mounts`: incoming mount forwarding \
-                         is not available in this build"
-                        .into(),
-            });
-        }
         Ok(())
     }
 

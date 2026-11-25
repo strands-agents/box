@@ -15,7 +15,8 @@ use crate::record::config::{
 use crate::record::layout::BoxRoot;
 use crate::run::commands::ConfiguredCommands;
 use crate::run::contain::boundary::{
-    Boundary, EgressMode, Launch, RuntimeReach, ShebangInterpreters, Site, file_watching_disclosure,
+    Boundary, EgressMode, Launch, RuntimeReach, ShebangInterpreters, Site,
+    file_watching_disclosure, incoming_mounts_disclosure,
 };
 use crate::run::contain::supervise::Contained;
 use crate::run::hosted::HostedBox;
@@ -547,6 +548,13 @@ async fn hosted(
             B0201,
             "{table} starts on demand; approved direct filesystem grants:{grants}"
         );
+        if !contained.spec.filesystem.receive_mounts.is_empty() {
+            ::diagnostics::diag!(
+                B0201,
+                "{}",
+                incoming_mounts_disclosure(&table, &contained.spec.filesystem.receive_mounts,)
+            );
+        }
         if cfg!(target_os = "macos") && contained.spec.file_watching {
             ::diagnostics::diag!(B0206, "{}", file_watching_disclosure(&table));
         }

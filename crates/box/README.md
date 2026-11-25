@@ -139,17 +139,22 @@ one. A directory entry is recursive, and a file entry is exact. `write` does not
 is the residual: a writable bind reads there, and the startup disclosure says so on that entry's
 line.
 
-In `box.toml`, the separate `filesystem.receive_mounts` array selects paths where the agent, a tool,
-or a local MCP server would receive externally attached filesystems. Each process has its own
-array, and listing a path grants no filesystem access. Linux requires no additional experimental
-setting, but this build still rejects nonempty arrays because incoming mount forwarding is
-unavailable. On Linux, an empty or omitted array leaves ordinary filesystem behavior unchanged.
+On Linux, `filesystem.receive_mounts` in `box.toml` selects directories where the agent, a tool,
+or a local MCP server receives host-mounted filesystems. Each process has its own selection.
+Listing a directory grants no access: the agent needs whole-directory read, write, and execution
+grants; tools and servers need read and write grants under their existing execution rules.
+Box rejects intersecting denied or protected paths and incompatible native filesystem policy.
 
-On macOS, any `receive_mounts` key rejects configuration loading, including an explicit empty
-array. Omit the key on macOS. Both platform refusals happen before Box creates state or starts a
-workload. The removed `[experimental-features] linux-storage-mounts` key is also an error, including
-when `false`. See [incoming mount declarations](../../docs/user/config.md#incoming-mount-declarations)
-for the per-process path checks.
+Each selected directory must already be a dedicated mount point connected to an upstream publisher.
+Box verifies the approved directory identity and prepares the receiving connection before the process
+starts. Linux delivers later mounts directly. Future arrivals keep the trusted publisher's options;
+Box does not add restrictions to them. No experimental feature flag is required.
+
+An empty or omitted selection keeps private mount behavior on Linux. On macOS, any `receive_mounts`
+key rejects configuration loading, including an empty array. The removed
+`[experimental-features] linux-storage-mounts` key is an error at either value. See
+[incoming mount declarations](../../docs/user/config.md#incoming-mount-declarations) for setup
+requirements and the permission contract.
 
 Without experimental native filesystem policy, no `fs:*` decision records these operations, so the box prints each grant
 on stderr when it starts. A grant that would expose the box's own directory is refused, which

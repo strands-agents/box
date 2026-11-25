@@ -161,13 +161,18 @@ impl Receiver {
                 Some("size=8m"),
             )
             .unwrap();
-            let config = fixture.config();
-            let paths = if connected {
-                vec![fixture.selected.clone(), fixture.second.clone()]
-            } else {
-                vec![]
-            };
-            let view = MountView::plan_receiving_mounts(&config, &paths).unwrap();
+            let mut config = fixture.config();
+            if connected {
+                for path in [&fixture.selected, &fixture.second] {
+                    let directory = File::open(path).unwrap();
+                    config = config.receive_mounts_from(path, &directory).unwrap();
+                }
+            }
+            let loaded = ContainmentConfig::from_json(&config.to_json().unwrap()).unwrap();
+            // Loading has replaced every source pin with an identity-checked local handle,
+            // as in the trampoline. Only the loaded configuration reaches the mount planner.
+            drop(config);
+            let view = MountView::plan(&loaded).unwrap();
             let (mut ready_parent, mut ready_child) = UnixStream::pair().unwrap();
             // SAFETY: entering the fresh PID namespace requires this child fork.
             let workload = unsafe { libc::fork() };
@@ -179,7 +184,34 @@ impl Receiver {
                     0
                 );
                 drop(ready_parent);
+                let source_descriptors: Vec<i32> = std::fs::read_dir("/proc/self/fd")
+                    .unwrap()
+                    .filter_map(|entry| {
+                        let entry = entry.unwrap();
+                        let target = std::fs::read_link(entry.path()).ok()?;
+                        (target == fixture.selected || target == fixture.second)
+                            .then(|| entry.file_name().to_str().unwrap().parse().unwrap())
+                    })
+                    .collect();
+                if connected {
+                    assert!(
+                        !source_descriptors.is_empty(),
+                        "the connected plan holds source pins"
+                    );
+                }
                 view.materialize().unwrap();
+                for descriptor in source_descriptors {
+                    // SAFETY: F_GETFD only inspects this descriptor number.
+                    assert_eq!(
+                        unsafe { libc::fcntl(descriptor, libc::F_GETFD) },
+                        -1,
+                        "source descriptor {descriptor} survived completed setup"
+                    );
+                    assert_eq!(
+                        std::io::Error::last_os_error().raw_os_error(),
+                        Some(libc::EBADF)
+                    );
+                }
                 let reverse = fixture.selected.join("reverse");
                 mount_syscall(
                     Some(Path::new("tmpfs")),
@@ -514,6 +546,58 @@ fn missing_mount_authority_refuses_setup() {
             error.to_string().contains("Operation not permitted"),
             "{error}"
         );
+    });
+}
+
+#[test]
+fn configured_sources_use_approved_identity_under_a_covering_parent_grant() {
+    isolated(|| {
+        let mut fixture = Fixture::new();
+        fixture.grant_parent = true;
+        let directory = File::open(&fixture.selected).unwrap();
+        let config = fixture
+            .config()
+            .receive_mounts_from(&fixture.selected, &directory)
+            .unwrap();
+        let restored = ContainmentConfig::from_json(&config.to_json().unwrap()).unwrap();
+        let view = MountView::plan(&restored).unwrap();
+        assert_eq!(view.incoming_mounts, vec![fixture.selected.clone()]);
+        assert_eq!(
+            view.grant_identities[&fixture.selected],
+            ObjectIdentity::from_metadata(&directory.metadata().unwrap())
+        );
+        assert!(
+            restored
+                .authorizations()
+                .iter()
+                .all(|grant| grant.resolved != fixture.selected)
+        );
+        // A still-connected replacement under the same permitted parent cannot replace the
+        // object Core approved. The parent grant's own identity remains unchanged.
+        mount_syscall(
+            Some(&fixture.payload),
+            &fixture.selected,
+            None,
+            libc::MS_BIND,
+            None,
+        )
+        .unwrap();
+        mount_syscall(None, &fixture.selected, None, libc::MS_PRIVATE, None).unwrap();
+        mount_syscall(None, &fixture.selected, None, libc::MS_SHARED, None).unwrap();
+        let current = File::open(&fixture.selected).unwrap();
+        require_connection(&current, false, &fixture.selected).unwrap();
+        let error = MountView::plan(&restored).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("changed after its directory was approved"),
+            "{error}"
+        );
+        let replacement = fixture
+            .config()
+            .receive_mounts_from(&fixture.selected, &current)
+            .unwrap();
+        MountView::plan(&replacement).unwrap();
     });
 }
 

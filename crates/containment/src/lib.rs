@@ -11,6 +11,7 @@ mod grants;
 mod model;
 mod os_paths;
 mod platform;
+mod receiving;
 
 #[cfg(any(test, feature = "test-support"))]
 /// Test doubles (gated by the `test-support` cargo feature). Exposes

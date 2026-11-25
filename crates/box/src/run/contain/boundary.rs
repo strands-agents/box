@@ -86,14 +86,28 @@ impl ApprovedReach {
         // The tables that the early check of a secret source program judges, so no table reaches
         // one judgement and not the other.
         let judged = stored.process_tables();
-        let tables = judged
-            .tables
-            .iter()
-            .map(|(table, spec)| {
+        // Keep the process role separate from the table spelling used in diagnostics.
+        let specs =
+            stored
+                .agent
+                .iter()
+                .map(|spec| ("[agent]".to_string(), spec, RuntimeReach::Agent))
+                .chain(
+                    stored
+                        .tool
+                        .iter()
+                        .map(|(name, spec)| (format!("[tool.{name}]"), spec, RuntimeReach::Leaf)),
+                )
+                .chain(stored.contained_mcp.iter().map(|(name, server)| {
+                    (format!("[mcp.{name}]"), &server.spec, RuntimeReach::Leaf)
+                }));
+        let tables = specs
+            .map(|(table, spec, role)| {
+                let table = &table;
                 let mut reach = judge_lists(spec, table, &judged, protected_sources)?;
                 commands.validate_reach(table, &reach)?;
                 installation.validate_reach(table, &reach)?;
-                super::mounts::prepare(spec, table, stored, &reach, protected_sources)?;
+                super::mounts::prepare(spec, table, role, stored, &reach, protected_sources)?;
                 reach.installation = Some(std::sync::Arc::clone(&installation));
                 reach.command = commands.get(table).cloned();
                 Ok((table.clone(), reach))
@@ -289,7 +303,7 @@ pub(crate) enum ShebangInterpreters {
 /// The translated boundary for one process.
 pub(crate) struct Boundary {
     installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
-    /// Startup-checked sources, held until the boundary is dropped; forwarding remains disabled.
+    /// Approved sources, held through launch so serialized identities cannot be reused.
     _receiving_mounts: Vec<super::mounts::ApprovedMount>,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
@@ -525,8 +539,17 @@ impl Boundary {
             None => std::sync::Arc::new(crate::run::installation::TrustedInstallation::load()?),
         };
         installation.validate_reach(table, reach)?;
-        let receiving_mounts =
-            super::mounts::prepare(spec, table, stored, reach, site.protected_sources)?;
+        let receiving_mounts = super::mounts::prepare(
+            spec,
+            table,
+            launch.runtime_reach,
+            stored,
+            reach,
+            site.protected_sources,
+        )?;
+        for source in &receiving_mounts {
+            containment = source.forward_into(containment)?;
+        }
         let exec_trees: Vec<&Path> = reach
             .grants
             .iter()
@@ -838,6 +861,7 @@ impl Boundary {
             table,
             grants: &reach.grants,
             write_protections: &reach.write_protections,
+            receiving_mounts: &receiving_mounts,
             minimum: &minimum,
             interpreters: &interpreters,
             interpreter_aliases: &interpreter_aliases,
@@ -1014,6 +1038,7 @@ struct DisclosureInputs<'a> {
     table: &'a str,
     grants: &'a [DirectGrant],
     write_protections: &'a [PathBuf],
+    receiving_mounts: &'a [super::mounts::ApprovedMount],
     minimum: &'a [MinimumCell],
     interpreters: &'a [PathBuf],
     interpreter_aliases: &'a [(PathBuf, PathBuf)],
@@ -1039,6 +1064,18 @@ pub(crate) fn file_watching_disclosure(table: &str) -> String {
          as the host-wide event count and each volume's history identifier; file-content and \
          write restrictions still apply, except that a root process can delete any volume's \
          event history"
+    )
+}
+
+/// The selected sources and the whole-directory contract, including on-demand servers.
+pub(crate) fn incoming_mounts_disclosure(table: &str, paths: &[PathBuf]) -> String {
+    let paths = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{table} incoming mounts: {paths}; this process permits read, write, and execution throughout each selected directory. New mounts keep the trusted publisher's options; Box does not add restrictions to them"
     )
 }
 
@@ -1078,6 +1115,14 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> Vec<DisclosureMessage> {
         ));
     }
     messages.push((grant, lines.join("\n")));
+    if !inputs.receiving_mounts.is_empty() {
+        let paths: Vec<_> = inputs
+            .receiving_mounts
+            .iter()
+            .map(|source| source.resolved_path().to_path_buf())
+            .collect();
+        messages.push((grant, incoming_mounts_disclosure(table, &paths)));
+    }
     if !inputs.interpreter_aliases.is_empty() {
         let mut lines = vec![format!(
             "{table} interpreter aliases for configured access:"

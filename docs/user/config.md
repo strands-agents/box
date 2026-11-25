@@ -687,29 +687,52 @@ This includes directories that inherited their group bit: GNU `chmod g+w` and ev
 
 ### Incoming mount declarations
 
-In `box.toml`, the optional `receive_mounts` array in `[agent.filesystem]`,
-`[tool.<name>.filesystem]`, or a local `[mcp.<name>.filesystem]` selects paths where that sandbox
-would receive externally attached filesystems after startup. It does not tell Box to create or
-attach a filesystem. Omitting the array selects no paths. Each process has its own array; tools
-and local servers do not inherit the agent's entries. Listing a path grants no read, write, or
-execution access.
+On Linux, `receive_mounts` in `[agent.filesystem]`, `[tool.<name>.filesystem]`, or a local
+`[mcp.<name>.filesystem]` selects directories where that process receives filesystems attached
+by the surrounding host. Box establishes each connection before the process starts. Later mounts
+arrive through Linux mount propagation; Box does not poll for them or run a background mount helper.
+This setting does not create storage, start a filesystem service, or wait for remote files to download.
 
-**Incoming mount forwarding is unavailable in this build.** Linux requires no additional
-experimental setting, but a nonempty array still rejects configuration loading until forwarding
-is implemented. On Linux, an empty or omitted array leaves ordinary filesystem behavior unchanged.
+Each process selects its own directories. Tools and local servers do not inherit the agent's
+entries. An empty or omitted array keeps ordinary, private mount behavior. Linux requires no
+experimental feature flag. On macOS, any `receive_mounts` key rejects configuration loading,
+including `receive_mounts = []`; omit the key to start Box.
 
-On macOS, the presence of `receive_mounts` rejects configuration loading, including
-`receive_mounts = []`. Omit the key on macOS. Both platform refusals happen before Box creates its
-state directory or starts a workload.
+Listing a directory grants no access. The agent must separately grant the whole directory read,
+write, and execution access. Tools and local servers need whole-directory read and write grants;
+their existing execution rules already permit code in those grants. A covering parent grant works;
+child and exact-file grants do not. For an existing connected mount at `/mnt/data`, add:
 
-The declaration checks require absolute, literal paths other than `/`. Entries cannot be
-home-relative, such as `~/data`, or contain patterns, control characters, or `..`. Within one
-process's array, paths cannot repeat or contain
-one another: `/mnt/data` and `/mnt/data/child` conflict, while `/mnt/data` and `/mnt/database` do not.
-Different processes may name the same path.
-A nonempty array also conflicts with enabled
-[native filesystem policy checks](native-filesystem-policy.md) for the same process.
-These checks do not validate a future filesystem's contents or establish that storage is available.
+```toml
+[agent.filesystem]
+read = ["/mnt/data"]
+write = ["/mnt/data"]
+exec = ["/mnt/data"]
+receive_mounts = ["/mnt/data"]
+```
+
+The process still needs the grants required by its application and runtime. Before launch, each
+selected directory must exist as a dedicated mount point with an upstream propagation connection.
+A shared parent alone does not satisfy Box's check. The trusted host or storage provider prepares
+this mount connection; Box prepares the receiving side inside the sandbox. Box refuses process
+startup if the connection or approved directory identity cannot be verified.
+
+**Select a directory only when the process may read, write, and execute throughout it.** Box rejects
+selections that intersect `deny`, `deny_write`, its state directory, or loaded configuration and
+policy sources. Existing command and installed-program protections still apply. These checks also
+reject restrictions on absent descendants that later mounts could introduce. A nonempty selection
+cannot be combined with [native filesystem policy checks](native-filesystem-policy.md).
+
+Existing source read-only and execution restrictions remain effective. Future mounts keep the
+trusted publisher's options and contents. Box does not add read-only, `noexec`, `nosuid`, or `nodev`
+options to those arrivals. These options respectively block writes, executable mappings, privilege
+gains through executable attributes, and device-node use. Keep publishing under trusted control.
+Box prints the selected paths and this whole-directory permission contract at startup, including
+local servers that start on demand.
+
+Paths must be absolute and literal, other than `/`. They cannot be home-relative, contain patterns,
+control characters, or `..`. Within one process, selections cannot repeat or contain one another:
+`/mnt/data` and `/mnt/data/child` conflict. Different processes may select the same directory.
 
 ### Direct access by operating system
 
@@ -1577,8 +1600,9 @@ An invalid `limits.shell.timeout`, `limits.shell.max_input`, `limits.shell.max_o
 
 [Incoming mount declarations](#incoming-mount-declarations) also fail before Box creates state:
 invalid or overlapping `receive_mounts` paths, or a nonempty array combined with native filesystem
-policy for that process. This build rejects nonempty arrays on Linux because forwarding is
-unavailable. On macOS, any `receive_mounts` key is rejected, including `receive_mounts = []`.
+policy for that process. On macOS, any `receive_mounts` key is rejected, including
+`receive_mounts = []`. Directory identity, permissions, and mount connections are checked later,
+before the selected process runs; those failures do not promise that Box state remains uncreated.
 The removed `[experimental-features] linux-storage-mounts` key is an error regardless of its value.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal

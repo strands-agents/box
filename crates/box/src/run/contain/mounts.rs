@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use containment::{Operation, Scope};
+use containment::{ContainmentConfig, Operation, Scope};
+
+use super::boundary::RuntimeReach;
 
 use crate::error::ConfigError;
 use crate::record::config::filesystem::DirectReach;
@@ -24,6 +26,14 @@ impl ApprovedMount {
         &self.resolved
     }
 
+    /// Hand the checked object to containment without authorizing any additional access.
+    pub(super) fn forward_into(
+        &self,
+        config: ContainmentConfig,
+    ) -> Result<ContainmentConfig, containment::ContainmentError> {
+        config.receive_mounts_from(&self.resolved, self.directory.file())
+    }
+
     fn intersects(&self, authored: &Path, protected: &Path) -> std::io::Result<bool> {
         let resolved = crate::record::layout::resolved_to_its_deepest_existing_ancestor(protected);
         // Path restrictions also describe absent descendants that a future mount could introduce.
@@ -39,10 +49,11 @@ impl ApprovedMount {
     }
 }
 
-/// Approve whole-directory permissions without enabling or handing a source to the mount backend.
+/// Approve whole-directory permissions and retain each selected source for the mount backend.
 pub(super) fn prepare(
     spec: &ProcessSpec,
     table: &str,
+    runtime_reach: RuntimeReach,
     stored: &Record,
     reach: &DirectReach,
     protected_sources: &[AuthoritySource],
@@ -132,10 +143,9 @@ pub(super) fn prepare(
                 )));
             }
         }
-        let required: &[Operation] = if table == "[agent]" {
-            &[Operation::Read, Operation::Write, Operation::Exec]
-        } else {
-            &[Operation::Read, Operation::Write]
+        let required: &[Operation] = match runtime_reach {
+            RuntimeReach::Agent => &[Operation::Read, Operation::Write, Operation::Exec],
+            RuntimeReach::Leaf => &[Operation::Read, Operation::Write],
         };
         for operation in required {
             let mut covered = false;
@@ -244,7 +254,12 @@ mod tests {
             table: &str,
         ) -> Result<Vec<ApprovedMount>, ConfigError> {
             let reach = self.reach(spec, table)?;
-            prepare(spec, table, &self.record, &reach, &[])
+            let role = if table == "[agent]" {
+                RuntimeReach::Agent
+            } else {
+                RuntimeReach::Leaf
+            };
+            prepare(spec, table, role, &self.record, &reach, &[])
         }
     }
 
@@ -497,10 +512,17 @@ mod tests {
         ] {
             spec.filesystem.receive_mounts = vec![selected.clone()];
             assert!(
-                prepare(&spec, "[agent]", &fixture.record, &reach, &[])
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Box's own directory")
+                prepare(
+                    &spec,
+                    "[agent]",
+                    RuntimeReach::Agent,
+                    &fixture.record,
+                    &reach,
+                    &[]
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("Box's own directory")
             );
         }
         spec.filesystem.receive_mounts = vec![fixture.data.clone()];
@@ -508,15 +530,29 @@ mod tests {
         std::fs::write(&policy, "permit(principal, action, resource);").unwrap();
         let (source, _) = AuthoritySource::read(&policy, "policy").unwrap();
         assert!(
-            prepare(&spec, "[agent]", &fixture.record, &reach, &[source])
-                .unwrap_err()
-                .to_string()
-                .contains("protected authority source")
+            prepare(
+                &spec,
+                "[agent]",
+                RuntimeReach::Agent,
+                &fixture.record,
+                &reach,
+                &[source]
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("protected authority source")
         );
         assert_eq!(
-            prepare(&spec, "[agent]", &fixture.record, &reach, &[])
-                .unwrap()
-                .len(),
+            prepare(
+                &spec,
+                "[agent]",
+                RuntimeReach::Agent,
+                &fixture.record,
+                &reach,
+                &[]
+            )
+            .unwrap()
+            .len(),
             1
         );
     }
@@ -556,6 +592,52 @@ mod tests {
         }
     }
 
+    /// Permission requirements follow the launch role, independently of diagnostic table text.
+    #[test]
+    fn launch_role_determines_required_permissions() {
+        let fixture = Fixture::new();
+        let spec = fixture.spec(false);
+        let reach = fixture.reach(&spec, "[tool.reader]").unwrap();
+        assert!(
+            prepare(
+                &spec,
+                "[agent]",
+                RuntimeReach::Leaf,
+                &fixture.record,
+                &reach,
+                &[]
+            )
+            .is_ok()
+        );
+        let error = prepare(
+            &spec,
+            "[tool.reader]",
+            RuntimeReach::Agent,
+            &fixture.record,
+            &reach,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("`exec` grant covering the whole directory"),
+            "{error}"
+        );
+    }
+
+    /// Only the object approved by Core can cross the configuration handoff.
+    #[test]
+    fn handoff_refuses_a_replaced_approved_directory() {
+        let fixture = Fixture::new();
+        let spec = fixture.spec(true);
+        let approved = fixture.prepare(&spec, "[agent]").unwrap();
+        approved[0].forward_into(ContainmentConfig::new()).unwrap();
+        std::fs::rename(&fixture.data, fixture.root.join("original-data")).unwrap();
+        std::fs::create_dir(&fixture.data).unwrap();
+        assert!(approved[0].forward_into(ContainmentConfig::new()).is_err());
+    }
+
     /// With no selected directories, the ordinary grant compiler and compatibility check are unchanged.
     #[test]
     fn empty_selection_preserves_ordinary_grants_and_native_policy() {
@@ -570,9 +652,16 @@ mod tests {
             .native_filesystem_policy = true;
         let before = fixture.reach(&spec, "[agent]").unwrap();
         assert!(
-            prepare(&spec, "[agent]", &fixture.record, &before, &[])
-                .unwrap()
-                .is_empty()
+            prepare(
+                &spec,
+                "[agent]",
+                RuntimeReach::Agent,
+                &fixture.record,
+                &before,
+                &[]
+            )
+            .unwrap()
+            .is_empty()
         );
         let after = fixture.reach(&spec, "[agent]").unwrap();
         assert_eq!(before.grants, after.grants);
