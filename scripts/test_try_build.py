@@ -158,7 +158,7 @@ class TryBuildTests(unittest.TestCase):
 
     def test_the_command_form_gets_the_build_and_box_home(self):
         result = self.run_script(
-            "main", "--", "sh", "-c", 'command -v box; echo "$BOX_HOME"; box'
+            "main", "--", "sh", "-c", 'command -v box; printf "%s\\n" "$BOX_HOME"; box'
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
@@ -168,7 +168,7 @@ class TryBuildTests(unittest.TestCase):
 
     def test_the_shell_form_starts_the_shell_with_the_build_and_box_home(self):
         shell = self.stubs / "fake-shell"
-        self.write(shell, '#!/bin/sh\ncommand -v box\necho "$BOX_HOME"\n')
+        self.write(shell, '#!/bin/sh\ncommand -v box\nprintf "%s\\n" "$BOX_HOME"\n')
         result = self.run_script("329", shell=str(shell))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
@@ -178,11 +178,11 @@ class TryBuildTests(unittest.TestCase):
         self.assertIn("use --env", result.stderr)
 
     def test_a_new_commit_gets_a_new_empty_box_home(self):
-        first = self.run_script("329", "--", "sh", "-c", 'touch "$BOX_HOME/profile"; echo "$BOX_HOME"')
+        first = self.run_script("329", "--", "sh", "-c", 'touch "$BOX_HOME/profile"; printf "%s\\n" "$BOX_HOME"')
         self.assertEqual(first.returncode, 0, first.stderr)
         other = "f" * 40
         second = self.run_script(
-            "329", "--", "sh", "-c", 'ls -A "$BOX_HOME"; echo "$BOX_HOME"', env={"TRY_SHA": other}
+            "329", "--", "sh", "-c", 'ls -A "$BOX_HOME"; printf "%s\\n" "$BOX_HOME"', env={"TRY_SHA": other}
         )
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(first.stdout, f"{self.box_home()}\n")
@@ -198,7 +198,7 @@ class TryBuildTests(unittest.TestCase):
             eval "$({SCRIPT} 329 --env)"
             touch "$BOX_HOME/profile"
             TRY_SHA={other} eval "$(TRY_SHA={other} {SCRIPT} 329 --env)"
-            echo "$BOX_HOME"; ls -A "$BOX_HOME"
+            printf "%s\\n" "$BOX_HOME"; ls -A "$BOX_HOME"
             """
         )
         result = self.run_script(command=["bash", "-c", script])
@@ -242,7 +242,7 @@ class TryBuildTests(unittest.TestCase):
     def test_an_operator_box_home_wins(self):
         own = self.root / "own"
         result = self.run_script(
-            "329", "--", "sh", "-c", 'echo "$BOX_HOME"', env={"BOX_HOME": str(own)}
+            "329", "--", "sh", "-c", 'printf "%s\\n" "$BOX_HOME"', env={"BOX_HOME": str(own)}
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, f"{own}\n")
@@ -251,7 +251,7 @@ class TryBuildTests(unittest.TestCase):
     def test_a_box_home_that_an_older_script_set_is_replaced(self):
         old = self.cached / "home"
         result = self.run_script(
-            "329", "--", "sh", "-c", 'echo "$BOX_HOME"', env={"BOX_HOME": str(old)}
+            "329", "--", "sh", "-c", 'printf "%s\\n" "$BOX_HOME"', env={"BOX_HOME": str(old)}
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, f"{self.box_home()}\n")
@@ -280,7 +280,7 @@ class TryBuildTests(unittest.TestCase):
         tmpdir = f"{self.root}/var/folders/8l/48m77r0d1vzbb140_nz4mks40000gn/T"
         os.makedirs(tmpdir)
         result = self.run_script(
-            "329", "--", "sh", "-c", 'echo "$BOX_HOME"', env={"TMPDIR": f"{tmpdir}/"}
+            "329", "--", "sh", "-c", 'printf "%s\\n" "$BOX_HOME"', env={"TMPDIR": f"{tmpdir}/"}
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         box_home = result.stdout.strip()
