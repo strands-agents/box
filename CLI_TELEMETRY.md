@@ -8,9 +8,8 @@ or turn it off through environment variables.
 ## How it works
 
 - Only `box run` sends events.
-- By default, each run sends three kinds of event to `https://telemetry.strandsagents.com/box/ping`:
+- Each run sends three kinds of event to `https://telemetry.strandsagents.com/box/ping`:
   a start event, a count of policy decisions about once a minute, and an end event.
-  A [developer endpoint override](docs/cli/cli.md#environment-variables) sends them to a local receiver instead.
 - `box` sends them from your machine, outside the box, so your profile's network policy does not
   apply to them.
 - If sending fails, your command continues without a telemetry error. At the end of a run,
