@@ -75,7 +75,9 @@ impl Internal {
             Self::Supervise(error) => match error {
                 SuperviseError::Spawn { .. } | SuperviseError::Native { .. } => Code::B0108.into(),
                 SuperviseError::NativeDuringRun { .. } => Code::B1003.into(),
-                SuperviseError::Callback { .. } => Code::B0112.into(),
+                SuperviseError::Callback { .. } | SuperviseError::NativeSelectionChanged => {
+                    Code::B0112.into()
+                }
                 SuperviseError::Ingress { .. } => Code::B0704.into(),
                 SuperviseError::AlsoShutdown { outcome, .. } => outcome.code(),
                 SuperviseError::NoProcessId
@@ -776,6 +778,16 @@ pub(crate) enum SuperviseError {
     #[error("workload process control failed: on_ready callback failed: {source}")]
     Callback { source: std::io::Error },
 
+    /// Native policy was enabled after preparation for the caller's callback.
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "native-filesystem-policy")),
+        allow(dead_code)
+    )]
+    #[error(
+        "workload process control failed: native filesystem selection changed after capability preparation; restart with native filesystem policy already enabled"
+    )]
+    NativeSelectionChanged,
+
     /// An `[[agent.ingress]]` listener could not be bound or relayed.
     #[error("workload process control failed: {reason}")]
     Ingress { reason: String },
@@ -923,7 +935,7 @@ mod tests {
     #[test]
     fn refusals_name_their_code() {
         use ::diagnostics::{Code, Kind, Severity};
-        let cases: [(BoxError, Kind); 23] = [
+        let cases: [(BoxError, Kind); 25] = [
             (
                 SuperviseError::NativeDuringRun {
                     reason: "native request deadline exceeded".into(),
@@ -945,6 +957,17 @@ mod tests {
                 }
                 .into(),
                 Code::B0112.into(),
+            ),
+            (
+                SuperviseError::NativeSelectionChanged.into(),
+                Code::B0112.into(),
+            ),
+            (
+                SuperviseError::Native {
+                    reason: "native filesystem selection changed after capability preparation; restart with native filesystem policy already enabled".into(),
+                }
+                .into(),
+                Code::B0108.into(),
             ),
             (
                 SuperviseError::Ingress {

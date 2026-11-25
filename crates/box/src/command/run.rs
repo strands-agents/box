@@ -82,7 +82,33 @@ fn write_credential_stores(
 #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
 pub(crate) struct NativeSetup {
     contract: Option<RunContract>,
+    prepared_native: bool,
     guard: std::io::Result<Option<Arc<crate::run::native_enforcement::EntryGuard>>>,
+}
+
+#[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+impl NativeSetup {
+    fn guard_for(
+        self,
+        selected: bool,
+    ) -> Result<Option<Arc<crate::run::native_enforcement::EntryGuard>>, BoxError> {
+        if !selected {
+            return Ok(None);
+        }
+        if !self.prepared_native {
+            return Err(crate::error::SuperviseError::NativeSelectionChanged.into());
+        }
+        Ok(Some(
+            self.guard
+                .map_err(|source| crate::error::SuperviseError::Native {
+                    reason: format!("native filesystem setup failed: {source}"),
+                })?
+                .ok_or_else(|| crate::error::SuperviseError::Native {
+                    reason: "native filesystem interception requires CAP_BPF and CAP_PERFMON"
+                        .to_string(),
+                })?,
+        ))
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
@@ -92,9 +118,12 @@ pub(super) fn prepare_native(config: &Path, has_callback: bool) -> Result<Native
     } else {
         Some(read_contract(config)?)
     };
-    let enabled = contract
-        .as_ref()
-        .is_none_or(RunContract::uses_native_filesystem);
+    // A callback may create or repair the configuration. Keep errors deferred until it runs,
+    // and read the authoritative contract afterward. A known opt-out needs no BPF programs.
+    let enabled = match &contract {
+        Some(contract) => contract.uses_native_filesystem(),
+        None => RunContract::native_selection(config).unwrap_or(true),
+    };
     let guard = crate::run::native_enforcement::EntryGuard::prepare(enabled);
     if guard.is_err() {
         crate::run::native_enforcement::EntryGuard::prepare(false).map_err(|source| {
@@ -103,7 +132,11 @@ pub(super) fn prepare_native(config: &Path, has_callback: bool) -> Result<Native
             }
         })?;
     }
-    Ok(NativeSetup { contract, guard })
+    Ok(NativeSetup {
+        contract,
+        prepared_native: enabled,
+        guard,
+    })
 }
 
 /// The program that each `[tool]` grammar in `record` decides.
@@ -305,26 +338,12 @@ pub(crate) async fn execute(
 ) -> Result<ExitCode, BoxError> {
     #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     let ((locked, secrets), entry_guard) = {
-        let NativeSetup { contract, guard } = native_setup;
-        let contract = match contract {
+        let mut native_setup = native_setup;
+        let contract = match native_setup.contract.take() {
             Some(contract) => contract,
             None => read_contract(config)?,
         };
-        let guard = if contract.uses_native_filesystem() {
-            Some(
-                guard
-                    .map_err(|source| crate::error::SuperviseError::Native {
-                        reason: format!("native filesystem setup failed: {source}"),
-                    })?
-                    .ok_or_else(|| crate::error::SuperviseError::Native {
-                        reason: "native filesystem interception requires CAP_BPF and CAP_PERFMON"
-                            .to_string(),
-                    })?,
-            )
-        } else {
-            drop(guard);
-            None
-        };
+        let guard = native_setup.guard_for(contract.uses_native_filesystem())?;
         (prepare_contract(contract, config, argv, box_id)?, guard)
     };
     #[cfg(not(all(target_os = "linux", feature = "native-filesystem-policy")))]
@@ -1128,5 +1147,139 @@ mod tests {
             String::from_utf8(output).expect("the announcement is UTF-8"),
             "strands-box: note[B0202]: [tool.aws-suite]: exposes ~/.aws/\\u{1b}[2J\\u{202e} (read)\n"
         );
+    }
+
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+    mod native_setup {
+        use super::*;
+
+        #[test]
+        fn existing_callback_opt_out_skips_native_preparation() {
+            for selection in [
+                "",
+                "[experimental-features]\nnative-filesystem-policy = false\n",
+            ] {
+                let root = tempfile::tempdir().expect("configuration directory");
+                let state = root.path().join("state");
+                let config = root.path().join("box.toml");
+                let quote = |path: &Path| toml::Value::String(path.display().to_string());
+                std::fs::write(
+                    &config,
+                    format!(
+                        "name = \"native-opt-out\"\nbox_dir = {}\n{selection}",
+                        quote(&state)
+                    ),
+                )
+                .expect("write the opted-out configuration");
+
+                let setup = prepare_native(&config, true).expect("prepare the callback run");
+
+                assert!(
+                    !setup.prepared_native,
+                    "an existing opt-out must not request native guard preparation"
+                );
+                assert!(
+                    setup.contract.is_none(),
+                    "the callback still precedes the contract read"
+                );
+                assert!(
+                    matches!(setup.guard, Ok(None)),
+                    "no guard is loaded for an opt-out"
+                );
+                assert!(!state.exists(), "selection inspection creates no Box state");
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        #[tokio::test]
+        async fn execute_refuses_callback_enabling_native_after_preparation() {
+            let root = tempfile::tempdir_in("/var/tmp").expect("configuration directory");
+            let config = root.path().join("box.toml");
+            let quote = |path: &Path| toml::Value::String(path.display().to_string());
+            let configuration = |enabled: bool| {
+                format!(
+                    "name = \"late-native\"\nbox_dir = {}\n\
+                     [experimental-features]\nnative-filesystem-policy = {enabled}\n\
+                     [agent]\ncommand = [\"/usr/bin/true\"]\nworkspace = {}\n",
+                    quote(&root.path().join("state")),
+                    quote(root.path()),
+                )
+            };
+            std::fs::write(&config, configuration(false)).expect("write the initial configuration");
+            let setup = prepare_native(&config, true).expect("prepare before the callback");
+            std::fs::write(&config, configuration(true))
+                .expect("the callback enables native policy");
+
+            let error = execute(&config, &[], None, None, None, None, setup)
+                .await
+                .expect_err("late native selection refuses before preparing the workload");
+            assert_eq!(error.code(), ::diagnostics::Code::B0112.into());
+            assert_eq!(
+                error.to_string(),
+                "workload process control failed: native filesystem selection changed after capability preparation; restart with native filesystem policy already enabled",
+                "execution must check the callback's final native selection"
+            );
+        }
+
+        #[test]
+        fn native_guard_setup_failure_keeps_host_diagnostic() {
+            let setup = NativeSetup {
+                contract: None,
+                prepared_native: true,
+                guard: Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "loader denied",
+                )),
+            };
+            let error = setup
+                .guard_for(true)
+                .err()
+                .expect("a native loader failure refuses startup");
+            assert_eq!(error.code(), ::diagnostics::Code::B0108.into());
+            assert_eq!(
+                error.to_string(),
+                "workload process control failed: native filesystem setup failed: loader denied"
+            );
+        }
+
+        #[test]
+        fn native_selection_requires_prior_preparation() {
+            for prepared_native in [false, true] {
+                for selected in [false, true] {
+                    let setup = NativeSetup {
+                        contract: None,
+                        prepared_native,
+                        guard: Ok(None),
+                    };
+                    let result = setup.guard_for(selected);
+                    if !selected {
+                        assert!(
+                            matches!(result, Ok(None)),
+                            "an opt-out needs no native guard"
+                        );
+                    } else {
+                        let error = result
+                            .err()
+                            .expect("native selection without a guard refuses");
+                        let expected_code = if prepared_native {
+                            ::diagnostics::Code::B0108
+                        } else {
+                            ::diagnostics::Code::B0112
+                        };
+                        assert_eq!(error.code(), expected_code.into());
+                        let expected = if prepared_native {
+                            "native filesystem interception requires CAP_BPF and CAP_PERFMON"
+                        } else {
+                            "native filesystem selection changed after capability preparation; restart with native filesystem policy already enabled"
+                        };
+                        assert_eq!(
+                            error.to_string(),
+                            format!("workload process control failed: {expected}"),
+                            "distinguish late activation from missing loader capabilities"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

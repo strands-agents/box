@@ -129,7 +129,7 @@ Each of these stops the box, almost always before the workload starts. `strands-
 | `B0109` | error | A declared MCP server could not be prepared, so the box did not start. | Read the step that the text names. See [MCP errors and exit codes](mcp.md#errors-and-exit-codes). |
 | `B0110` | error | The egress gateway or its relay failed, so the box did not start or stopped. | Report it as a bug with the full stderr of the run. |
 | `B0111` | error | The socket the box's interpreters reach could not be served. | Report it as a bug with the full stderr of the run. |
-| `B0112` | error | The library caller's `on_ready` callback returned an error, so the box did not start its workload. | Read the callback's error in the text; it comes from the program that runs the box, not from Box. |
+| `B0112` | error | The library caller's `on_ready` callback returned an error or changed native filesystem policy from off to on after startup preparation, so the box did not start its workload. | For a callback error, read its message from the calling program. For late activation, restart that program with [native filesystem policy](native-filesystem-policy.md) already enabled in the Box configuration. |
 | `B0113` | error | A secret source program failed to read a secret, so the box did not start. | Sign in to the vault or correct the reference, then run the box again. The line names the entry and the program's own error. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |
 
 <a id="b02"></a>

@@ -403,6 +403,13 @@ pub(crate) struct RunContract {
 }
 
 impl RunContract {
+    /// Inspect feature selection without creating Box state or accepting a run contract.
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+    pub(crate) fn native_selection(path: &Path) -> Result<bool, BoxError> {
+        let (source, text) = AuthoritySource::read(path, "configuration")?;
+        Ok(ConfigFile::parse(&text, source.path())?.uses_native_filesystem())
+    }
+
     /// Read the selected configuration and settle the agent's workspace against `invocation`.
     pub(crate) fn read(path: &Path, invocation: &Path) -> Result<Self, BoxError> {
         let (source, text) = AuthoritySource::read(path, "configuration")?;

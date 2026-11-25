@@ -266,6 +266,9 @@ interpreters are part of the code the operator must trust.
 1. It [hardens the trusted process](decisions.md#the-trusted-processs-memory-is-a-defended-asset)
    against memory access by other processes running as the same user. This adds protection but
    does not guarantee it. Root can bypass it.
+   On Linux, it prepares selected native filesystem checks and drops loader capabilities before creating runtime threads.
+   For library runs with an `on_ready` callback, an advisory configuration read can skip unused checks;
+   [the authoritative read still follows the callback](../user/native-filesystem-policy.md#linux-arm64-requirements).
 2. It reads `box.toml` and locks the box directory. It records the canonical path and filesystem
    identity of each source file it opens.
    [Later steps use the validated identities](decisions.md#a-run-validates-once-then-acts-on-the-identity-it-approved),
