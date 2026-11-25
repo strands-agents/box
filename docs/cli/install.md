@@ -171,8 +171,9 @@ tap's [Install by short name](https://github.com/strands-agents/homebrew-tap#ins
 `box` keeps a box from changing the release folder of the `box` you run, in Homebrew's Caskroom,
 but not the rest of Homebrew's prefix. The default prefix (`/opt/homebrew`, `/usr/local`, or
 `/home/linuxbrew/.linuxbrew`) is outside your home, so a write rule over your home doesn't reach
-it. A prefix inside your home isn't protected yet. Either way, keep your write grants and `permit`
-rules out of `$(brew --prefix)` ([Keep write rules narrow](policies.md#keep-write-rules-narrow)).
+it. A prefix inside your home, such as `~/.linuxbrew`, is reached by such a rule too. Either way,
+keep your write grants and `permit` rules out of `$(brew --prefix)`
+([Keep write rules narrow](policies.md#keep-write-rules-narrow)).
 
 Check that `box` runs:
 
