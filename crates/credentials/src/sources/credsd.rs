@@ -52,7 +52,7 @@ pub(crate) const SESSION_CREDENTIALS_TYPE: &str = "session_credentials";
 /// The material tag a bearer token for a non-AWS API carries.
 pub(crate) const ACCESS_TOKEN_TYPE: &str = "access_token";
 
-/// The one `token_type` the box can attach: a plain bearer token, with no per-request proof.
+/// The one `token_type` the box can attach, compared without case (RFC 6749 section 5.1).
 const BEARER_TOKEN_TYPE: &str = "Bearer";
 
 /// The per-user tail beneath `HOME` for the macOS user-scoped install's socket (signed `.pkg` or
@@ -457,7 +457,7 @@ impl std::fmt::Debug for AccessToken {
 /// Fetch the access token of one `credsd` credential for an opaque route.
 ///
 /// The token delivery adapter, beside the AWS one in [`super::aws`]. A material tag other than
-/// `access_token`, a `token_type` other than `Bearer`, or an empty or unusable token is a hard
+/// `access_token`, a `token_type` other than `Bearer` in any case, or an empty or unusable token is a hard
 /// credential failure that names the credential and never the material.
 pub(crate) fn credsd_access_token(client: &CredsdClient, credential: &str) -> Result<AccessToken> {
     access_token_from(client.get(credential)?, credential)
@@ -478,7 +478,7 @@ fn access_token_from(result: CredentialResult, credential: &str) -> Result<Acces
     }
     // A DPoP-bound token needs a proof the box cannot make, so attaching it as a bearer token would
     // send a request the API refuses.
-    if material.token_type != BEARER_TOKEN_TYPE {
+    if !material.token_type.eq_ignore_ascii_case(BEARER_TOKEN_TYPE) {
         return Err(CredentialError::Credential(format!(
             "credsd credential {credential:?} returned a {token_type:?} token, and the box \
              attaches only {BEARER_TOKEN_TYPE} tokens",
@@ -738,6 +738,18 @@ mod tests {
             "{message}"
         );
         assert!(!message.contains("secretkey"), "no material: {message}");
+    }
+
+    /// A `token_type` of `Bearer` in any case maps, because RFC 6749 makes the value
+    /// case-insensitive and credsd passes an issuer's spelling through.
+    #[test]
+    fn a_bearer_token_type_matches_in_any_case() {
+        for token_type in ["bearer", "BEARER", "bEaReR"] {
+            let token =
+                access_token_from(token_result("ghp_example", token_type, "null"), "github")
+                    .unwrap_or_else(|error| panic!("{token_type:?} is a bearer token: {error}"));
+            assert_eq!(token.token.as_str(), "ghp_example");
+        }
     }
 
     /// A token that is not a plain bearer token, such as a DPoP-bound one, is refused: the box makes
