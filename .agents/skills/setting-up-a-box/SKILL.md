@@ -30,7 +30,8 @@ and follow it in place of the page's interactive `box profile create` step.
   here, then copy the three binaries into `~/box-tutorial/box-core` the way the "Build from source"
   section of `docs/user/getting-started.md` does.
 - A Box message on stderr carries a code, such as `B0201` in `strands-box: note[B0201]: ...`.
-  [`docs/user/message-codes.md`](../../../docs/user/message-codes.md) explains each code.
+  `box explain <code>` says what it means and what to do, and
+  [`docs/user/message-codes.md`](../../../docs/user/message-codes.md) lists every code.
 
 ## After setup
 

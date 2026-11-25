@@ -1,7 +1,8 @@
 # Message codes
 
 Box writes its own messages to stderr in one format, and most messages carry a code that names
-their kind. This page explains each code and what to do when you see it.
+their kind. This page explains each code and what to do when you see it. With the `box` CLI,
+[`box explain <code>`](../cli/cli.md#box-explain) prints a code's row from this page.
 
 ## How a message reads
 

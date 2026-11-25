@@ -32,7 +32,8 @@ Examples:
   box run claude            Start the claude profile in this folder
   box profile create        Pick an agent and set up a profile
   box profile list          See your profiles and starters
-  box runs list             See saved box runs"
+  box runs list             See saved box runs
+  box explain B0102         Explain a code in a Box message"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -96,6 +97,18 @@ Examples:
     Telemetry {
         #[command(subcommand)]
         command: TelemetryCommand,
+    },
+    /// Show what a Box message code means and what to do about it.
+    #[command(after_help = "Examples:
+  box explain B0102                 Explain strands-box: error[B0102]
+  box explain P0201 --format json   Print the explanation as JSON")]
+    Explain {
+        /// The code in a message such as `policy: warning[P0201]: ...`.
+        #[arg(value_parser = parse_code)]
+        code: String,
+        /// Print text or one JSON object.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
     },
 }
 
@@ -452,10 +465,25 @@ fn main() -> ExitCode {
             .expect("parsed subcommand belongs to the command");
         selected = matches;
     }
+    if let Command::Explain { code, format } = &cli.command {
+        let explained = strands_box_cli::explain(code, *format, &mut std::io::stdout().lock());
+        return finish(
+            match explained {
+                Err(Error::ExplainOutput { source })
+                    if source.kind() == std::io::ErrorKind::BrokenPipe =>
+                {
+                    Ok(ExitCode::SUCCESS)
+                }
+                result => result.map(|()| ExitCode::SUCCESS),
+            },
+            context,
+        );
+    }
     if let Err(error) = strands_box_cli::check_box_home() {
         return finish(Err(error), context);
     }
     let result = match cli.command {
+        Command::Explain { .. } => unreachable!("explained above"),
         Command::Run {
             profile,
             box_id,
@@ -617,6 +645,18 @@ fn list_runs(profile: Option<&str>, format: OutputFormat) -> Result<(), Error> {
             Ok(())
         }
         result => result,
+    }
+}
+
+fn parse_code(value: &str) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    if bytes.len() == 5
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1..].iter().all(u8::is_ascii_digit)
+    {
+        Ok(value.to_ascii_uppercase())
+    } else {
+        Err("a code is a letter and four digits, such as P0201".to_owned())
     }
 }
 
