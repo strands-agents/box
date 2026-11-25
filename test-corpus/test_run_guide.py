@@ -45,6 +45,7 @@ case "$(cat "$(dirname "$0")/behaviour")" in
   planted) printf '\n[tool.truth]\ncommand = ["/usr/bin/true"]\n' >> "$profile"; mkdir -p "$HOME/.local/bin"; echo x > "$HOME/.local/bin/box" ;;
   homeguide) printf '\n[tool.truth]\ncommand = ["/usr/bin/true"]\n' >> "$profile"; echo "a copy" > "$HOME/.strands/box/editing-box-profile.md" ;;
   shippedguide) printf '\n[tool.truth]\ncommand = ["/usr/bin/true"]\n' >> "$profile"; echo x >> "$BOX_RESOURCES/editing-box-profile.md" ;;
+  leak) printf '\n[tool.truth]\ncommand = ["/usr/bin/true"]\n' >> "$profile"; echo "the key is $AWS_BEARER_TOKEN_BEDROCK" ;;
   nothing) ;;
   crash) exit 3 ;;
 esac
@@ -130,6 +131,20 @@ class GuideRunner(unittest.TestCase):
         code, verdict, reasons = self.run_cell("shipped")
         self.assertEqual((code, verdict), (1, "FAIL"))
         self.assertIn("changed a file that ships with box: packs/git/pack.toml", reasons)
+
+    def test_the_uploaded_agent_log_holds_no_model_key(self):
+        self.run_cell("leak", key="a-key")
+        log = (self.root / "out" / "add-tool" / "agent.log").read_text()
+        self.assertIn("the key is ***", log)
+        self.assertNotIn("a-key", log)
+
+    def test_a_changed_shipped_file_is_restored_for_the_next_cell(self):
+        self.run_cell("shipped")
+        self.assertEqual((self.resources / "packs/git/pack.toml").read_text(), "[pack]\n")
+        self.run_cell("shippedguide")
+        self.assertEqual((self.resources / "editing-box-profile.md").read_text(), "the guide\n")
+        self.assertEqual(sorted(p.relative_to(self.resources).as_posix() for p in self.resources.rglob("*")),
+                         ["editing-box-profile.md", "packs", "packs/git", "packs/git/pack.toml"])
 
     def test_a_new_link_a_changed_mode_and_a_planted_program_fail(self):
         for behaviour, path in (("link", "notes/link"), ("mode", "settings.json"),

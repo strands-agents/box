@@ -1514,10 +1514,9 @@ fixture = "csv-to-json-cli"
 needs = ["cargo"]
 net = ["index.crates.io", "static.crates.io"]
 pass_check = "cargo nextest run passes; nothing new in ~/.cargo/bin"
-note = "The install that nextest's docs give, cargo install cargo-nextest --locked, still fails in a box on macOS: the default features include usdt, whose build runs dtrace -h, and dtrace cannot open /dev/stdin in a box (strands-agents/box#380). --no-default-features drops usdt and self-update, which a box needs neither of. The cargo pack sets CARGO_HOME to the project's .cargo, so cargo install puts cargo-nextest in .cargo/bin there, and cargo finds the subcommand in it. The cargo tool can only read ~/.cargo/bin, so a write there would be a deny."
+note = "The install that nextest's docs give, cargo install cargo-nextest --locked, still fails in a box on macOS: the default features include usdt, whose build runs dtrace -h, and dtrace cannot open /dev/stdin in a box (strands-agents/box#380). --no-default-features drops usdt and self-update, which a box needs neither of. @box/cargo sets CARGO_HOME to the tool's own storage, so cargo install puts cargo-nextest in its bin there, and cargo finds the subcommand in it. The agent gets no grant to that storage, so the script checks the install by running cargo nextest. The cargo tool can only read ~/.cargo/bin, so a write there would be a deny."
 script = '''
 bash -c 'cargo install cargo-nextest@0.9.150 --locked --no-default-features'
-[ -f .cargo/bin/cargo-nextest ]
 bash -c 'cargo nextest run'
 '''
 

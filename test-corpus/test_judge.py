@@ -131,6 +131,17 @@ class Steps(unittest.TestCase):
         self.assertEqual(judge.plain_steps(other),
                          [{"kind": "final", "text": "The formatPrice test passes now."}])
 
+    def test_coded_box_lines_from_every_source_are_not_the_agents_words(self):
+        other = ["strands-box: note[B0201]: [agent] runs /bin/bash with no policy decision over these paths:",
+                 "  read        /usr/lib",
+                 "strands-box-sock-alias: error[H0302]: ./build.sh: Permission denied",
+                 "strands-box-contain-trampoline: error[H0401]: apply sandbox: Operation not permitted",
+                 "policy: warning[P0201]: dogwood evaluation failed: x; denying",
+                 "telemetry: warning[T0101]: the collector stopped",
+                 "The build passes now."]
+        self.assertEqual(judge.plain_steps(other),
+                         [{"kind": "final", "text": "The build passes now."}])
+
     def test_kiro_stream_json_becomes_tool_calls_outputs_and_words(self):
         # The event shapes kiro-cli 3.4.0 prints with --output-format stream-json.
         def update(**u):

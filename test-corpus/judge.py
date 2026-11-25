@@ -213,7 +213,9 @@ def changes(before, after, limit=DIFF_LIMIT):
 
 # ---------------------------------------------------------------- the run's record
 
-BOX_LINE = re.compile(r"^(strands-box|strands-shell|box):")
+# The sources Box writes its own lines under (docs/user/message-codes.md), the Shell, and `box`.
+BOX_SOURCES = r"(strands-box|strands-box-sock-alias|strands-box-contain-trampoline|strands-shell|policy|telemetry|box)"
+BOX_LINE = re.compile(rf"^{BOX_SOURCES}:")
 
 
 def parse_stream(log):
