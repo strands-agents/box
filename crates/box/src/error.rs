@@ -90,8 +90,8 @@ impl Internal {
                 DaemonError::Refused { .. } => Code::B0102.into(),
                 DaemonError::NoProxyPort => Code::B0110.into(),
             },
-            // The mark changes the kind, not the message, so the code is the marked error's.
-            Self::AgentNotFound(inner) => inner.code(),
+            // Whichever check noticed, the fix is to install the agent or correct its command.
+            Self::AgentNotFound(_) => Code::B0114.into(),
             Self::Executable(error) => match error {
                 ExecutableError::NotExecutable { .. }
                 | ExecutableError::NotOnPath { .. }

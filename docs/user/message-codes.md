@@ -131,6 +131,7 @@ Each of these stops the box, almost always before the workload starts. `strands-
 | `B0111` | error | The socket the box's interpreters reach could not be served. | Report it as a bug with the full stderr of the run. |
 | `B0112` | error | The library caller's `on_ready` callback returned an error, so the box did not start its workload. | Read the callback's error in the text; it comes from the program that runs the box, not from Box. |
 | `B0113` | error | A secret source program failed to read a secret, so the box did not start. | Sign in to the vault or correct the reference, then run the box again. The line names the entry and the program's own error. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |
+| `B0114` | error | The program that `[agent] command` names is not installed, so the box did not start. | Install the agent, or correct `[agent] command` to the path where it is installed. |
 
 <a id="b02"></a>
 

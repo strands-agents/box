@@ -105,6 +105,7 @@ codes! {
     B0111 => strands_box error, "broker socket failures", "The socket the box's interpreters reach could not be served.";
     B0112 => strands_box error, "refused library callbacks", "The library caller's `on_ready` callback returned an error, so the box did not start its workload.";
     B0113 => strands_box error, "secret source failures", "A secret source program failed to read a secret, so the box did not start.";
+    B0114 => strands_box error, "agents that are not installed", "The program that `[agent] command` names is not installed, so the box did not start.";
     // Box: startup disclosures.
     B0201 => strands_box note, "filesystem grant disclosures", "A process reaches these paths directly, with no policy decision.";
     B0202 => strands_box note, "exposed credential stores", "A process's filesystem grant reaches a credential store.";

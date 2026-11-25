@@ -1333,12 +1333,12 @@ mod event_tests {
             (
                 "library-events-missing",
                 "box-events-agent-not-installed",
-                "AgentNotFound:B0107",
+                "AgentNotFound:B0114",
             ),
             (
                 "library-events-absolute",
                 "/nonexistent-box-events/bin/claude",
-                "AgentNotFound:B0108",
+                "AgentNotFound:B0114",
             ),
             (
                 "library-events-unexp",
