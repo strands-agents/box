@@ -63,7 +63,9 @@ fn check_credential(listed: &[(String, String)], credential: &str, expected: &st
     };
     if kind != expected {
         let fix = if expected == SESSION_CREDENTIALS_TYPE {
-            "set secret.type = \"token\" on a route that reads a token"
+            "set secret.type = \"token\" on an egress or MCP route that reads it, or give a \
+             telemetry target, which always signs with AWS credentials, a session_credentials \
+             credential"
         } else {
             "set secret.type = \"aws\" on a route that signs with AWS credentials"
         };

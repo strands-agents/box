@@ -391,7 +391,7 @@ not upgrade `rust-lang.org`.
 | `secret.type` is a value other than `aws` or `token` | Use `aws` or `token`. |
 | A credsd token route has no `secret.env` and no `secret.inject = "always"` | Set `secret.inject = "always"`, or name the placeholder variable with `secret.env`. |
 | Two routes read one credsd token with a different `secret.env` | Give both the same `secret.env`, or leave it out of both. The box reads one token once and holds it behind one placeholder. |
-| At startup, `credsd credential "<name>" is "<kind>", but a route that reads it expects "<kind>"` | Set `secret.type` to the credential's kind in `creds list`: `aws` for `session_credentials`, `token` for `access_token`. |
+| At startup, `credsd credential "<name>" is "<kind>", but a route that reads it expects "<kind>"` | On an egress or MCP route, set `secret.type` to the credential's kind in `creds list`: `aws` for `session_credentials`, `token` for `access_token`. A telemetry target always signs, so name a `session_credentials` credential there. |
 | At startup, a credsd token route reads a token whose type is not `Bearer` | Use a bearer token. The box can't make the proof that a DPoP token needs. |
 | A `credsd://` route has no `secret.type`, at startup (a warning) | Set `secret.type = "aws"`, or `"token"` for a token. A later release requires the key. |
 | `secret.env` on an `env://NAME` route is not `NAME`, or an `aws://` route sets `secret.env` | Remove `secret.env`. |

@@ -16,8 +16,8 @@ A key can come from one of four places. The scheme at the start of `secret.ref` 
 | --- | --- | --- | --- | --- |
 | `secret.ref` | `env://GH_TOKEN` | `aws://` or `aws://work` | `credsd://work` | `op://Personal/GitHub/token` |
 | Read | Once, when the box starts | On each request | On each request, or once at start for a token | Once, when the box starts |
-| The agent gets | A placeholder in `GH_TOKEN` | Placeholder AWS keys | Placeholder AWS keys | A placeholder in the variable `secret.env` names |
-| Works for | Any HTTPS host | AWS service hosts | AWS service hosts | Any HTTPS host |
+| The agent gets | A placeholder in `GH_TOKEN` | Placeholder AWS keys | Placeholder AWS keys, or for a token, the placeholder that `secret.env` names | A placeholder in the variable `secret.env` names |
+| Works for | Any HTTPS host | AWS service hosts | AWS service hosts, or any HTTPS host for a token | Any HTTPS host |
 | Long-lived key kept in | Your shell | `~/.aws` | The daemon's keystore | Your password manager |
 
 A pack's route already names a source, such as `aws://` for Bedrock. To use another one, set

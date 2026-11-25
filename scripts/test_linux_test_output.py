@@ -44,6 +44,13 @@ class LinuxTestOutputTests(unittest.TestCase):
         self.assertTrue(accepted)
         self.assertIn("remains untested", report)
 
+    def test_one_missing_token_fixture_is_reported_as_untested(self):
+        accepted, report = REPORTER.check_output(
+            "skipping: " + REPORTER.MISSING_TOKEN_FIXTURE + "\n" + PASSED
+        )
+        self.assertTrue(accepted)
+        self.assertIn("token fixture remains untested", report)
+
     def test_known_alias_limit_reports_partial_coverage(self):
         accepted, report = REPORTER.check_output(
             "skipping: " + REPORTER.ALIAS_READ + "\n" + PASSED
