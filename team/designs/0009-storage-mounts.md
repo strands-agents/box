@@ -54,7 +54,7 @@ Ordinary Box mounts can make `/mnt/data` read-only, make `/mnt/data/output` writ
 
 The proposed version therefore accepts only the following settings:
 
-| Settings for a directory listed in `mounts` | Result |
+| Settings for a directory listed in `receive_mounts` | Result |
 | --- | --- |
 | Agent: `read`, `write`, and `exec` cover the entire directory; no intersecting `deny` or `deny_write` | Accept if the other startup checks pass. |
 | Tool or local Model Context Protocol (MCP) server: `read` and `write` cover the entire directory; no intersecting `deny` or `deny_write` | Accept if the other checks pass. These sandboxes can run reachable programs and load code from their own readable and writable paths; they do not take an `exec` list. |
@@ -76,7 +76,9 @@ Box cannot inspect storage that has not arrived or check every later mount. Depl
 
 ## 4. Proposed configuration
 
-Box Core builds sandboxes. Its proposed `box.toml` setting, `[experimental-features] linux-passthrough-mounts`, enables this Linux-only feature. Each agent, tool, or local MCP server lists the paths it needs in its own `filesystem.mounts` array. Listing a mount does not grant access; the permission lists do that.
+Box Core builds sandboxes. Its proposed `box.toml` setting, `[experimental-features] linux-passthrough-mounts`, enables this Linux-only feature. Each agent, tool, or local MCP server lists the paths it needs in its own `filesystem.receive_mounts` array. Listing a path does not grant access; the permission lists do that.
+
+`receive_mounts` selects paths where the sandbox receives externally attached filesystems after startup. It does not tell Box to create or mount a filesystem. Linux propagation settings such as `rslave` remain implementation details, not public configuration options.
 
 This is a configuration excerpt, not a complete runnable file. Current releases do not support it.
 
@@ -86,14 +88,14 @@ linux-passthrough-mounts = true
 
 # Allow the agent to read, write, and run files in both directories.
 [agent.filesystem]
-mounts = ["/mnt/data", "/mnt/shared"]
+receive_mounts = ["/mnt/data", "/mnt/shared"]
 read = ["/mnt/data", "/mnt/shared"]
 write = ["/mnt/data", "/mnt/shared"]
 exec = ["/mnt/data", "/mnt/shared"]
 
 # Give the indexer access to /mnt/data only.
 [tool.indexer.filesystem]
-mounts = ["/mnt/data"]
+receive_mounts = ["/mnt/data"]
 read = ["/mnt/data"]
 write = ["/mnt/data"]
 ```
@@ -218,7 +220,7 @@ Separate checks on each file operation might preserve finer rules with direct pr
 ## 9. Decisions still needed
 
 1. **Permission contract:** accept whole-directory access for this feature, or use the helper when finer Box restrictions are required? This draft recommends direct propagation with incompatible settings rejected.
-2. **Configuration:** approve `linux-passthrough-mounts` with per-sandbox `mounts` lists and explicit grants? The old experimental flag must not silently change meaning.
+2. **Configuration:** approve `linux-passthrough-mounts` with per-sandbox `receive_mounts` lists and explicit grants? The old experimental flag must not silently change meaning.
 3. **Runtime feasibility:** can the actual mount arrangement forward only the selected storage without new host privileges? The Linux and Runtime tests must answer this before support is claimed.
 
 References:
