@@ -170,7 +170,8 @@ strands-box: warning[B0403]: MCP server "repro" tool "create_account" has no per
 The tool still works under the server's `mcp:call` permit, and a rule on `mcp:call` that names it
 with `context.input.tool` still applies. A rule that names the tool's own action, such as
 `repro::Action::"create_account"`, doesn't load, and Box refuses every call to that tool while the
-rule is in the policy. Box also doesn't check that tool's arguments against its schema, as it does
+rule is in the policy. That holds when the rule only reads the action in a `when temporal` clause
+too, for example a guard on `http:request` after `create_account` ran. Box also doesn't check that tool's arguments against its schema, as it does
 for a tool with an action.
 
 An argument that can have more than one type, from `anyOf`, `oneOf`, or a `type` list, is a record

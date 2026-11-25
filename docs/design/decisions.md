@@ -637,8 +637,8 @@ the schema. The client therefore cannot see a tool before Box enforces its rules
 not change the catalog commits nothing. A list that changes it replaces it, and a refused list keeps
 a stdio server's accepted catalog. A tool whose schema doesn't generate, or doesn't compose with the
 Box schema, on its own gets no per-tool action and a warning, so only `mcp:call` rules decide its
-calls and the server's other tools keep theirs. A rule that names its action can't load, so Box
-refuses that tool until the rule goes. Refusing the whole server was rejected, because one tool that
+calls and the server's other tools keep theirs. A rule that names its action can't load, even one
+that only reads it from history, so Box refuses that tool until the rule goes. Refusing the whole server was rejected, because one tool that
 the operator can't change cost every tool on it. Refusing the tool's calls was rejected too: the
 operator's `mcp:call` permit already allows every tool on the server, and no rule they wrote gets
 weaker. We replaced discovery that made Box page the server itself. That

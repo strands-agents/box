@@ -58,7 +58,9 @@ before changing persistence; code and tests own its current commit and recovery 
 - A tool whose MCP schema does not generate stays in the catalog with no per-tool action, so only
   `mcp:call` rules decide it. Never give it an action with untyped arguments: a guarded `forbid` on
   an argument would load and never fire. With no action, a rule that names it cannot load and the
-  tool degrades (`a_rule_on_a_left_out_tool_degrades_it_and_the_rest_of_the_server_works`). Its
+  tool degrades (`a_rule_on_a_left_out_tool_degrades_it_and_the_rest_of_the_server_works`), also
+  when the rule only reads it from history
+  (`a_rule_that_reads_a_tool_without_a_schema_from_history_refuses_that_tool`). Its
   arguments are not checked against its schema, which a typed tool's are. The per-tool retry
   composes with a `Box::Agent` and `Box::Resource` stub and skips a list with no `$ref`, because a
   full composition per tool timed out `catalog_page_limit_accepts_256_pages_and_refuses_a_257th`.
