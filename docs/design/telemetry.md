@@ -153,7 +153,9 @@ reserved](decisions.md#the-strands-box-namespace-is-reserved).
 The workload cannot suppress Box records by filling their queues with its own telemetry. Box uses
 one bounded queue per target for its records. A relayed payload never enters that queue. The
 receiver sends it directly to the target, with only one relay active at a time. This slot is a
-concurrency token, not a policy permit. A payload that finds it occupied is dropped. See [the two
+concurrency token, not a policy permit. A payload that finds it occupied gets `503 Service
+Unavailable` with `Retry-After: 2`, which OTLP/HTTP defines as a retryable answer, so the agent's
+exporter sends it again. Box does not queue it. See [the two
 kinds of record share no queue](decisions.md#the-agents-lane-and-the-boxs-lane-share-no-queue). With
 a shared queue, the workload could fill it until subsequent decisions were dropped.
 
@@ -162,7 +164,7 @@ recorded. A record that a full queue refuses is lost, but it is counted and repo
 ends.
 
 The receiver bounds the memory needed to process a payload. It takes the relay slot before decoding.
-If the slot is occupied, it discards the payload without decoding it. The bytes have already
+If the slot is occupied, it refuses the payload without decoding it. The bytes have already
 arrived, subject to the request-size cap, but the expensive processing has not begun.
 
 Two size limits bound an accepted payload. The first caps request bytes before decoding. The second
@@ -172,8 +174,10 @@ megabytes of input into hundreds of megabytes of memory. The receiver runs in th
 the policy engine, resolved secrets, and gateway signing key, so memory exhaustion would affect all
 of them.
 
-The workload cannot tell which data a target kept from the response. Every answer has the same
-two-byte JSON body. A dropped payload still gets `200`.
+The workload cannot tell which data a target kept from the response. Every `200`, `400`, and `413`
+answer has the same two-byte JSON body. A refusal because the slot is occupied tells the
+workload only that another relay was in progress, which it can already see from the delay of an
+admitted answer.
 
 ## Limits
 
@@ -206,7 +210,8 @@ two-byte JSON body. A dropped payload still gets `200`.
 - A slow target delays workload telemetry. The relay slot stays occupied during a write and its disk
   flush. Box does not bound the number of connections to the port. The slot limits concurrency, not
   rate. A client that waits for each response never encounters an occupied slot, regardless of
-  volume. Dropping a payload requires two payloads in flight together.
+  volume. A `503` requires two payloads in flight together. An exporter retries only for a limited
+  time, so a relay that holds the slot longer than that loses the refused payload.
 - Two boxes must not share a file. A long line can require multiple writes, and concurrent writers
   can interleave them. Give each box its own file.
 

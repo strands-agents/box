@@ -15,7 +15,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
+use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse as _, Response};
 use axum::routing::post;
 use axum::serve::{Listener, ListenerExt as _};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -31,8 +33,14 @@ use crate::export::TargetExporter;
 /// The most a single request body may carry.
 const BODY_LIMIT: usize = 4 * 1024 * 1024;
 
-/// The most posted payloads of one signal decoded and relayed at once.
+/// The most posted payloads decoded at once, across every route.
 const RELAY_CAPACITY: usize = 1;
+
+/// The seconds a refused agent is asked to wait before it posts the payload again.
+const RETRY_AFTER_SECONDS: &str = "2";
+
+/// The message a refused agent reads in the `503` answer.
+const BUSY: &str = "the box is relaying another payload; retry this one";
 
 /// The most resource entries one request may carry, whichever signal it names.
 const RESOURCE_LIMIT: usize = 1024;
@@ -74,25 +82,8 @@ struct Inbound {
     box_name: String,
     run_id: String,
     relays: Relays,
-    admitted: Admitted,
-    dropped: Arc<AtomicU64>,
-}
-
-/// One relay slot per signal, so a slow relay of one signal never drops a payload of another.
-struct Admitted {
-    traces: Semaphore,
-    logs: Semaphore,
-    metrics: Semaphore,
-}
-
-impl Admitted {
-    fn new() -> Self {
-        Self {
-            traces: Semaphore::new(RELAY_CAPACITY),
-            logs: Semaphore::new(RELAY_CAPACITY),
-            metrics: Semaphore::new(RELAY_CAPACITY),
-        }
-    }
+    admitted: Semaphore,
+    refused: Arc<AtomicU64>,
 }
 
 /// A bound loopback listener, and the port the kernel gave it.
@@ -137,7 +128,7 @@ impl Receiver {
         box_name: String,
         run_id: String,
         relays: Relays,
-        dropped: Arc<AtomicU64>,
+        refused: Arc<AtomicU64>,
     ) {
         let Ok(listener) = self.connections() else {
             return;
@@ -155,8 +146,8 @@ impl Receiver {
                 box_name,
                 run_id,
                 relays,
-                admitted: Admitted::new(),
-                dropped,
+                admitted: Semaphore::new(RELAY_CAPACITY),
+                refused,
             }));
         let _ = axum::serve(listener, router).await;
     }
@@ -181,16 +172,19 @@ fn decoded<T>(headers: &HeaderMap, body: &Bytes) -> Option<T>
 where
     T: prost::Message + Default + serde::de::DeserializeOwned,
 {
-    let json = headers
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.starts_with("application/json"));
-
-    if json {
+    if json(headers) {
         serde_json::from_slice(body.as_ref()).ok()
     } else {
         T::decode(body.as_ref()).ok()
     }
+}
+
+/// Whether the request names the JSON encoding rather than binary Protobuf.
+fn json(headers: &HeaderMap) -> bool {
+    headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/json"))
 }
 
 /// Whether one payload names more resource entries than the stamp may amplify.
@@ -199,14 +193,47 @@ where
 fn beyond_the_fan_out_bound(inbound: &Inbound, resources: usize) -> bool {
     let beyond = resources > RESOURCE_LIMIT;
     if beyond {
-        inbound.dropped.fetch_add(1, Ordering::Relaxed);
+        inbound.refused.fetch_add(1, Ordering::Relaxed);
     }
     beyond
 }
 
-/// The answer every handler returns, so a client always reads one shape.
-fn answer(status: StatusCode) -> (StatusCode, [(&'static str, &'static str); 1], &'static str) {
-    (status, [("content-type", "application/json")], "{}")
+/// The answer to a payload that held the relay slot, so a client always reads one shape.
+fn answer(status: StatusCode) -> Response {
+    (status, [(CONTENT_TYPE, "application/json")], "{}").into_response()
+}
+
+/// The `google.rpc.Status` that an OTLP/HTTP failure answer carries, with only its message.
+#[derive(Clone, PartialEq, prost::Message)]
+struct Status {
+    #[prost(string, tag = "2")]
+    message: String,
+}
+
+/// The `503` answer to a payload that found the relay slot taken.
+fn busy(inbound: &Inbound, headers: &HeaderMap) -> Response {
+    inbound.refused.fetch_add(1, Ordering::Relaxed);
+    let status = Status {
+        message: BUSY.to_string(),
+    };
+    let (content_type, body) = if json(headers) {
+        let body = serde_json::json!({ "message": status.message }).to_string();
+        ("application/json", body.into_bytes())
+    } else {
+        (
+            "application/x-protobuf",
+            prost::Message::encode_to_vec(&status),
+        )
+    };
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            (CONTENT_TYPE, content_type),
+            (RETRY_AFTER, RETRY_AFTER_SECONDS),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// Decode one posted trace, strip what it may not claim, and relay it inline.
@@ -214,12 +241,11 @@ async fn accept_trace(
     State(inbound): State<Arc<Inbound>>,
     headers: HeaderMap,
     body: Bytes,
-) -> impl axum::response::IntoResponse {
+) -> Response {
     // Taken before the decode, because the decode is where the cost is. `try_acquire`, never
     // `acquire`: a queue the agent could wait in is a queue it could measure.
-    let Ok(_permit) = inbound.admitted.traces.try_acquire() else {
-        inbound.dropped.fetch_add(1, Ordering::Relaxed);
-        return answer(StatusCode::OK);
+    let Ok(_permit) = inbound.admitted.try_acquire() else {
+        return busy(&inbound, &headers);
     };
 
     let Some(mut trace) = decoded::<ExportTraceServiceRequest>(&headers, &body) else {
@@ -260,10 +286,9 @@ async fn accept_logs(
     State(inbound): State<Arc<Inbound>>,
     headers: HeaderMap,
     body: Bytes,
-) -> impl axum::response::IntoResponse {
-    let Ok(_permit) = inbound.admitted.logs.try_acquire() else {
-        inbound.dropped.fetch_add(1, Ordering::Relaxed);
-        return answer(StatusCode::OK);
+) -> Response {
+    let Ok(_permit) = inbound.admitted.try_acquire() else {
+        return busy(&inbound, &headers);
     };
 
     let Some(mut logs) = decoded::<ExportLogsServiceRequest>(&headers, &body) else {
@@ -298,10 +323,9 @@ async fn accept_metrics(
     State(inbound): State<Arc<Inbound>>,
     headers: HeaderMap,
     body: Bytes,
-) -> impl axum::response::IntoResponse {
-    let Ok(_permit) = inbound.admitted.metrics.try_acquire() else {
-        inbound.dropped.fetch_add(1, Ordering::Relaxed);
-        return answer(StatusCode::OK);
+) -> Response {
+    let Ok(_permit) = inbound.admitted.try_acquire() else {
+        return busy(&inbound, &headers);
     };
 
     let Some(mut metrics) = decoded::<ExportMetricsServiceRequest>(&headers, &body) else {
@@ -644,62 +668,249 @@ mod tests {
         }
     }
 
-    /// **A log relay in flight does not drop the agent's spans.**
-    ///
-    /// One slot shared by every signal answered a trace with `200` and dropped it while a log batch
-    /// was still being relayed.
-    #[tokio::test]
-    async fn a_trace_is_relayed_while_a_log_relay_holds_its_slot() {
+    /// A handler's state with one file target taking every signal, and the file's path.
+    fn inbound_with_a_file() -> (Arc<Inbound>, tempfile::TempDir, std::path::PathBuf) {
         use crate::config::{Target, TargetKind};
-        use axum::response::IntoResponse as _;
 
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("agent.jsonl");
         let target = Target::new(TargetKind::File, path.to_string_lossy().to_string());
-        let dropped = Arc::new(AtomicU64::new(0));
         let exporter = Arc::new(
-            TargetExporter::open(&target, Arc::clone(&dropped)).expect("open the file target"),
+            TargetExporter::open(&target, Arc::new(AtomicU64::new(0)))
+                .expect("open the file target"),
         );
         let inbound = Arc::new(Inbound {
             box_name: "probe".to_string(),
             run_id: "probe-run".to_string(),
             relays: Relays {
                 traces: vec![Arc::clone(&exporter)],
-                logs: vec![exporter],
-                metrics: Vec::new(),
+                logs: vec![Arc::clone(&exporter)],
+                metrics: vec![exporter],
             },
-            admitted: Admitted::new(),
-            dropped: Arc::clone(&dropped),
+            admitted: Semaphore::new(RELAY_CAPACITY),
+            refused: Arc::new(AtomicU64::new(0)),
         });
-        let log_relay_in_flight = inbound.admitted.logs.try_acquire().expect("the log slot");
+        (inbound, directory, path)
+    }
 
+    fn protobuf() -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert("content-type", "application/x-protobuf".parse().unwrap());
-        let body = ExportTraceServiceRequest {
-            resource_spans: vec![ResourceSpans {
-                scope_spans: vec![ScopeSpans {
-                    spans: vec![Span {
-                        name: "the agent's span during a log relay".to_string(),
+        headers.insert(CONTENT_TYPE, "application/x-protobuf".parse().unwrap());
+        headers
+    }
+
+    fn a_trace_named(name: &str) -> Bytes {
+        Bytes::from(
+            ExportTraceServiceRequest {
+                resource_spans: vec![ResourceSpans {
+                    scope_spans: vec![ScopeSpans {
+                        spans: vec![Span {
+                            name: name.to_string(),
+                            ..Default::default()
+                        }],
                         ..Default::default()
                     }],
                     ..Default::default()
                 }],
-                ..Default::default()
-            }],
-        }
-        .encode_to_vec();
-        let answered = accept_trace(State(Arc::clone(&inbound)), headers, Bytes::from(body))
-            .await
-            .into_response();
+            }
+            .encode_to_vec(),
+        )
+    }
 
-        assert_eq!(answered.status(), StatusCode::OK);
-        assert_eq!(dropped.load(Ordering::Relaxed), 0, "the span was dropped");
+    /// The status, the `Retry-After` value, the content type and the body of one answer.
+    async fn parts(answered: Response) -> (StatusCode, Option<String>, Option<String>, Bytes) {
+        let header = |name| {
+            answered
+                .headers()
+                .get(name)
+                .map(|value: &axum::http::HeaderValue| value.to_str().unwrap().to_string())
+        };
+        let retry_after = header(RETRY_AFTER);
+        let content_type = header(CONTENT_TYPE);
+        let status = answered.status();
+        let body = axum::body::to_bytes(answered.into_body(), usize::MAX)
+            .await
+            .expect("the body");
+        (status, retry_after, content_type, body)
+    }
+
+    /// **A payload that finds the relay slot taken gets `503` and `Retry-After`, and is not
+    /// relayed.**
+    #[tokio::test]
+    async fn a_payload_posted_while_the_slot_is_taken_is_answered_503_with_retry_after() {
+        let (inbound, _directory, path) = inbound_with_a_file();
+        let relay_in_flight = inbound.admitted.try_acquire().expect("the relay slot");
+
+        let answered = accept_trace(
+            State(Arc::clone(&inbound)),
+            protobuf(),
+            a_trace_named("posted while the slot is taken"),
+        )
+        .await;
+        let (status, retry_after, content_type, body) = parts(answered).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(retry_after.as_deref(), Some(RETRY_AFTER_SECONDS));
+        assert_eq!(content_type.as_deref(), Some("application/x-protobuf"));
+        assert_eq!(
+            <Status as prost::Message>::decode(body)
+                .expect("a Status")
+                .message,
+            BUSY
+        );
+        assert_eq!(
+            inbound.refused.load(Ordering::Relaxed),
+            1,
+            "the refusal is counted"
+        );
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .contains("posted while the slot is taken"),
+            "a refused payload was relayed"
+        );
+        drop(relay_in_flight);
+    }
+
+    /// Every route answers a refused payload with `503`, in the encoding the request named.
+    #[tokio::test]
+    async fn every_route_answers_503_while_the_slot_is_taken() {
+        let (inbound, _directory, _path) = inbound_with_a_file();
+        let _relay_in_flight = inbound.admitted.try_acquire().expect("the relay slot");
+        let mut json = HeaderMap::new();
+        json.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+
+        let answers = [
+            accept_trace(State(Arc::clone(&inbound)), json.clone(), Bytes::from("{}")).await,
+            accept_logs(State(Arc::clone(&inbound)), json.clone(), Bytes::from("{}")).await,
+            accept_metrics(State(Arc::clone(&inbound)), json, Bytes::from("{}")).await,
+        ];
+        for answered in answers {
+            let (status, retry_after, content_type, body) = parts(answered).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(retry_after.as_deref(), Some(RETRY_AFTER_SECONDS));
+            assert_eq!(content_type.as_deref(), Some("application/json"));
+            let status: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+            assert_eq!(status["message"], BUSY);
+        }
+        assert_eq!(inbound.refused.load(Ordering::Relaxed), 3);
+    }
+
+    /// A payload that finds the relay slot free is relayed and answered `200`.
+    #[tokio::test]
+    async fn a_payload_posted_while_the_slot_is_free_is_relayed_and_answered_200() {
+        let (inbound, _directory, path) = inbound_with_a_file();
+
+        let answered = accept_trace(
+            State(Arc::clone(&inbound)),
+            protobuf(),
+            a_trace_named("posted while the slot is free"),
+        )
+        .await;
+        let (status, retry_after, _, _) = parts(answered).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(retry_after, None);
+        assert_eq!(inbound.refused.load(Ordering::Relaxed), 0);
         assert!(
             std::fs::read_to_string(&path)
                 .expect("the relayed span")
-                .contains("the agent's span during a log relay")
+                .contains("posted while the slot is free")
         );
-        drop(log_relay_in_flight);
+    }
+
+    /// **A trace posted during a real log relay to a stalled target gets `503`, and the same trace
+    /// posted after that relay is relayed.**
+    #[tokio::test]
+    async fn a_trace_posted_during_a_slow_log_relay_is_refused_and_then_relayed() {
+        use crate::config::{Target, TargetKind};
+        use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let stalled = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let address = format!("http://{}", stalled.local_addr().expect("its address"));
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let (mut connection, _) = stalled.accept().await.expect("the log relay connects");
+            let mut request = vec![0; 64 * 1024];
+            let _ = connection.read(&mut request).await;
+            let _ = released.await;
+            let _ = connection
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                .await;
+        });
+        let slow = Arc::new(
+            TargetExporter::open(
+                &Target::new(TargetKind::Otlp, address),
+                Arc::new(AtomicU64::new(0)),
+            )
+            .expect("open the OTLP target"),
+        );
+        let (file_only, _directory, path) = inbound_with_a_file();
+        let inbound = Arc::new(Inbound {
+            box_name: "probe".to_string(),
+            run_id: "probe-run".to_string(),
+            relays: Relays {
+                traces: file_only.relays.traces.clone(),
+                logs: vec![slow],
+                metrics: Vec::new(),
+            },
+            admitted: Semaphore::new(RELAY_CAPACITY),
+            refused: Arc::new(AtomicU64::new(0)),
+        });
+
+        let log_relay = tokio::spawn(accept_logs(
+            State(Arc::clone(&inbound)),
+            protobuf(),
+            Bytes::from(
+                ExportLogsServiceRequest {
+                    resource_logs: vec![ResourceLogs {
+                        scope_logs: vec![ScopeLogs {
+                            log_records: vec![LogRecord::default()],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                }
+                .encode_to_vec(),
+            ),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while inbound.admitted.available_permits() > 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the log relay takes the slot");
+
+        let span = "the agent's span during a log relay";
+        let first =
+            accept_trace(State(Arc::clone(&inbound)), protobuf(), a_trace_named(span)).await;
+        assert_eq!(first.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .contains(span),
+            "the refused span was relayed"
+        );
+
+        release.send(()).expect("the stalled target waits");
+        assert_eq!(
+            log_relay.await.expect("the log relay").status(),
+            StatusCode::OK
+        );
+        let retried =
+            accept_trace(State(Arc::clone(&inbound)), protobuf(), a_trace_named(span)).await;
+
+        assert_eq!(retried.status(), StatusCode::OK);
+        assert_eq!(inbound.refused.load(Ordering::Relaxed), 1);
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("the relayed span")
+                .contains(span)
+        );
     }
 
     /// A live receiver writing to one file target, and that file's path.
