@@ -1,0 +1,34 @@
+name: Probe launch folders on macOS
+
+on:
+  push:
+    branches: [feature/probe-launch-macos]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: macos-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install --profile minimal
+      - name: Volume case sensitivity
+        run: |
+          diskutil info / | grep -i -E 'personality|file system' || true
+          mkdir -p "$RUNNER_TEMP/case" && touch "$RUNNER_TEMP/case/box" && ls "$RUNNER_TEMP/case/BOX" && echo case-insensitive
+      - name: Build Box and helpers
+        timeout-minutes: 40
+        run: cargo build --locked -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline
+      - name: Run the probe
+        timeout-minutes: 30
+        run: cargo test --locked -p strands-box-cli --all-features --test launch_probe -- --nocapture --test-threads 1 2>&1 | tee probe-macos.log
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: probe-macos
+          path: probe-macos.log
