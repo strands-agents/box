@@ -74,6 +74,9 @@ class TryBuildTests(unittest.TestCase):
     def cached(self):
         return self.tmp / "box-try" / SHA
 
+    def box_home(self, sha=SHA):
+        return self.home / ".box-try" / sha[:10]
+
     def run_script(self, *arguments, shell="/bin/zsh", env=None, command=None):
         environment = {
             "HOME": str(self.home),
@@ -116,12 +119,12 @@ class TryBuildTests(unittest.TestCase):
             result.stdout.splitlines(),
             [
                 str(self.cached / "bin/box"),
-                str(self.cached / "home"),
+                str(self.box_home()),
                 str(self.cached / "bin/resources"),
                 f"329@{SHA[:10]}",
             ],
         )
-        self.assertTrue((self.cached / "home").is_dir())
+        self.assertTrue(self.box_home().is_dir())
 
     def test_fish_env_puts_the_build_first_and_removes_an_alias(self):
         fish = shutil.which("fish")
@@ -136,7 +139,7 @@ class TryBuildTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            [str(self.cached / "bin/box"), "no-function", str(self.cached / "home")],
+            [str(self.cached / "bin/box"), "no-function", str(self.box_home())],
         )
 
     def test_fish_env_is_fish_syntax(self):
@@ -160,7 +163,7 @@ class TryBuildTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            [str(self.cached / "bin/box"), str(self.cached / "home"), "box test"],
+            [str(self.cached / "bin/box"), str(self.box_home()), "box test"],
         )
 
     def test_the_shell_form_starts_the_shell_with_the_build_and_box_home(self):
@@ -170,7 +173,7 @@ class TryBuildTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
-            [str(self.cached / "bin/box"), str(self.cached / "home")],
+            [str(self.cached / "bin/box"), str(self.box_home())],
         )
         self.assertIn("use --env", result.stderr)
 
@@ -182,9 +185,9 @@ class TryBuildTests(unittest.TestCase):
             "329", "--", "sh", "-c", 'ls -A "$BOX_HOME"; echo "$BOX_HOME"', env={"TRY_SHA": other}
         )
         self.assertEqual(second.returncode, 0, second.stderr)
-        self.assertEqual(first.stdout, f"{self.cached / 'home'}\n")
+        self.assertEqual(first.stdout, f"{self.box_home()}\n")
         self.assertEqual(
-            second.stdout, f"{self.tmp / 'box-try' / other / 'home'}\n"
+            second.stdout, f"{self.box_home(other)}\n"
         )
         self.assertEqual(self.downloads(), 2)
 
@@ -200,7 +203,7 @@ class TryBuildTests(unittest.TestCase):
         )
         result = self.run_script(command=["bash", "-c", script])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, f"{self.tmp / 'box-try' / other / 'home'}\n")
+        self.assertEqual(result.stdout, f"{self.box_home(other)}\n")
 
     def test_env_sh_prints_posix_lines_when_the_login_shell_is_fish(self):
         script = f'eval "$({SCRIPT} 329 --env sh)"; command -v box'
@@ -243,7 +246,7 @@ class TryBuildTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, f"{own}\n")
-        self.assertFalse((self.cached / "home").exists())
+        self.assertFalse(self.box_home().exists())
 
     def test_a_build_that_ignores_box_home_gets_a_warning(self):
         self.build(reads_box_home=False)
@@ -254,7 +257,7 @@ class TryBuildTests(unittest.TestCase):
     def test_a_build_that_reads_box_home_gets_no_warning(self):
         result = self.run_script("329", "--", "true")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("BOX_HOME", result.stderr.replace(str(self.cached / "home"), ""))
+        self.assertNotIn("BOX_HOME", result.stderr.replace(str(self.box_home()), ""))
 
     def test_clean_removes_every_cached_build(self):
         self.assertEqual(self.run_script("329", "--", "true").returncode, 0)
@@ -262,6 +265,31 @@ class TryBuildTests(unittest.TestCase):
         result = self.run_script("--clean")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.tmp / "box-try").exists())
+        self.assertFalse((self.home / ".box-try").exists())
+
+    def test_the_box_home_leaves_room_for_box_cores_socket_path(self):
+        # Box Core refuses a broker socket path over 103 bytes: <BOX_HOME>/r/<box ID>/box/run/box.sock.
+        tmpdir = f"{self.root}/var/folders/8l/48m77r0d1vzbb140_nz4mks40000gn/T"
+        os.makedirs(tmpdir)
+        result = self.run_script(
+            "329", "--", "sh", "-c", 'echo "$BOX_HOME"', env={"TMPDIR": f"{tmpdir}/"}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        box_home = result.stdout.strip()
+        self.assertFalse(box_home.startswith(tmpdir), box_home)
+        mac_home = "/Users/" + "u" * 20
+        box_id = "b-" + "0" * 16
+        socket = f"{box_home.replace(str(self.home), mac_home)}/r/{box_id}/box/run/box.sock"
+        self.assertLessEqual(len(socket.encode()), 103, socket)
+
+    def test_a_linked_box_home_folder_is_refused(self):
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        (self.home / ".box-try").symlink_to(elsewhere)
+        result = self.run_script("329", "--", "true")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is not a folder that you own", result.stderr)
+        self.assertEqual(list(elsewhere.iterdir()), [])
 
 
 if __name__ == "__main__":
