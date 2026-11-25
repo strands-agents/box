@@ -41,6 +41,7 @@ impl Internal {
                 | LayoutError::ReadDirectory { .. }
                 | LayoutError::Create { .. }
                 | LayoutError::NotADirectory { .. } => Code::B0122.into(),
+                LayoutError::NotThisBox { .. } => Code::B0105.into(),
             },
             Self::Daemon(error) => match error {
                 DaemonError::NotRunning
@@ -582,6 +583,11 @@ pub(crate) enum LayoutError {
     #[error("unsafe box directory {path}: {reason}")]
     UnsafeDirectory { path: PathBuf, reason: String },
 
+    /// The box directory holds something other than this box's valid record: a folder that is
+    /// not a box, or a record that was edited. Same text as `UnsafeDirectory`, a different cause.
+    #[error("unsafe box directory {path}: {reason}")]
+    NotThisBox { path: PathBuf, reason: String },
+
     #[error("cannot remove {path}: {source}")]
     Remove {
         path: PathBuf,
@@ -955,7 +961,7 @@ mod tests {
     #[test]
     fn refusals_name_their_code() {
         use ::diagnostics::{Code, Kind, Severity};
-        let cases: [(BoxError, Kind); 33] = [
+        let cases: [(BoxError, Kind); 34] = [
             (
                 SuperviseError::NativeDuringRun {
                     reason: "native request deadline exceeded".into(),
@@ -1059,6 +1065,14 @@ mod tests {
                 Code::B0115.into(),
             ),
             (LayoutError::NoOperatorHome.into(), Code::B0122.into()),
+            (
+                LayoutError::NotThisBox {
+                    path: "/box".into(),
+                    reason: "it is not empty and contains no valid private record".into(),
+                }
+                .into(),
+                Code::B0105.into(),
+            ),
             (
                 LayoutError::UnsafeDirectory {
                     path: "/box".into(),

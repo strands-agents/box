@@ -893,7 +893,7 @@ fn a_history_without_a_committed_record_refuses_the_next_run_and_is_left_as_foun
     std::fs::remove_file(&commit).expect("remove the record commit");
 
     let second = run_in(home.path(), &workspace, &[]);
-    refused_before_the_workload(&second, "strands-box: error[B0122]: unsafe box directory ");
+    refused_before_the_workload(&second, "strands-box: error[B0105]: unsafe box directory ");
     assert!(
         text(&second).contains("contains no valid private record"),
         "the refusal must name the missing record: {}",
@@ -1009,11 +1009,11 @@ fn an_edited_record_refuses_the_next_run_and_starts_no_workload() {
     std::fs::write(&record, &edited).expect("edit the record in place");
 
     let second = run_in(home.path(), &workspace, &[]);
-    refused_before_the_workload(&second, "strands-box: error[B0122]: unsafe box directory ");
+    refused_before_the_workload(&second, "strands-box: error[B0105]: unsafe box directory ");
     let reported = text(&second);
     assert!(
         reported.lines().any(|line| {
-            line.starts_with("strands-box: error[B0122]: unsafe box directory ")
+            line.starts_with("strands-box: error[B0105]: unsafe box directory ")
                 && line.contains(": its record identity is box-")
                 && line.contains(" sha256:")
                 && line.contains(", but the committed record has identity box-")
