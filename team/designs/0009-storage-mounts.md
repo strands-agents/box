@@ -193,7 +193,7 @@ Use four implementation pull requests. Each includes tests and documentation for
 1. **Configuration and validation.** Add Core settings, CLI profile support, startup errors, and disclosure of selected paths. Test valid and invalid settings for every sandbox type, missing paths, parent/child restrictions, protected aliases, disabled flags, and unsupported platforms. Do not enable the feature until its implementation exists.
 2. **Linux mount connections.** Build selective one-way connections during startup and drop mount-changing privileges before running sandboxed code. Test Linux ARM64 and x86-64, pausing and resuming sandboxed processes, same and separate user namespaces, broken connections, mounts over the selected path and beneath it, multiple paths, unlisted siblings, read-only and `noexec` source mounts, reverse isolation, and existing sandbox restrictions.
 3. **All Box processes.** Integrate the agent, tools, local MCP servers, Shell, and Monty. Test actual file operations as the agent and tool users, processes started before and after attachment, multiple sandboxes, protected aliases, hosted policy denials, and cleanup after failed startup. Add runnable examples.
-4. **Runtime tests and operator guide.** Start Box before snapshot and open storage on the first invocation without sleeps or retries. Test already-open files and working directories, the maximum number of mounts Runtime supports, each claimed storage provider, source permission denials, and mount failures. Record the Box revision, Linux kernel version, Runtime deployment settings, and event times. Publish reproducible setup instructions; claim support only for tested environments.
+4. **Runtime tests and operator guide.** Start Box before snapshot and open storage on the first invocation without sleeps or retries. Verify that each sandbox receives only its selected storage paths. Confirm that Box's mount connections survive snapshot restoration and that setup needs no additional host privileges. Test already-open files and working directories, the maximum number of mounts Runtime supports, each claimed storage provider, source permission denials, and mount failures. Record the Box revision, Linux kernel version, Runtime deployment settings, and event times. Publish reproducible setup instructions; claim support only for tested environments.
 
 Both Linux ARM64 and x86-64 are required for the first release. macOS is follow-up work and must reject the Linux-only feature meanwhile. Use Runtime's supported mount limits in Runtime tests; larger local tests do not expand those limits.
 
@@ -223,7 +223,6 @@ Separate checks on each file operation might preserve finer rules with direct pr
 
 1. **Permission contract:** accept whole-directory access for this feature, or use the helper when finer Box restrictions are required? This draft recommends direct propagation with incompatible settings rejected.
 2. **Configuration:** approve `linux-passthrough-mounts` with per-sandbox `receive_mounts` lists and explicit grants? The old experimental flag must not silently change meaning.
-3. **Runtime feasibility:** can the actual mount arrangement forward only the selected storage without new host privileges? The Linux and Runtime tests must answer this before support is claimed.
 
 References:
 
