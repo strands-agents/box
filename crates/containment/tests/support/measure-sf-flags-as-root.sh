@@ -9,8 +9,8 @@
 #   cargo build -p strands-box-containment --all-features --tests
 #   sudo crates/containment/tests/support/measure-sf-flags-as-root.sh
 #
-# Every probe must print `probe ok` and the script must exit 0. Record the macOS build, the
-# architecture, and kern.securelevel beside the result in crates/containment/AGENTS.md.
+# Every probe must print `probe ok` and the script must exit 0. Include the macOS build,
+# architecture, kern.securelevel, and result in the pull request that uses this measurement.
 #
 # `--control` inverts the two flag expectations to `expect-ok`, and it is the other half of the
 # measurement. Refused-as-root on its own does not say WHAT refused: the volume, securelevel, or

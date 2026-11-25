@@ -137,6 +137,8 @@ impl Fixture {
     }
 }
 
+// A `skipping:` line is test-harness output.
+#[allow(clippy::print_stderr)]
 fn available(route: &str, report: &Value, fields: &[&str]) -> bool {
     for field in fields {
         let error = report[*field].as_u64().unwrap();

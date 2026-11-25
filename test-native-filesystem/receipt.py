@@ -18,7 +18,7 @@ def covered(name, packages):
         "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
         ".github/workflows/rust-test-lint.yml",
         "crates/box/tests/support/bounded_output.rs",
-    ) or name.startswith((".cargo/", "test-native-filesystem/")):
+    ) or name.startswith((".cargo/", "test-native-filesystem/", "test-common/")):
         return True
     for package in sorted(packages, key=len, reverse=True):
         if name.startswith(package + "/"):

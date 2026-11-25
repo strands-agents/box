@@ -7,9 +7,10 @@ walks through a first run. This page covers what's different about Claude Code.
 
 `box profile create claude` asks which model provider Claude Code uses, then the region, whether
 to bring in your MCP servers (`claude.import-mcp`), whether to run your command hooks
-(`claude.import-hooks`), and the policy. It skips the provider and region questions when your
-Claude Code settings already answer them, as
-[Starters](../../../docs/cli/starters.md#skip-questions-the-agents-settings-already-answer)
+(`claude.import-hooks`), and the policy. When your Claude Code settings already name Bedrock, the
+provider question starts with Bedrock selected and still lists the Anthropic API and a Claude
+subscription. It skips the region question when your settings already answer it, as
+[Starters](../../../docs/cli/starters.md#start-from-the-agents-settings)
 shows. It always asks the MCP and hooks questions at a terminal, because each one shows a warning
 first; pass `--option claude.import-mcp=false` or `--option claude.import-hooks=false` to answer
 one ahead of time.
@@ -200,7 +201,7 @@ and output reach Claude Code as on your machine.
 
 A script gets at most 1 MiB of the event. A larger event, such as a `PostToolUse` event for a
 big file write, can make a script hang or see an empty event, and the run may print
-`strands-box: stdin is more than 1048576 bytes`. For hooks that read large events, raise both
+`strands-box: warning[B1201]: stdin is more than 1048576 bytes`. For hooks that read large events, raise both
 limits in the profile:
 
 ```toml
@@ -337,6 +338,9 @@ back on, remove
   [Scoped](../../policies/scoped/README.md) allows. A condition that
   lists commands must also name each setup command; `box runs history <box-id> --deny --action
   shell:exec` lists the ones a run refused.
+- The agent in the box can change `.claude/settings.json`, `.claude/settings.local.json`, and
+  `.mcp.json` in your project, and Claude Code uses them the next time you run it there.
+  For more info, check [the limitations section](../../../docs/cli/limitations.md#the-agent-can-plant-code-that-runs-outside-the-box-later).
 
 ## Troubleshooting
 

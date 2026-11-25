@@ -73,7 +73,7 @@ fn launch_observation_preserves_results_and_finishes_under_the_instance_lock() {
                 records.push(json!({
                     "timeUnixNano":timestamp,
                     "attributes":[
-                        {"key":"strands.box.control.operation","value":{"stringValue":"box_started"}},
+                        {"key":"strands.box.control.operation","value":{"stringValue":"workload_started"}},
                         {"key":"strands.box.control.outcome","value":{"stringValue":"ok"}}
                     ]
                 }));

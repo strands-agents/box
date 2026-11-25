@@ -888,7 +888,10 @@ fn a_profile_that_turns_file_attributes_off_cannot_set_file_times_on_macos() {
     if cfg!(target_os = "macos") {
         let text = stderr(&output);
         assert!(!output.status.success(), "{text}");
-        assert!(text.contains("strands-box: starting workload"), "{text}");
+        assert!(
+            text.contains("strands-box: note[B0302]: starting workload"),
+            "{text}"
+        );
         assert!(
             text.contains("stamped.txt: Operation not permitted"),
             "{text}"
@@ -3745,7 +3748,7 @@ fn a_run_prints_the_box_id_that_brings_it_back() {
         "Box Core stores the box ID that box prints"
     );
     assert!(
-        stderr(&output).contains(&format!("strands-box: box {id} created")),
+        stderr(&output).contains(&format!("strands-box: note[B0301]: box {id} created")),
         "{}",
         stderr(&output)
     );
@@ -3768,10 +3771,10 @@ fn a_redirected_run_prints_the_startup_disclosure_on_stderr() {
     let text = stderr(&output);
     let workload = text.find("WORKLOAD_RAN").expect("the workload ran");
     for heading in [
-        "strands-box: [agent] runs ",
-        "strands-box: [agent] runtime minimum, added by Core:",
+        "strands-box: note[B0201]: [agent] runs ",
+        "strands-box: note[B0201]: [agent] runtime minimum, added by Core:",
         "\n  exec        /bin/bash",
-        "strands-box: [agent] HOME=",
+        "strands-box: note[B0201]: [agent] HOME=",
     ] {
         let at = text
             .find(heading)
@@ -3823,7 +3826,7 @@ fn a_terminal_run_ends_with_the_exit_block_and_logs_the_disclosure() {
     assert!(!text.contains("runtime minimum, added by Core"), "{text}");
     let log = std::fs::read_to_string(run.join("box.log")).expect("the run log");
     assert!(
-        log.contains("strands-box: [agent] runtime minimum, added by Core:"),
+        log.contains("strands-box: note[B0201]: [agent] runtime minimum, added by Core:"),
         "{log}"
     );
 }
@@ -3906,6 +3909,60 @@ fn long_box_home(scene: &Scene, length: usize) -> PathBuf {
     }
     assert_eq!(long.as_os_str().len(), length);
     long
+}
+
+#[test]
+fn the_history_command_names_a_moved_box_home_so_another_shell_can_run_it() {
+    let scene = Scene::new();
+    let moved = scene.root.join("moved home");
+    let folder = moved.join("profiles/probe");
+    std::fs::create_dir_all(&folder).expect("a profile folder");
+    for file in ["profile.toml", "policy.dw"] {
+        std::fs::copy(
+            scene.home().join(".strands/box/profiles/probe").join(file),
+            folder.join(file),
+        )
+        .expect("a copy of the probe profile");
+    }
+    let output = scene
+        .command(&scene.workspace(), "probe", &["-c", "true"])
+        .env("BOX_HOME", &moved)
+        .output()
+        .expect("box runs");
+    succeeded(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let command = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("box: policy history: "))
+        .unwrap_or_else(|| panic!("no history line\n{stderr}"));
+    let id = std::fs::read_dir(moved.join("r"))
+        .expect("the runs folder")
+        .next()
+        .expect("a run")
+        .expect("a run")
+        .file_name();
+    let id = id.to_str().expect("a UTF-8 box ID");
+    assert_eq!(
+        command,
+        format!("BOX_HOME='{}' box runs history {id}", moved.display())
+    );
+    // A shell with no BOX_HOME runs the command as printed, and finds the run only through it.
+    let program = format!(" '{}' runs history ", env!("CARGO_BIN_EXE_box"));
+    let shell = |command: &str| {
+        scene
+            .process(Path::new("/bin/sh"))
+            .arg("-c")
+            .arg(command.replacen(" box runs history ", &program, 1))
+            .current_dir(scene.workspace())
+            .output()
+            .expect("the shell runs")
+    };
+    succeeded(&shell(command));
+    assert!(
+        !shell(&format!("exec box runs history {id}"))
+            .status
+            .success()
+    );
 }
 
 #[test]
@@ -4029,7 +4086,7 @@ fn a_startup_failure_at_a_terminal_shows_the_error_and_leaves_no_run_folder() {
     let text = String::from_utf8_lossy(&text).replace('\r', "");
     assert_eq!(result.status.code(), Some(1));
     assert!(
-        text.contains("box: recent log output\n  strands-box: error: ")
+        text.contains("box: recent log output\n  strands-box: error[")
             && text.contains("its broker socket path exceeds the platform limit"),
         "{text}"
     );
@@ -4052,11 +4109,16 @@ fn a_folder_too_deep_for_any_profile_name_is_left_to_box_core() {
         .output()
         .expect("box runs");
     assert!(!output.status.success(), "{}", stderr(&output));
+    // The history line names the moved box home so another shell can run it; it is not advice.
+    let text = stderr(&output);
+    let others: Vec<_> = text
+        .lines()
+        .filter(|line| !line.starts_with("box: policy history: "))
+        .collect();
     for advice in ["BOX_HOME", "profile name", "cannot start"] {
         assert!(
-            !stderr(&output).contains(advice),
-            "box gives no advice when no profile name would help: {}",
-            stderr(&output)
+            !others.iter().any(|line| line.contains(advice)),
+            "box gives no advice when no profile name would help: {text}"
         );
     }
 }

@@ -1,5 +1,8 @@
 //! Working-directory restrictions through the configured shell and its decision records.
 
+// Lines a test helper writes to stderr are test output, not Box Core messages.
+#![allow(clippy::print_stderr)]
+
 #[path = "support/fixture.rs"]
 mod fixture;
 

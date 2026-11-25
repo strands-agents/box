@@ -34,7 +34,33 @@ impl Callers {
     /// The next caller's connection.
     pub(crate) async fn next(&mut self) -> std::io::Result<tokio::net::TcpStream> {
         match self {
-            Self::Tcp(listener) => listener.accept().await.map(|(stream, _peer)| stream),
+            Self::Tcp(listener) => {
+                let (stream, _peer) = listener.accept().await?;
+                // Best-effort: Nagle's algorithm off. The root `AGENTS.md` records why.
+                let _ = stream.set_nodelay(true);
+                Ok(stream)
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_caller_connection_has_tcp_nodelay_set() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind source");
+        let address = listener.local_addr().expect("address");
+        let mut callers = Source::tcp(listener).open().expect("open");
+        let _caller = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+
+        let accepted = callers.next().await.expect("accept");
+        assert!(
+            accepted.nodelay().expect("nodelay"),
+            "Nagle's algorithm is off on the caller's connection"
+        );
     }
 }

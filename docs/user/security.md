@@ -41,12 +41,15 @@ MCP request through a declared server. Remote MCP checks require a
 [`[egress.<name>]`](egress.md) credential is attached to a request only after policy permits it. The
 table binds the credential, and the policy's permits open the destination.
 
-Two things pass with no decision from either tier:
+Three things pass with no decision from either tier:
 
 - The reply to an HTTP request. Its status is recorded as `output.status`, so a temporal rule can
   read it.
 - A few MCP protocol methods, and every notification. [MCP](policy/actions.md#mcp) lists them by
   transport.
+- The messages of a WebSocket after its `101`. Policy decides the handshake once, as
+  `websocket:connect`, and the gateway then passes bytes both ways. See
+  [WebSocket](../design/egress.md#websocket).
 
 ## What Box always enforces
 
@@ -142,6 +145,9 @@ records why, the item links it.
   [how Box decides a file operation](../design/monty.md#how-box-decides-a-file-operation).
 - **The decision log records the rule and the path, and not the operation.** A `cat` and an `ls`
   of one file produce the same entry.
+- **A rule cannot close a WebSocket that is already open.** A rule that blocks traffic after an
+  event refuses the next `websocket:connect`. A WebSocket that is open stays open until one side
+  closes it, or until no byte moves for 300 seconds. See [WebSocket](../design/egress.md#websocket).
 - **A long temporal window slows every decision on that action.** Each decision recounts the events
   in the window, so a `24h` window on a busy action costs more than a `1m` one. Pick the shortest
   window the rule needs. See [residual risk](../design/policy.md#residual-risk).

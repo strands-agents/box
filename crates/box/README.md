@@ -15,8 +15,8 @@ state, and one selects the workload:
 
 | Input | Kind | Spelled | What it decides |
 |---|---|---|---|
-| Policy | authority | `policy` in the config file | Which effects this box may cause, decided per request. Scoped to this box |
-| Credentials | authority | `[egress.<name>]` in the config file | Which secret is attached once a request is permitted |
+| Policy | authority | `policy` in the config file | Which effects this box may cause, decided per request. Scoped to this box. In log-only mode a denial is recorded and the effect goes ahead |
+| Credentials | authority | `[egress.<name>]` in the config file | Which secret is attached once a request is permitted, which in log-only mode includes a request the policy would deny |
 | Identity and state | state | `name` in the config file, and `RunOptions::box_id` for a library caller | Which box this is, and where it keeps its persistent state |
 | Workload | selection | `[agent] command` in the config file, and `run`'s trailing argv | Which process runs |
 
@@ -130,14 +130,26 @@ event metadata, the host-wide event count, and each volume's history identifier.
 also delete any volume's event history. Box prints these limitations at startup. See
 [file watching](../../docs/user/config.md#file-watching).
 
-`filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
-`exec`, and `deny` — and also takes `deny_write`, which keeps an existing directory inside a
-`write` directory read-only. A tool and a local MCP server take `deny_write` too.
+`filesystem` holds nine permission lists: `read`, `write`, `read_file`, `write_file`, `list`,
+`metadata`, `exec`, `deny`, and `deny_write`. The `deny_write` list keeps an existing directory
+inside a `write` directory read-only. A tool and a local MCP server take `deny_write` too.
 They give this process's own filesystem calls direct reach, because an
 unmodified coding agent's `Read`, `Write` and `Edit` issue those calls and containment refuses every
 one. A directory entry is recursive, and a file entry is exact. `write` does not imply `read`. Linux
 is the residual: a writable bind reads there, and the startup disclosure says so on that entry's
 line.
+
+In `box.toml`, the separate `filesystem.receive_mounts` array selects paths where the agent, a tool,
+or a local MCP server would receive externally attached filesystems. Each process has its own
+array, and listing a path grants no filesystem access. Linux requires no additional experimental
+setting, but this build still rejects nonempty arrays because incoming mount forwarding is
+unavailable. On Linux, an empty or omitted array leaves ordinary filesystem behavior unchanged.
+
+On macOS, any `receive_mounts` key rejects configuration loading, including an explicit empty
+array. Omit the key on macOS. Both platform refusals happen before Box creates state or starts a
+workload. The removed `[experimental-features] linux-storage-mounts` key is also an error, including
+when `false`. See [incoming mount declarations](../../docs/user/config.md#incoming-mount-declarations)
+for the per-process path checks.
 
 Without experimental native filesystem policy, no `fs:*` decision records these operations, so the box prints each grant
 on stderr when it starts. A grant that would expose the box's own directory is refused, which
@@ -250,7 +262,7 @@ reply's `output.status`, so a temporal rule can count server errors; a rule cann
 reply's size.
 
 **Four** enforcement points read the same authority, and each sees the actions it can enforce. The
-egress gateway decides `net:connect` and `http:request`. The Strands Shell decides `shell:exec`,
+egress gateway decides `net:connect`, `http:request`, and `websocket:connect`. The Strands Shell decides `shell:exec`,
 `shell:spawn`, and `fs:*`. The Python interpreter decides `fs:*`. The local MCP broker decides
 `mcp:call` and generated tool refinements. All four are adapters over the one `PolicyEngine` the
 trusted `run` process holds for that box, so they share one decision history.

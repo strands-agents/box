@@ -9,6 +9,7 @@ mod claude;
 mod claude_subscription;
 mod codex;
 mod git;
+mod go;
 mod kiro;
 mod node;
 mod npm;

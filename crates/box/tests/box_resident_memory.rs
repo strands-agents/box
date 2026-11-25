@@ -1,5 +1,8 @@
 //! The resident memory of the run process, at startup and after twenty thousand decisions.
 
+// The measurement line a test helper writes to stderr is test output, not a Box Core message.
+#![allow(clippy::disallowed_methods)]
+
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};

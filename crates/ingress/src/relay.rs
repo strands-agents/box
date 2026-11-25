@@ -45,8 +45,9 @@ impl Ingress {
                     Ok(caller) => caller,
                     Err(error) => {
                         drop(permit);
-                        eprintln!(
-                            "strands-box: [ingress] accepting a caller failed: {error}; retrying in {} s",
+                        diagnostics::diag!(
+                            B0702,
+                            "[ingress] accepting a caller failed: {error}; retrying in {} s",
                             ACCEPT_BACKOFF.as_secs()
                         );
                         tokio::select! {
@@ -68,8 +69,9 @@ impl Ingress {
                         }
                         Err(error) => {
                             if !refusing.swap(true, Ordering::Relaxed) {
-                                eprintln!(
-                                    "strands-box: [ingress] {}",
+                                diagnostics::diag!(
+                                    B0703,
+                                    "[ingress] {}",
                                     refusal(&error, workload.port())
                                 );
                             }
@@ -174,6 +176,18 @@ mod tests {
             .await
             .expect("the relay answers rather than hangs")
             .expect("the caller thread does not panic")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_to_the_workload_has_tcp_nodelay_set() {
+        let connection = workload_at(uppercase_server(), 0)
+            .connect()
+            .await
+            .expect("connect");
+        assert!(
+            connection.nodelay().expect("nodelay"),
+            "Nagle's algorithm is off on the connection to the workload"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use strands_shell::os::{CommandContext, CommandFallback, OpenFlags};
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::effect::{EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit};
 use crate::kernel::ShellKernel;
@@ -19,6 +19,9 @@ const DENIED_STATUS: i32 = 126;
 
 /// The status of a decision that faulted, or of an outcome that could not be recorded.
 const FAULT_STATUS: i32 = 125;
+
+/// The bytes of a command's stdin the Shell reads at one time for a host program.
+const STDIN_COPY_BYTES: usize = 8 * 1024;
 
 /// What one Python source printed and returned.
 pub struct ScriptOutcome {
@@ -44,6 +47,57 @@ pub(crate) struct Commands {
     pub(crate) script: Option<ScriptRunner>,
     /// The most script text `python SCRIPT` reads.
     pub(crate) max_script: usize,
+}
+
+/// A command's stdin on its way to a host program: the input, the program's end, and the first
+/// read, which ran before the spawn.
+struct StdinFeed<'a> {
+    input: &'a mut strands_shell::os::CommandInput,
+    stderr: Option<&'a mut strands_shell::os::CommandOutput>,
+    write: tokio::net::unix::pipe::Sender,
+    buffer: Vec<u8>,
+    ready: Option<io::Result<usize>>,
+}
+
+impl StdinFeed<'_> {
+    /// Copy the input to the program's pipe until its end, and close the pipe there.
+    ///
+    /// A failed read reports itself on stderr at once and holds the pipe open, and so does a
+    /// failed write other than `BrokenPipe`, so the program never reads end of file on part of its
+    /// input. A program that stops reading ends the copy quietly.
+    async fn run(self, program: &str) {
+        let Self {
+            input,
+            stderr,
+            mut write,
+            mut buffer,
+            ready,
+        } = self;
+        let mut read = match ready {
+            Some(read) => read,
+            None => input.read(&mut buffer).await,
+        };
+        loop {
+            match read {
+                // Returning drops the write end, which is the program's end of file.
+                Ok(0) => return,
+                Ok(count) => match write.write_all(&buffer[..count]).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return,
+                    Err(_) => std::future::pending::<()>().await,
+                },
+                Err(error) => {
+                    if let Some(stderr) = stderr {
+                        let line = format!("strands-shell: {program}: read stdin: {error}\n");
+                        let _ = stderr.write_all(line.as_bytes()).await;
+                    }
+                    std::future::pending::<()>().await;
+                    return;
+                }
+            }
+            read = input.read(&mut buffer).await;
+        }
+    }
 }
 
 const PYTHON_HELP: &str = "Usage: python [-c SOURCE | SCRIPT]
@@ -372,18 +426,83 @@ impl CommandFallback for ShellKernel {
             permit.finish(context, 127).await;
             return Ok(None);
         }
+        // The command's stdin is copied to the program while it runs, and what it leaves unread
+        // is dropped, as the Shell drops a command's unread stdin once the command takes it.
+        // A stdin already at its end with no bytes gives the program none, as `/dev/null` does,
+        // because a tool such as `rg` reads a pipe in place of its working directory.
+        let mut stdin = None;
+        let mut feed = None;
+        let mut pipe_error = None;
+        if let (Some(input), _, stderr) = context.stdio() {
+            let mut first = vec![0_u8; STDIN_COPY_BYTES];
+            // One yield lets an end of input that is already on its way arrive first.
+            tokio::task::yield_now().await;
+            let ready = tokio::select! {
+                biased;
+                read = input.read(&mut first) => Some(read),
+                () = std::future::ready(()) => None,
+            };
+            if !matches!(ready, Some(Ok(0))) {
+                // Only the write end is non-blocking: the program reads its end as an ordinary pipe.
+                match std::io::pipe().and_then(|(read, write)| {
+                    let write = tokio::net::unix::pipe::Sender::from_owned_fd(write.into())?;
+                    Ok((read, write))
+                }) {
+                    Ok((read, write)) => {
+                        stdin = Some(read.into());
+                        feed = Some(StdinFeed {
+                            input,
+                            stderr,
+                            write,
+                            buffer: first,
+                            ready,
+                        });
+                    }
+                    Err(error) => pipe_error = Some(error),
+                }
+            }
+        }
+        if let Some(error) = pipe_error {
+            write_stderr(
+                context,
+                &format!("strands-shell: {program}: stdin pipe: {error}\n"),
+            )
+            .await;
+            return Ok(Some(permit.finish(context, FAULT_STATUS).await));
+        }
         let spawn = HostSpawn {
             program: resolved.path.into(),
             invoked: resolved.spelling.into(),
             args,
             cwd: working_directory,
+            stdin,
         };
-        let spawned = match &self.commands.spawner {
-            Some(spawner) => spawner(spawn).await,
-            None => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "host-binary execution requires a contained spawner; none is installed",
-            )),
+        // The futures drop before the output is written, which needs the command's streams back.
+        let spawned = {
+            let spawning = async {
+                match &self.commands.spawner {
+                    Some(spawner) => spawner(spawn).await,
+                    None => Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "host-binary execution requires a contained spawner; none is installed",
+                    )),
+                }
+            };
+            let feeding = async {
+                match feed {
+                    Some(feed) => feed.run(&program).await,
+                    None => std::future::pending().await,
+                }
+            };
+            // Pinned in this order, so a cancelled command drops the spawn, which kills the
+            // program, before the feed closes its pipe on part of its input.
+            tokio::pin!(feeding, spawning);
+            // The program's own result wins when both are ready.
+            tokio::select! {
+                biased;
+                spawned = &mut spawning => spawned,
+                () = &mut feeding => spawning.await,
+            }
         };
         let status = match spawned {
             Ok(outcome) => {
