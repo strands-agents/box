@@ -1992,6 +1992,21 @@ fn ask_question(
     Ok(order[number - 1])
 }
 
+/// The values that the prompt for the input `name` lists: Bedrock's regions for `bedrock.region`,
+/// with a saved or detected `default` that is not one of them first, so Enter keeps it.
+fn suggestions<'a>(name: &str, allowed: &[String], default: Option<&'a str>) -> Vec<&'a str> {
+    if name != "bedrock.region" || !allowed.is_empty() {
+        return Vec::new();
+    }
+    let regions = crate::prompt::BEDROCK_REGIONS;
+    let mut listed: Vec<&'a str> = default
+        .filter(|default| !regions.contains(default))
+        .into_iter()
+        .collect();
+    listed.extend(regions.iter().copied());
+    listed
+}
+
 /// Ask for the input `name` until the answer is valid. Enter keeps the default, and returns
 /// `None`, so the profile does not repeat what a pack says. An input with a `warning` returns
 /// each answer, the default included, so the profile records it.
@@ -2045,9 +2060,11 @@ fn ask_input(
         }
     }
     let labels: Vec<&str> = allowed.iter().map(String::as_str).collect();
+    let suggestions = suggestions(name, &allowed, default);
     if terminal.choice_controls
         && allowed.is_empty()
         && let Some(default) = default
+        && !suggestions.contains(&default)
     {
         terminal.detail(&format!("  Default: {}\n\n", label(default)));
     }
@@ -2060,6 +2077,10 @@ fn ask_input(
             } else {
                 crate::prompt::choose(terminal, &labels, selected)?
             }
+        } else if terminal.choice_controls && !suggestions.is_empty() {
+            let selected =
+                default.and_then(|default| suggestions.iter().position(|value| *value == default));
+            crate::prompt::suggest(terminal, &suggestions, selected)?
         } else if terminal.choice_controls {
             crate::prompt::text(terminal)?
         } else {
