@@ -86,31 +86,24 @@ impl ApprovedReach {
         // The tables that the early check of a secret source program judges, so no table reaches
         // one judgement and not the other.
         let judged = stored.process_tables();
-        // Keep the process role separate from the table spelling used in diagnostics.
-        let specs =
-            stored
-                .agent
-                .iter()
-                .map(|spec| ("[agent]".to_string(), spec, RuntimeReach::Agent))
-                .chain(
-                    stored
-                        .tool
-                        .iter()
-                        .map(|(name, spec)| (format!("[tool.{name}]"), spec, RuntimeReach::Leaf)),
-                )
-                .chain(stored.contained_mcp.iter().map(|(name, server)| {
-                    (format!("[mcp.{name}]"), &server.spec, RuntimeReach::Leaf)
-                }));
-        let tables = specs
-            .map(|(table, spec, role)| {
-                let table = &table;
-                let mut reach = judge_lists(spec, table, &judged, protected_sources)?;
-                commands.validate_reach(table, &reach)?;
-                installation.validate_reach(table, &reach)?;
-                super::mounts::prepare(spec, table, role, stored, &reach, protected_sources)?;
+        let tables = judged
+            .tables
+            .iter()
+            .map(|table| {
+                let mut reach = judge_lists(&table.spec, &table.name, &judged, protected_sources)?;
+                commands.validate_reach(&table.name, &reach)?;
+                installation.validate_reach(&table.name, &reach)?;
+                super::mounts::prepare(
+                    &table.spec,
+                    &table.name,
+                    table.runtime_reach,
+                    stored,
+                    &reach,
+                    protected_sources,
+                )?;
                 reach.installation = Some(std::sync::Arc::clone(&installation));
-                reach.command = commands.get(table).cloned();
-                Ok((table.clone(), reach))
+                reach.command = commands.get(&table.name).cloned();
+                Ok((table.name.clone(), reach))
             })
             .collect::<Result<BTreeMap<_, _>, BoxError>>()?;
         Ok(Self {

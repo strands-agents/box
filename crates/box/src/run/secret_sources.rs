@@ -241,9 +241,9 @@ impl SecretSources {
         if !self.commands.has_sources() {
             return Ok(());
         }
-        for (table, spec) in &tables.tables {
-            let reach = judge_lists(spec, table, tables, protected_sources)?;
-            self.commands.validate_reach(table, &reach)?;
+        for table in &tables.tables {
+            let reach = judge_lists(&table.spec, &table.name, tables, protected_sources)?;
+            self.commands.validate_reach(&table.name, &reach)?;
         }
         Ok(())
     }
