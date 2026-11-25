@@ -1,9 +1,8 @@
 # Install Box
 
-The installer downloads a Box release from `strands-agents/box` on GitHub, checks it, and puts
-`box` on your `PATH`. On macOS, the checks include Apple's signing and notarization. To install
-with Homebrew instead, see [Install with Homebrew](#install-with-homebrew). To build `box`
-yourself, see [Build from source](#build-from-source).
+Install Box with [Homebrew](#install-with-homebrew), or with the installer. Each downloads a Box
+release from `strands-agents/box` on GitHub, checks it, and puts `box` on your `PATH`. To build
+`box` yourself, see [Build from source](#build-from-source).
 
 ## Requirements
 
@@ -21,13 +20,22 @@ neither.
 
 ## Install
 
-Download the installer and run it:
+Install `box` with Homebrew:
+
+```sh
+brew install --cask strands-agents/tap/box
+```
+
+[Install with Homebrew](#install-with-homebrew) says what this adds and how to upgrade and
+uninstall.
+
+Or download the installer and run it:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | sh
 ```
 
-Example output on a Mac:
+Example output of the installer on a Mac:
 
 ```text
 Downloading box-cli-v0.3.0-aarch64-apple-darwin.tar.gz...
@@ -149,18 +157,20 @@ setup.
 
 ## Install with Homebrew
 
-On macOS and Linux, you can install `box` from the
-[Strands Homebrew tap](https://github.com/strands-agents/homebrew-tap) instead of with the installer:
+On macOS and Linux, install `box` from the
+[Strands Homebrew tap](https://github.com/strands-agents/homebrew-tap):
 
 ```sh
 brew install --cask strands-agents/tap/box
 ```
 
-This adds the tap, trusts the `box` cask, and puts `box` in Homebrew's `bin` folder. The cask
-installs the same release archive as the installer, on the same Macs and Linux systems. On Linux,
-a box also needs unprivileged user namespaces, which Ubuntu 24.04 blocks by default. See
+This adds the tap, trusts the `box` cask, and puts `box` in Homebrew's `bin` folder. For Linux, see
 [Linux requirements](../user/linux-requirements.md). To install by the short name `box`, see the
 tap's [Install by short name](https://github.com/strands-agents/homebrew-tap#install-by-short-name).
+
+Homebrew's default prefix (`/opt/homebrew`, `/usr/local`, or `/home/linuxbrew/.linuxbrew`) is
+outside every box's reach. A Homebrew prefix inside your home isn't protected yet, apart from the
+release folder of the `box` you run.
 
 Check that `box` runs:
 
@@ -224,19 +234,25 @@ If `box --version` shows an older release, another `box` comes first on your `PA
 
 Homebrew checks each download against the checksum in the cask, and the tap's tests check that
 checksum against the release's `SHA256SUMS.txt` and its build attestation. Each release archive has
-a build attestation from Box's release workflow. To check an archive you downloaded:
+a build attestation from Box's release workflow. To check the archive Homebrew installed, fetch it
+again in case `brew cleanup` removed it, and check the copy in Homebrew's cache:
 
 ```sh
-gh attestation verify box-cli-<tag>-<triple>.tar.gz --repo strands-agents/box \
+brew fetch --cask strands-agents/tap/box
+gh attestation verify "$(brew --cache --cask strands-agents/tap/box)" --repo strands-agents/box \
   --signer-workflow strands-agents/box/.github/workflows/deploy-box-artifact.yml \
   --source-ref refs/heads/main
 ```
 
-On macOS, the cask keeps the release's Developer ID signature and Apple notarization:
+On macOS, the cask keeps the release's Developer ID signature and Apple notarization. Check `box`
+and the two helpers it runs, without running any of them first:
 
 ```sh
-codesign --verify --strict --verbose=2 "$(brew --caskroom)/box/$(box --version | cut -d' ' -f2)/box"
-spctl --assess --type install --verbose "$(brew --caskroom)/box/$(box --version | cut -d' ' -f2)/box"
+room="$(brew --caskroom)/box/$(brew list --cask --versions box | cut -d' ' -f2)"
+for program in box strands-box-sock-alias strands-box-contain-trampoline; do
+  codesign --verify --strict --verbose=2 "$room/$program"
+done
+spctl --assess --type install --verbose "$room/box"
 ```
 
 `spctl` prints `source=Notarized Developer ID`.
