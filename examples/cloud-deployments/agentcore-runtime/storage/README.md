@@ -6,7 +6,7 @@ The HTTP application compares each sandbox operation with an operation outside t
 
 ## Prepare the image
 
-Use Linux ARM64, Python 3.10 or later, a C compiler, Docker, and Box's [native build dependencies](../../../../README.md#build-from-source). Install `boto3` for deployment and offline request tests. The container runs as user and group `1000:1000`; configure an EFS or S3 Files access point with matching identity and write access.
+Use Linux ARM64, Python 3.10 or later, a C compiler, Docker, and Box's [native build dependencies](../../../../README.md#build-from-source). Install `boto3` for deployment and offline request tests. The image creates a Linux user account and home directory for user and group `1000:1000`; configure an EFS or S3 Files access point with matching identity and write access. Box requires a passwd entry for its operating-system user to check protected paths beneath that user’s home. Setting `HOME` alone does not supply that account.
 
 Use a clean, committed checkout of the Box revision you want to test. Build all three helpers from that checkout, then run these commands from its root:
 
