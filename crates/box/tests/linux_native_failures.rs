@@ -2,7 +2,8 @@
 #![cfg(all(
     box_native_kernel_tests,
     target_os = "linux",
-    target_arch = "aarch64",
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    target_pointer_width = "64",
     feature = "native-filesystem-policy",
     feature = "test-support"
 ))]

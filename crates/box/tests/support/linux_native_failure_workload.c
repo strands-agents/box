@@ -1,9 +1,10 @@
-/* A static ARM64 workload. Each operation calls Linux directly, without Shell. */
+/* A static native 64-bit workload. Each operation calls Linux directly, without Shell. */
 #include <asm/unistd.h>
 #include <errno.h>
 #include <fcntl.h>
 
 static long invoke(long n, long a, long b, long c, long d, long e) {
+#if defined(__aarch64__)
     register long x0 __asm__("x0") = a;
     register long x1 __asm__("x1") = b;
     register long x2 __asm__("x2") = c;
@@ -12,6 +13,15 @@ static long invoke(long n, long a, long b, long c, long d, long e) {
     register long x8 __asm__("x8") = n;
     __asm__ volatile("svc 0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8) : "memory");
     return x0;
+#elif defined(__x86_64__) && !defined(__ILP32__)
+    register long r10 __asm__("r10") = d;
+    register long r8 __asm__("r8") = e;
+    __asm__ volatile("syscall" : "+a"(n) : "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8)
+                     : "rcx", "r11", "memory", "cc");
+    return n;
+#else
+#error "native workloads require ARM64 or native x86-64"
+#endif
 }
 
 static void message(const char *text, long length) {
@@ -237,4 +247,8 @@ void native_main(long *stack) {
     invoke(__NR_exit, 0, 0, 0, 0, 0);
     __builtin_unreachable();
 }
+#if defined(__aarch64__)
 __asm__(".global _start\n_start:\nmov x0, sp\nbl native_main\n");
+#elif defined(__x86_64__) && !defined(__ILP32__)
+__asm__(".global _start\n_start:\nmov %rsp, %rdi\nandq $-16, %rsp\ncall native_main\nud2\n");
+#endif

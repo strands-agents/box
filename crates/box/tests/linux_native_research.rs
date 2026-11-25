@@ -2,7 +2,8 @@
 #![cfg(all(
     box_native_kernel_tests,
     target_os = "linux",
-    target_arch = "aarch64",
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    target_pointer_width = "64",
     feature = "native-filesystem-policy",
     feature = "test-support"
 ))]
@@ -20,6 +21,9 @@ fn run(
     tool: Option<bool>,
     shared_history: bool,
 ) {
+    let workload_operation = operation;
+    let operation = operation.strip_prefix('L').unwrap_or(operation);
+    let operation = operation.strip_prefix('R').unwrap_or(operation);
     let test_root = std::env::var_os("NATIVE_TEST_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().expect("test working directory"));
@@ -92,7 +96,7 @@ fn run(
         "deny"
     };
     let args = [
-        operation.to_string(),
+        workload_operation.to_string(),
         source.display().to_string(),
         destination.display().to_string(),
         expected.into(),
@@ -157,7 +161,9 @@ fn run(
     } else {
         expected
     };
-    println!("case={operation}, allow={allow}, agent={agent_enabled}, tool={tool:?}\n{stderr}");
+    println!(
+        "case={workload_operation}, allow={allow}, agent={agent_enabled}, tool={tool:?}\n{stderr}"
+    );
     assert!(output.status.success(), "{output:?}");
     let marker = if expected == "allow" {
         "NATIVE_ALLOWED"
@@ -704,23 +710,83 @@ fn no_controlling_terminal_flag_does_not_bypass_policy() {
     run("quiet", false, true, None, false);
 }
 
+fn path_truncate(allow: bool, agent_enabled: bool, tool: Option<bool>) {
+    for operation in ["xtruncate", "Rxtruncate"] {
+        run(operation, allow, agent_enabled, tool, false);
+    }
+}
+
 #[test]
 fn agent_path_truncate_allow() {
-    run("xtruncate", true, true, None, false);
+    path_truncate(true, true, None);
 }
 #[test]
 fn agent_path_truncate_deny() {
-    run("xtruncate", false, true, None, false);
+    path_truncate(false, true, None);
 }
 #[test]
 fn tool_path_truncate_allow() {
-    run("xtruncate", true, false, Some(true), false);
+    path_truncate(true, false, Some(true));
 }
 #[test]
 fn tool_path_truncate_deny() {
-    run("xtruncate", false, false, Some(true), false);
+    path_truncate(false, false, Some(true));
 }
 #[test]
 fn disabled_native_path_truncate_keeps_the_baseline_behavior() {
-    run("xtruncate", false, false, None, false);
+    path_truncate(false, false, None);
+}
+
+#[cfg(target_arch = "x86_64")]
+mod legacy {
+    fn run(
+        operation: &str,
+        allow: bool,
+        agent_enabled: bool,
+        tool: Option<bool>,
+        shared_history: bool,
+    ) {
+        for prefix in ["L", "LR"] {
+            let operation = format!("{prefix}{}", &operation[1..]);
+            super::run(&operation, allow, agent_enabled, tool, shared_history);
+        }
+    }
+
+    fn allow_deny_and_opt_out(operation: &str) {
+        run(operation, true, true, None, false);
+        run(operation, false, true, None, false);
+        run(operation, false, false, None, false);
+    }
+
+    #[test]
+    fn open_obeys_read_policy() {
+        allow_deny_and_opt_out("Lread");
+    }
+
+    #[test]
+    fn open_obeys_write_policy_and_preserves_denied_bytes() {
+        allow_deny_and_opt_out("Lwrite");
+    }
+
+    #[test]
+    fn open_obeys_creation_policy_and_leaves_no_denied_file() {
+        allow_deny_and_opt_out("Lcreate");
+    }
+
+    #[test]
+    fn unlink_obeys_policy_and_preserves_denied_bytes() {
+        allow_deny_and_opt_out("Ldelete");
+    }
+
+    #[test]
+    fn rename_obeys_policy_and_preserves_denied_source_and_destination() {
+        allow_deny_and_opt_out("Lmove");
+    }
+
+    #[test]
+    fn a_tools_legacy_open_obeys_its_native_policy_selection() {
+        run("Lwrite", true, false, Some(true), false);
+        run("Lwrite", false, false, Some(true), false);
+        run("Lwrite", false, false, Some(false), false);
+    }
 }

@@ -410,21 +410,20 @@ should change.
 
 ## Experimental native filesystem policy
 
-Box Core supports this experiment on macOS 27 or later and Linux ARM64. Use a CLI
+Box Core supports this experiment on macOS 27 or later and Linux ARM64 or x86-64. Use a CLI
 build that includes the Cargo feature `native-filesystem-policy`. On macOS, activating the feature
 requires a binary built with the macOS 27 software development kit (SDK) or later. The executable
 must have a valid signature and Apple's Endpoint Security entitlement
 (`com.apple.developer.endpoint-security.client`), which permits interception of selected system
 requests. The profile setting does not compile support into an existing binary.
 
-On Linux ARM64, the host must support seccomp user notifications and descriptor injection, which
+On Linux, the host must support seccomp user notifications and descriptor injection, which
 let Box pause a system call and supply an approved file descriptor. It also needs BPF Linux
 Security Module hooks and BPF type information so Box can load kernel checks for file identity.
 When any workload selects native checks, start the trusted Box process with `CAP_BPF` and
 `CAP_PERFMON`, the Linux capabilities for loading these programs and using their tracing hooks.
 A normal install does not provide these capabilities. Box loads its checks and drops these
 capabilities before launching workloads. Missing capabilities or kernel support stop launch.
-Linux x86-64 refuses selection.
 
 The feature adds policy checks for supported file operations that processes perform directly.
 It does not expand their filesystem grants, check every operation, or revoke access through an

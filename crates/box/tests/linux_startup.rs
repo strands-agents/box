@@ -163,9 +163,9 @@ fn linux_help_and_version_remain_available_without_opt_in() {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", feature = "native-filesystem-policy"))]
+#[cfg(not(feature = "native-filesystem-policy"))]
 #[test]
-fn x86_native_policy_is_refused_before_state_or_schema_creation() {
+fn native_policy_without_compiled_support_is_refused_before_state_or_schema_creation() {
     let directory = tempfile::tempdir().expect("create the native-selection fixture");
     let config = directory.path().join("box.toml");
     let state = directory.path().join("state");
@@ -176,7 +176,7 @@ fn x86_native_policy_is_refused_before_state_or_schema_creation() {
         std::fs::write(
             &config,
             format!(
-                "name = \"native-x86-refusal\"\nbox_dir = {state:?}\n\
+                "name = \"native-build-refusal\"\nbox_dir = {state:?}\n\
                  [experimental-features]\nnative-filesystem-policy = true\n\
                  [agent]\ncommand = [\"/bin/true\"]\n{selection}"
             ),
@@ -197,7 +197,7 @@ fn x86_native_policy_is_refused_before_state_or_schema_creation() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(
                 !output.status.success(),
-                "native x86 selection must be refused"
+                "native selection without compiled support must be refused"
             );
             assert!(
                 stderr.contains("experimental feature `native-filesystem-policy` requires"),
@@ -210,7 +210,7 @@ fn x86_native_policy_is_refused_before_state_or_schema_creation() {
     std::fs::write(
         &config,
         format!(
-            "name = \"native-x86-refusal\"\nbox_dir = {state:?}\n\
+            "name = \"native-build-refusal\"\nbox_dir = {state:?}\n\
              [experimental-features]\nnative-filesystem-policy = false\n"
         ),
     )
@@ -236,4 +236,53 @@ fn x86_native_policy_is_refused_before_state_or_schema_creation() {
         schema.exists(),
         "the disabled-feature control must generate a schema"
     );
+}
+
+#[cfg(all(
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    target_pointer_width = "64",
+    feature = "native-filesystem-policy"
+))]
+#[test]
+fn native_policy_schema_accepts_supported_linux_architectures() {
+    let directory = tempfile::tempdir().expect("create the native-selection fixture");
+    let config = directory.path().join("box.toml");
+    let state = directory.path().join("state");
+    for (index, selection) in ["", "native-filesystem-policy = false\n"]
+        .into_iter()
+        .enumerate()
+    {
+        let schema = directory.path().join(format!("schema-{index}"));
+        std::fs::write(
+            &config,
+            format!(
+                "name = \"native-linux-selection\"\nbox_dir = {state:?}\n\
+                 [experimental-features]\nnative-filesystem-policy = true\n\
+                 [agent]\ncommand = [\"/bin/true\"]\n{selection}"
+            ),
+        )
+        .expect("write the native policy configuration");
+        let output = command(
+            None,
+            None,
+            &[
+                "policy",
+                "generate-schema",
+                "--config",
+                config.to_str().expect("UTF-8 configuration path"),
+                "--output-dir",
+                schema.to_str().expect("UTF-8 schema path"),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(schema.exists(), "native selection must generate a schema");
+        assert!(
+            !state.exists(),
+            "schema generation must not create Box state"
+        );
+    }
 }

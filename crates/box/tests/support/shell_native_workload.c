@@ -1,8 +1,9 @@
-/* Direct ARM64 calls for the Shell/native comparison suite. */
+/* Direct ARM64 and x86-64 calls for the Shell/native comparison suite. */
 #include <asm/unistd.h>
 #include <fcntl.h>
 
 static long call(long n, long a, long b, long c, long d) {
+#if defined(__aarch64__)
     register long x0 __asm__("x0") = a;
     register long x1 __asm__("x1") = b;
     register long x2 __asm__("x2") = c;
@@ -10,6 +11,16 @@ static long call(long n, long a, long b, long c, long d) {
     register long x8 __asm__("x8") = n;
     __asm__ volatile("svc 0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x8) : "memory");
     return x0;
+#elif defined(__x86_64__) && !defined(__ILP32__)
+    register long r10 __asm__("r10") = d;
+    long result;
+    __asm__ volatile("syscall" : "=a"(result)
+                     : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10)
+                     : "rcx", "r11", "memory", "cc");
+    return result;
+#else
+#error "This workload requires native 64-bit ARM64 or x86-64 Linux"
+#endif
 }
 
 static void finish(long code) {
@@ -86,4 +97,8 @@ void native_main(long *stack) {
     finish(0);
 }
 
+#if defined(__aarch64__)
 __asm__(".global _start\n_start:\nmov x0, sp\nbl native_main\n");
+#elif defined(__x86_64__) && !defined(__ILP32__)
+__asm__(".global _start\n_start:\nmov %rsp, %rdi\nand $-16, %rsp\ncall native_main\nud2\n");
+#endif

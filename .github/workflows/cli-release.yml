@@ -35,7 +35,7 @@ on:
         default: false
         type: boolean
       native_filesystem_policy:
-        description: 'Compile native policy into the ARM64 packages (experimental dry run)'
+        description: 'Compile native policy into the macOS and Linux packages (experimental dry run)'
         required: false
         default: false
         type: boolean
@@ -143,7 +143,7 @@ jobs:
         run: |
           set -euo pipefail
           set --
-          if [ "${NATIVE_FILESYSTEM_POLICY:-false}" = true ] && [ "$TARGET" = aarch64-unknown-linux-gnu ]; then
+          if [ "${NATIVE_FILESYSTEM_POLICY:-false}" = true ]; then
             set -- --features strands-box-cli/native-filesystem-policy
           fi
           mkdir -p target
@@ -218,7 +218,7 @@ jobs:
           archive = Path("dist") / f"box-cli-{os.environ['NEW_TAG']}-{target}.tar.gz"
           record = json.loads(Path("stage/package/release.json").read_text())
           features = ["strands-box-cli/native-filesystem-policy"] if target in (
-              "aarch64-apple-darwin", "aarch64-unknown-linux-gnu") else []
+              "aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu") else []
           record.update(cargo_features=features, archive=archive.name,
                         archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
                         archive_stage="unsigned_build", runtime_qualified=False)

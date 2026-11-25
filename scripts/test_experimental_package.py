@@ -204,7 +204,7 @@ class BuildFeatureTests(unittest.TestCase):
                     self.assertEqual(len(commands), 1)
                     args = commands[0]
                     self.assertNotIn("--all-features", args)
-                    expected = native == "true" and target != TARGETS[2]
+                    expected = native == "true"
                     self.assertEqual("--features" in args, expected, args)
                     self.assertEqual(FEATURE in args, expected, args)
                     if expected:
@@ -237,7 +237,7 @@ class BuildFeatureTests(unittest.TestCase):
                                         }), capture_output=True, text=True, timeout=20)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 receipt = json.loads((root / "dist/native-filesystem-policy.json").read_text())
-                self.assertEqual(receipt["cargo_features"], [FEATURE] if target != TARGETS[2] else [])
+                self.assertEqual(receipt["cargo_features"], [FEATURE])
                 self.assertEqual(receipt["archive"], archive.name)
                 self.assertEqual(receipt["archive_sha256"], hashlib.sha256(archive.read_bytes()).hexdigest())
                 for key, value in record.items():

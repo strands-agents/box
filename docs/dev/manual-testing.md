@@ -85,8 +85,8 @@ To activate the experiment, the executable must also satisfy Box Core's
 including the macOS 27 SDK and signing requirements. Older SDKs can compile a binary that
 refuses activation.
 
-Box Core supports experimental activation on Linux ARM64 when the host meets
-those prerequisites. Linux x86-64 builds refuse selection. A successful build alone does not
+Box Core supports experimental activation on Linux ARM64 and x86-64 when the host meets
+those prerequisites. A successful build alone does not
 qualify a host; run native allow and deny controls on the target system.
 
 ## 2. Set up the shell

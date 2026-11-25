@@ -24,6 +24,18 @@ pub(super) const OPERATIONS: &[libc::c_long] = &[
     libc::SYS_mkdirat,
     libc::SYS_symlinkat,
     libc::SYS_truncate,
+    #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+    libc::SYS_open,
+    #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+    libc::SYS_mkdir,
+    #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+    libc::SYS_unlink,
+    #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+    libc::SYS_rmdir,
+    #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+    libc::SYS_rename,
+    #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+    libc::SYS_symlink,
 ];
 
 pub(super) fn handoff(
@@ -108,6 +120,59 @@ fn transfer(socket: &UnixStream, descriptors: [RawFd; 3]) -> io::Result<()> {
                 return Err(io::Error::other(
                     "incomplete native filesystem descriptor handoff",
                 ));
+            }
+        }
+    }
+}
+
+#[cfg(all(
+    test,
+    target_pointer_width = "64",
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
+mod tests {
+    use super::OPERATIONS;
+    use crate::backend::linux::namespace::syscall::WORKLOAD_PERMITTED;
+
+    #[test]
+    fn permitted_native_policy_families_are_intercepted() {
+        // Path-based open/create-file, create-directory, remove, rename, symlink, and truncate.
+        // Keep this family list independent of OPERATIONS so a missing trap fails the contract.
+        let families = [
+            ("openat", libc::SYS_openat),
+            ("openat2", libc::SYS_openat2),
+            ("mkdirat", libc::SYS_mkdirat),
+            ("unlinkat", libc::SYS_unlinkat),
+            ("renameat", libc::SYS_renameat),
+            ("renameat2", libc::SYS_renameat2),
+            ("symlinkat", libc::SYS_symlinkat),
+            ("truncate", libc::SYS_truncate),
+            #[cfg(target_arch = "x86_64")]
+            ("open", libc::SYS_open),
+            #[cfg(target_arch = "x86_64")]
+            ("creat", libc::SYS_creat),
+            #[cfg(target_arch = "x86_64")]
+            ("mkdir", libc::SYS_mkdir),
+            #[cfg(target_arch = "x86_64")]
+            ("unlink", libc::SYS_unlink),
+            #[cfg(target_arch = "x86_64")]
+            ("rmdir", libc::SYS_rmdir),
+            #[cfg(target_arch = "x86_64")]
+            ("rename", libc::SYS_rename),
+            #[cfg(target_arch = "x86_64")]
+            ("symlink", libc::SYS_symlink),
+        ];
+        for (name, number) in families {
+            // The permit compiler adds scoped renameat2 and native-only truncate separately.
+            let permitted = WORKLOAD_PERMITTED
+                .iter()
+                .any(|entry| entry.number == number)
+                || [libc::SYS_renameat2, libc::SYS_truncate].contains(&number);
+            if permitted {
+                assert!(
+                    OPERATIONS.contains(&number),
+                    "permitted '{name}' belongs to a native policy family but has no notification trap"
+                );
             }
         }
     }

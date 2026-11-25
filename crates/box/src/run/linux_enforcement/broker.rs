@@ -1,5 +1,5 @@
 //! Research broker for the shared Linux Box launch path.
-use super::notify;
+use super::notify::{self, Operation};
 use crate::run::telemetry::{DecisionRecorder, EffectiveDecision};
 use policy::{
     ApprovedPath, FsOperation, FsResult, GovernedBox, Outcome, PathResolver, PolicyEngine,
@@ -19,9 +19,14 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const RESOLVE_NO_MAGICLINKS: u64 = 2;
 const RESOLVE_NO_SYMLINKS: u64 = 4;
 const RESOLVE_IN_ROOT: u64 = 16;
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_pointer_width = "64"))]
 const KERNEL_LARGEFILE: i32 = 0o400000;
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+const KERNEL_LARGEFILE: i32 = 0o100000;
+#[cfg(not(all(
+    target_pointer_width = "64",
+    any(target_arch = "aarch64", target_arch = "x86_64")
+)))]
 const KERNEL_LARGEFILE: i32 = libc::O_LARGEFILE;
 const NO_LINKS: u64 = RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS;
 const IN_ROOT: u64 = RESOLVE_IN_ROOT;
@@ -49,12 +54,7 @@ struct RequestPath {
 }
 
 impl RequestPath {
-    fn new(
-        root: i32,
-        request: &notify::Request,
-        path: &Path,
-        directory_arg: usize,
-    ) -> Result<Self> {
+    fn new(root: i32, request: &notify::Request, path: &Path, directory: i32) -> Result<Self> {
         if path.as_os_str().is_empty() {
             return Err("unsupported path component".into());
         }
@@ -66,11 +66,10 @@ impl RequestPath {
                 resolve: IN_ROOT | RESOLVE_NO_MAGICLINKS,
             });
         }
-        let directory_fd = request.data.args[directory_arg] as i32;
-        let source = if directory_fd == libc::AT_FDCWD {
+        let source = if directory == libc::AT_FDCWD {
             format!("/proc/{}/cwd", request.pid)
-        } else if directory_fd >= 0 {
-            format!("/proc/{}/fd/{directory_fd}", request.pid)
+        } else if directory >= 0 {
+            format!("/proc/{}/fd/{directory}", request.pid)
         } else {
             return Err(io::Error::from_raw_os_error(libc::EBADF).into());
         };
@@ -313,13 +312,17 @@ pub(super) fn file_request(
     recorder: &DecisionRecorder,
 ) -> Result<Value> {
     notify::valid(listener, request.id)?;
-    let truncate = request.data.number == libc::SYS_truncate as i32;
-    let flags = if truncate {
-        libc::O_WRONLY | libc::O_CLOEXEC
-    } else {
-        request.data.args[2] as i32 & !(libc::O_CREAT | libc::O_EXCL)
+    let (path_argument, raw_flags, length) = match request.operation() {
+        Some(Operation::Open { path, flags, .. }) => (path, flags, None),
+        Some(Operation::Truncate { path, length }) => (
+            path,
+            (libc::O_WRONLY | libc::O_CLOEXEC) as u64,
+            Some(length),
+        ),
+        _ => return Err("unexpected file syscall".into()),
     };
-    let copied = notify::read_path(request, usize::from(!truncate))?;
+    let flags = raw_flags as i32 & !(libc::O_CREAT | libc::O_EXCL);
+    let copied = notify::read_path(request, path_argument.argument)?;
     notify::valid(listener, request.id)?;
     let path = Path::new(std::str::from_utf8(&copied)?);
     let access = if flags & (libc::O_ACCMODE | libc::O_TRUNC) == 0 {
@@ -328,9 +331,6 @@ pub(super) fn file_request(
         FsOperation::WriteContent
     };
     let mut audit = Audit::new(recorder, path.display().to_string(), access);
-    if request.data.number != libc::SYS_openat as i32 && !truncate {
-        return Err("unexpected file syscall".into());
-    }
     let Some(mut operations) = operations(flags as u64) else {
         static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -342,7 +342,7 @@ pub(super) fn file_request(
         audit.refused("unsupported open flags");
         notify::reply(listener, request.id, libc::EACCES)?;
         return Ok(
-            json!({"refusal": "unsupported flags", "flags":request.data.args[2], "path":path, "decisions": []}),
+            json!({"refusal": "unsupported flags", "flags":raw_flags, "path":path, "decisions": []}),
         );
     };
     if flags & libc::O_PATH != 0 && super::PATH_HANDLES.get() != Some(&true) {
@@ -374,7 +374,7 @@ pub(super) fn file_request(
             }
             return Ok((resolver.approve_virtual(&process_path)?, pinned));
         }
-        let resolved = RequestPath::new(root, request, path, 0)?;
+        let resolved = RequestPath::new(root, request, path, path_argument.directory)?;
         let pinned = resolved.pin(flags).map_err(BoxLookupError)?;
         let actual_path = std::fs::read_link(format!("/proc/self/fd/{}", pinned.as_raw_fd()))?;
         // SAFETY: Zero is a valid initial representation of this integer-only C output structure.
@@ -452,7 +452,7 @@ pub(super) fn file_request(
                 .unwrap_or(libc::EACCES);
             notify::reply(listener, request.id, errno)?;
             return Ok(
-                json!({"refusal": error.to_string(), "path":path, "flags":request.data.args[2], "broker_errno":errno, "decisions": []}),
+                json!({"refusal": error.to_string(), "path":path, "flags":raw_flags, "broker_errno":errno, "decisions": []}),
             );
         }
     };
@@ -514,11 +514,11 @@ pub(super) fn file_request(
             Ok(json!({"decisions": decisions, "outcome": "failed", "broker_errno": errno}))
         }
         Ok(source) => {
-            if truncate {
+            if let Some(length) = length {
                 notify::valid(listener, request.id)?;
                 // SAFETY: The owned descriptor remains live; ftruncate validates the scalar length.
                 let effect = notify::checked(unsafe {
-                    libc::ftruncate(source.as_raw_fd(), request.data.args[1] as libc::off_t)
+                    libc::ftruncate(source.as_raw_fd(), length as libc::off_t)
                 });
                 audit.allowed = effect.is_ok();
                 if let Err(error) = &effect {
@@ -545,7 +545,7 @@ pub(super) fn file_request(
                 listener,
                 request.id,
                 source.as_raw_fd(),
-                request.data.args[2] & libc::O_CLOEXEC as u64 != 0,
+                raw_flags & libc::O_CLOEXEC as u64 != 0,
             ) {
                 Ok(descriptor) => {
                     audit.allowed = true;
@@ -606,10 +606,10 @@ fn entry(
     root: i32,
     request: &notify::Request,
     bytes: &[u8],
-    directory_arg: usize,
+    directory: i32,
 ) -> Result<Entry> {
     let path = Path::new(std::str::from_utf8(bytes)?);
-    let resolved = RequestPath::new(root, request, path, directory_arg)?;
+    let resolved = RequestPath::new(root, request, path, directory)?;
     let relative = resolved.relative.as_os_str().as_bytes();
     let end = relative
         .iter()
@@ -697,8 +697,9 @@ fn creation_entry(
     root: i32,
     request: &notify::Request,
     mut source: Entry,
+    flags: u64,
 ) -> Result<Entry> {
-    if request.data.args[2] as i32 & (libc::O_EXCL | libc::O_NOFOLLOW) != 0 {
+    if flags as i32 & (libc::O_EXCL | libc::O_NOFOLLOW) != 0 {
         return Ok(source);
     }
     for _ in 0..40 {
@@ -739,7 +740,13 @@ fn creation_entry(
             .parent()
             .ok_or("link has no parent")?
             .join(target);
-        source = entry(resolver, root, request, target.as_os_str().as_bytes(), 0)?;
+        source = entry(
+            resolver,
+            root,
+            request,
+            target.as_os_str().as_bytes(),
+            libc::AT_FDCWD,
+        )?;
     }
     Err(BoxLookupError(io::Error::from_raw_os_error(libc::ELOOP)).into())
 }
@@ -777,17 +784,27 @@ pub(super) fn entry_request(
     recorder: &DecisionRecorder,
 ) -> Result<Value> {
     notify::valid(listener, request.id)?;
-    let number = request.data.number as libc::c_long;
-    let symlink = number == libc::SYS_symlinkat;
-    let mkdir = number == libc::SYS_mkdirat;
-    let rmdir = number == libc::SYS_unlinkat && request.data.args[2] == libc::AT_REMOVEDIR as u64;
-    let bytes = notify::read_path(request, if symlink { 2 } else { 1 })?;
+    let operation = request.operation().ok_or("unexpected entry syscall")?;
+    let (path_argument, flags, mode) = match operation {
+        Operation::Open { path, flags, mode } => (path, flags, mode),
+        Operation::Remove { path, flags } => (path, flags, 0),
+        Operation::Rename { source, flags, .. } => (source, flags, 0),
+        Operation::Mkdir { path, mode } => (path, 0, mode),
+        Operation::Symlink { path } => (path, 0, 0),
+        Operation::Truncate { .. } => return Err("unexpected entry syscall".into()),
+    };
+    let create = matches!(operation, Operation::Open { .. });
+    let symlink = matches!(operation, Operation::Symlink { .. });
+    let mkdir = matches!(operation, Operation::Mkdir { .. });
+    let remove = matches!(operation, Operation::Remove { .. });
+    let rmdir = remove && flags == libc::AT_REMOVEDIR as u64;
+    let bytes = notify::read_path(request, path_argument.argument)?;
     let link_target = if symlink {
         Some(CString::new(notify::read_path(request, 0)?)?)
     } else {
         None
     };
-    let rename = number == libc::SYS_renameat || number == libc::SYS_renameat2;
+    let rename = matches!(operation, Operation::Rename { .. });
     let mut audit = Audit::new(
         recorder,
         String::from_utf8_lossy(&bytes).into_owned(),
@@ -795,7 +812,7 @@ pub(super) fn entry_request(
             FsOperation::Rename
         } else if rmdir {
             FsOperation::RemoveDir
-        } else if number == libc::SYS_unlinkat {
+        } else if remove {
             FsOperation::RemoveFile
         } else if mkdir {
             FsOperation::CreateDir
@@ -806,38 +823,37 @@ pub(super) fn entry_request(
         },
     );
     let prepared = (|| -> Result<_> {
-        if number == libc::SYS_openat
-            && (request.data.args[2] & libc::O_CREAT as u64 == 0
-                || operations(request.data.args[2] & !((libc::O_CREAT | libc::O_EXCL) as u64))
-                    .is_none()
-                || request.data.args[2] & libc::O_DIRECTORY as u64 != 0
-                || request.data.args[3] & !0o777 != 0)
-            || number == libc::SYS_unlinkat && request.data.args[2] != 0 && !rmdir
-            || mkdir && request.data.args[2] & !0o777 != 0
-            || number == libc::SYS_renameat2 && request.data.args[4] != 0
+        if create
+            && (flags & libc::O_CREAT as u64 == 0
+                || operations(flags & !((libc::O_CREAT | libc::O_EXCL) as u64)).is_none()
+                || flags & libc::O_DIRECTORY as u64 != 0
+                || mode & !0o777 != 0)
+            || remove && flags != 0 && !rmdir
+            || mkdir && mode & !0o777 != 0
+            || rename && flags != 0
         {
             return Err("unsupported entry flags or mode".into());
         }
         if mkdir {
             let path = Path::new(std::str::from_utf8(&bytes)?);
-            let resolved = RequestPath::new(root, request, path, 0)?;
+            let resolved = RequestPath::new(root, request, path, path_argument.directory)?;
             if resolved.pin(0).is_ok() {
                 return Err(BoxLookupError(io::Error::from_raw_os_error(libc::EEXIST)).into());
             }
         }
-        let source = entry(resolver, root, request, &bytes, usize::from(symlink))?;
-        let source = if number == libc::SYS_openat {
-            creation_entry(resolver, root, request, source)?
+        let source = entry(resolver, root, request, &bytes, path_argument.directory)?;
+        let source = if create {
+            creation_entry(resolver, root, request, source, flags)?
         } else {
             source
         };
-        let destination = if rename {
+        let destination = if let Operation::Rename { destination, .. } = operation {
             Some(entry(
                 resolver,
                 root,
                 request,
-                &notify::read_path(request, 3)?,
-                2,
+                &notify::read_path(request, destination.argument)?,
+                destination.directory,
             )?)
         } else {
             None
@@ -847,7 +863,7 @@ pub(super) fn entry_request(
         {
             return Err("replacing an existing directory is not supported".into());
         }
-        if number != libc::SYS_openat && !mkdir && !symlink && !source.exists {
+        if !create && !mkdir && !symlink && !source.exists {
             return Err("source entry does not exist".into());
         }
         Ok((source, destination))
@@ -871,8 +887,8 @@ pub(super) fn entry_request(
             json!({"refusal":"creation target already exists", "decisions":[], "broker_errno":libc::EEXIST}),
         );
     }
-    if number == libc::SYS_openat && source.exists {
-        if request.data.args[2] & libc::O_EXCL as u64 != 0 {
+    if create && source.exists {
+        if flags & libc::O_EXCL as u64 != 0 {
             notify::reply(listener, request.id, libc::EEXIST)?;
             return Ok(
                 json!({"refusal":"exclusive creation target already exists", "decisions":[], "broker_errno":libc::EEXIST}),
@@ -883,17 +899,17 @@ pub(super) fn entry_request(
             resolver, engine, root, listener, request, governed, recorder,
         );
     }
-    let mut checks = match number {
-        libc::SYS_openat => {
+    let mut checks = match operation {
+        Operation::Open { .. } => {
             let mut checks = vec![(&source.path, FsOperation::WriteContent)];
-            if request.data.args[2] as i32 & libc::O_ACCMODE != libc::O_WRONLY {
+            if flags as i32 & libc::O_ACCMODE != libc::O_WRONLY {
                 checks.push((&source.path, FsOperation::ReadContent));
             }
             checks
         }
-        libc::SYS_mkdirat => vec![(&source.path, FsOperation::CreateDir)],
-        libc::SYS_symlinkat => vec![(&source.path, FsOperation::Symlink)],
-        libc::SYS_unlinkat => vec![(
+        Operation::Mkdir { .. } => vec![(&source.path, FsOperation::CreateDir)],
+        Operation::Symlink { .. } => vec![(&source.path, FsOperation::Symlink)],
+        Operation::Remove { .. } => vec![(
             &source.path,
             if rmdir {
                 FsOperation::RemoveDir
@@ -901,7 +917,7 @@ pub(super) fn entry_request(
                 FsOperation::RemoveFile
             },
         )],
-        _ if rename => {
+        Operation::Rename { .. } => {
             let destination = destination.as_ref().ok_or("rename destination absent")?;
             let mut checks = vec![
                 (&source.path, FsOperation::Rename),
@@ -977,8 +993,8 @@ pub(super) fn entry_request(
     notify::valid(listener, request.id)?;
     // SAFETY: Owned descriptors and CStrings outlive these synchronous calls, including the guarded closures.
     let effect = unsafe {
-        match number {
-            libc::SYS_openat | libc::SYS_mkdirat => {
+        match operation {
+            Operation::Open { .. } | Operation::Mkdir { .. } => {
                 let status = std::fs::read_to_string(format!("/proc/{}/status", request.pid))?;
                 let mask = status
                     .lines()
@@ -994,25 +1010,25 @@ pub(super) fn entry_request(
                     notify::checked(libc::mkdirat(
                         source.parent.as_raw_fd(),
                         source.leaf.as_ptr(),
-                        request.data.args[2] as libc::mode_t,
+                        mode as libc::mode_t,
                     ))
                 } else {
                     notify::checked(libc::openat(
                         source.parent.as_raw_fd(),
                         source.leaf.as_ptr(),
-                        request.data.args[2] as i32 | libc::O_EXCL | libc::O_CLOEXEC,
-                        request.data.args[3] as libc::mode_t,
+                        flags as i32 | libc::O_EXCL | libc::O_CLOEXEC,
+                        mode as libc::mode_t,
                     ))
                 };
                 libc::umask(previous);
                 created
             }
-            libc::SYS_symlinkat => notify::checked(libc::symlinkat(
+            Operation::Symlink { .. } => notify::checked(libc::symlinkat(
                 link_target.as_ref().ok_or("link target absent")?.as_ptr(),
                 source.parent.as_raw_fd(),
                 source.leaf.as_ptr(),
             )),
-            libc::SYS_unlinkat => guard.effect(
+            Operation::Remove { .. } => guard.effect(
                 &source.parent,
                 source.object.as_ref().ok_or("unlink identity absent")?,
                 None,
@@ -1052,7 +1068,7 @@ pub(super) fn entry_request(
     let error = effect.as_ref().err();
     let (result, outcome) = if error.is_some() {
         (FsResult::Failed, "failed")
-    } else if number == libc::SYS_openat {
+    } else if create {
         // SAFETY: The successful open returned a fresh descriptor; ownership transfers exactly once.
         let descriptor = unsafe {
             OwnedFd::from_raw_fd(
@@ -1065,7 +1081,7 @@ pub(super) fn entry_request(
             listener,
             request.id,
             descriptor.as_raw_fd(),
-            request.data.args[2] as i32 & libc::O_CLOEXEC != 0,
+            flags as i32 & libc::O_CLOEXEC != 0,
         ) {
             for (path, operation, request_id) in &permitted {
                 engine.record(
@@ -1107,7 +1123,7 @@ pub(super) fn entry_request(
             },
         )?;
     }
-    if number != libc::SYS_openat || error.is_some() {
+    if !create || error.is_some() {
         audit.allowed = error.is_none();
         if let Some(error) = error {
             audit.refused(error);
@@ -1115,7 +1131,7 @@ pub(super) fn entry_request(
     }
     guard.check()?;
     let errno = error.and_then(io::Error::raw_os_error);
-    if number != libc::SYS_openat || error.is_some() {
+    if !create || error.is_some() {
         notify::reply(listener, request.id, errno.unwrap_or(0))?;
     }
     Ok(json!({"decisions":decisions, "outcome":outcome, "broker_errno":errno}))
@@ -1158,7 +1174,7 @@ mod path_tests {
                 root.as_raw_fd(),
                 &request(libc::AT_FDCWD),
                 Path::new(path),
-                0,
+                libc::AT_FDCWD,
             )
             .unwrap();
             assert_eq!(bytes(&resolved.pin(libc::O_RDONLY).unwrap()), b"captured");
@@ -1167,7 +1183,7 @@ mod path_tests {
             root.as_raw_fd(),
             &request(libc::AT_FDCWD),
             Path::new("/../../etc/passwd"),
-            0,
+            libc::AT_FDCWD,
         )
         .unwrap();
         assert_eq!(
@@ -1189,12 +1205,44 @@ mod path_tests {
                 root.as_raw_fd(),
                 &request(directory.as_raw_fd()),
                 Path::new(path),
-                0,
+                directory.as_raw_fd(),
             )
             .unwrap();
             assert_eq!(bytes(&resolved.pin(0).unwrap()), b"relative");
         }
     }
+    #[test]
+    fn implicit_working_directory_paths_resolve_without_a_directory_argument() {
+        let working_directory = std::env::current_dir().unwrap();
+        let fixture = tempfile::tempdir_in(&working_directory).unwrap();
+        let file = fixture.path().join("file");
+        std::fs::write(&file, b"working-directory").unwrap();
+        let relative = file.strip_prefix(&working_directory).unwrap();
+        let name = CString::new(relative.as_os_str().as_bytes()).unwrap();
+        let root = root(Path::new("/"));
+        let check = |number| {
+            let mut request = request(libc::AT_FDCWD);
+            request.data.number = number as i32;
+            request.data.args = [name.as_ptr() as u64, 0, u64::MAX, 0, 0, 0];
+            let path = match request.operation().unwrap() {
+                Operation::Open { path, .. } | Operation::Truncate { path, .. } => path,
+                other => panic!("unexpected operation {other:?}"),
+            };
+            let copied = notify::read_path(&request, path.argument).unwrap();
+            let resolved = RequestPath::new(
+                root.as_raw_fd(),
+                &request,
+                Path::new(std::ffi::OsStr::from_bytes(&copied)),
+                path.directory,
+            )
+            .unwrap();
+            assert_eq!(bytes(&resolved.pin(0).unwrap()), b"working-directory");
+        };
+        check(libc::SYS_truncate);
+        #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+        check(libc::SYS_open);
+    }
+
     #[test]
     fn path_only_nofollow_keeps_the_link_identity() {
         let fixture = tempfile::tempdir().unwrap();
@@ -1205,7 +1253,7 @@ mod path_tests {
             root.as_raw_fd(),
             &request(libc::AT_FDCWD),
             Path::new("/link"),
-            0,
+            libc::AT_FDCWD,
         )
         .unwrap();
         let link = resolved.pin(libc::O_PATH | libc::O_NOFOLLOW).unwrap();
@@ -1225,12 +1273,22 @@ mod path_tests {
         let file = fixture.path().join("file");
         std::fs::write(&file, b"approved").unwrap();
         let root = root(Path::new("/"));
-        let resolved =
-            RequestPath::new(root.as_raw_fd(), &request(libc::AT_FDCWD), &file, 0).unwrap();
+        let resolved = RequestPath::new(
+            root.as_raw_fd(),
+            &request(libc::AT_FDCWD),
+            &file,
+            libc::AT_FDCWD,
+        )
+        .unwrap();
         let pinned = resolved.pin(0).unwrap();
         let magic = PathBuf::from(format!("/proc/self/fd/{}", pinned.as_raw_fd()));
-        let resolved =
-            RequestPath::new(root.as_raw_fd(), &request(libc::AT_FDCWD), &magic, 0).unwrap();
+        let resolved = RequestPath::new(
+            root.as_raw_fd(),
+            &request(libc::AT_FDCWD),
+            &magic,
+            libc::AT_FDCWD,
+        )
+        .unwrap();
         assert_eq!(
             resolved.pin(0).unwrap_err().raw_os_error(),
             Some(libc::ELOOP)

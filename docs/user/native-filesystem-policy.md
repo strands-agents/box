@@ -1,6 +1,6 @@
 # Experimental native filesystem policy
 
-This experimental feature adds Dogwood checks to selected native file operations on macOS and Linux ARM64.
+This experimental feature adds Dogwood checks to selected native file operations on macOS and Linux ARM64 or x86-64.
 
 ### macOS requirements
 
@@ -34,14 +34,16 @@ An absent table or `false` leaves native interception disabled, including in an 
 A selected but unavailable mechanism refuses startup. Box never silently disables the selected checks.
 Signed macOS release artifacts include the experiment's code; unsigned build artifacts do not establish its signing requirements.
 
-### Linux ARM64 requirements
+<a id="linux-arm64-requirements"></a>
+### Linux requirements
 
-Linux x86-64 builds refuse this feature during configuration validation, before creating Box state or starting a workload.
+Linux ARM64 and x86-64 builds can enable this feature when the host meets the requirements below.
 
 The host must support seccomp user notifications, descriptor injection, BPF Linux Security Module hooks, and BPF type information.
 BPF lets Box attach the checks that prevent delete and rename from affecting a replacement file.
 The checks use the kernel's file identity while the filesystem operation holds its locks.
 Testing used Amazon Linux 2023 on ARM64 with kernel `6.12.111-136.204.amzn2023.aarch64`.
+Development testing also used Linux x86-64 with kernel `6.12.115-140.210.amzn2023.x86_64`.
 Other kernels and distributions need qualification.
 
 Start the trusted Box process with `CAP_BPF` and `CAP_PERFMON` when any workload selects native checks.
@@ -144,7 +146,8 @@ those operations before Box stopped. Normal shutdown cleanup does not protect th
 The signed tests cover normal detached-child cleanup and durable history across mode changes.
 Standard-release support still requires the remaining failure review and tests.
 
-### Linux ARM64
+<a id="linux-arm64"></a>
+### Linux ARM64 and x86-64
 
 The adapter checks file opens, creation, unlink, rename, directory creation and removal, symbolic-link creation, and path-based truncation.
 Tests cover allowed and denied operations through agents, declared tools, and local MCP servers.
@@ -197,8 +200,12 @@ Linux permission changes remain subject to filesystem grants, without a fresh Do
 The Linux adapter does not mediate standalone metadata queries or link-target reads.
 Outcome records distinguish descriptor delivery from later file effects.
 A descriptor's delivery does not prove that a subsequent write succeeded.
-Policy storage errors, worker failures, and expired processing deadlines stop Box.
-The kernel tests cover pending requests, process termination, detached descendants, and concurrent writes.
+Box stops on reported policy storage errors and worker failures. Fault-injection tests on ARM64 and x86-64 expose two unresolved limits:
+
+- A write can occur before a delayed policy-history flush reports a storage error. A storage error does not guarantee that the write was prevented.
+- A stalled policy-history lock can keep Box running beyond the tested 12-second shutdown limit.
+
+The kernel tests retain these failing controls and cover pending requests, process termination, detached descendants, and concurrent writes.
 Telemetry remains best effort: its bounded exporter queue can lose records under sustained load.
 Use the durable policy history and saved file effects when assessing enforcement.
 
@@ -353,7 +360,7 @@ Changing TOML alone does not rewrite the stored record.
 
 ## Validate the Linux build
 
-Run the kernel suite on a qualified ARM64 Linux host with passwordless `sudo`:
+Run the kernel suite on an ARM64 or x86-64 Linux host with the required kernel support and passwordless `sudo`:
 
 ```sh
 bash test-native-filesystem/run-linux.sh

@@ -876,7 +876,8 @@ impl ExperimentalFeatures {
                 all(target_os = "macos", feature = "native-filesystem-policy"),
                 all(
                     target_os = "linux",
-                    target_arch = "aarch64",
+                    any(target_arch = "aarch64", target_arch = "x86_64"),
+                    target_pointer_width = "64",
                     feature = "native-filesystem-policy"
                 )
             ))
@@ -2353,7 +2354,10 @@ native-filesystem-policy = false
         ] {
             let text = format!("{base}{extra}");
             let parsed = ConfigFile::parse(&text, Path::new("box.toml"));
-            let file = if cfg!(target_arch = "aarch64") {
+            let file = if cfg!(all(
+                any(target_arch = "aarch64", target_arch = "x86_64"),
+                target_pointer_width = "64"
+            )) {
                 parsed.unwrap()
             } else {
                 assert!(matches!(
@@ -2665,7 +2669,8 @@ native-filesystem-policy = false
             all(target_os = "macos", feature = "native-filesystem-policy"),
             all(
                 target_os = "linux",
-                target_arch = "aarch64",
+                any(target_arch = "aarch64", target_arch = "x86_64"),
+                target_pointer_width = "64",
                 feature = "native-filesystem-policy"
             )
         )) {

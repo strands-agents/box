@@ -445,7 +445,7 @@
       "source": "docs/user/native-filesystem-policy.md",
       "slug": "security/native-filesystem-policy",
       "title": "Experimental native filesystem policy",
-      "description": "Enable and configure experimental native filesystem policy on macOS and Linux ARM64.",
+      "description": "Enable and configure experimental native filesystem policy on macOS and Linux ARM64 or x86-64.",
       "nav": {
         "group": [
           "Box Core",

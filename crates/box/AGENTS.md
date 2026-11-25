@@ -28,6 +28,12 @@ Read [configuration](../../docs/user/config.md) for the surface, and the relevan
 
 ## Startup and identity traps
 
+- Linux ARM64 and x86-64 can select native filesystem policy when the Cargo feature is compiled;
+  the runtime kernel and capability requirements still apply.
+  `linux_startup::native_policy_without_compiled_support_is_refused_before_state_or_schema_creation`
+  preserves the build-feature refusal, and
+  `linux_startup::native_policy_schema_accepts_supported_linux_architectures` checks configuration
+  acceptance without starting native enforcement.
 - Leave absent tools out once, before consumers build reach or secret-source checks. Re-resolving a
   left-out tool later admits a file the workload planted (`a_file_planted_at_a_left_out_tools_path_never_runs_with_its_reach`).
 - Check secret-source programs and protected paths before committing a new box record or running a

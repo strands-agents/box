@@ -1,10 +1,11 @@
-/* A static ARM64 workload. Each operation calls Linux directly, without Shell. */
+/* A static native 64-bit workload. Each operation calls Linux directly, without Shell. */
 #include <asm/unistd.h>
-#include <fcntl.h>
+#include <linux/fcntl.h>
 #include <errno.h>
 #include <sys/vfs.h>
 
 static long invoke(long n, long a, long b, long c, long d, long e) {
+#if defined(__aarch64__)
     register long x0 __asm__("x0") = a;
     register long x1 __asm__("x1") = b;
     register long x2 __asm__("x2") = c;
@@ -13,6 +14,15 @@ static long invoke(long n, long a, long b, long c, long d, long e) {
     register long x8 __asm__("x8") = n;
     __asm__ volatile("svc 0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8) : "memory");
     return x0;
+#elif defined(__x86_64__) && !defined(__ILP32__)
+    register long r10 __asm__("r10") = d;
+    register long r8 __asm__("r8") = e;
+    __asm__ volatile("syscall" : "+a"(n) : "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8)
+                     : "rcx", "r11", "memory", "cc");
+    return n;
+#else
+#error "native workloads require ARM64 or native x86-64"
+#endif
 }
 
 static void check_filesystem_information(const char *path) {
@@ -61,6 +71,17 @@ void native_main(long *stack) {
         invoke(__NR_exit, 90, 0, 0, 0, 0);
         __builtin_unreachable();
     }
+    int legacy = argv[1][0] == 'L';
+    if (legacy) {
+#if defined(__x86_64__) && !defined(__ILP32__)
+        argv[1]++;
+#else
+        invoke(__NR_exit, 92, 0, 0, 0, 0);
+        __builtin_unreachable();
+#endif
+    }
+    int relative = argv[1][0] == 'R' && (legacy || argv[1][1] == 'x');
+    if (relative) argv[1]++;
     if ((argv[1][0] == 'v' || argv[1][0] == 'l') && argv[1][1] == 'c') {
         long child = invoke(__NR_clone, 17, 0, 0, 0, 0);
         if (child < 0) { invoke(__NR_exit, 95, 0, 0, 0, 0); __builtin_unreachable(); }
@@ -79,6 +100,17 @@ void native_main(long *stack) {
     for (int i = 0; argv[2][i] && i < sizeof(parent)-1; i++) { parent[i] = argv[2][i]; if (parent[i] == '/') last = i; }
     if (last < 0) { invoke(__NR_exit, 97, 0, 0, 0, 0); __builtin_unreachable(); }
     parent[last] = 0;
+    if (relative) {
+        if (invoke(__NR_chdir, (long)parent, 0, 0, 0, 0) < 0) {
+            invoke(__NR_exit, 98, 0, 0, 0, 0); __builtin_unreachable();
+        }
+        path = argv[2] + last + 1;
+        if (argv[3][0] == '/') {
+            const char *destination = argv[3];
+            for (int i = 0; argv[3][i]; i++) if (argv[3][i] == '/') destination = argv[3] + i + 1;
+            argv[3] = (char *)destination;
+        }
+    }
     if (op == 'l' && argv[1][1] != 'a') {
         if (argv[1][1] == 'c' && invoke(__NR_chdir, (long)parent, 0, 0, 0, 0) < 0) {
             invoke(__NR_exit, 98, 0, 0, 0, 0); __builtin_unreachable();
@@ -150,7 +182,14 @@ void native_main(long *stack) {
         if (argv[1][1] == 'd') flags = O_WRONLY | O_CREAT | O_CLOEXEC;
         if (argv[1][1] == 'h' || argv[1][1] == 's') flags = O_PATH | O_CLOEXEC;
         if (argv[1][1] == 's' || argv[1][1] == 'n') flags |= O_NOFOLLOW;
-        result = invoke(__NR_openat, AT_FDCWD, (long)path, flags, flags & O_CREAT ? 0600 : 0, 0);
+#if defined(__x86_64__) && !defined(__ILP32__)
+        if (legacy) {
+            result = invoke(__NR_open, (long)path, flags, flags & O_CREAT ? 0600 : 0, 0, 0);
+        } else
+#endif
+        {
+            result = invoke(__NR_openat, AT_FDCWD, (long)path, flags, flags & O_CREAT ? 0600 : 0, 0);
+        }
         if (result >= 0) {
             char bytes[16];
             if (flags & O_CREAT) {
@@ -189,7 +228,14 @@ void native_main(long *stack) {
         if (argv[1][1] == '1') mode |= 01000;
         if (argv[1][1] == '2') mode |= 02000;
         if (argv[1][1] == '4') mode |= 04000;
-        result = invoke(__NR_mkdirat, AT_FDCWD, (long)path, mode, 0, 0);
+#if defined(__x86_64__) && !defined(__ILP32__)
+        if (legacy) {
+            result = invoke(__NR_mkdir, (long)path, mode, 0, 0, 0);
+        } else
+#endif
+        {
+            result = invoke(__NR_mkdirat, AT_FDCWD, (long)path, mode, 0, 0);
+        }
         if (argv[1][1] == 'e') {
             long expected = 0;
             for (int i = 0; argv[3][i]; i++) expected = expected * 10 + argv[3][i] - '0';
@@ -197,11 +243,32 @@ void native_main(long *stack) {
             __builtin_unreachable();
         }
     } else if (op == 'k') {
-        result = invoke(__NR_unlinkat, AT_FDCWD, (long)path, AT_REMOVEDIR, 0, 0);
+#if defined(__x86_64__) && !defined(__ILP32__)
+        if (legacy) {
+            result = invoke(__NR_rmdir, (long)path, 0, 0, 0, 0);
+        } else
+#endif
+        {
+            result = invoke(__NR_unlinkat, AT_FDCWD, (long)path, AT_REMOVEDIR, 0, 0);
+        }
     } else if (op == 's') {
-        result = invoke(__NR_symlinkat, (long)argv[3], AT_FDCWD, (long)path, 0, 0);
+#if defined(__x86_64__) && !defined(__ILP32__)
+        if (legacy) {
+            result = invoke(__NR_symlink, (long)argv[3], (long)path, 0, 0, 0);
+        } else
+#endif
+        {
+            result = invoke(__NR_symlinkat, (long)argv[3], AT_FDCWD, (long)path, 0, 0);
+        }
     } else if (op == 'd') {
-        result = invoke(__NR_unlinkat, AT_FDCWD, (long)path, 0, 0, 0);
+#if defined(__x86_64__) && !defined(__ILP32__)
+        if (legacy) {
+            result = invoke(__NR_unlink, (long)path, 0, 0, 0, 0);
+        } else
+#endif
+        {
+            result = invoke(__NR_unlinkat, AT_FDCWD, (long)path, 0, 0, 0);
+        }
     } else if (op == 'm') {
         const char *destination = argv[3];
         if (argv[1][1] == 'l') { for (int i = 0; argv[3][i]; i++) if (argv[3][i] == '/') destination = argv[3] + i + 1; }
@@ -210,7 +277,14 @@ void native_main(long *stack) {
             long flags = argv[1][2] == 'n' ? 1 : 0;
             result = invoke(__NR_renameat2, AT_FDCWD, (long)path, AT_FDCWD, (long)destination, flags);
         } else {
-            result = invoke(__NR_renameat, AT_FDCWD, (long)path, AT_FDCWD, (long)destination, 0);
+#if defined(__x86_64__) && !defined(__ILP32__)
+            if (legacy) {
+                result = invoke(__NR_rename, (long)path, (long)destination, 0, 0, 0);
+            } else
+#endif
+            {
+                result = invoke(__NR_renameat, AT_FDCWD, (long)path, AT_FDCWD, (long)destination, 0);
+            }
         }
     } else {
         long flags = O_WRONLY | O_CLOEXEC | (op == 'c' ? O_CREAT | O_EXCL : O_TRUNC);
@@ -227,14 +301,21 @@ void native_main(long *stack) {
         if (op == 'c' && argv[1][1] == '4') mode |= 04000;
         if (op == 'a') flags = O_WRONLY | O_APPEND | O_CLOEXEC;
         if (op == 'r' || op == 'q' || op == 'u' || op == 'v') flags = O_RDONLY | O_CLOEXEC;
-        if (op == 'q') flags |= O_NOCTTY | 0400000;
+        if (op == 'q') flags |= O_NOCTTY | O_LARGEFILE;
         if (op == 'p') flags &= ~O_CLOEXEC;
         if (op == 'n') flags |= O_NOFOLLOW;
         if (op == 'b') flags |= O_NONBLOCK;
-        if (op == 'l' && argv[1][1] == 'a') flags |= 0400000;
+        if (op == 'l' && argv[1][1] == 'a') flags |= O_LARGEFILE;
         if (op == 'e') flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
         if (op == 'h') flags = O_PATH | O_DIRECTORY | O_CLOEXEC;
-        result = invoke(__NR_openat, directory, (long)(op == 'u' ? "/dev/urandom" : op == 'v' ? "/proc/self/stat" : path), flags, mode, 0);
+#if defined(__x86_64__) && !defined(__ILP32__)
+        if (legacy) {
+            result = invoke(__NR_open, (long)path, flags, mode, 0, 0);
+        } else
+#endif
+        {
+            result = invoke(__NR_openat, directory, (long)(op == 'u' ? "/dev/urandom" : op == 'v' ? "/proc/self/stat" : path), flags, mode, 0);
+        }
         if (op == 'z' && result != -2) { invoke(__NR_exit, 100, 0, 0, 0, 0); __builtin_unreachable(); }
         if (result >= 0) {
             long descriptor_flags = invoke(__NR_fcntl, result, F_GETFD, 0, 0, 0);
@@ -269,6 +350,10 @@ void native_main(long *stack) {
             if (!valid) result = -1;
         }
     }
+    if (legacy && argv[4][0] == 'd' && result != -EACCES) {
+        invoke(__NR_exit, 112, 0, 0, 0, 0);
+        __builtin_unreachable();
+    }
     if (argv[4][0] == 'E' && result != -EPERM) {
         invoke(__NR_exit, 111, 0, 0, 0, 0);
         __builtin_unreachable();
@@ -286,4 +371,8 @@ void native_main(long *stack) {
     __builtin_unreachable();
 }
 
+#if defined(__aarch64__)
 __asm__(".global _start\n_start:\nmov x0, sp\nbl native_main\n");
+#elif defined(__x86_64__) && !defined(__ILP32__)
+__asm__(".global _start\n_start:\nmov %rsp, %rdi\nandq $-16, %rsp\ncall native_main\nud2\n");
+#endif
