@@ -3,9 +3,13 @@
 This experimental feature adds Dogwood checks to selected native file operations on macOS and Linux ARM64.
 
 ### macOS requirements
-It requires macOS 27 or later and a binary built with the macOS 27 SDK or later.
+
+Enabling native filesystem policy requires macOS 27 or later and a binary built with the macOS 27 SDK or later.
 The binary must carry Apple's Endpoint Security entitlement and a valid signature.
 Endpoint Security is the macOS interface that lets a client decide selected operating system requests.
+
+These requirements apply only when native filesystem policy is enabled.
+Runs with the feature disabled use the [standard Box Core requirements](getting-started.md#before-you-start).
 
 ## Enable native filesystem policy
 
@@ -104,6 +108,13 @@ Their native filesystem operations do not produce Dogwood permission or outcome 
 Later history-based rules cannot rely on observing those operations.
 Shell and network policy checks remain active.
 Kernel event delivery and trusted launcher setup can still add overhead.
+
+A nonempty [`filesystem.receive_mounts` array](config.md#incoming-mount-declarations) is incompatible
+with enabled native filesystem policy checks for the same process.
+On Linux, Box requires no separate experimental flag for incoming mount declarations. This build
+still rejects nonempty arrays because incoming mount forwarding is unavailable. Disabling native checks does not enable it. On macOS,
+any `receive_mounts` key rejects configuration loading, including an explicit empty array; omit
+the key there.
 
 ## Coverage and limits
 
@@ -220,6 +231,7 @@ no egress destination has a backend, `[gateway] upgrade_http` is empty, the box 
 every process leaves `file-watching` disabled, and each telemetry target uses only the settings
 an earlier build reads,
 configurations without process overrides retain version 21 when disabled and version 22 when enabled.
+These versions also require every process's `receive_mounts` array to be empty or omitted.
 An explicit process override requires record version 23.
 Two stdio MCP servers that share a program require record version 24.
 Setting [`file-attributes`](config.md#file-attributes) to `true` requires record version 25.
@@ -242,6 +254,12 @@ A box whose agent, tool, or local MCP server declares a [`deny_write`](config.md
 A [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table, or a `secret.env` key on a route or a
 remote MCP server, requires record version 39.
 A [telemetry target](telemetry.md#include) that names `mcp_tool_calls` requires record version 40.
+A [`policy`](config.md#keys) table with `enforcement = "log_only"` requires record version 41.
+Record version 42 preserves each process's
+[`receive_mounts` array](config.md#incoming-mount-declarations). A record requires this version
+when any such array is nonempty; empty or omitted arrays do not require it. Record-format support
+does not enable mount forwarding. This build rejects nonempty arrays in Linux run configurations
+and any `receive_mounts` key in macOS run configurations before creating Box state.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 

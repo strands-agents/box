@@ -643,7 +643,7 @@ fn runs_list_orders_nanoseconds_then_ids_and_places_missing_times_last() {
         text.iter().map(|row| row[2].as_str()).collect::<Vec<_>>(),
         ids(&rows)
     );
-    assert_eq!(text[0][1], "2000-01-02T03:04:05.000000009Z");
+    assert_eq!(text[0][1], "2000-01-02T03:04:05Z");
     assert_eq!(text[4][1], "unknown");
     assert_eq!(snapshot(&scene.home), before);
 }

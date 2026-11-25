@@ -9,6 +9,11 @@
 
 use std::process::ExitCode;
 
+use diagnostics::diag;
+
+/// The voice of every message this trampoline prints.
+const DIAGNOSTIC_SOURCE: diagnostics::Source = diagnostics::Source::ContainTrampoline;
+
 // The parsed-args layer is pure and platform-independent, so it lives outside any
 // `cfg` gate and is unit-tested on every target.
 mod args;
@@ -49,7 +54,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
         Err(args::ParseError::Invalid(msg)) => {
-            eprintln!("strands-box-contain-trampoline: {msg}\n{USAGE}");
+            diag!(error, "{msg}\n{USAGE}");
             return ExitCode::from(2);
         }
     };
@@ -61,8 +66,9 @@ fn main() -> ExitCode {
 
 #[cfg(not(unix))]
 fn run(_args: &Args) -> ExitCode {
-    eprintln!(
-        "strands-box-contain-trampoline: unsupported platform — containment is macOS (Seatbelt) / \
+    diag!(
+        error,
+        "unsupported platform — containment is macOS (Seatbelt) / \
          Linux (namespaces) only"
     );
     ExitCode::from(2)
@@ -73,7 +79,7 @@ fn run(args: &Args) -> ExitCode {
     let setup_status = match SetupStatus::arm(args.setup_status_fd) {
         Ok(status) => status,
         Err(error) => {
-            eprintln!("strands-box-contain-trampoline: cannot arm setup status channel: {error}");
+            diag!(H0401, "cannot arm setup status channel: {error}");
             return ExitCode::from(2);
         }
     };
@@ -253,7 +259,7 @@ fn apply_containment(args: &Args, setup_status: &SetupStatus) -> Result<(), Exit
             format_args!("cannot load config: {error}"),
         )
     })?;
-    disclose_warnings(&config, &mut std::io::stderr());
+    disclose_warnings(&config, &mut diagnostics::stderr());
 
     // Detection, backend selection, refusal, and apply are one unskippable operation.
     let egress_handoff = args.relay_control_fd.map(|descriptor| {
@@ -294,10 +300,10 @@ fn apply_containment(args: &Args, setup_status: &SetupStatus) -> Result<(), Exit
 
 /// Write each warning the configuration carries to `sink`, one line each, before it applies.
 #[cfg(any(unix, test))]
-fn disclose_warnings(config: &containment::ContainmentConfig, sink: &mut impl std::io::Write) {
+fn disclose_warnings(config: &containment::ContainmentConfig, mut sink: impl std::io::Write) {
     for warning in config.warnings() {
         // A disclosure that cannot be written must not stop the apply: stderr may be closed.
-        let _ = writeln!(sink, "strands-box-contain-trampoline: warning: {warning}");
+        let _ = diag!(into sink, { warning.code() }, "{warning}");
     }
 }
 
@@ -425,7 +431,7 @@ impl SetupStatus {
     /// boundary failure the supervisor reads as a workload exit.
     fn fail(&self, stage: SetupStage, code: u8, message: impl std::fmt::Display) -> ExitCode {
         self.report(stage);
-        eprintln!("strands-box-contain-trampoline: {message}");
+        diag!(H0401, "{message}");
         ExitCode::from(code)
     }
 
@@ -793,7 +799,7 @@ mod tests {
         let text = String::from_utf8(disclosed).expect("UTF-8");
         assert_eq!(text.lines().count(), 1, "one pair, one line: {text}");
         assert!(
-            text.starts_with("strands-box-contain-trampoline: warning: ")
+            text.starts_with("strands-box-contain-trampoline: warning[H0402]: ")
                 && text.contains("both writable and executable")
                 && text.contains(&built.display().to_string()),
             "the line names the tool, the pair, and the path: {text}"

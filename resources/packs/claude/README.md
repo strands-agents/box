@@ -7,9 +7,10 @@ walks through a first run. This page covers what's different about Claude Code.
 
 `box profile create claude` asks which model provider Claude Code uses, then the region, whether
 to bring in your MCP servers (`claude.import-mcp`), whether to run your command hooks
-(`claude.import-hooks`), and the policy. It skips the provider and region questions when your
-Claude Code settings already answer them, as
-[Starters](../../../docs/cli/starters.md#skip-questions-the-agents-settings-already-answer)
+(`claude.import-hooks`), and the policy. When your Claude Code settings already name Bedrock, the
+provider question starts with Bedrock selected and still lists the Anthropic API and a Claude
+subscription. It skips the region question when your settings already answer it, as
+[Starters](../../../docs/cli/starters.md#start-from-the-agents-settings)
 shows. It always asks the MCP and hooks questions at a terminal, because each one shows a warning
 first; pass `--option claude.import-mcp=false` or `--option claude.import-hooks=false` to answer
 one ahead of time.
@@ -17,6 +18,11 @@ one ahead of time.
 `box` doesn't read Claude Code's managed settings, the files an admin puts in
 `/Library/Application Support/ClaudeCode/`. If your provider is set there, answer the question
 yourself.
+
+## Sign in with a Claude subscription
+
+To run Claude Code on your claude.ai Pro or Max plan instead of an API key, use
+[`@box/claude-subscription`](../claude-subscription/README.md) as the provider.
 
 ## How Claude Code asks before it acts
 
@@ -195,7 +201,7 @@ and output reach Claude Code as on your machine.
 
 A script gets at most 1 MiB of the event. A larger event, such as a `PostToolUse` event for a
 big file write, can make a script hang or see an empty event, and the run may print
-`strands-box: stdin is more than 1048576 bytes`. For hooks that read large events, raise both
+`strands-box: warning[B1201]: stdin is more than 1048576 bytes`. For hooks that read large events, raise both
 limits in the profile:
 
 ```toml
@@ -307,16 +313,15 @@ on your machine after that first run don't come into the box. To bring them in, 
 `agent/config/settings.json` from the storage folder that `box profile show` prints, and the next
 run copies your file again.
 
-With the Anthropic API (`claude.host = "anthropic"`), the `@box/anthropic` route reaches
-`api.anthropic.com`, so the check stays on. A profile that you move from Bedrock to the Anthropic
-API keeps the setting from its earlier runs. To turn the check back on, remove
+With the Anthropic API (`claude.host = "anthropic"`), the box lets Claude Code reach
+`api.anthropic.com`, with an API key or a subscription, so the check stays on. A profile that you
+move from Bedrock to the Anthropic API keeps the setting from its earlier runs. To turn the check
+back on, remove
 `skipWebFetchPreflight` from `agent/config/settings.json` in the storage folder that
 `box profile show` prints.
 
 ## Limitations
 
-- Signing in with a claude.ai subscription doesn't work in a box. Use an Anthropic API key
-  (`@box/anthropic`) or Amazon Bedrock (`@box/bedrock`).
 - If your organization deploys `managed-mcp.json`, Claude Code uses only the MCP servers it lists,
   and those servers don't work in the box yet. Your own servers from `~/.claude.json` don't load
   either, because the policy turns them off.
@@ -333,6 +338,9 @@ API keeps the setting from its earlier runs. To turn the check back on, remove
   [Scoped](../../policies/scoped/README.md) allows. A condition that
   lists commands must also name each setup command; `box runs history <box-id> --deny --action
   shell:exec` lists the ones a run refused.
+- The agent in the box can change `.claude/settings.json`, `.claude/settings.local.json`, and
+  `.mcp.json` in your project, and Claude Code uses them the next time you run it there.
+  For more info, check [the limitations section](../../../docs/cli/limitations.md#the-agent-can-plant-code-that-runs-outside-the-box-later).
 
 ## Troubleshooting
 
@@ -376,7 +384,7 @@ ANTHROPIC_MODEL = "global.anthropic.claude-opus-5-5"
 ```
 
 To see which models your account can use, run the command in
-[Get started](../../../docs/cli/getting-started.md#3-choose-the-model).
+[Get started](../../../docs/cli/getting-started.md#choose-the-model).
 
 Then stop the stuck run with Ctrl-C and start it again. If it still hangs, work through
 [Every model request fails with 403](../bedrock/README.md#every-model-request-fails-with-403).

@@ -20,7 +20,7 @@ name: Release Box
 #
 # Shape (mirrors the harness-sdk release workflows, retargeted to a binary
 # release): scan -> test-lint + cli-test / build / cli -> inspect -> approve ->
-#           tag + release -> verify.
+#           attest -> tag + release -> verify.
 #
 # Dry runs build and inspect without credentials by default. An upstream main
 # dry run can opt into signing, notarization, and native tests. Protected premerge tests use a separate environment.
@@ -921,13 +921,47 @@ jobs:
         run: |
           echo "Approved to release $NEW_TAG at $RELEASE_SHA."
 
+  # ── Attest the release assets ──────────────────────────────────────────
+  # Every asset, SHA256SUMS.txt included, gets a signed attestation that this workflow, on the
+  # dispatched ref, built it. `gh attestation verify` checks it, on Linux too, where there is no
+  # Apple signature. The attestation names the dispatched commit, which differs from the tagged
+  # commit when the `sha` input pins an older one, so the tag names the source. A job of its own,
+  # so the OIDC token never shares a job with contents: write.
+  attest:
+    name: Attest release assets
+    needs: [scan, approve-release, inspect]
+    if: |
+      always() &&
+      inputs.dry_run != true &&
+      inputs.premerge_signing_test != true &&
+      needs.scan.result == 'success' &&
+      needs.inspect.result == 'success' &&
+      needs.approve-release.result == 'success'
+    runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download verified release bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: box-release-bundle
+          path: release
+
+      - name: Attest the release assets
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/*
+
   # ── Tag + publish the GitHub Release ───────────────────────────────────
   # The tag is the source of truth: it is pushed before the release is
   # published, and both steps are idempotent, so re-running after a partial
   # failure is safe.
   release:
     name: Publish GitHub Release
-    needs: [scan, approve-release, inspect]
+    needs: [scan, approve-release, inspect, attest]
     # always() is required: a skipped `test` (via skip_tests) poisons every
     # downstream job that does not use it, so gate on the explicit results
     # instead. approve-release already encodes the test-skip rule.
@@ -937,6 +971,7 @@ jobs:
       inputs.premerge_signing_test != true &&
       needs.scan.result == 'success' &&
       needs.inspect.result == 'success' &&
+      needs.attest.result == 'success' &&
       needs.approve-release.result == 'success'
     runs-on: ${{ github.repository_owner == 'strands-agents' && 'strands-agents_ubuntu-latest_4-core' || 'ubuntu-latest' }}
     timeout-minutes: 15
@@ -969,6 +1004,11 @@ jobs:
             platforms="macOS 15 or later on Apple silicon, ARM64 Linux, and x86-64 Linux"
           fi
           installer="curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh |"
+          # The installer reads this repository by default, so only another repository names it.
+          repository_setting=""
+          if [ "$GITHUB_REPOSITORY" != "strands-agents/box" ]; then
+            repository_setting="BOX_GITHUB_REPO=${GITHUB_REPOSITORY} "
+          fi
           cat > body.md <<EOF
           ## Install box
 
@@ -982,8 +1022,7 @@ jobs:
           Install the latest release:
 
           \`\`\`sh
-          ${installer}
-            BOX_GITHUB_REPO=${GITHUB_REPOSITORY} sh
+          ${installer} ${repository_setting}sh
           \`\`\`
 
           EOF
@@ -992,8 +1031,7 @@ jobs:
           Install this exact release:
 
           \`\`\`sh
-          ${installer}
-            BOX_GITHUB_REPO=${GITHUB_REPOSITORY} BOX_VERSION=${NEW_TAG#v} sh
+          ${installer} ${repository_setting}BOX_VERSION=${NEW_TAG#v} sh
           \`\`\`
 
           The installer verifies the \`box-cli-\` archive for your platform against \`SHA256SUMS.txt\`, and on macOS its Apple signature, then puts \`box\` on your \`PATH\`.
@@ -1073,6 +1111,14 @@ jobs:
           ## Assets
 
           The macOS archive contains \`Box.app\`, a \`box\` launcher, and helper links into its signed and notarized bundle. Keep that directory intact. Linux archives contain \`box\` beside its helpers. Each \`box-cli-\` archive contains the \`box\` command, both Box Core helpers, bundled packs, and \`release.json\`, and its macOS programs are signed and notarized. \`SHA256SUMS.txt\` contains each archive's checksum.
+
+          Each asset has a build provenance attestation from this workflow. To check one, run:
+
+          \`\`\`sh
+          gh attestation verify <asset> --repo ${GITHUB_REPOSITORY} \\
+            --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/deploy-box-artifact.yml \\
+            --source-ref refs/heads/main
+          \`\`\`
           EOF
 
       - name: Tag the pinned SHA

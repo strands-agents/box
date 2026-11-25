@@ -465,7 +465,10 @@ fn reaper_exit_code(mut wait: impl FnMut(&mut libc::c_int) -> std::io::Result<()
 
 fn close_reaper_descriptors(keep: &[libc::c_int], confirm_fd: Option<libc::c_int>) {
     if let Err(error) = authority::close_inherited_descriptors(keep) {
-        eprintln!("strands-box: namespace reaper could not close descriptors: {error}");
+        diagnostics::diag!(
+            H0501,
+            "namespace reaper could not close descriptors: {error}"
+        );
         write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: PID 1 exits before the workload starts, terminating the namespace.
         unsafe { libc::_exit(127) };
@@ -474,8 +477,9 @@ fn close_reaper_descriptors(keep: &[libc::c_int], confirm_fd: Option<libc::c_int
 
 fn protect_reaper_memory(confirm_fd: Option<libc::c_int>) {
     if let Err(error) = authority::refuse_process_memory_access() {
-        eprintln!(
-            "strands-box: namespace reaper could not refuse process-memory access \
+        diagnostics::diag!(
+            H0501,
+            "namespace reaper could not refuse process-memory access \
              ({error:?}); killing the namespace rather than starting a workload \
              from a reachable PID 1"
         );
@@ -490,8 +494,9 @@ fn drop_reaper_authority(confirm_fd: Option<libc::c_int>) {
     let locked = authority::set_no_new_privileges();
     if dropped.is_err() || locked.is_err() {
         write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
-        eprintln!(
-            "strands-box: namespace reaper could not drop its own authority \
+        diagnostics::diag!(
+            H0501,
+            "namespace reaper could not drop its own authority \
              ({dropped:?}, {locked:?}); killing the namespace rather than \
              supervising from a privileged PID 1"
         );
@@ -550,7 +555,10 @@ fn establish_pid_namespace_and_reaper(
             .and_then(|_| authority::set_no_new_privileges())
             .and_then(|_| authority::refuse_process_memory_access());
         if let Err(error) = hardened {
-            eprintln!("strands-box: filesystem query supervisor could not drop authority: {error}");
+            diagnostics::diag!(
+                H0502,
+                "filesystem query supervisor could not drop authority: {error}"
+            );
             write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
             // SAFETY: exit closes an incomplete lifetime handshake or triggers the armed parent-death signal.
             unsafe { libc::_exit(127) };
@@ -581,7 +589,7 @@ fn establish_pid_namespace_and_reaper(
     if let Err(error) = view.materialize() {
         // Printed because the reaper cannot return a `Result`: without this, a
         // failure here is only exit 127 and the cause is invisible.
-        eprintln!("strands-box: namespace reaper could not build the view: {error}");
+        diagnostics::diag!(H0501, "namespace reaper could not build the view: {error}");
         write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
         // SAFETY: PID 1 exiting kills the namespace, which is the right response to
         // being unable to build the boundary at all.
@@ -1686,6 +1694,75 @@ mod tests {
     }
 
     #[test]
+    fn a_file_lists_its_attribute_names_but_reads_no_value_under_the_filters() {
+        let directory = tempfile::tempdir().expect("create the xattr fixture");
+        let file = directory.path().join("wheel.whl");
+        std::fs::write(&file, "wheel").expect("write the xattr fixture");
+        let path = std::ffi::CString::new(file.as_os_str().as_encoded_bytes()).unwrap();
+        let held = std::fs::File::open(&file).expect("open the xattr fixture");
+        let descriptor = std::os::fd::AsRawFd::as_raw_fd(&held);
+        let name = c"user.box";
+        // Give the file an attribute before the filters go on, so the names come back non-empty and
+        // `getxattr` has a value to refuse. ext4 and tmpfs from Linux 6.6 accept a `user.` name; a
+        // filesystem that refuses it leaves the file with none, and the name check below is skipped.
+        // SAFETY: both strings and the value stay live for the call.
+        let labelled =
+            unsafe { libc::setxattr(path.as_ptr(), name.as_ptr(), b"hello".as_ptr().cast(), 5, 0) }
+                == 0;
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        let outcome = in_filtered_child(&filters, || {
+            let answer = |result: libc::ssize_t| {
+                if result >= 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error().raw_os_error())
+                }
+            };
+            let mut names = [0_u8; 256];
+            // SAFETY: the path stays live, and the buffer is writable for its whole length.
+            let listed =
+                unsafe { libc::listxattr(path.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+            if answer(listed).is_err() {
+                return 10;
+            }
+            let listed = usize::try_from(listed).unwrap_or_default();
+            if labelled
+                && !names[..listed]
+                    .split(|byte| *byte == 0)
+                    .any(|n| n == b"user.box")
+            {
+                return 14;
+            }
+            // SAFETY: the path stays live, and a null buffer of size 0 asks only for the length.
+            if answer(unsafe { libc::llistxattr(path.as_ptr(), std::ptr::null_mut(), 0) }).is_err()
+            {
+                return 11;
+            }
+            // SAFETY: the descriptor is the parent's open file, inherited by this child.
+            if answer(unsafe { libc::flistxattr(descriptor, std::ptr::null_mut(), 0) }).is_err() {
+                return 12;
+            }
+            // SAFETY: both strings stay live, and a null buffer of size 0 asks only for the length.
+            let value =
+                unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+            if answer(value) != Err(Some(libc::EPERM)) {
+                return 13;
+            }
+            0
+        });
+        drop(held);
+        assert_eq!(
+            outcome, 0,
+            "10/11/12 = listxattr, llistxattr or flistxattr was refused (EPERM fails Python's \
+             shutil.copy2, which treats only ENOTSUP, ENODATA and EINVAL as no attributes), \
+             13 = getxattr was not refused with EPERM, 14 = listxattr did not return the \
+             fixture's user.box name"
+        );
+    }
+
+    #[test]
     fn select_waits_on_held_descriptors_under_the_filters() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
@@ -1859,7 +1936,7 @@ mod tests {
             if libc::setresgid(!0, !0, !0) != 0 {
                 return 11;
             }
-            if libc::setresgid(!0, 0, !0) != -1
+            if libc::setresgid(!0, 1, !0) != -1
                 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
             {
                 return 12;
@@ -2543,7 +2620,7 @@ mod tests {
                 let credential_widening_refused = unsafe {
                     let uid_refused = libc::setresuid(0, 1, 0) == -1
                         && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-                    let gid_refused = libc::setresgid(!0, 0, !0) == -1
+                    let gid_refused = libc::setresgid(!0, 1, !0) == -1
                         && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
                     uid_refused && gid_refused
                 };

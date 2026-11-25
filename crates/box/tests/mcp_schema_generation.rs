@@ -914,7 +914,7 @@ fn generate_schema_reads_a_remote_mcp_secret_through_its_declared_source() {
     assert_eq!(
         stderr,
         format!(
-            "strands-box: [secret-source.vault]: reads each vault:// secret with {}, which runs \
+            "strands-box: note[B0203]: [secret-source.vault]: reads each vault:// secret with {}, which runs \
              outside every sandbox\n",
             program.display()
         )
@@ -1028,7 +1028,7 @@ fn generate_schema_refuses_a_write_grant_over_a_source_program() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         format!(
-            "strands-box: error: `[agent]` filesystem entry {:?} is refused: this write grant \
+            "strands-box: error[B0102]: `[agent]` filesystem entry {:?} is refused: this write grant \
              can change [secret-source.vault] command {} or its path. Keep the program of each \
              secret source outside every process's write grants\n",
             tools.display().to_string(),
@@ -1090,7 +1090,7 @@ fn generate_schema_refuses_a_table_that_exposes_a_secret_source() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         format!(
-            "strands-box: error: `[agent]` filesystem entry {store_text:?} is refused: this \
+            "strands-box: error[B0102]: `[agent]` filesystem entry {store_text:?} is refused: this \
              grant reaches {store_text}, which the secret source `vault` keeps from each \
              workload (its `reads` entry {store_text:?}). Keep each grant outside the paths \
              that a secret source names in `reads` and `deny`\n"
@@ -1148,7 +1148,7 @@ fn generate_schema_skips_and_names_an_entry_whose_path_is_absent() {
     };
 
     let line = format!(
-        "strands-box: [secret-source.vault]: reads each vault:// secret with {}, which runs \
+        "strands-box: note[B0203]: [secret-source.vault]: reads each vault:// secret with {}, which runs \
          outside every sandbox\n",
         program.display()
     );
@@ -1157,7 +1157,7 @@ fn generate_schema_skips_and_names_an_entry_whose_path_is_absent() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         format!(
-            "{line}strands-box: [secret-source.vault]: `reads` entry \"~/store\" names {}, which \
+            "{line}strands-box: note[B0203]: [secret-source.vault]: `reads` entry \"~/store\" names {}, which \
              does not exist when the box starts, so no sandbox denies it in this run\n",
             home_path.join("store").display()
         )
@@ -1216,9 +1216,9 @@ fn generate_schema_refuses_a_placement_before_it_starts_the_program() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         format!(
-            "strands-box: [secret-source.vault]: reads each vault:// secret with {}, which runs \
+            "strands-box: note[B0203]: [secret-source.vault]: reads each vault:// secret with {}, which runs \
              outside every sandbox\n\
-             strands-box: error: MCP server \"remote\" uses credential placement \
+             strands-box: error[B0109]: MCP server \"remote\" uses credential placement \
              \"query_param\", which schema discovery does not support\n",
             program.display()
         )
@@ -1282,9 +1282,9 @@ fn generate_schema_stops_when_a_declared_source_returns_no_secret() {
     assert_eq!(
         stderr,
         format!(
-            "strands-box: [secret-source.vault]: reads each vault:// secret with {program}, \
+            "strands-box: note[B0203]: [secret-source.vault]: reads each vault:// secret with {program}, \
              which runs outside every sandbox\n\
-             strands-box: error: cannot resolve the credential for MCP server \"remote\": \
+             strands-box: error[B0109]: cannot resolve the credential for MCP server \"remote\": \
              credential error: the secret source \"vault\" (\"{program}\") for \
              vault://[REDACTED] exited unsuccessfully (exit status: 3): no item of that name\n",
             program = program.display()

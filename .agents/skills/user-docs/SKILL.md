@@ -21,8 +21,9 @@ it is not enough: a correct page that a person cannot follow is wrong.
 ### 1. Place it
 
 1. Read [`writing.md`](../../references/writing.md) and
-   [`docs/cli/README.md`](../../../docs/cli/README.md). When the target page has front matter, read it
-   ([Front matter](../../references/writing.md#front-matter-the-pages-reader-and-test)). A fact
+   [`docs/cli/README.md`](../../../docs/cli/README.md). When the target page has an entry in
+   [`user-page-tests.md`](../../references/user-page-tests.md), read it
+   ([Page tests](../../references/writing.md#page-tests-the-pages-reader-and-test)). A fact
    that fails its `belongs` test goes to the page that the test names, not to this page.
 2. Choose the page type: tutorial, overview, topic, how-to, reference, troubleshooting, or limits. Every command has a section in
    `cli.md` and every flag a row in its command's table, and every profile key has a row in

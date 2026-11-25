@@ -1261,7 +1261,7 @@ fn the_claude_and_codex_starters_ask_how_the_box_signs_in_to_bedrock() {
 }
 
 #[test]
-fn the_kiro_starter_asks_for_the_sign_in_and_adds_no_pack() {
+fn the_kiro_starter_asks_for_the_sign_in_and_mcp_import_and_adds_no_pack() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let lookup = Lookup {
         vendored: Some(crate::resources::source_tree().join("packs")),
@@ -1272,7 +1272,7 @@ fn the_kiro_starter_asks_for_the_sign_in_and_adds_no_pack() {
     let starter = Starter::load("@box/kiro", &lookup).expect("the Kiro starter");
     assert_eq!(starter.label, "Kiro CLI");
     assert!(starter.questions.is_empty());
-    assert_eq!(starter.ask, ["kiro.sign-in"]);
+    assert_eq!(starter.ask, ["kiro.sign-in", "kiro.import-mcp"]);
 }
 
 #[test]
@@ -1293,6 +1293,7 @@ fn each_shipped_starter_that_imports_mcp_servers_asks_for_it_off_by_default_and_
     for (pack, input) in [
         ("@box/claude", "claude.import-mcp"),
         ("@box/codex", "codex.import-mcp"),
+        ("@box/kiro", "kiro.import-mcp"),
     ] {
         let starter = Starter::load(pack, &lookup).expect("a shipped starter");
         assert!(starter.ask.iter().any(|name| name == input), "{pack}");
@@ -1976,6 +1977,40 @@ fn reviewing_settings_prefills_detected_values_and_preserves_unrelated_answers()
         option(&answered, "cloud.region"),
         None,
         "a value of a pack the change removes is not asked or kept"
+    );
+}
+
+#[test]
+fn a_terminal_still_asks_a_detected_question_with_the_detected_choice_as_its_default() {
+    let fixture = Fixture::new();
+    fixture.agent(DETECTING);
+    fixture.settings(r#"{"env": {"USE_CLOUD": "1", "REGION": "west-2"}}"#);
+    let (answered, output) = fixture
+        .answer(Call {
+            interactive: true,
+            input: "\n\n\n",
+            ..Call::default()
+        })
+        .expect("Enter keeps what was detected");
+    assert!(output.contains("Which provider?"), "{output}");
+    assert!(
+        output.contains("This machine"),
+        "every choice is listed: {output}"
+    );
+    assert!(output.contains("> [1] "), "{output}");
+    assert_eq!(answered.packs, ["@box/agent", "@box/cloud"]);
+    assert_eq!(option(&answered, "cloud.region"), Some("west-2"));
+    let (answered, lines) = fixture
+        .detected(Call {
+            interactive: true,
+            input: "2\n\n\n",
+            ..Call::default()
+        })
+        .expect("a choice that detection did not pick");
+    assert_eq!(answered.packs, ["@box/agent", "@box/local"]);
+    assert!(
+        lines.iter().all(|line| !line.starts_with("Provider")),
+        "an answer that the operator changed is not reported as detected: {lines:?}"
     );
 }
 

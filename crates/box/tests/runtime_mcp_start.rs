@@ -1,5 +1,7 @@
 //! Black-box checks that a stdio MCP server starts only under its applicable policy action.
 
+// Lines a test helper writes to stderr are test output, not Box Core messages.
+#![allow(clippy::print_stderr)]
 #![cfg(unix)]
 
 use std::time::Duration;
