@@ -813,22 +813,40 @@ pub(crate) fn rewrite(file: &StorageFile) -> Result<(), Error> {
     .map(|_| ())
 }
 
-/// Add to the copy of a row with `fill` each `keep` value of `kept` that it lacks, through the
-/// same walk as [`rewrite`]. A copy that is a link, not a file, or a file with another hard link is
-/// left alone, and the reason is returned.
-pub(crate) fn fill(file: &StorageFile, kept: &str) -> Result<Option<String>, Error> {
+/// Fill missing values, returning any refusal and whether the imported model differs.
+pub(crate) fn fill(file: &StorageFile, kept: &str) -> Result<(Option<String>, bool), Error> {
     let Some(edit) = file.edit.as_ref().filter(|edit| edit.fill) else {
-        return Ok(None);
+        return Ok((None, false));
     };
     let in_storage = format!("{} in storage", file.relative);
-    edit_copy(file, true, |text| {
-        edit.fill(text, kept)
-            .map(|filled| filled.map(|(text, _)| text))
-            .map_err(|failure| {
-                let (at, reason) = failure_text(file, edit, &in_storage, failure);
-                Error::Set { at, reason }
-            })
-    })
+    let failure = |failure| {
+        let (at, reason) = failure_text(file, edit, &in_storage, failure);
+        Error::Set { at, reason }
+    };
+    let mut model_differs = false;
+    let skipped = edit_copy(file, true, |text| {
+        let filled = edit.fill(text, kept).map_err(&failure)?;
+        if edit
+            .keep
+            .as_ref()
+            .is_some_and(|paths| paths.iter().any(|path| path == &["model"]))
+        {
+            let parse = |text| {
+                edit.kind
+                    .parse(text)
+                    .map_err(|reason| failure(Failure::Parse(reason)))
+            };
+            let saved = parse(text)?;
+            let source = parse(kept)?;
+            model_differs = saved
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .zip(source.get("model").and_then(serde_json::Value::as_str))
+                .is_some_and(|(saved, source)| saved != source);
+        }
+        Ok(filled.map(|(text, _)| text))
+    })?;
+    Ok((skipped, model_differs))
 }
 
 /// Replace the copy of `file` with what `change` makes of its text, when `change` returns a text.
@@ -1906,7 +1924,8 @@ mod tests {
         let State::Fill { text, .. } = state(&file, &fixture.refusals()).expect("a state") else {
             panic!("a fill");
         };
-        let why = fill(&file, &text).expect("a fill").expect("left alone");
+        let (why, _) = fill(&file, &text).expect("a fill");
+        let why = why.expect("left alone");
         assert!(why.contains("hard link"), "{why}");
         assert_eq!(
             std::fs::read_to_string(&file.target).expect("read"),
@@ -1922,7 +1941,8 @@ mod tests {
 
         std::fs::remove_file(&file.target).expect("remove");
         symlink(&secret, &file.target).expect("a link");
-        let why = fill(&file, &text).expect("a fill").expect("left alone");
+        let (why, _) = fill(&file, &text).expect("a fill");
+        let why = why.expect("left alone");
         assert!(why.contains("is a link"), "{why}");
         assert_eq!(
             std::fs::read_to_string(&secret).expect("read"),

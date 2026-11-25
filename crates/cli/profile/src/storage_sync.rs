@@ -642,6 +642,7 @@ pub const SYNC_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(6
 pub struct Copied {
     pub not_copied: Vec<(String, String)>,
     pub synced: Vec<String>,
+    pub import_warnings: Vec<String>,
 }
 
 /// Copy each `[[storage.files]]` row whose target storage lacks, building each copy in the run
@@ -730,8 +731,16 @@ pub(crate) fn copy_files_waiting(
             State::WillCopy(_) | State::NothingKept => {}
             State::InStorage => storage_files::rewrite(file)?,
             State::Fill { text, .. } => {
-                if let Some(why) = storage_files::fill(file, &text)? {
+                let (skipped, model_differs) = storage_files::fill(file, &text)?;
+                if let Some(why) = skipped {
                     not_copied.push((tilde(home, &file.source), why));
+                }
+                if model_differs {
+                    copied.import_warnings.push(format!(
+                        "Saved model in {:?} differs from {:?}; kept the saved value.",
+                        tilde(home, &file.target),
+                        tilde(home, &file.source),
+                    ));
                 }
             }
             State::Absent => {
@@ -941,6 +950,99 @@ mod tests {
                     shipped: None,
                     protected: Vec::new(),
                 },
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_different_imported_string_model_produces_a_warning() {
+        use crate::mcp::Format;
+        use crate::storage_edit::Edit;
+        use serde_json::json;
+
+        for kind in [Format::Json, Format::Toml] {
+            let encode = |value: &serde_json::Value| match kind {
+                Format::Json => serde_json::to_string_pretty(value).expect("JSON"),
+                Format::Toml => toml::to_string(value).expect("TOML"),
+            };
+            let fixture = Fixture::new();
+            let mut file = fixture.row("settings", "config/settings", false);
+            file.edit = Some(Edit {
+                kind,
+                keep: Some(vec![vec!["model".into()], vec!["theme".into()]]),
+                set: Vec::new(),
+                fill: true,
+            });
+            let source = json!({"model": "host-private-model", "theme": "light"});
+            fixture.write("settings", &encode(&source));
+            assert!(fixture.run(&file).import_warnings.is_empty(), "first copy");
+            for (saved, source, warns) in [
+                (
+                    json!({"model": "saved-private-model", "theme": "dark"}),
+                    source.clone(),
+                    true,
+                ),
+                (
+                    json!({"model": "host-private-model", "theme": "dark"}),
+                    source.clone(),
+                    false,
+                ),
+                (json!({"theme": "dark"}), source.clone(), false),
+                (json!({"model": false}), source.clone(), false),
+                (source.clone(), json!({"theme": "dark"}), false),
+                (source.clone(), json!({"model": false}), false),
+            ] {
+                std::fs::write(&file.target, encode(&saved)).expect("saved settings");
+                fixture.write("settings", &encode(&source));
+                let copied = fixture.run(&file);
+                assert_eq!(copied.import_warnings.len(), usize::from(warns));
+                if warns {
+                    assert_eq!(
+                        copied.import_warnings,
+                        [
+                            "Saved model in \"~/.strands/box/storage/p/default/config/settings\" \
+                             differs from \"~/settings\"; kept the saved value."
+                        ]
+                    );
+                    assert_eq!(fixture.read("config/settings"), encode(&saved));
+                }
+            }
+            fixture.write("settings", &encode(&source));
+            let saved = encode(&json!({"model": "saved-private-model", "theme": "dark"}));
+            std::fs::write(&file.target, &saved).expect("saved settings");
+            for keep in [
+                vec![vec!["theme".into()]],
+                vec![vec!["nested".into(), "model".into()]],
+            ] {
+                file.edit.as_mut().unwrap().keep = Some(keep);
+                assert!(
+                    fixture.run(&file).import_warnings.is_empty(),
+                    "model not imported"
+                );
+            }
+            file.edit.as_mut().unwrap().keep = Some(vec![vec!["model".into()]]);
+            file.edit.as_mut().unwrap().fill = false;
+            assert!(fixture.run(&file).import_warnings.is_empty(), "copy once");
+            file.edit.as_mut().unwrap().fill = true;
+            std::fs::remove_file(&file.source).expect("remove source");
+            assert!(
+                fixture.run(&file).import_warnings.is_empty(),
+                "absent source"
+            );
+            fixture.write("settings", &encode(&source));
+            let private = fixture.write("private-settings", &saved);
+            std::fs::remove_file(&file.target).expect("remove copy");
+            for hard in [false, true] {
+                if hard {
+                    std::fs::hard_link(&private, &file.target).expect("hard link");
+                } else {
+                    symlink(&private, &file.target).expect("symbolic link");
+                }
+                let copied = fixture.run(&file);
+                assert!(copied.import_warnings.is_empty(), "unsafe copy");
+                assert_eq!(copied.not_copied.len(), 1);
+                assert_eq!(std::fs::read_to_string(&private).unwrap(), saved);
+                std::fs::remove_file(&file.target).expect("remove link");
             }
         }
     }

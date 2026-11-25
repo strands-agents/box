@@ -86,11 +86,10 @@ A choice saved in the box stays, even if you change the host setting. If neither
 Codex uses its own default. Other settings, except `mcp_servers`, and your sessions stay outside
 the box.
 
-When the saved model differs from `model` in your Codex folder's `config.toml`, Box warns at startup
-and keeps the saved model.
-To change the saved model, use Codex's `/model`. To import these settings again, exit the agent and
-run `box profile reset <profile>`, then start a new run. Reset also deletes that profile's
-agent sessions and memory ([Reset](../../../docs/cli/cli.md#box-profile-reset)).
+If both files set a model and the values differ, Box warns before each run and keeps the saved
+choice. To change it, use Codex's `/model`. To import these settings again, stop the profile's
+runs and use `box profile reset <profile>`, then start a new run. Reset also deletes that
+profile's agent sessions and memory ([Reset](../../../docs/cli/cli.md#box-profile-reset)).
 
 Your Codex folder's `agents/` folder comes into `home/agents`. Its `skills` and `~/.agents/skills` come into separate folders,
 `home/skills/codex` and `home/skills/agents`, so matching names stay separate.

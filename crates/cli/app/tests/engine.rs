@@ -606,6 +606,81 @@ fn spawn_at_terminal(mut command: Command) -> (Child, std::fs::File) {
     (command.spawn().unwrap(), std::fs::File::from(pair.master))
 }
 
+#[test]
+fn an_imported_model_warning_precedes_the_agent_and_explains_reset() {
+    use std::io::Read as _;
+
+    let scene = Scene::new();
+    scene.profile(
+        "probe",
+        &format!(
+            r#"{PROBE}
+[storage]
+directories = ["settings"]
+
+[[storage.files]]
+source = "${{{{ home }}}}/settings.toml"
+target = "settings/config.toml"
+kind = "toml"
+fill = true
+keep = [["model"], ["theme"]]
+"#
+        ),
+        PROBE_POLICY,
+    );
+    std::fs::write(
+        scene.home().join("settings.toml"),
+        "model = 'host-private-model'\ntheme = 'light'\n",
+    )
+    .unwrap();
+    let relative = "storage/probe/default/agent/settings/config.toml";
+    let target = scene.home().join(".strands/box").join(relative);
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    let saved = "# saved choice\nmodel = 'saved-private-model'\ntheme = 'dark'\n";
+    std::fs::write(&target, saved).unwrap();
+    let check = |text: &str, target: &Path| {
+        let warning = text.find("box: warning: Saved model").expect("a warning");
+        assert!(warning < text.find("agent-started").expect("agent output"));
+        assert_eq!(text.matches("box: warning:").count(), 1);
+        assert!(text.contains("box profile reset probe"));
+        assert!(text.contains("deletes this profile's sessions and memory"));
+        assert!(!text.contains("host-private-model"));
+        assert!(!text.contains("saved-private-model"));
+        assert_eq!(std::fs::read_to_string(target).unwrap(), saved);
+    };
+    let script = "printf 'agent-started\\n' >&2";
+    let output = scene.probe(&scene.workspace(), script);
+    succeeded(&output);
+    let text = String::from_utf8_lossy(&output.stderr);
+    check(&text, &target);
+    assert!(!text.contains("with the same BOX_HOME"));
+    let box_home = scene.home().join("box-home");
+    std::fs::rename(scene.home().join(".strands/box"), &box_home).unwrap();
+    let target = box_home.join(relative);
+    for display in ["--no-banner", "--banner"] {
+        let mut command =
+            scene.command_with(&scene.workspace(), "probe", &[display], &["-c", script]);
+        command.env("BOX_HOME", &box_home);
+        let (child, mut terminal) = spawn_at_terminal(command);
+        let reader = std::thread::spawn(move || {
+            let mut text = Vec::new();
+            let mut bytes = [0; 8192];
+            while let Ok(count) = terminal.read(&mut bytes) {
+                if count == 0 {
+                    break;
+                }
+                text.extend_from_slice(&bytes[..count]);
+            }
+            String::from_utf8_lossy(&text).into_owned()
+        });
+        let output = wait_for_output(child);
+        let text = reader.join().unwrap();
+        assert!(output.status.success(), "{}: {text}", output.status);
+        check(&text, &target);
+        assert!(text.contains("with the same BOX_HOME"));
+    }
+}
+
 /// Run `box run probe <flags> -- -c <script>` at a 40x200 pseudo-terminal with the banner on. Wait
 /// for each of `needles` in order on the screen, then send a line so the script can finish. Return
 /// the screen as it was when the last needle appeared.
@@ -1660,72 +1735,6 @@ fn show_prints_the_options_and_full_adds_the_configuration() {
         .output()
         .expect("box runs");
     assert!(!output.status.success(), "`profile check` is not a command");
-}
-
-#[test]
-fn codex_model_warning_precedes_the_agent_output_and_ignores_other_settings() {
-    let scene = Scene::new();
-    let profile = format!(
-        "{PROBE}\nenv.CODEX_HOME = \"${{{{ storage.config }}}}\"\n\
-         [storage]\ndirectories = [\"config\"]\n\n[[storage.files]]\n\
-         source = \"${{{{ home }}}}/config.toml\"\ntarget = \"config/config.toml\"\n\
-         kind = \"toml\"\nkeep = [[\"model\"], [\"personality\"]]\nfill = true\n"
-    );
-    scene.profile("probe", &profile, PROBE_POLICY);
-    let source = scene.home().join("config.toml");
-    std::fs::write(&source, "model = 'saved-model'\npersonality = 'friendly'\n")
-        .expect("host settings");
-    let first = scene.probe(&scene.workspace(), "printf agent-started >&2");
-    succeeded(&first);
-    assert!(!String::from_utf8_lossy(&first.stderr).contains("box profile reset"));
-
-    std::fs::write(
-        &source,
-        "model = 'saved-model'\npersonality = 'pragmatic'\n",
-    )
-    .expect("changed preference");
-    let preference = scene.probe(&scene.workspace(), "printf agent-started >&2");
-    succeeded(&preference);
-    assert!(!String::from_utf8_lossy(&preference.stderr).contains("box profile reset"));
-
-    std::fs::write(&source, "model = 'changed-model'\n").expect("changed host settings");
-    let next = scene.probe(&scene.workspace(), "printf agent-started >&2");
-    succeeded(&next);
-    let stderr = String::from_utf8_lossy(&next.stderr);
-    let warning = stderr
-        .find("Codex's saved model differs from `model` in ~/config.toml.")
-        .expect("the saved model warning");
-    let agent = stderr.find("agent-started").expect("agent output");
-    assert!(warning < agent, "{stderr}");
-    assert!(stderr.contains("use `/model` in Codex"), "{stderr}");
-    assert!(stderr.contains("box profile reset probe"), "{stderr}");
-    assert!(stderr.contains("Reset deletes the agent's settings, sessions, and memory."));
-    for value in ["saved-model", "changed-model"] {
-        assert!(!stderr.contains(value), "{stderr}");
-    }
-
-    scene.profile(
-        "probe",
-        &profile.replace("env.CODEX_HOME = \"${{ storage.config }}\"\n", ""),
-        PROBE_POLICY,
-    );
-    let other_agent = scene.probe(&scene.workspace(), "printf agent-started >&2");
-    succeeded(&other_agent);
-    assert!(!String::from_utf8_lossy(&other_agent.stderr).contains("box profile reset"));
-
-    scene.profile("probe", &profile, PROBE_POLICY);
-    let moved = scene.root.join("box\u{200b}");
-    std::fs::rename(scene.home().join(".strands/box"), &moved).expect("move box home");
-    let moved = scene
-        .command(&scene.workspace(), "probe", &["-c", "true"])
-        .env("BOX_HOME", moved)
-        .output()
-        .expect("run with moved home");
-    succeeded(&moved);
-    assert!(
-        String::from_utf8_lossy(&moved.stderr)
-            .contains("`box profile reset probe` with the same `BOX_HOME`")
-    );
 }
 
 #[test]

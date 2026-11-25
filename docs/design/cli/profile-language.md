@@ -1184,6 +1184,8 @@ creates that file on its first run, so a copy made once never brings the host va
   copy, and adds each `keep` path that the copy lacks, creating each missing table. A value that
   the copy holds stays, whatever it is. A path whose parent in the copy is not a table is not
   added. The copy is written only if it changed, by the same walk as a `set` rewrite.
+- **When `keep` includes `["model"]`**, differing string values for that top-level key in the
+  source and copy produce a warning before each run. The copy keeps its value.
 - **A copy that is a link, not a file, or a file with another hard link** is left alone, as the
   MCP import leaves it, and `box run` reports it. A `set` rewrite stops the run there instead.
 - A host file or a copy that does not parse as its `kind` stops the run.
@@ -1253,8 +1255,8 @@ that changes between the check and the copy, stops the run. A copy keeps each fi
 
 A `[[storage.hooks]]` row makes the hooks of a JSON copy in storage a per-run view of the hooks in
 a host file ([decisions.md](decisions.md#imported-hooks-are-rebuilt-on-each-run)). The pack states
-where the file holds its hooks and what an imported hook looks like. The hook reader knows no
-harness's layout ([decisions.md](decisions.md#box-knows-no-provider)). This is the row of `@box/claude`:
+where the file holds its hooks and what an imported hook looks like. `box` knows no harness's
+layout ([decisions.md](decisions.md#box-knows-no-provider)). This is the row of `@box/claude`:
 
 ```toml
 [[storage.hooks]]
