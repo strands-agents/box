@@ -27,15 +27,15 @@ sequenceDiagram
     Boundary->>API: "If policy permits, forward with real secret"
 ```
 
-A pack in Box CLI is a reusable set of TOML configuration: `box/claude` describes how to run Claude Code, and `box/anthropic` configures its connection to the Anthropic API. The operator's profile selects packs and supplies their own settings. Box CLI merges these into the `box.toml` that Box Core reads.
+A pack in Box CLI is a reusable set of TOML configuration: `@box/claude` describes how to run Claude Code, and `@box/anthropic` configures its connection to the Anthropic API. The operator's profile selects packs and supplies their own settings. Box CLI merges these into the `box.toml` that Box Core reads.
 
 A secret provider does something that no pack does. A pack only adds config to `box.toml`, and every program it names runs inside a sandbox. A provider changes what Box itself can do. Box's trusted process runs a host program such as `op` (the 1Password CLI) outside every sandbox, with the user's rights and vault login. That is a different trust level, so it should look different in the profile. We add a plugin for it, which the profile lists in `plugins`, rather than extend the pack format.
 
-The proposed `box/1password` plugin holds a `secret-source` table. The table declares how to read secrets with `op` and which local paths to protect. The operator lists the plugin and names the secret in their profile:
+The proposed `@box/1password` plugin declares how to read secrets with `op`, and which local paths and variables to protect. The operator lists the plugin and names the secret in their profile:
 
 ```toml
-packs   = ["box/claude", "box/anthropic"]
-plugins = ["box/1password"]
+packs   = ["@box/claude", "@box/anthropic"]
+plugins = ["@box/1password"]
 
 [egress.anthropic.secret]
 ref = "op://Private/Anthropic/credential"
@@ -46,31 +46,39 @@ The plugin is one TOML file:
 
 ```toml
 [plugin]
-name    = "box/1password"
+name    = "@box/1password"
 version = 1
 kind    = "secret-source"
+scheme  = "op"
 
 [inputs.onepassword.path]
 type    = "program"
 program = "op"
 
-[secret-source.op]
-protocol        = "box.secret-source.v1"
-command         = ["${{ inputs.onepassword.path }}", "read", "op://{ref}"]
-pass-env        = ["OP_ACCOUNT", "OP_CONNECT_HOST"]
-pass-secret-env = ["OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_TOKEN", "OP_SESSION_*"]
-reads           = ["~/.config/op"]
-# deny lists the desktop app's socket directories, after we verify them.
+[run]
+command = ["${{ inputs.onepassword.path }}", "read", "op://{ref}"]
+
+[env]
+OP_ACCOUNT               = { from = "env:OP_ACCOUNT" }
+OP_CONNECT_HOST          = { from = "env:OP_CONNECT_HOST" }
+TMPDIR                   = { from = "env:TMPDIR" }
+OP_SERVICE_ACCOUNT_TOKEN = { from = "env:OP_SERVICE_ACCOUNT_TOKEN" }
+OP_CONNECT_TOKEN         = { from = "env:OP_CONNECT_TOKEN" }
+
+[protect]
+env   = ["OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_TOKEN"]
+paths = ["${{ home }}/.config/op", "${{ home }}/.op",
+         "${{ home }}/Library/Group Containers/2BUA8C4S2C.com.1password"]
 ```
 
-The plugin finds `op` on the operator's `PATH` through a `program` input, as an agent pack finds its agent. A profile can set another path in `[options]`. Box CLI writes the absolute path into `box.toml`.
+The plugin is written as an agent pack is, because it also runs one program. It finds `op` on the operator's `PATH` through a `program` input, as an agent pack finds its agent. A profile can set another path in `[options]`. `[run]` says how Box starts the program, and `[env]` names the operator's variables that the program gets. `[protect]` is not the program's: it names what Box keeps from the agent, tools, and MCP servers.
 
-The `[plugin]` header keys mean what they mean in a `[pack]` header: `version` is the file's own revision, and `kind` names the plugin type. `kind` leaves room for other plugin types later. This version accepts only `secret-source`.
+The `[plugin]` header keys mean what they mean in a `[pack]` header: `version` is the file's own revision, and `kind` names the plugin type. `kind` leaves room for other plugin types later. This version accepts only `secret-source`. `scheme` names the references that the plugin reads, such as `op://`.
 
 A plugin has its own rules:
 
-- Only the profile lists a plugin, in `plugins`. No pack can pull one in through `extends`.
-- Only a plugin, or the profile itself, can declare `[secret-source.<scheme>]`. Packs refuse it.
+- Only the profile lists a plugin, in `plugins`. No pack can pull one in through `extend` or `include`.
+- Only a plugin, or the profile itself in a `[secret-source.<scheme>]` table, can declare a secret source. Packs refuse it.
 - Only the profile can name a reference in a declared scheme, such as `secret.ref = "op://..."`. Box CLI refuses one in a pack, and names the pack. So a pack cannot choose which vault item Box reads.
 - `box profile show` prints each plugin, and Box prints each declared source at startup. Both name the program that runs.
 
@@ -80,27 +88,40 @@ A second provider is one more plugin file. For example, this plugin reads AWS Se
 
 ```toml
 [plugin]
-name    = "box/aws-secrets-manager"
+name    = "@box/aws-secrets-manager"
 version = 1
 kind    = "secret-source"
+scheme  = "aws-secretsmanager"
 
-[inputs.aws.path]
+[inputs.aws-secrets-manager.path]
 type    = "program"
 program = "aws"
 
-[secret-source.aws-secretsmanager]
-protocol        = "box.secret-source.v1"
-command         = ["${{ inputs.aws.path }}", "secretsmanager", "get-secret-value",
-                   "--secret-id", "{ref}", "--query", "SecretString", "--output", "json"]
-output          = "json"
-pass-env        = ["AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_ROLE_ARN",
-                   "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-                   "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
-                   "AWS_EC2_METADATA_DISABLED"]
-pass-secret-env = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-                   "AWS_CONTAINER_AUTHORIZATION_TOKEN"]
-reads           = ["~/.aws", "/var/run/secrets/eks.amazonaws.com",
-                   "/var/run/secrets/pods.eks.amazonaws.com"]
+[run]
+command = ["${{ inputs.aws-secrets-manager.path }}", "secretsmanager", "get-secret-value",
+           "--secret-id", "{ref}", "--query", "SecretString", "--output", "json"]
+output  = "json"
+
+[env]
+AWS_PROFILE                            = { from = "env:AWS_PROFILE" }
+AWS_REGION                             = { from = "env:AWS_REGION" }
+AWS_DEFAULT_REGION                     = { from = "env:AWS_DEFAULT_REGION" }
+AWS_ROLE_ARN                           = { from = "env:AWS_ROLE_ARN" }
+AWS_WEB_IDENTITY_TOKEN_FILE            = { from = "env:AWS_WEB_IDENTITY_TOKEN_FILE" }
+AWS_CONTAINER_CREDENTIALS_FULL_URI     = { from = "env:AWS_CONTAINER_CREDENTIALS_FULL_URI" }
+AWS_CONTAINER_CREDENTIALS_RELATIVE_URI = { from = "env:AWS_CONTAINER_CREDENTIALS_RELATIVE_URI" }
+AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE = { from = "env:AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE" }
+AWS_EC2_METADATA_DISABLED              = { from = "env:AWS_EC2_METADATA_DISABLED" }
+AWS_ACCESS_KEY_ID                      = { from = "env:AWS_ACCESS_KEY_ID" }
+AWS_SECRET_ACCESS_KEY                  = { from = "env:AWS_SECRET_ACCESS_KEY" }
+AWS_SESSION_TOKEN                      = { from = "env:AWS_SESSION_TOKEN" }
+AWS_CONTAINER_AUTHORIZATION_TOKEN      = { from = "env:AWS_CONTAINER_AUTHORIZATION_TOKEN" }
+
+[protect]
+env   = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+         "AWS_CONTAINER_AUTHORIZATION_TOKEN"]
+paths = ["${{ home }}/.aws", "/var/run/secrets/eks.amazonaws.com",
+         "/var/run/secrets/pods.eks.amazonaws.com"]
 ```
 
 The command prints the secret string as JSON. A binary secret prints `null`, which Box refuses. The `aws` child finds its identity in the variables that it gets and in `~/.aws`. So exported keys, such as from `aws-vault exec`, and `~/.aws` profiles work. The plugin also passes the variables of a container or web identity, such as EKS Pod Identity, and it protects the token files. It passes `AWS_EC2_METADATA_DISABLED` too, so the child reads instance metadata only where a bare `aws://` route does. So the child gets the identity that a bare `aws://` route gets there. The secret must be in the region that the child is configured for, because the `aws` CLI does not read the region from an ARN. Do not use a profile that sets `credential_process` with this plugin. Box does not refuse such a profile. A bare program name there fails on the fixed `PATH`. An absolute path runs outside every sandbox, and Box does not protect that program. Box does not check that this identity is the one a bare `aws://` route signs with.
@@ -108,7 +129,7 @@ The command prints the secret string as JSON. A binary secret prints `null`, whi
 One secret in AWS Secrets Manager often holds a JSON object with several keys, so a reference can name one field with `#FIELD`. A profile then sends one key of that secret to a telemetry target:
 
 ```toml
-plugins = ["box/aws-secrets-manager"]
+plugins = ["@box/aws-secrets-manager"]
 
 [telemetry.langsmith]
 kind = "otlp"
@@ -127,14 +148,15 @@ Box keeps the fetched secrets in the trusted run process’s memory until the ru
 
 The agent must not be able to bypass Box and fetch secrets directly from the vault, or change how Box retrieves them. The provider remains trusted software chosen by the operator.
 
-The plugin tells Box what to protect. For `box/1password`, this declaration covers:
+The plugin tells Box what to protect. For `@box/1password`, this covers:
 
-- `command`: the `op` executable, which is its first entry.
-- `reads`: the CLI's configuration paths.
-- `deny`: other access paths, such as directories containing the desktop app's authentication sockets.
-- `pass-secret-env`: host credentials the provider needs, such as `OP_SERVICE_ACCOUNT_TOKEN`.
+- `[run] command`: the `op` executable, which is its first entry.
+- `[protect] paths`: the CLI's configuration paths and, on macOS, the folder where the 1Password app keeps its sockets. The plugin lists no folder of the Linux app.
+- `[protect] env`: host credentials the provider needs, such as `OP_SERVICE_ACCOUNT_TOKEN`.
 
-Box keeps the declared files and sockets outside the agent's, tools', and MCP servers' reach. It refuses a grant that gives a workload a path in `reads` or `deny`, and the refusal names the plugin and the entry. This also applies to a path that a workload can get by name today, such as `~/.aws`. It refuses write grants that could let them replace the executable or its configuration. A declaration passes host variables to the provider in two lists. `pass-env` holds plain settings, such as `AWS_REGION`, and a workload can set the same names. `pass-secret-env` holds credentials. Box refuses a workload environment that holds the operator's value of one of them, under any name. A placeholder under the same name is allowed, such as the `AWS_ACCESS_KEY_ID` placeholder of a signed `aws://` route. Box also refuses an `env://NAME` or `secret://NAME` reference when `NAME` is in a `pass-secret-env` list. So no route or telemetry target can send that credential out. A name in either list can end with `*`, which passes each variable with that prefix. The 1Password plugin uses `OP_SESSION_*` for the token of a manual `op signin`, because that name holds the account ID. `OP_ACCOUNT` selects the account when the operator has more than one. These protections must also cover the hosted Shell and Python paths.
+Box CLI writes each plugin into `box.toml` as one `[secret-source.<scheme>]` table, which [box.toml](#boxtoml) describes. `[run]` gives `command` and `output`, with the full path of the program in `command`. Box CLI adds `protocol = "box.secret-source.v1"`. An `[env]` entry goes to `pass-env`, or to `pass-secret-env` when `[protect] env` names it. `[protect] paths` goes to `deny`. The [plugins design](../../docs/design/cli/plugins.md#the-file) gives the full translation.
+
+Box keeps the declared files and sockets outside the agent's, tools', and MCP servers' reach. It refuses a grant that gives a workload a path in `reads` or `deny`, and the refusal names the plugin and the entry. This also applies to a path that a workload can get by name today, such as `~/.aws`. It refuses write grants that could let them replace the executable or its configuration. A declaration passes host variables to the provider in two lists. `pass-env` holds plain settings, such as `AWS_REGION`, and a workload can set the same names. `pass-secret-env` holds credentials. Box gives the operator's value of one to the program alone, and a workload gets no variable from the operator's shell but `HOME` and `PATH`. A workload can hold a placeholder under the same name, such as the `AWS_ACCESS_KEY_ID` placeholder of a signed `aws://` route. Box also refuses an `env://NAME` or `secret://NAME` reference when `NAME` is in a `pass-secret-env` list. So no route or telemetry target can send that credential out. In `box.toml`, a name in either list can end with `*`, which passes each variable with that prefix. A plugin's `[env]` names one variable in each entry. `OP_ACCOUNT` selects the account when the operator has more than one. These protections must also cover the hosted Shell and Python paths.
 
 Box does not discover these paths automatically, so protection depends on the plugin declaring every access path. On Linux, only paths present at configuration time are protected. Before shipping the plugin, we must verify the real 1Password authentication paths on Linux and macOS.
 
@@ -184,7 +206,7 @@ The credentials API adds `SecretSourceCommand`, the `{ref}` token constant, and 
 
 #### Box CLI
 
-Box CLI adds plugins: the `plugins` list in a profile, and the `[plugin]` header with `name`, `version`, and `kind`. Only `plugins` accepts a plugin. One scheme has one declaration: Box CLI refuses a profile in which two plugins, or a plugin and the profile, declare the same scheme. Box CLI accepts provider declarations in profiles and plugins, refuses them in every pack, and shows each plugin and its program in `box profile show`. It also refuses a reference in a declared scheme that a pack writes. We ship `box/1password` as the first plugin. The profile supplies `secret.env`; existing model packs keep their defaults, so profiles that override `env://` references still work.
+Box CLI adds plugins: the `plugins` list in a profile, and the plugin file. The file holds the `[plugin]` header with `name`, `version`, `kind`, and `scheme`, then `[run]`, `[env]`, and `[protect]`. Only `plugins` accepts a plugin. One scheme has one declaration: Box CLI refuses a profile in which two plugins, or a plugin and the profile, declare the same scheme. Box CLI accepts provider declarations in profiles and plugins, refuses them in every pack, and shows each plugin and its program in `box profile show`. It also refuses a reference in a declared scheme that a pack writes. We ship `@box/1password` and `@box/aws-secrets-manager` as the first plugins. The profile supplies `secret.env`; existing model packs keep their defaults, so profiles that override `env://` references still work.
 
 #### Telemetry
 
