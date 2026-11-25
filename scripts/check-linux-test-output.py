@@ -9,6 +9,11 @@ import re
 
 # Keep this text aligned with crates/credentials/tests/end_to_end.rs.
 MISSING_DAEMON = "no credsd daemon at /run/credsd/credsd.sock"
+# Keep this text aligned with crates/credentials/tests/end_to_end.rs and
+# crates/box/tests/box_credentials.rs, whose live token tests each print it once.
+MISSING_TOKEN_FIXTURE = (
+    "CREDSD_SOCKET, CREDSD_TEST_TOKEN_CREDENTIAL, or CREDSD_TEST_TOKEN is absent"
+)
 # Keep this text aligned with crates/box/tests/box_shell.rs.
 ALIAS_READ = (
     "the namespace launcher cannot subtract read from an exec grant, so the alias-read "
@@ -16,6 +21,7 @@ ALIAS_READ = (
 )
 EXPECTED_SKIPS = {
     MISSING_DAEMON: "The real credential-daemon fixture remains untested in this job.",
+    MISSING_TOKEN_FIXTURE: "The real credential-daemon token fixture remains untested in this job.",
     ALIAS_READ: "The alias test retains its write assertions; its read assertion remains omitted.",
 }
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")

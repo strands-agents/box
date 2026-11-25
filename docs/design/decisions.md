@@ -2698,6 +2698,44 @@ contain at most 64 characters, and use only the RFC 3986 unreserved set. A custo
 looks like a real key, so a reader of a log or a bug report can no longer recognize it as a
 placeholder.
 
+
+<a id="a-credsd-route-declares-its-credential-type"></a>
+### A credsd route declares its credential type, because explicit is better than implicit
+
+A `credsd://NAME` reference does not say what credsd holds under that name, so the route names it
+with `secret.type`: `aws` for session credentials Box signs with, or `token` for an access token
+Box attaches. The type is explicit so that a reader of `box.toml` sees how each secret is used, and
+so that AWS is not a special case that a route gets by saying nothing. A route with no type signs
+as `aws` and warns for now, and a later release requires the key. The startup preflight checks each
+declared type against the kind credsd lists, and a mismatch stops the box.
+
+The type also lets Box settle a route without the daemon. When the configuration loads, Box decides
+which keys the route accepts, which `secret.env` variable the composed environment holds, and what
+the stored record says. The vault mints the placeholder later, when it opens after the preflight.
+
+**Rejected.** Inferring the type from the daemon's reply: a route's keys and stored record would
+depend on what credsd holds when the box starts, and `box.toml` could not be checked without the
+daemon. Inferring it from the other keys, such as `secret.env` for a token: the kind becomes a side
+effect of unrelated keys, and it fails when credsd adds a third kind. Keeping `aws` as the
+permanent default for a route with no type: AWS stays a special case.
+
+**Cost.** An operator states what credsd already knows. An existing AWS route warns until it names
+its type, and a record that names it moves to version 43.
+
+<a id="a-credsd-token-is-read-once-at-startup"></a>
+### A credsd token is read once at startup, as a declared secret source is
+
+A token route reads its access token when the vault opens, before the workload starts, and holds it
+for the run. It behaves as an `env://` route or a secret source does: the workload holds a
+placeholder, routes that name one token under one placeholder variable share one read, and two
+variables for one token are allowed, as they are for a declared secret source, with one read each.
+
+**Rejected.** Fetching the token on each request, or caching it until its expiry: either one
+needs a token lifecycle that no source has yet, and redaction that follows a changing value.
+
+**Cost.** A token that expires during a run stops working until the next run. Box warns at startup
+when the token names an expiry.
+
 ## Telemetry
 
 <a id="one-collector-per-box-in-the-trusted-process"></a>

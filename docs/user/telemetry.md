@@ -136,7 +136,7 @@ that the workload's log records and metrics reach every target.
 ### The credential
 
 `secret.ref` names where the box reads the key: `env://NAME` or `secret://NAME` for a variable in the
-environment of `strands-box run`, `aws://PROFILE` or `credsd://CREDENTIAL` for a SigV4 signature, or
+environment of `strands-box run`, `aws://PROFILE` or `credsd://NAME` for a SigV4 signature, or
 a reference in a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table
 declares. The box holds the key in a vault of its own for each target, and attaches it on each
 request. A literal key is refused, and so is a `file://` reference. An `op://` reference is refused
