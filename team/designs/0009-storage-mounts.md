@@ -6,7 +6,7 @@
 
 **Updated**: November 25, 2026
 
-> **Terminology:** This document uses **receiving mount** for the Linux mount mode documented as `slave`. It receives upstream mount changes without sending local changes back. Exact command and API identifiers, such as `rslave` and `MS_SLAVE`, remain unchanged so readers can use and look them up.
+> **Terminology:** Linux retains historical, non-inclusive mount terminology, including [`rslave`](https://docs.kernel.org/filesystems/sharedsubtree.html). This document uses **receiving mount** in prose and preserves exact Linux identifiers where needed.
 
 ## Overview
 
