@@ -341,6 +341,74 @@ when { context.input.path == "/workspace/secret" };
     );
 }
 
+/// A rule that names a left-out tool cannot stage, so the tool degrades and stays refused while the
+/// server's other tool is decided as usual.
+#[test]
+fn a_rule_on_a_left_out_tool_degrades_it_and_the_rest_of_the_server_works() {
+    let (schema, omitted) = policy::generate_mcp_schema_with_omissions(
+        "repro",
+        r##"{"result":{"tools":[
+            {"name":"get_zone","inputSchema":{"type":"object",
+                "properties":{"zone_id":{"type":"string"}}}},
+            {"name":"create_account","inputSchema":{"type":"object",
+                "properties":{"account":{"$ref":"#/$defs/create-account"}},
+                "$defs":{"create-account":{"type":"object"}}}}
+        ]}}"##,
+    )
+    .expect("the server generates without its bad tool");
+    assert_eq!(omitted.len(), 1, "{omitted:?}");
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "left-out.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "repro" };
+forbid(principal, action == repro::Action::"create_account", resource)
+when { context.input has account };
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+    authority
+        .stage_mcp_schema("repro", schema)
+        .expect("the schema is not a terminal fault");
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("completion degrades rather than fataling"),
+        vec!["repro".to_string()],
+        "the rule on the left-out tool never stages"
+    );
+    let call = |tool: &str| {
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "repro",
+                tool,
+                &json!({}),
+            )
+            .0
+    };
+    let refused = call("create_account");
+    assert!(
+        matches!(
+            refused,
+            Decision::Deny {
+                reason: DenyReason::NoMatch,
+                ..
+            }
+        ),
+        "a call that omits the forbid's argument is still refused: {refused:?}"
+    );
+    let allowed = call("get_zone");
+    assert!(
+        matches!(allowed, Decision::Allow { .. }),
+        "the server's other tool is decided as usual: {allowed:?}"
+    );
+}
+
 /// A server that declares a tool but names its arguments differently from the operator's rule
 /// leaves that rule unable to stage, so the tool degrades while the committed schema still
 /// declares its action. The refinement must still deny the call. The coarse `mcp:call` permit
