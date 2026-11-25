@@ -111,6 +111,24 @@ pub(crate) fn protected(host: &Host, install: Option<&Path>, extra: &[PathBuf]) 
         .collect()
 }
 
+/// `box` in each absolute `PATH` folder, as spelled and through the folder's real path: the file a
+/// shell starts as the next `box`.
+pub(crate) fn launch_files(search_path: &std::ffi::OsStr) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for folder in std::env::split_paths(search_path).filter(|folder| folder.is_absolute()) {
+        for folder in [Some(folder.clone()), folder.canonicalize().ok()]
+            .into_iter()
+            .flatten()
+        {
+            let file = folder.join("box");
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+    }
+    files
+}
+
 /// The installed package directory of this `box`, which a later run trusts.
 pub(crate) fn install_root() -> Option<PathBuf> {
     crate::installation::executable()
@@ -424,6 +442,12 @@ pub(crate) fn compile_run(
     let mut protected = protected(host, settings.install, extra_protected);
     protected.extend(resources.clone());
     let box_homes = host.box_homes();
+    let mut trusted = source.trusted.to_vec();
+    for file in launch_files(&host.search_path) {
+        if !trusted.contains(&file) {
+            trusted.push(file);
+        }
+    }
     let compiled = compile(&Run {
         profile: &resolved,
         policy: Some(&resolved.policy),
@@ -432,7 +456,7 @@ pub(crate) fn compile_run(
         instance,
         home: &host.home,
         box_homes: &box_homes,
-        trusted: source.trusted,
+        trusted: &trusted,
         protected: &protected,
         resources: resources.as_deref(),
         search_path: &host.search_path,
