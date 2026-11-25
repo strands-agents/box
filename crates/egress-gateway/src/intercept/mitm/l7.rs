@@ -777,10 +777,13 @@ fn escapes_backend_prefix(path: &str) -> Option<&'static str> {
              path parameter and escape the prefix",
         );
     }
-    if path
-        .split('/')
-        .any(|segment| segment.replace("%20", "").starts_with(".."))
-    {
+    if path.split('/').any(|segment| {
+        segment
+            .replace("%20", "")
+            .replace("%2B", "")
+            .replace('+', "")
+            .starts_with("..")
+    }) {
         return Some(
             "a re-routed path under a backend prefix may not carry a segment that starts with \
              `..`: the backend could fold it to `..` and escape the prefix",
@@ -1002,6 +1005,11 @@ mod tests {
             "/..~/x",
             "/..,/x",
             "/%2E%2Ex/admin",
+            "/+..+/x",
+            "/%2B../x",
+            "/%2b../x",
+            "/+../x",
+            "/%20+%2B../x",
         ] {
             let canonical = canonicalize_request_path(path);
             assert!(
@@ -1021,6 +1029,9 @@ mod tests {
             "/a..b/c",
             "/a/b../c",
             "/.a.b/c",
+            "/a+b/c",
+            "/+/x",
+            "/+.hidden/x",
             "/repos/o/r/contents/docs/My%20File.md",
             "/v1.0/me/drive/root:/My%20Documents/a.docx:/content",
             "/.%20/x",

@@ -716,6 +716,8 @@ fn a_backend_reroute_refuses_a_path_that_could_escape_the_prefix() {
         "/..+/slack/secret",
         "/..%2B/slack/secret",
         "/..\\slack/secret",
+        "/+..+/slack/secret",
+        "/%2B..%2B/slack/secret",
     ] {
         let upstream = TlsUpstream::start("gw.example.test");
         let handle = start_reroute(&upstream, original, "/github");
