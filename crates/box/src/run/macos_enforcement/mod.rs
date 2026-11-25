@@ -677,7 +677,9 @@ impl FileMonitor {
 impl Drop for FileMonitor {
     fn drop(&mut self) {
         if let Err(error) = self.stop() {
-            ::diagnostics::diag!(error, "{error}");
+            // The same code as the stop that `HostedBox::shutdown` reports.
+            let error = crate::error::BoxError::from(error);
+            ::diagnostics::diag!({ error.code() }, "{error}");
         }
     }
 }
