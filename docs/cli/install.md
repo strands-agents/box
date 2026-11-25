@@ -1,8 +1,9 @@
 # Install Box
 
 The installer downloads a Box release from `strands-agents/box` on GitHub, checks it, and puts
-`box` on your `PATH`. On macOS, the checks include Apple's signing and notarization. To build
-`box` yourself instead, see [Build from source](#build-from-source).
+`box` on your `PATH`. On macOS, the checks include Apple's signing and notarization. To install
+with Homebrew instead, see [Install with Homebrew](#install-with-homebrew). To build `box`
+yourself, see [Build from source](#build-from-source).
 
 ## Requirements
 
@@ -145,6 +146,100 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh 
 
 This leaves your shell's startup files alone, so put `~/.local/bin` on your `PATH` in your own
 setup.
+
+## Install with Homebrew
+
+On macOS and Linux, you can install `box` from the
+[Strands Homebrew tap](https://github.com/strands-agents/homebrew-tap) instead of with the installer:
+
+```sh
+brew install --cask strands-agents/tap/box
+```
+
+This adds the tap, trusts the `box` cask, and puts `box` in Homebrew's `bin` folder. The cask
+installs the same release archive as the installer, on the same Macs and Linux systems. On Linux,
+a box also needs unprivileged user namespaces, which Ubuntu 24.04 blocks by default. See
+[Linux requirements](../user/linux-requirements.md). To install by the short name `box`, see the
+tap's [Install by short name](https://github.com/strands-agents/homebrew-tap#install-by-short-name).
+
+Check that `box` runs:
+
+```console
+$ box --version
+box 0.3.1
+```
+
+`box` sends usage telemetry. To opt out, run `box telemetry off`.
+[Usage telemetry](../../CLI_TELEMETRY.md) says what it sends. Next,
+[create a Claude Code profile](getting-started.md#2-create-a-claude-code-profile), and skip that
+page's install step.
+
+### Upgrade with Homebrew
+
+```sh
+brew update
+brew upgrade --cask box
+```
+
+The cask follows Box's stable releases and skips pre-releases. A new release reaches the tap when
+the tap's bump pull request for it is merged. The installer variables, such as `BOX_VERSION`, don't
+apply.
+
+### Uninstall with Homebrew
+
+```sh
+brew uninstall --cask box
+```
+
+This removes `box` and its release files. Your profiles, packs, storage, and run records stay in
+`~/.strands/box`. To remove them too, delete that folder.
+
+### Switch from the installer to Homebrew
+
+Use one install method on a computer, so that the `box` on your `PATH` is the one you upgrade.
+Install the cask first:
+
+```sh
+brew install --cask strands-agents/tap/box
+```
+
+Then remove the installer's release files and its link:
+
+```sh
+rm -rf ~/.strands/box/packages
+rm ~/.local/bin/box
+```
+
+Your profiles in `~/.strands/box` keep working. To remove the lines the installer added to your
+shell's startup files, see [Uninstall](#uninstall). Check that your shell finds Homebrew's `box`
+first:
+
+```sh
+which -a box
+```
+
+If `box --version` shows an older release, another `box` comes first on your `PATH`.
+
+### Check a Homebrew install
+
+Homebrew checks each download against the checksum in the cask, and the tap's tests check that
+checksum against the release's `SHA256SUMS.txt` and its build attestation. Each release archive has
+a build attestation from Box's release workflow. To check an archive you downloaded:
+
+```sh
+gh attestation verify box-cli-<tag>-<triple>.tar.gz --repo strands-agents/box \
+  --signer-workflow strands-agents/box/.github/workflows/deploy-box-artifact.yml \
+  --source-ref refs/heads/main
+```
+
+On macOS, the cask keeps the release's Developer ID signature and Apple notarization:
+
+```sh
+codesign --verify --strict --verbose=2 "$(brew --caskroom)/box/$(box --version | cut -d' ' -f2)/box"
+spctl --assess --type install --verbose "$(brew --caskroom)/box/$(box --version | cut -d' ' -f2)/box"
+```
+
+`spctl` prints `source=Notarized Developer ID`.
 
 ## Build from source
 
