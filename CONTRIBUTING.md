@@ -119,16 +119,8 @@ history persistence steps of the [`unit-test` workflow job](.github/workflows/ru
 
 ### Test the release downloader
 
-Run the Python script tests with:
-
-```sh
-python3 -m unittest discover -s scripts -p 'test_*.py' -v
-```
-
-These tests cover release packaging, the downloader, and the telemetry capture helper.
-To capture and inspect telemetry from a real CLI run, follow
-[Check telemetry delivery](docs/dev/manual-testing.md#check-telemetry-delivery).
-Continuous integration runs the downloader tests on Linux and macOS. The downloader tests use local fixture archives
+Run `python3 -m unittest discover -s scripts -p 'test_*.py' -v` to test release packaging and the downloader.
+Continuous integration runs the downloader tests on Linux and macOS. These tests use local fixture archives
 and simulated HTTP clients; they do not qualify a published binary or its containment behavior.
 The [release guide](docs/dev/releases.md#rehearse) describes the architecture, system-library, and packaged-workload checks for Linux ARM64 and x86-64.
 Both Linux build jobs must pass the packaged-workload checks before publication.

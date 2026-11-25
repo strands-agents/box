@@ -376,14 +376,6 @@ into the capture directory. For the terminal run above, find it beside the `box.
 the exit summary. This lets you compare Core's `workload_started` record with the outgoing `run/1`
 payload. A reused box's journal also contains earlier invocations.
 
-[`scripts/test_capture_telemetry.py`](../../scripts/test_capture_telemetry.py) tests the receiver
-with local HTTP fixtures. Run it when changing the helper; it does not launch Box:
-
-```sh
-python3 -m unittest discover \
-  -s "$repo/scripts" -p 'test_capture_telemetry.py' -v
-```
-
 Run the CLI telemetry end-to-end tests from the checkout. They launch Box with temporary profiles,
 a local receiver, and no model credential:
 
