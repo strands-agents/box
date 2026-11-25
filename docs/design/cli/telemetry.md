@@ -205,8 +205,15 @@ The event contains no raw refusal reason.
 | `zero` or `nonzero` | `null` | The CLI result is known; Core's stop outcome is unavailable. |
 
 The schema permits `zero` with `refused`, but the current Core error path produces a
-nonzero CLI result. These fields do not expose a workload exit code, signal, or specific Core
-error category.
+nonzero CLI result. These fields do not expose a workload exit code or signal.
+
+`core_code` names the failure that ended Core's run, by its
+[message code](../../user/message-codes.md), such as `B0114`, or `uncoded` for a Box defect.
+`Launch::run_with_telemetry` passes a `strands_box::run_events` sender to Core, reads the one
+`RunEvent::Refused` after Core returns, and hands its code to `Session::core_code` before
+`finish`. The code is the one Core's stderr line prints. It arrives even when Core fails before it
+opens telemetry, where `core_outcome` is `null`. It is `null` when Core reports no failure: the
+run succeeded, the workload exited nonzero, or the CLI failed before Core ran.
 
 The shutdown event retains the invocation's IDs and context. A crash or force-kill can prevent
 it. Its absence does not establish a crash, and its exit outcome does not establish that the

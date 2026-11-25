@@ -2609,7 +2609,7 @@ impl Launch {
 
     /// Run the engine, which appends `args` to the agent's command.
     pub fn run(self, args: &[OsString]) -> Result<ExitCode, Error> {
-        self.run_inner(args)
+        self.run_inner(args, None)
     }
 
     /// Run the engine and finish telemetry with the box's instance lock retained.
@@ -2618,22 +2618,28 @@ impl Launch {
         args: &[OsString],
         telemetry: Option<Session>,
     ) -> Result<ExitCode, Error> {
-        self.run_observed(telemetry, |launch| launch.run_inner(args))
+        self.run_observed(telemetry, |launch, events| {
+            launch.run_inner(args, Some(events))
+        })
     }
 
     fn run_observed(
         self,
         mut telemetry: Option<Session>,
-        execute: impl FnOnce(&Self) -> Result<ExitCode, Error>,
+        execute: impl FnOnce(&Self, strands_box::RunEventSender) -> Result<ExitCode, Error>,
     ) -> Result<ExitCode, Error> {
         if let Some(session) = telemetry.as_mut()
             && let Ok(journal) = Journal::start_locked(&self.journal, self._claim.clone())
         {
             session.observe(journal, ActionCatalog::new(self.mcp_names.iter().cloned()));
         }
-        let result = execute(&self);
+        let (events, received) = strands_box::run_events();
+        let result = execute(&self, events);
         let completed = Instant::now();
         if let Some(session) = telemetry {
+            if let Some(code) = core_code(&received) {
+                session.core_code(code);
+            }
             let outcome = if result.as_ref().is_ok_and(|code| *code == ExitCode::SUCCESS) {
                 ExitOutcome::Zero
             } else {
@@ -2644,9 +2650,13 @@ impl Launch {
         result
     }
 
-    fn run_inner(&self, args: &[OsString]) -> Result<ExitCode, Error> {
+    fn run_inner(
+        &self,
+        args: &[OsString],
+        events: Option<strands_box::RunEventSender>,
+    ) -> Result<ExitCode, Error> {
         let result = if terminal::attached() {
-            terminal::run(self, |options| {
+            terminal::run(self, events, |options| {
                 strands_box::run(self.config.clone(), args.to_vec(), options)
             })
         } else {
@@ -2654,7 +2664,10 @@ impl Launch {
             Ok(strands_box::run(
                 self.config.clone(),
                 args.to_vec(),
-                self.run_options(),
+                strands_box::RunOptions {
+                    events,
+                    ..self.run_options()
+                },
             ))
         };
         if self.unused(*result.as_ref().unwrap_or(&ExitCode::FAILURE))
@@ -2666,6 +2679,20 @@ impl Launch {
         }
         result
     }
+}
+
+/// The message code of the failure that ended Core's run, as the run's event channel reports
+/// it: `None` when Core sent none, because the run succeeded or never reached Core.
+fn core_code(received: &strands_box::RunEventReceiver) -> Option<&'static str> {
+    while let Ok(event) = received.try_recv() {
+        if let strands_box::RunEvent::Refused { code } = event {
+            return Some(match code {
+                diagnostics::Kind::Coded(code) => code.as_str(),
+                diagnostics::Kind::Uncoded(_) => "uncoded",
+            });
+        }
+    }
+    None
 }
 
 /// Ask `question` before a removal, and refuse to go on without a yes or when `interactive` is

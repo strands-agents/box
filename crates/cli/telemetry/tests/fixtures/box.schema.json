@@ -314,7 +314,7 @@
       "description": "A best-effort event on controlled completion. Absence does not establish a crash. Duration covers the Boxy invocation, and exit status does not establish task completion.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["invocation_duration_ms", "exit_outcome", "core_outcome"],
+      "required": ["invocation_duration_ms", "exit_outcome", "core_outcome", "core_code"],
       "properties": {
         "invocation_duration_ms": {
           "$ref": "#/definitions/elapsed_ms"
@@ -332,6 +332,18 @@
             {
               "type": "string",
               "enum": ["ok", "refused"]
+            }
+          ]
+        },
+        "core_code": {
+          "description": "The message code of the failure that ended Box Core's run, as its stderr line prints it, such as B0114, or uncoded for a Box defect. Null means Core reported no failure: the run succeeded, or the failure was the CLI's own.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^([BHPT][0-9]{4}|uncoded)$"
             }
           ]
         }

@@ -271,7 +271,12 @@ mod tests {
         let events = [
             invocation.run_event(LaunchOutcome::Confirmed(None)),
             invocation.polling_event(polling),
-            invocation.shutdown_event(Instant::now(), ExitOutcome::Zero, Some(CoreOutcome::Ok)),
+            invocation.shutdown_event(
+                Instant::now(),
+                ExitOutcome::Zero,
+                Some(CoreOutcome::Ok),
+                None,
+            ),
         ];
         for event in &events {
             delivery.send(event, None);
@@ -336,7 +341,8 @@ mod tests {
             }
         };
         let run = [invocation.run_event(LaunchOutcome::Unknown)];
-        let shutdown = [invocation.shutdown_event(Instant::now(), ExitOutcome::Nonzero, None)];
+        let shutdown =
+            [invocation.shutdown_event(Instant::now(), ExitOutcome::Nonzero, None, None)];
         let pair = [run[0].clone(), shutdown[0].clone()];
 
         delivery.send_all(&run, None);
@@ -378,7 +384,7 @@ mod tests {
         let invocation = invocation();
         let events = [
             invocation.run_event(LaunchOutcome::Unknown),
-            invocation.shutdown_event(Instant::now(), ExitOutcome::Nonzero, None),
+            invocation.shutdown_event(Instant::now(), ExitOutcome::Nonzero, None, None),
         ];
         let started = Instant::now();
         delivery.send_all(&events, Some(started + Duration::from_millis(150)));
