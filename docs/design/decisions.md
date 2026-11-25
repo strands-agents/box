@@ -2700,19 +2700,27 @@ placeholder.
 
 
 <a id="a-credsd-route-declares-its-credential-type"></a>
-### A credsd route declares its credential type, because Box fixes the route kind before the daemon answers
+### A credsd route declares its credential type, because explicit is better than implicit
 
 A `credsd://NAME` reference does not say what credsd holds under that name, so the route names it
 with `secret.type`: `aws` for session credentials Box signs with, or `token` for an access token
-Box attaches. Box builds each route when the configuration loads, before it contacts the daemon,
-and a token route mints a placeholder at that point while a signed route does not. A route with no
-type signs as `aws` and warns, and a later release requires the key. The startup preflight checks
-each declared type against the kind credsd lists.
+Box attaches. The type is explicit so that a reader of `box.toml` sees how each secret is used, and
+so that AWS is not a special case that a route gets by saying nothing. A route with no type signs
+as `aws` and warns for now, and a later release requires the key. The startup preflight checks each
+declared type against the kind credsd lists, and a mismatch stops the box.
 
-**Rejected.** Inferring the type from the daemon's reply: it can choose only between routes that
-mint no placeholder, so it worked only while AWS was credsd's one kind.
+The type also lets Box settle a route without the daemon. When the configuration loads, Box decides
+which keys the route accepts, which `secret.env` variable the composed environment holds, and what
+the stored record says. The vault mints the placeholder later, when it opens after the preflight.
 
-**Cost.** An operator states what credsd already knows, and a mismatch stops the box at startup.
+**Rejected.** Inferring the type from the daemon's reply: a route's keys and stored record would
+depend on what credsd holds when the box starts, and `box.toml` could not be checked without the
+daemon. Inferring it from the other keys, such as `secret.env` for a token: the kind becomes a side
+effect of unrelated keys, and it fails when credsd adds a third kind. Keeping `aws` as the
+permanent default for a route with no type: AWS stays a special case.
+
+**Cost.** An operator states what credsd already knows. An existing AWS route warns until it names
+its type, and a record that names it moves to version 43.
 
 <a id="a-credsd-token-is-read-once-at-startup"></a>
 ### A credsd token is read once at startup, as a declared secret source is
