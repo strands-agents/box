@@ -44,16 +44,22 @@ struct RotatingToken {
 struct CachedToken {
     secret: Arc<Secret>,
     refresh_at: SystemTime,
+    expires_at: SystemTime,
 }
 
 impl CachedToken {
     fn new(credential: &str, secret: Secret, expires_at: &str) -> Result<Self> {
+        let expiry = parse_expiry(credential, expires_at)?;
         Ok(Self {
             secret: Arc::new(secret),
-            refresh_at: refresh_at(credential, expires_at, token_now())?,
+            refresh_at: refresh_before(credential, expiry, token_now())?,
+            expires_at: expiry,
         })
     }
 }
+
+/// How long a still-valid token is served after a failed early refresh before the next attempt.
+const REFRESH_RETRY: Duration = Duration::from_secs(5);
 
 impl RotatingToken {
     fn acquire(&self, vault: &Vault) -> Result<Arc<Secret>> {
@@ -80,6 +86,14 @@ impl RotatingToken {
         }
         match vault.refresh_credsd_token(&self.credential) {
             Ok(next) => Ok(Arc::clone(&current.insert(next).secret)),
+            // An early refresh is advisory: a still-valid token keeps serving, and the next attempt waits.
+            Err(_)
+                if let Some(cached) = current.as_mut()
+                    && token_now() < cached.expires_at =>
+            {
+                cached.refresh_at = (token_now() + REFRESH_RETRY).min(cached.expires_at);
+                Ok(Arc::clone(&cached.secret))
+            }
             Err(error) => {
                 *current = None;
                 self.failures.fetch_add(1, Ordering::Release);
@@ -131,14 +145,24 @@ fn token_now() -> SystemTime {
 }
 
 /// Refresh in the last fifth of the remaining lifetime, at most a minute before expiry.
+#[cfg(test)]
 fn refresh_at(credential: &str, expires_at: &str, now: SystemTime) -> Result<SystemTime> {
-    let expiry: SystemTime = chrono::DateTime::parse_from_rfc3339(expires_at)
+    refresh_before(credential, parse_expiry(credential, expires_at)?, now)
+}
+
+/// Parse the daemon's RFC 3339 `expires_at`.
+fn parse_expiry(credential: &str, expires_at: &str) -> Result<SystemTime> {
+    Ok(chrono::DateTime::parse_from_rfc3339(expires_at)
         .map_err(|_| {
             CredentialError::Credential(format!(
                 "credsd credential {credential:?} has an invalid expires_at"
             ))
         })?
-        .into();
+        .into())
+}
+
+/// Refresh in the last fifth of the remaining lifetime, at most a minute before `expiry`.
+fn refresh_before(credential: &str, expiry: SystemTime, now: SystemTime) -> Result<SystemTime> {
     let remaining = expiry.duration_since(now).unwrap_or_default();
     if remaining.is_zero() {
         return Err(CredentialError::Credential(format!(
@@ -1509,7 +1533,8 @@ mod tests {
             original.set_headers().next().unwrap().1.as_str(),
             "Bearer ghp_vault_example"
         );
-        TOKEN_CLOCK.set(Some(SystemTime::UNIX_EPOCH + Duration::from_secs(80)));
+        // Past the first token's expiry, so each failed refresh refuses rather than serving it.
+        TOKEN_CLOCK.set(Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100)));
         assert!(
             vault
                 .attach_for(request)
@@ -1595,7 +1620,7 @@ mod tests {
     }
 
     #[test]
-    fn early_credsd_refresh_failure_refuses_an_overtaken_waiter() {
+    fn early_credsd_refresh_failure_keeps_serving_the_still_valid_token() {
         use std::sync::mpsc::channel;
 
         struct Restore(PathBuf);
@@ -1675,17 +1700,35 @@ mod tests {
                 .recv_timeout(timeout)
                 .expect("waiter observes epoch");
             reply_to_refresh.send(()).unwrap();
-            assert!(failed.join().unwrap().is_err());
+            // The failed refresh is advisory: the original token has a minute left and still attaches.
+            let (kept, _) = failed.join().unwrap().unwrap().unwrap();
+            assert_eq!(
+                kept.set_headers().next().unwrap().1.as_str(),
+                "Bearer ghp_vault_example"
+            );
 
-            // A request arriving after the failure retries with a minute left on the original token.
-            TOKEN_CLOCK.set(Some(early_refresh));
+            // Within the retry delay the original token serves with no daemon read.
+            TOKEN_CLOCK.set(Some(early_refresh + Duration::from_secs(4)));
+            let (cached, _) = vault.attach_with_redactor(request).unwrap().unwrap();
+            assert_eq!(
+                cached.set_headers().next().unwrap().1.as_str(),
+                "Bearer ghp_vault_example"
+            );
+
+            // After it, the next request retries and gets the replacement.
+            TOKEN_CLOCK.set(Some(early_refresh + REFRESH_RETRY));
             let (replacement, _) = vault.attach_with_redactor(request).unwrap().unwrap();
             assert_eq!(
                 replacement.set_headers().next().unwrap().1.as_str(),
                 "Bearer replacement-token"
             );
+            // The overtaken waiter shares no failure, and takes the replacement.
             release_waiter.send(()).unwrap();
-            assert!(waiter.join().unwrap().is_err());
+            let (waited, _) = waiter.join().unwrap().unwrap().unwrap();
+            assert_eq!(
+                waited.set_headers().next().unwrap().1.as_str(),
+                "Bearer replacement-token"
+            );
         });
         assert_eq!(
             recorder
