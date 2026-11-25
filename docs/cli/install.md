@@ -1,8 +1,8 @@
 # Install Box
 
-The installer downloads a Box release from `strands-agents/box` on GitHub, checks it, and puts
-`box` on your `PATH`. On macOS, the checks include Apple's signing and notarization. To build
-`box` yourself instead, see [Build from source](#build-from-source).
+Install Box with [Homebrew](#install-with-homebrew), or with the installer. Each downloads a Box
+release from `strands-agents/box` on GitHub, checks it, and puts `box` on your `PATH`. To build
+`box` yourself, see [Build from source](#build-from-source).
 
 ## Requirements
 
@@ -20,13 +20,22 @@ neither.
 
 ## Install
 
-Download the installer and run it:
+Install `box` with Homebrew:
+
+```sh
+brew install --cask strands-agents/tap/box
+```
+
+[Install with Homebrew](#install-with-homebrew) says what this adds and how to upgrade and
+uninstall.
+
+Or download the installer and run it:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | sh
 ```
 
-Example output on a Mac:
+Example output of the installer on a Mac:
 
 ```text
 Downloading box-cli-v0.3.0-aarch64-apple-darwin.tar.gz...
@@ -145,6 +154,58 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh 
 
 This leaves your shell's startup files alone, so put `~/.local/bin` on your `PATH` in your own
 setup.
+
+## Install with Homebrew
+
+On macOS and Linux, install `box` from the
+[Strands Homebrew tap](https://github.com/strands-agents/homebrew-tap):
+
+```sh
+brew install --cask strands-agents/tap/box
+```
+
+This adds the tap, trusts the `box` cask, and puts `box` in Homebrew's `bin` folder. For Linux, see
+[Linux requirements](../user/linux-requirements.md). To install by the short name `box`, see the
+tap's [Install by short name](https://github.com/strands-agents/homebrew-tap#install-by-short-name).
+
+`box` keeps a box from changing the release folder of the `box` you run, in Homebrew's Caskroom,
+but not the rest of Homebrew's prefix. The default prefix (`/opt/homebrew`, `/usr/local`, or
+`/home/linuxbrew/.linuxbrew`) is outside your home, so a write rule over your home doesn't reach
+it. A prefix inside your home, such as `~/.linuxbrew`, is reached by such a rule too. Either way,
+keep your write grants and `permit` rules out of `$(brew --prefix)`
+([Keep write rules narrow](policies.md#keep-write-rules-narrow)).
+
+Check that `box` runs:
+
+```console
+$ box --version
+box 0.3.1
+```
+
+`box` sends usage telemetry. To opt out, run `box telemetry off`.
+[Usage telemetry](../../CLI_TELEMETRY.md) says what it sends. Next,
+[create a Claude Code profile](getting-started.md#2-create-a-claude-code-profile), and skip that
+page's install step.
+
+### Upgrade with Homebrew
+
+```sh
+brew update
+brew upgrade --cask box
+```
+
+The cask follows Box's stable releases and skips pre-releases. A new release reaches the tap when
+the tap's bump pull request for it is merged. The installer variables, such as `BOX_VERSION`, don't
+apply.
+
+### Uninstall with Homebrew
+
+```sh
+brew uninstall --cask box
+```
+
+This removes `box` and its release files. Your profiles, packs, storage, and run records stay in
+`~/.strands/box`. To remove them too, delete that folder.
 
 ## Build from source
 
