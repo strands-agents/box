@@ -5348,6 +5348,20 @@ command = ["mcp-server-fetch"]
         assert_eq!(placeholders, [Some("GH_TOKEN"), Some("TOOLS_TOKEN")]);
     }
 
+    /// **A `secret.type` key beside log-only mode takes the higher version**, so a build that reads
+    /// log-only records but not `secret.type` refuses the box.
+    #[test]
+    fn a_secret_type_beside_log_only_mode_stores_the_secret_type_version() {
+        let record = record_from_config_with(
+            "[policy]\nsource = \"policy.dw\"\nenforcement = \"log_only\"\n",
+            "[egress.github]\ndestinations = [\"api.github.com\"]\n\
+             secret.ref = \"credsd://github\"\nsecret.type = \"token\"\nsecret.inject = \"always\"\n",
+        )
+        .expect("the configuration loads");
+        assert_eq!(record.enforcement, Enforcement::LogOnly);
+        assert_eq!(record.version, SECRET_TYPE_RECORD_VERSION);
+    }
+
     /// **A `secret.type` key needs its own record version**, above every other, so an older build
     /// refuses the box rather than signing a token route's reference as AWS. A credsd route with no
     /// type keeps the version an earlier build stored.

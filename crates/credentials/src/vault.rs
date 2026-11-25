@@ -344,7 +344,7 @@ impl Vault {
                 // A box-owned route resolves a real secret and attaches it itself, with no phantom.
                 RouteKind::BoxOwned { inject } => {
                     if let Some(secret) = Self::classify_resolve(
-                        vault.resolve_secret_once(route, &mut credsd_tokens),
+                        vault.resolve_secret(route),
                         route,
                         missing,
                         &mut skipped,
@@ -443,7 +443,7 @@ impl Vault {
         Ok(())
     }
 
-    /// Resolve one route's secret, reading a `credsd://` token once for every route that names it:
+    /// Resolve one opaque route's secret, reading a `credsd://` token once for every route that names it:
     /// the first route reads the daemon and records the read, and each later one takes a copy.
     fn resolve_secret_once(
         &self,
@@ -463,13 +463,21 @@ impl Vault {
         if let Some((_, secret)) = read.iter().find(|(earlier, _)| earlier == locator) {
             return copy(secret);
         }
-        let secret = self.resolve_secret(route)?;
+        let request_id = RequestId::new(LOAD_CORRELATION);
+        let secret = crate::audit_resolve(
+            self.emitter.as_ref(),
+            &self.tenant,
+            locator.scheme(),
+            &route.reference_display(),
+            &request_id,
+            || self.resolve_credsd_token(route),
+        )?;
         read.push((locator.clone(), copy(&secret)?));
         Ok(secret)
     }
 
-    /// Resolve one opaque route's secret, auditing the attempt: a `credsd://` reference through the
-    /// daemon's access token, and every other reference through the backend.
+    /// Resolve one route's secret through the backend, auditing the attempt. The backend has no
+    /// credsd source, so a box-owned `credsd://` route is refused here.
     fn resolve_secret(&self, route: &RouteSpec) -> Result<Secret> {
         let locator = route.credential_ref();
         let request_id = RequestId::new(LOAD_CORRELATION);
@@ -479,13 +487,7 @@ impl Vault {
             locator.scheme(),
             &route.reference_display(),
             &request_id,
-            || {
-                if locator.scheme() == CREDSD_SCHEME {
-                    self.resolve_credsd_token(route)
-                } else {
-                    self.backend.resolve_secret(locator)
-                }
-            },
+            || self.backend.resolve_secret(locator),
         )
     }
 
@@ -495,18 +497,19 @@ impl Vault {
     /// follows the same model: the vault holds it for the run and does not refresh it. A token that
     /// names an expiry warns once at open, so an operator learns why a long run stops working.
     fn resolve_credsd_token(&self, route: &RouteSpec) -> Result<Secret> {
-        let environment = crate::legs::credsd_credential(route.credential_ref())?;
+        let credential = crate::legs::credsd_credential(route.credential_ref())?;
         let socket = self.credsd_socket().ok_or_else(|| {
             CredentialError::KeystoreAccess(format!(
-                "no credsd socket was resolved for credential {environment:?}"
+                "no credsd socket was resolved for credential {credential:?}"
             ))
         })?;
-        let token = credsd_access_token(&CredsdClient::new(socket.to_path_buf()), environment)?;
+        let token = credsd_access_token(&CredsdClient::new(socket.to_path_buf()), credential)?;
+        // The expiry is the daemon's text, so it is quoted like every other daemon value.
         if let Some(expires_at) = &token.expires_at {
             self.warn_at_open(&format!(
-                "credsd://{environment} for {destination} reads a token that expires at \
-                 {expires_at}; the box reads it once, when the box starts, and does not refresh it \
-                 during the run",
+                "credsd://{credential} for {destination} reads a token that expires at \
+                 {expires_at:?}; the box reads it once, when the box starts, and does not refresh \
+                 it during the run",
                 destination = route.destination_display(),
             ));
         }
@@ -1381,5 +1384,26 @@ mod tests {
             "one token, one placeholder"
         );
         let _ = std::fs::remove_file(&socket);
+    }
+
+    /// A box-owned `credsd://` route is refused at open: only an opaque route reads a credsd token,
+    /// and no daemon is contacted for it.
+    #[test]
+    fn a_box_owned_credsd_route_is_refused() {
+        let unbound = std::env::temp_dir().join(format!(
+            "credsd-vault-box-owned-{}.sock",
+            std::process::id()
+        ));
+        let error = Vault::open(
+            VaultConfig::new(Backend::local(), "t")
+                .credsd_socket(unbound)
+                .route(RouteSpec::box_owned(
+                    DestinationPattern::parse("api.github.com").unwrap(),
+                    Locator::parse_uri("credsd://github").unwrap(),
+                    InjectMode::header("Bearer {}", None).unwrap(),
+                )),
+        )
+        .expect_err("a box-owned credsd route has no source");
+        assert!(error.to_string().contains("credsd"), "{error}");
     }
 }

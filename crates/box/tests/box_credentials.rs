@@ -2074,10 +2074,10 @@ fn a_credsd_token_with_no_placeholder_variable_is_attached_to_every_request() {
     );
 }
 
-/// **A token route whose credsd environment serves AWS credentials stops the box before the
+/// **A token route whose credsd credential is AWS credentials stops the box before the
 /// workload**, naming both kinds and the key that fixes it.
 #[test]
-fn a_credsd_token_route_whose_environment_serves_aws_stops_the_box() {
+fn a_credsd_token_route_whose_credential_is_aws_stops_the_box() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }

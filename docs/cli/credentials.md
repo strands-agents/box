@@ -78,6 +78,7 @@ credential `work`:
 ```toml
 [egress.bedrock.secret]
 ref = "credsd://work"   # a credential that `creds bootstrap --credential work` created
+type = "aws"
 ```
 
 ### Set up a credential
@@ -118,9 +119,9 @@ a password manager. Without `secret.env`, the agent holds no placeholder, so the
 
 ### What the box checks
 
-Before the agent starts, the box asks the daemon whether it's running and whether it lists each
-credential the profile names. If either check fails, the run stops with a message that names the
-problem ([credsd errors](troubleshooting.md#the-credentials-daemon-refuses-the-run)). A profile with
+Before the agent starts, the box asks the daemon whether it's running, whether it lists each
+credential the profile names, and whether each one is the kind its route's `secret.type` says. If a
+check fails, the run stops with a message that names the problem ([credsd errors](troubleshooting.md#the-credentials-daemon-refuses-the-run)). A profile with
 no `credsd://` route never contacts the daemon.
 
 After that, a signed route asks the daemon for the credential on each request and doesn't cache it

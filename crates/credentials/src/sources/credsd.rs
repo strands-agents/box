@@ -454,24 +454,24 @@ impl std::fmt::Debug for AccessToken {
     }
 }
 
-/// Fetch the access token of one `credsd` environment for an opaque route.
+/// Fetch the access token of one `credsd` credential for an opaque route.
 ///
 /// The token delivery adapter, beside the AWS one in [`super::aws`]. A material tag other than
 /// `access_token`, a `token_type` other than `Bearer`, or an empty or unusable token is a hard
-/// credential failure that names the environment and never the material.
-pub(crate) fn credsd_access_token(client: &CredsdClient, environment: &str) -> Result<AccessToken> {
-    access_token_from(client.get(environment)?, environment)
+/// credential failure that names the credential and never the material.
+pub(crate) fn credsd_access_token(client: &CredsdClient, credential: &str) -> Result<AccessToken> {
+    access_token_from(client.get(credential)?, credential)
 }
 
 /// Map a `credsd` result onto an [`AccessToken`], asserting the material tag and the token type.
-fn access_token_from(result: CredentialResult, environment: &str) -> Result<AccessToken> {
+fn access_token_from(result: CredentialResult, credential: &str) -> Result<AccessToken> {
     let CredentialResult {
         mut material,
         expires_at,
     } = result;
     if material.kind != ACCESS_TOKEN_TYPE {
         return Err(CredentialError::Credential(format!(
-            "credsd credential {environment:?} returned {kind:?} material, but a token route \
+            "credsd credential {credential:?} returned {kind:?} material, but a token route \
              needs {ACCESS_TOKEN_TYPE}",
             kind = material.kind
         )));
@@ -480,13 +480,13 @@ fn access_token_from(result: CredentialResult, environment: &str) -> Result<Acce
     // send a request the API refuses.
     if material.token_type != BEARER_TOKEN_TYPE {
         return Err(CredentialError::Credential(format!(
-            "credsd credential {environment:?} returned a {token_type:?} token, and the box \
+            "credsd credential {credential:?} returned a {token_type:?} token, and the box \
              attaches only {BEARER_TOKEN_TYPE} tokens",
             token_type = material.token_type
         )));
     }
     let raw = Zeroizing::new(std::mem::take(&mut material.token.0));
-    let token = Secret::new(raw, &format!("{CREDSD_SCHEME}://{environment}"))?;
+    let token = Secret::new(raw, &format!("{CREDSD_SCHEME}://{credential}"))?;
     Ok(AccessToken { token, expires_at })
 }
 
@@ -583,7 +583,7 @@ struct HealthResult {
     protocol: u32,
 }
 
-/// The `credential/list` result. Only each entry's name is read; kind, source, status, and tags
+/// The `credential/list` result. Each entry's name and kind are read; source, status, and tags
 /// are ignored.
 #[derive(Debug, Deserialize)]
 struct ListResult {

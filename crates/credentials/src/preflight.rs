@@ -294,9 +294,9 @@ mod tests {
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"credentials\":[{\"credential\":\"github\",\"kind\":\"access_token\",\"source\":\"static_secret\",\"status\":\"active\",\"tags\":{}}]}}\n".to_string()
     }
 
-    /// A token route's environment passes when its first credential is an access token.
+    /// A token route's credential passes when the daemon lists it as an access token.
     #[test]
-    fn a_token_environment_that_serves_a_token_passes() {
+    fn a_token_credential_that_is_a_token_passes() {
         let path = socket_path();
         let lists = std::sync::Arc::new(AtomicU32::new(0));
         let counted = lists.clone();
@@ -311,15 +311,15 @@ mod tests {
         assert_eq!(
             lists.load(Ordering::SeqCst),
             1,
-            "a token environment alone is still listed and checked"
+            "a token credential alone is still listed and checked"
         );
         let _ = std::fs::remove_file(&path);
     }
 
-    /// A token route's environment that serves AWS credentials stops the run, naming the environment,
+    /// A token route's credential that is AWS credentials stops the run, naming the credential,
     /// both kinds, and the key to fix.
     #[test]
-    fn a_token_environment_that_serves_aws_credentials_fails() {
+    fn a_token_credential_that_is_aws_credentials_fails() {
         let path = socket_path();
         spawn_daemon(path.as_path(), |method| match method {
             "system/health" => health_reply(1),
@@ -338,10 +338,10 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// A signed route's environment that serves a token stops the run and names `secret.type =
+    /// A signed route's credential that is a token stops the run and names `secret.type =
     /// "token"`, which is what an operator who left the key out needs.
     #[test]
-    fn a_signed_environment_that_serves_a_token_names_the_token_type() {
+    fn a_signed_credential_that_is_a_token_names_the_token_type() {
         let path = socket_path();
         spawn_daemon(path.as_path(), |method| match method {
             "system/health" => health_reply(1),
