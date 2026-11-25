@@ -245,7 +245,7 @@ See [Shell timeouts](shell.md#limitsshelltimeout) for the call scope and
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `upgrade_http` | string array | empty | Host names whose plain `http://` request to port 80 the gateway decides and sends as `https://` on port 443. A host name alone: no scheme, port, path, `*` wildcard, or IP address. |
+| `upgrade_http` | string array | empty | Host names whose plain `http://` request to port 80 the gateway decides and sends as `https://` on port 443. A host name alone: no scheme, port, path, `*` wildcard, or IP address, and no name that ends in a number, such as `0x7f.1`. |
 
 ```toml
 [gateway]
@@ -1100,6 +1100,16 @@ requests out. The current reference for this table is
 
 The example takes every default: the key lands in the `Authorization` header with a `Bearer `
 prefix, and only a request that carries the placeholder gets it.
+
+A destination host, and a backend `url` host, must be a spelling that a connection can match. The
+loader removes a trailing dot, so `api.example.com.` loads as `api.example.com`. It refuses a host
+with an empty label, a character other than an ASCII letter, a digit, `.`, `-`, or `_`, a label over
+63 bytes, or a name over 253 bytes. It also refuses a name that ends in a number, such as `10.5` or
+`0x7f.1`, because a resolver reads it as an IPv4 address; write the address as four decimal
+numbers, such as `10.0.0.5`. The message names the host as written: `` destination host "10.5" is
+not the spelling the gateway matches a connection against: <reason> ``. A backend `url` host may not
+be a host that another entry re-routes, or a remote MCP server's host. See
+[destinations](egress.md#destinations).
 
 An entry needs a `secret` or a backend. One with neither is refused: `an entry with no secret
 declares only a destination, which policy already decides; give it a secret, add a backend, or set
