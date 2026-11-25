@@ -670,6 +670,9 @@ read_file = [
 
 The only entry keys are required `path`, optional `optional` (default `false`), and `when`.
 An optional missing path or broken link is dropped.
+A `read_file` or `write_file` entry for an existing file inside a folder that the same table's
+`read` or `write` already grants is dropped too, unless the file is a link that points outside
+that folder.
 
 ### Conditions
 

@@ -1392,6 +1392,50 @@ fn a_profile_deny_write_folder_runs_and_stays_read_only() {
     assert!(!scene.workspace().join(".venv/new").exists());
 }
 
+/// A file that a `read_file` or `write_file` entry names inside a folder that the same table
+/// already grants, such as an organization's managed Claude Code settings, does not stop the run.
+#[test]
+fn a_file_entry_inside_a_granted_folder_runs() {
+    let scene = Scene::new();
+    let managed = scene.home().join("managed");
+    std::fs::create_dir_all(&managed).expect("a managed folder");
+    std::fs::write(managed.join("managed-settings.json"), "managed\n").expect("a regular file");
+    let state = scene.home().join("state");
+    std::fs::create_dir_all(&state).expect("a writable folder");
+    std::fs::write(state.join("notes"), "notes\n").expect("a file in it");
+    let (managed, state) = (managed.display().to_string(), state.display().to_string());
+    scene.profile(
+        "managed",
+        &format!(
+            "packs = [\"@box/base\"]\n{PROBE}\
+             filesystem.read = [\"{managed}\", \"{state}\"]\n\
+             filesystem.read_file = [\"{managed}/managed-settings.json\"]\n\
+             filesystem.write = [\"{state}\"]\n\
+             filesystem.write_file = [\"{state}/notes\"]\n"
+        ),
+        PROBE_POLICY,
+    );
+    let script = [
+        check(
+            "read",
+            &format!("read -r line < {managed}/managed-settings.json"),
+        ),
+        check("write", &format!("echo more >> {state}/notes")),
+    ]
+    .concat();
+    let output = scene
+        .command(&scene.workspace(), "managed", &["-c", &script])
+        .output()
+        .expect("box runs");
+    succeeded(&output);
+    assert_eq!(
+        stdout(&output),
+        "read: yes\nwrite: yes\n",
+        "{}",
+        stderr(&output)
+    );
+}
+
 /// A run stops when an entry beneath a write grant became a link after the run before it.
 #[test]
 fn a_run_refuses_an_entry_that_became_a_link_beneath_a_write_grant() {

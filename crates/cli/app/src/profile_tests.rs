@@ -2428,6 +2428,72 @@ fn a_deny_write_folder_outside_every_write_grant_is_dropped() {
     );
 }
 
+#[test]
+fn a_file_entry_inside_a_folder_entry_is_dropped_unless_it_links_out() {
+    let scene = Scene::new();
+    let managed = scene.root.join("managed");
+    std::fs::create_dir_all(&managed).expect("a managed folder");
+    std::fs::write(managed.join("managed-settings.json"), "{}").expect("a regular file");
+    std::fs::write(managed.join("deployed.json"), "{}").expect("a file in the folder");
+    std::os::unix::fs::symlink(managed.join("deployed.json"), managed.join("CLAUDE.md"))
+        .expect("a link inside the folder");
+    let outside = scene.root.join("outside.json");
+    std::fs::write(&outside, "{}").expect("a file outside the folder");
+    std::os::unix::fs::symlink(&outside, managed.join("managed-mcp.json"))
+        .expect("a link out of the folder");
+    let link_in = scene.root.join("settings-link.json");
+    std::os::unix::fs::symlink(managed.join("deployed.json"), &link_in)
+        .expect("a link from outside into the folder");
+    let writable = scene.root.join("writable");
+    std::fs::create_dir_all(&writable).expect("a writable folder");
+    std::fs::write(writable.join("state"), "s").expect("a file in the writable folder");
+    let folder = managed.display().to_string();
+    let link_in = link_in.display().to_string();
+    let writable = writable.display().to_string();
+    let text = format!(
+        "[agent]\ncommand = [\"/usr/bin/true\"]\nfilesystem.read = [\"{folder}\", \"{writable}\"]\n\
+         filesystem.write = [\"{writable}\"]\nfilesystem.write_file = [\"{writable}/state\"]\n\
+         filesystem.read_file = [\n\
+         {{ path = \"{folder}/managed-settings.json\", optional = true }},\n\
+         {{ path = \"{folder}/CLAUDE.md\", optional = true }},\n\
+         {{ path = \"{folder}/managed-mcp.json\", optional = true }},\n\
+         \"{link_in}\",\n\
+         \"{folder}/absent.json\",\n]"
+    );
+    let compiled = scene.compile(&profile(&text), None).expect("a compile");
+    let config: toml::Table = toml::from_str(&compiled.box_toml).expect("box.toml");
+    let filesystem = &config["agent"]["filesystem"];
+    let files: Vec<&str> = filesystem["read_file"]
+        .as_array()
+        .expect("a read_file list")
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .collect();
+    assert_eq!(files.len(), 3, "{}", compiled.box_toml);
+    assert!(
+        files.iter().any(|file| file.ends_with("managed-mcp.json")),
+        "{}",
+        compiled.box_toml
+    );
+    assert!(
+        files
+            .iter()
+            .any(|file| file.ends_with("settings-link.json")),
+        "{}",
+        compiled.box_toml
+    );
+    assert!(
+        files.iter().any(|file| file.ends_with("absent.json")),
+        "{}",
+        compiled.box_toml
+    );
+    assert!(
+        filesystem.get("write_file").is_none(),
+        "{}",
+        compiled.box_toml
+    );
+}
+
 /// **A `deny_write` on a tool alone reaches `box.toml` with no switch**, and a `deny_write` entry that
 /// names a file is refused before Box Core sees it.
 #[test]

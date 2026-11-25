@@ -623,8 +623,28 @@ fn a_claude_box_reads_the_managed_policy_that_this_host_has() {
         );
         exec.push("/usr/bin/plutil".to_string());
     }
-    assert_eq!(policy("read"), present(vec![folder.to_string()]));
-    assert_eq!(policy("read_file"), present(files));
+    // A file entry keeps its name in its real parent folder, and is left out when its name and its
+    // target both lie inside the granted folder.
+    let granted_folder = present(vec![folder.to_string()]);
+    let files = files
+        .iter()
+        .map(Path::new)
+        .filter(|file| file.exists())
+        .filter_map(|file| {
+            Some((
+                resolved(file.parent()?).join(file.file_name()?),
+                resolved(file),
+            ))
+        })
+        .filter(|(name, target)| {
+            !granted_folder
+                .iter()
+                .any(|real| name.starts_with(real.as_str()) && target.starts_with(real.as_str()))
+        })
+        .map(|(name, _)| name.display().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(policy("read"), granted_folder);
+    assert_eq!(policy("read_file"), files);
     assert_eq!(policy("exec"), present(exec));
 }
 

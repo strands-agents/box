@@ -99,7 +99,7 @@ agent pack's.
 | List | What an entry does |
 | --- | --- |
 | `read`, `write` | Grants reading or writing the path, and everything below a folder. Pair a `write` entry with a `read` entry for the same path. |
-| `read_file`, `write_file` | Grants reading or writing one file. |
+| `read_file`, `write_file` | Grants reading or writing one file. `box` leaves out an entry for an existing file inside a folder that the same table's `read` or `write` already grants, unless the file is a link that points outside that folder. |
 | `list` | Grants listing a folder without reading its files, on macOS. Linux refuses this list. |
 | `metadata` | Grants reading file properties below a folder, on macOS. Linux ignores it. Not in a tool table. |
 | `exec` | Grants running the path, or the programs below a folder. Not in a tool table. |

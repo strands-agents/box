@@ -947,7 +947,7 @@ fn a_tool_keeps_a_read_file_link_and_resolves_other_grants() {
         let write = strings(&app["filesystem"]["write"]);
         assert!(write.contains(&text(&writable)), "{app}");
         assert!(!write.contains(&text(&readable.join("writable"))), "{app}");
-        assert_eq!(strings(&app["filesystem"]["write_file"]), [text(&state)]);
+        assert!(app["filesystem"].get("write_file").is_none(), "{app}");
     }
 }
 

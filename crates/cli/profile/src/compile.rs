@@ -162,6 +162,18 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
             fresh
         });
     }
+    drop_files_in_folders(
+        &mut filesystem.read_file,
+        &filesystem.read,
+        run.home,
+        &resolve,
+    );
+    drop_files_in_folders(
+        &mut filesystem.write_file,
+        &filesystem.write,
+        run.home,
+        &resolve,
+    );
     let writes: Vec<PathBuf> = filesystem
         .write
         .iter()
@@ -179,6 +191,8 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
         add(&mut process.filesystem.deny, &deny);
     }
     for (name, tool) in &mut profile.tool {
+        let lists = &mut tool.filesystem;
+        drop_files_in_folders(&mut lists.write_file, &lists.write, run.home, &resolve);
         refuse_file_protections(
             &format!("[tool.{name}.filesystem] deny_write"),
             &tool.filesystem.deny_write,
@@ -947,6 +961,26 @@ fn first(workspace: Option<&String>, entries: &[String]) -> Vec<String> {
         .into_iter()
         .map(|path| path.display().to_string())
         .collect()
+}
+
+/// `files` without each existing entry that lies inside one of `folders` by its name and its target.
+fn drop_files_in_folders(
+    files: &mut Vec<String>,
+    folders: &[String],
+    home: &Path,
+    resolve: &impl Fn(&str) -> PathBuf,
+) {
+    let folders: Vec<PathBuf> = folders.iter().map(|folder| resolve(folder)).collect();
+    files.retain(|file| {
+        let name = expand_home(home, Path::new(file));
+        if std::fs::metadata(&name).is_err() {
+            return true;
+        }
+        let target = resolve(file);
+        !folders
+            .iter()
+            .any(|folder| within(&name, folder) && within(&target, folder))
+    });
 }
 
 fn add(list: &mut Vec<String>, entry: &str) {
