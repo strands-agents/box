@@ -51,7 +51,9 @@ See [the two enforcement paths](containment.md#two-kinds-of-enforcement).
 The [Linux boundary uses namespaces rather than Landlock](decisions.md#the-linux-boundary-is-namespaces-not-landlock), a mechanism for additional process access restrictions.
 The optional [native filesystem policy](../user/native-filesystem-policy.md) adds policy decisions to selected direct filesystem operations.
 It requires a feature-enabled build and a kernel with seccomp notification, descriptor transfer, and BPF security hooks.
-The trusted process loads its identity guard with `CAP_BPF` and `CAP_PERFMON`, then drops those capabilities.
+The trusted process loads its identity guard under the [native policy prerequisites](../user/native-filesystem-policy.md#linux-arm64-requirements).
+It removes `CAP_BPF` and `CAP_PERFMON` before runtime startup and preserves inherited `CAP_SYS_ADMIN`.
+The workload still starts after the sandbox clears every capability set.
 Selected workloads pass their notification listener and filesystem root through the trusted launcher.
 The broker resolves paths inside that root and checks the same policy engine used by mediated requests.
 It transfers approved open descriptors and applies delete or rename through kernel-checked file identities.

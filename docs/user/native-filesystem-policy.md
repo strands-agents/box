@@ -44,12 +44,14 @@ The checks use the kernel's file identity while the filesystem operation holds i
 Testing used Amazon Linux 2023 on ARM64 with kernel `6.12.111-136.204.amzn2023.aarch64`.
 Other kernels and distributions need qualification.
 
-Start the trusted Box process with `CAP_BPF` and `CAP_PERFMON` when any workload selects native checks.
-These are Linux capabilities for loading BPF programs and accessing the required tracing hooks.
-The Box process need not run as root.
-It loads its checks and drops these capabilities before creating runtime threads or launching workloads.
+Start the box's trusted process with effective `CAP_BPF` and `CAP_PERFMON`, or with an already-effective `CAP_SYS_ADMIN`, when any workload selects native checks.
+These Linux capabilities authorize loading BPF programs and accessing the required tracing hooks.
+Capabilities present only in the permitted or bounding set do not satisfy this startup check.
+The trusted process need not run as root.
+It loads its checks and removes `CAP_BPF` and `CAP_PERFMON` before creating runtime threads or launching workloads.
 It preserves other inherited capabilities, including the authority root needs to create its user namespace.
-Inherited `CAP_SYS_ADMIN` remains baseline host authority and can also authorize BPF operations.
+Inherited `CAP_SYS_ADMIN` remains in the trusted process; Box grants no new capability.
+The sandbox still clears every capability set before starting the workload.
 Use the restricted capability set below to avoid retaining `CAP_SYS_ADMIN` after native setup.
 Missing capabilities or kernel support stop launch.
 For a command-line run, Box does not load these checks if every workload opts out.

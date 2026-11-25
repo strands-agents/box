@@ -544,9 +544,9 @@ tools, and its local MCP servers make directly, on top of their filesystem grant
 `box` built with the `native-filesystem-policy` Cargo feature, and:
 
 - On macOS: the [native policy requirements](../user/native-filesystem-policy.md#macos-requirements).
-- On Linux: an ARM64 machine with the required kernel support, and the `CAP_BPF` and
-  `CAP_PERFMON` capabilities for `box`, which a normal install does not give it. Linux x86-64
-  refuses selection.
+- On Linux: an ARM64 machine with the
+  [kernel support and loader capabilities required by Box Core](../user/native-filesystem-policy.md#linux-arm64-requirements).
+  A normal install does not give `box` these capabilities. Linux x86-64 refuses selection.
 
 See the
 [prerequisites in Box's own guide](../user/native-filesystem-policy.md)

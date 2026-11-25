@@ -49,11 +49,12 @@ impl Guard {
         let mut effective = 0_u64;
         checked(unsafe { box_guard_capabilities(&mut effective) })?;
         let required = (1_u64 << 39) | (1_u64 << 38);
-        let guard = if !enabled || effective & required == 0 {
+        let sys_admin = 1_u64 << 21;
+        let guard = if !enabled || effective & (required | sys_admin) == 0 {
             Ok(None)
-        } else if effective & required != required {
+        } else if effective & sys_admin == 0 && effective & required != required {
             Err(io::Error::other(
-                "native entry guard requires CAP_BPF and CAP_PERFMON together",
+                "native entry guard requires CAP_BPF and CAP_PERFMON together, or CAP_SYS_ADMIN",
             ))
         } else {
             Self::load().map(Some)

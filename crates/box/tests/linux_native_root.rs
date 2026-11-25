@@ -4,12 +4,25 @@ fn main() {}
 
 #[cfg(all(target_os = "linux", box_native_kernel_tests))]
 fn main() {
-    root::run();
+    if let Some(name) =
+        std::env::args().find_map(|arg| arg.strip_prefix("--admission=").map(str::to_owned))
+    {
+        admission::check(&name);
+    } else {
+        root::run();
+        if !std::env::args().any(|arg| arg.starts_with("--callback-")) {
+            admission::run();
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", box_native_kernel_tests))]
 #[path = "support/bounded_output.rs"]
 mod bounded_output;
+
+#[cfg(all(target_os = "linux", box_native_kernel_tests))]
+#[path = "support/linux_native_capabilities.rs"]
+mod admission;
 
 #[cfg(all(target_os = "linux", box_native_kernel_tests))]
 mod root {
@@ -54,13 +67,13 @@ mod root {
         root
     }
 
-    fn binary() -> PathBuf {
+    pub(super) fn binary() -> PathBuf {
         std::env::var_os("BOX_NATIVE_ROOT_TEST_BINARY")
             .map(PathBuf::from)
             .unwrap_or_else(|| env!("CARGO_BIN_EXE_strands-box").into())
     }
 
-    fn install_bundle(root: &Path, executable: &Path, companions: &Path) -> PathBuf {
+    pub(super) fn install_bundle(root: &Path, executable: &Path, companions: &Path) -> PathBuf {
         let directory = root.join("bin");
         std::fs::create_dir(&directory).unwrap();
         let installed = directory.join(executable.file_name().unwrap());
