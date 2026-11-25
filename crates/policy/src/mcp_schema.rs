@@ -162,7 +162,8 @@ impl fmt::Display for OmittedTool {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "MCP server {:?} tool {:?} is left out, and its calls are refused: {}",
+            "MCP server {:?} tool {:?} has no per-tool action, so only `mcp:call` rules decide \
+             its calls: {}",
             self.server, self.tool, self.reason
         )
     }
@@ -1508,8 +1509,8 @@ mod tests {
             .expect("the server generates without its bad tools");
         assert_eq!(
             omitted[0].to_string(),
-            "MCP server \"repro\" tool \"create_account\" is left out, and its calls are \
-             refused: unexpected token `-`"
+            "MCP server \"repro\" tool \"create_account\" has no per-tool action, so only \
+             `mcp:call` rules decide its calls: unexpected token `-`"
         );
         assert!(
             omitted[2]

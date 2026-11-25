@@ -1714,15 +1714,19 @@ done"#
     }
 
     #[test]
-    fn a_tool_whose_schema_does_not_generate_is_refused_and_the_rest_of_the_server_works() {
+    fn a_tool_whose_schema_does_not_generate_is_decided_by_mcp_call_alone() {
         let (runtime, local) = local_runtime();
         runtime.block_on(local.run_until(async {
-            let fixture = fixture(PERMIT_ALL_MCP);
+            let fixture = fixture(
+                r#"permit (principal, action == Box::Action::"mcp:call", resource);
+forbid (principal, action == Box::Action::"mcp:call", resource)
+when { context.input has tool && context.input.tool == "blocked_account" };"#,
+            );
             let log = tempfile::NamedTempFile::new().expect("frame log");
             let (mut program, mut output) = exchange(
                 listing_server(
                     log.path(),
-                    r##"[{"name":"Search","inputSchema":{"type":"object","properties":{"value":{"type":"string"}}}},{"name":"create_account","inputSchema":{"type":"object","properties":{"account":{"$ref":"#/$defs/create-account"}},"$defs":{"create-account":{"type":"object"}}}}]"##,
+                    r##"[{"name":"Search","inputSchema":{"type":"object","properties":{"value":{"type":"string"}}}},{"name":"create_account","inputSchema":{"type":"object","properties":{"account":{"$ref":"#/$defs/create-account"}},"$defs":{"create-account":{"type":"object"}}}},{"name":"blocked_account","inputSchema":{"type":"object","$defs":{"blocked-account":{}}}}]"##,
                     ":",
                 ),
                 &fixture,
@@ -1738,41 +1742,44 @@ done"#
             assert_eq!(reply["id"], 2);
             assert_eq!(
                 reply["result"]["tools"].as_array().map(Vec::len),
-                Some(2),
+                Some(3),
                 "the list reaches the client as the server sent it: {reply}"
             );
-            assert_eq!(
-                fixture.registry.require_listed("issues-mcp", "Search"),
-                Ok(())
-            );
-            assert_eq!(
-                fixture
-                    .registry
-                    .require_listed("issues-mcp", "create_account"),
-                Err(policy::CatalogRefusal::NotListed)
-            );
-            assert!(fixture.registry.admit_open("issues-mcp").is_ok());
+            for tool in ["Search", "create_account", "blocked_account"] {
+                assert_eq!(fixture.registry.require_listed("issues-mcp", tool), Ok(()));
+            }
 
+            // A name-level `mcp:call` forbid still refuses a tool with no per-tool action.
             send(
                 &program,
                 json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-                    "params": {"name": "create_account", "arguments": {}}}),
+                    "params": {"name": "blocked_account", "arguments": {}}}),
             )
             .await;
             let refusal = next_output(&mut output).await;
             assert_eq!(refusal["id"], 3);
-            assert!(
-                refusal["error"]["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains("not in the accepted MCP catalog")),
-                "{refusal}"
-            );
-            assert!(
-                !read_log(log.path())
+            assert!(refusal.get("error").is_some(), "{refusal}");
+
+            // The `mcp:call` permit decides the other one, and it reaches the server.
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                    "params": {"name": "create_account", "arguments": {}}}),
+            )
+            .await;
+            let deadline = std::time::Instant::now() + TEST_WAIT_TIMEOUT;
+            let called = loop {
+                let called: Vec<String> = read_log(log.path())
                     .iter()
-                    .any(|frame| frame["method"] == "tools/call"),
-                "the refused call never reaches the server"
-            );
+                    .filter(|frame| frame["method"] == "tools/call")
+                    .filter_map(|frame| frame["params"]["name"].as_str().map(str::to_string))
+                    .collect();
+                if !called.is_empty() || std::time::Instant::now() > deadline {
+                    break called;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            };
+            assert_eq!(called, ["create_account"], "only the permitted call runs");
             program.stop_and_wait().await.expect("stop the exchange");
         }));
     }

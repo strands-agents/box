@@ -342,7 +342,7 @@ impl DiscoveryRegistry {
                 let detail = if left_out == 0 {
                     format!("{tools} tools")
                 } else {
-                    format!("{tools} tools, {left_out} left out")
+                    format!("{tools} tools, {left_out} without a schema")
                 };
                 self.coordinator.control(
                     telemetry::ControlRecord::completed(
@@ -604,7 +604,8 @@ fn catalog_server(catalog: &CompleteCatalog) -> String {
     catalog.server().to_string()
 }
 
-/// Warn about each tool that staging left out of `server` since the last report, and count them.
+/// Warn about each tool of `server` whose schema staging left out since the last report, and count
+/// them.
 pub(crate) fn report_omitted(catalogs: &ToolCatalogs, server: &str) -> usize {
     let omitted = catalogs.take_omitted(server);
     for tool in &omitted {

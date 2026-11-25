@@ -347,8 +347,8 @@ impl ToolCatalogs {
         }
     }
 
-    /// Each tool that staging left out of `server`'s accepted catalog since the last call, for the
-    /// box to report.
+    /// Each tool of `server` whose schema staging left out since the last call, for the box to
+    /// report.
     pub fn take_omitted(&self, server: &str) -> Vec<crate::OmittedTool> {
         self.omitted
             .lock()
@@ -474,13 +474,9 @@ impl ToolCatalogs {
                     ));
                 }
             };
-        // A tool whose schema does not generate is left out, so its calls are refused as unlisted.
-        let tools: BTreeSet<String> = catalog
-            .tools
-            .iter()
-            .filter(|tool| !omitted.iter().any(|omitted| &omitted.tool == *tool))
-            .cloned()
-            .collect();
+        // A tool whose schema does not generate stays listed with no per-tool action, so only
+        // `mcp:call` rules decide its calls, and a rule that names its action cannot load.
+        let tools = catalog.tools.clone();
         let retained = catalog.bytes.saturating_add(fragment.len());
         {
             let inner = self.lock();
@@ -810,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_whose_schema_does_not_generate_is_left_out_of_the_accepted_catalog() {
+    fn a_tool_whose_schema_does_not_generate_stays_in_the_accepted_catalog() {
         let fixture = fixture(McpServerKind::Stdio);
         let response = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
             {"name": "read", "inputSchema": {"type": "object",
@@ -822,12 +818,13 @@ mod tests {
         let catalog = complete(&fixture.catalogs, "a", &response);
         assert_eq!(
             fixture.catalogs.stage(catalog).expect("staging runs"),
-            CatalogStage::Accepted { tools: 1 }
+            CatalogStage::Accepted { tools: 2 }
         );
         assert_eq!(fixture.catalogs.require_listed("demo", "read"), Ok(()));
         assert_eq!(
             fixture.catalogs.require_listed("demo", "create_account"),
-            Err(CatalogRefusal::NotListed)
+            Ok(()),
+            "policy decides the call by `mcp:call` alone"
         );
         assert_eq!(fixture.catalogs.state("demo"), Some(ServerDiscovery::Ready));
         let omitted = fixture.catalogs.take_omitted("demo");
