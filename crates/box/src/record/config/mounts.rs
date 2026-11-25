@@ -217,9 +217,14 @@ mod tests {
                  [experimental-features]\nlinux-storage-mounts = {value}\n"
             );
             let error = ConfigFile::parse(&text, Path::new("box.toml")).unwrap_err();
-            assert!(
-                matches!(error, ConfigError::RemovedKey { key, .. } if key == "[experimental-features] linux-storage-mounts")
-            );
+            assert!(matches!(
+                error,
+                ConfigError::RemovedKey { key, replacement, .. }
+                    if key == "[experimental-features] linux-storage-mounts"
+                        && replacement.contains("remove this key")
+                        && replacement.contains("not available in this build")
+                        && !replacement.contains("linux-passthrough-mounts")
+            ));
         }
     }
 

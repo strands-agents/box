@@ -1108,6 +1108,12 @@ const REMOVED_MCP_FILESYSTEM_EXEC: RemovedKey = RemovedKey {
                   macOS, so it states no `exec` list; only `[agent.filesystem]` takes `exec`",
 };
 
+/// The unpublished protected-view prototype does not have an active replacement.
+const REMOVED_LINUX_STORAGE_MOUNTS: RemovedKey = RemovedKey {
+    key: "[experimental-features] linux-storage-mounts",
+    replacement: "remove this key; incoming mount forwarding is not available in this build",
+};
+
 /// The filesystem lists a leaf table no longer states, per `box.toml` section.
 const REMOVED_LEAF_FILESYSTEM_LISTS: [(&str, [(&str, &RemovedKey); 2]); 2] = [
     (
@@ -1148,12 +1154,7 @@ fn refuse_removed_keys(text: &str, path: &Path) -> Result<(), ConfigError> {
         .and_then(toml::Value::as_table)
         .is_some_and(|features| features.contains_key("linux-storage-mounts"))
     {
-        return Err(refuse(&RemovedKey {
-            key: "[experimental-features] linux-storage-mounts",
-            replacement: "nothing in this build: this flag belongs to the protected-view prototype; \
-                          review the different permission contract of `linux-passthrough-mounts` \
-                          before migrating",
-        }));
+        return Err(refuse(&REMOVED_LINUX_STORAGE_MOUNTS));
     }
     for removed in &REMOVED_TOP_LEVEL_KEYS {
         if table.contains_key(removed.key.trim_matches(['[', ']'])) {
