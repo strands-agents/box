@@ -1282,7 +1282,20 @@ mod tests {
 
         let mut command = command_in_directory(opened, image_name);
         command.current_dir(&cache);
-        let status = command.status().await.expect("cached image runs");
+        // A sibling test's child can hold the copy's writer until it execs, and Linux then answers
+        // ETXTBSY, so retry for a short while.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let status = loop {
+            match command.status().await {
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ETXTBSY)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                result => break result.expect("cached image runs"),
+            }
+        };
 
         assert!(status.success(), "the opened cache must select the image");
     }

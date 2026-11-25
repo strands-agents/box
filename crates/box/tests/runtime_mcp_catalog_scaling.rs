@@ -112,8 +112,13 @@ fn the_first_catalog_of_256_pages_costs_at_most_three_times_one_of_128_pages() {
         return;
     }
     const LARGEST_RATIO: f64 = 3.0;
-    let full = time_to_first_catalog(256);
-    let half = time_to_first_catalog(128);
+    // Alternate the sizes and keep each one's fastest run, so the first run's warm-up and one slow
+    // moment on a shared runner do not decide the ratio.
+    let (mut full, mut half) = (Duration::MAX, Duration::MAX);
+    for _ in 0..2 {
+        full = full.min(time_to_first_catalog(256));
+        half = half.min(time_to_first_catalog(128));
+    }
     let ratio = full.as_secs_f64() / half.as_secs_f64().max(f64::EPSILON);
     let _ = writeln!(
         std::io::stderr().lock(),
