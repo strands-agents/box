@@ -192,11 +192,16 @@ pub fn generate_mcp_schema_with_omissions(
     };
     let mut kept = Vec::with_capacity(tools.len());
     let mut omitted = Vec::new();
+    let mut names = BTreeSet::new();
     for tool in tools {
         let Some(name) = tool.get("name").and_then(serde_json::Value::as_str) else {
             return Err(error);
         };
         let name = name.to_string();
+        // A name listed twice is ambiguous, so the server is refused as it is without omissions.
+        if !names.insert(name.clone()) {
+            return Err(error);
+        }
         let slot = response
             .pointer_mut(pointer)
             .expect("the tools array was just read");
@@ -229,11 +234,16 @@ pub fn generate_mcp_schema_with_omissions(
     Ok((schema, omitted))
 }
 
-/// [`generate_mcp_schema`], refused unless the schema also composes with `Box::Agent` and
-/// `Box::Resource`, the only Box types a server schema names.
+/// [`generate_mcp_schema`], refused unless the schema of a list with a `$ref` also composes with
+/// `Box::Agent` and `Box::Resource`, the only Box types a server schema names.
 fn schema_with_box_entities(server: &str, tools_list: &str) -> Result<String, McpSchemaError> {
     const BOX_ENTITIES: &str = "namespace Box { entity Agent; entity Resource; }";
     let schema = generate_mcp_schema(server, tools_list)?;
+    // Only a `$ref` can make a type cycle, the failure that generation alone misses. A list
+    // without one skips this composition, which `stage_mcp_schema` repeats with the Box schema.
+    if !tools_list.contains("\"$ref\"") {
+        return Ok(schema);
+    }
     let composition = |source: &str| McpSchemaError::Composition {
         reason: source.to_string(),
     };
@@ -1535,6 +1545,22 @@ mod tests {
             .expect("the server generates without its bad tool");
         assert_eq!(omitted_names(&omitted), ["create_account"]);
         assert!(schema.contains(r#"action "get_zone""#), "{schema}");
+    }
+
+    #[test]
+    fn a_server_that_lists_one_tool_twice_is_still_refused() {
+        let tools = r#"{"result":{"tools":[
+            {"name":"x","inputSchema":{"type":"object","properties":{"v":{"type":"string"}}}},
+            {"name":"x","inputSchema":{"type":"object","$defs":{"x-y":{}}}},
+            {"name":"y","inputSchema":{"type":"object"}}
+        ]}}"#;
+        let strict = generate_mcp_schema("repro", tools)
+            .expect_err("the strict schema is refused")
+            .to_string();
+        let lenient = generate_mcp_schema_with_omissions("repro", tools)
+            .expect_err("the duplicate still refuses the server")
+            .to_string();
+        assert_eq!(lenient, strict);
     }
 
     #[test]

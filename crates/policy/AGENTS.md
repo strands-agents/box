@@ -164,7 +164,10 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   load and never fire. Each check composes with a stub of `Box::Agent` and `Box::Resource`, the only
   Box types a server schema names, because the whole Box schema costs about 4 ms a tool and, for a
   256-tool list in a debug build, 3.1 s against the stub's 1.0 s; that extra time timed out
-  `catalog_page_limit_accepts_256_pages_and_refuses_a_257th` in CI. `stage_mcp_schema` and
+  `catalog_page_limit_accepts_256_pages_and_refuses_a_257th` in CI. The stub still cost a 256-tool
+  list 1.0 s and timed that test out on x86, so a list with no `$ref`, which cannot form the type
+  cycle this check exists for, skips it. A list that names one tool twice is refused whole, as
+  without omissions. `stage_mcp_schema` and
   `compose_action_schema` still compose with the whole Box schema. Measured on Linux aarch64,
   release: 3,000 tools with 500 bad ones stage in 2.8 s, and the 2,500 good ones in 0.9 s.
   The workload can still make its own http reply unreadable (an output over 16 MiB, or a server
