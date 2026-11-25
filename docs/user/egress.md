@@ -65,7 +65,7 @@ when { context.input.host == "api.github.com" };
 | `destinations` | string array | required | The destinations the credential goes to. See [Destinations](#destinations). |
 | `secret.ref` | string | required, unless the entry declares a backend | Where the credential comes from: `env://NAME`, `aws://PROFILE`, a bare `aws://` for the default credential chain, `credsd://NAME` for a credential in the credentials daemon, or a reference in a declared scheme. See [Credential sources](#credential-sources). |
 | `secret.type` | string | `aws`, with a warning | For `credsd://` only: the kind of credential that credsd serves under that name. `aws` signs each request with SigV4. `token` attaches an access token, as an `env://` route attaches its variable. Other schemes refuse the key, because the scheme sets the type. A later release requires the key. |
-| `secret.env` | string | `NAME` for `env://NAME` | Experimental: needs `secret-sources = true` in [`[experimental-features]`](config.md#experimental-features). The variable that holds the placeholder in the workload. Required for a reference in a declared scheme. For `env://NAME` it is optional and must equal `NAME`. Optional for a credsd token. Refused for `aws://` and a credsd AWS route. |
+| `secret.env` | string | `NAME` for `env://NAME` | The variable that holds the placeholder in the workload. Required for a reference in a declared scheme. For `env://NAME` it is optional and must equal `NAME`. Optional for a credsd token. Refused for `aws://` and a credsd AWS route. |
 | `backends` | table array | none | A destination to re-route this entry's requests to. At most one. See [Backends](#backends). |
 | `secret.placement` | string | `header` | For `env://`, a declared scheme, and a credsd token: where the credential goes. `header`, `basic_auth`, or `query_param`. |
 | `secret.header` | string | `Authorization` | For `env://`, a declared scheme, and a credsd token, with `placement = "header"`: the header name. |
@@ -394,7 +394,6 @@ not upgrade `rust-lang.org`.
 | At startup, a credsd token route reads a token whose type is not `Bearer` | Use a bearer token. The box can't make the proof that a DPoP token needs. |
 | A `credsd://` route has no `secret.type`, at startup (a warning) | Set `secret.type = "aws"`, or `"token"` for a token. A later release requires the key. |
 | `secret.env` on an `env://NAME` route is not `NAME`, or an `aws://` route sets `secret.env` | Remove `secret.env`. |
-| `secret.env` is set while `secret-sources` is off | Set `secret-sources = true` in `[experimental-features]`, or remove `secret.env` from an `env://` route, where it has no effect. |
 | Two entries hold a placeholder in one variable and name different secrets | Give one of them another variable. One placeholder variable holds one secret. |
 | An entry holds a placeholder in `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` beside a signed (`aws://`/`credsd://`) route | Give the entry another variable. A signed route fills those two variables with its own placeholders. |
 | `env://NAME` names a variable that a `pass-secret-env` list of a `[secret-source.<scheme>]` table names | Use another variable. No `env://` reference can read the credential of a declared source's vault. |

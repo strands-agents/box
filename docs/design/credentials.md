@@ -42,8 +42,8 @@ An HTTP MCP server, `[mcp.<name>] type = "http"`, takes the same `secret` keys. 
 the same route, and everything on this page applies to it as described in [the `[mcp.<name>]`
 table](../user/mcp.md).
 
-Box accepts the `env://` and `aws://` schemes, and a scheme that a `[secret-source.<scheme>]` table
-declares. A route that names any other scheme is refused when the configuration loads. See [a
+Box accepts the `env://`, `aws://`, and `credsd://` schemes, and a scheme that a
+`[secret-source.<scheme>]` table declares. A route that names any other scheme is refused when the configuration loads. See [a
 credential the box can't deliver is refused at
 load](./decisions.md#an-undeliverable-credential-is-refused-at-load).
 
@@ -137,16 +137,44 @@ The vault rejects empty secrets, whitespace-only secrets, and secrets containing
 when it reads them. Every source must pass this check. See [an unusable secret value is
 unrepresentable](./decisions.md#an-unusable-secret-value-is-unrepresentable).
 
-A `credsd://NAME` route reads one credsd credential, by name, over the daemon's Unix socket,
-and `secret.type` says what kind it is. The type is fixed when the configuration loads, before Box contacts
-the daemon, because the two kinds open different routes. An `aws` route is a signed route, and it
-fetches session credentials on each request, as `aws://` does. A `token` route is an opaque route,
-like `env://`: Box reads the access token once, when the vault opens, and holds it for the run, as
-it holds the secret of a declared source. Box does not refresh the token, so a token that expires
-stops working until the next run, and Box warns at startup when the token names an expiry. Every
-route that names one token under one placeholder variable, or with none, shares one read. Before either read, the credential preflight checks
-that credsd lists each named credential with the kind its routes name. A route with no
-`secret.type` is an `aws` route, and Box warns that it should name the type.
+## `credsd://`: credentials from the daemon
+
+A `credsd://NAME` route reads one credential from the credsd daemon, by its name in `creds list`,
+over the daemon's Unix socket. `secret.type` says what kind of credential it is, and
+[a credsd route declares its credential type](./decisions.md#a-credsd-route-declares-its-credential-type)
+states why the configuration names it rather than Box asking the daemon.
+
+| | `secret.type = "aws"`, or none | `secret.type = "token"` |
+|---|---|---|
+| Box reads it | On each request, as `aws://` | Once, when the vault opens |
+| A process in the box gets | Placeholder AWS keys | A placeholder in `secret.env`, or nothing with `secret.inject = "always"` |
+| The gateway | Signs the request with SigV4 | Attaches the token at the route's placement |
+| Takes `placement`, `header`, `prefix`, `param`, `inject`, `phantom_prefix`, `secret.env` | No | Yes, as `env://` |
+
+A token route follows the model of a declared secret source on purpose: Box reads the token before
+the workload starts and holds it for the run
+([a credsd token is read once at startup](./decisions.md#a-credsd-token-is-read-once-at-startup)).
+Because it matches `env://` and declared sources, it allows what they allow: two routes can read one
+token under two placeholder variables, and each vault reads it. A token with an expiry warns at
+startup, and a `token_type` other than `Bearer` is refused, because Box cannot make a DPoP proof.
+
+`secret.env` is stable, not experimental. It only names the variable that holds a placeholder, and
+it runs no program. The `[experimental-features] secret-sources` switch guards a
+`[secret-source.<scheme>]` table, which runs a host program outside every sandbox. A record that
+holds `secret.env` still stores its own record version, so an older build refuses it.
+
+Before either read, the credential preflight lists the caller's credentials once and checks that
+each named one exists with the kind its routes name. A telemetry target always signs, so it needs a
+`session_credentials` credential. A route with no `secret.type` warns with `B0214`.
+
+Three limits stay, each with a follow-up. `policy generate-schema` cannot read a credsd secret,
+because its backend has no credsd source, so it refuses that server by name. A token route with no
+placeholder logs an advisory line on each request, as an `env://` route with `inject = "always"`
+does. With `basic_auth`, response redaction matches only the whole `user:password` credential.
+
+A credsd plugin, a `[secret-source]` table that runs `creds get`, could later replace the built-in
+token reader. Today a plugin reads text once, can't say which kind of credential it returned, and
+runs with a stripped environment that must be told where the socket is.
 
 ## At startup
 

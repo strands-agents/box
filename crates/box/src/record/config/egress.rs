@@ -339,25 +339,6 @@ fn validate_pairs(
             validate_against_sources(secret, label, sources)?;
         }
         entry.validate()?;
-        // After the entry's own rules, so a key that the entry cannot take is named first.
-        if !sources.enabled() && entry.names_a_placeholder_variable() {
-            let reason = if entry.secrets().any(|secret| {
-                secret.env.is_some()
-                    && matches!(secret.deliverable(), Some((SecretScheme::CredsdToken, _)))
-            }) {
-                "secret.env is experimental: set `secret-sources = true` in \
-                 `[experimental-features]` to load it, or remove secret.env and set \
-                 secret.inject = \"always\" to attach the credsd token to every request"
-            } else {
-                "secret.env is experimental: set `secret-sources = true` in \
-                 `[experimental-features]` to load it, or remove secret.env, because an \
-                 env:// reference already names its variable"
-            };
-            return Err(ConfigError::Credential {
-                host: label.to_string(),
-                reason: reason.to_string(),
-            });
-        }
         if let Some(secret) = &entry.secret
             && let Some((scheme, variable)) = secret.placeholder_variable()
         {
@@ -1460,8 +1441,7 @@ impl EgressEntry {
                     "a credsd:// token route with no secret.env leaves the workload no \
                      placeholder to present, so the box would refuse each request: set \
                      secret.inject = \"always\" to attach the token to every request to the \
-                     destinations, or name the placeholder variable with secret.env, which needs \
-                     `secret-sources = true` in `[experimental-features]`",
+                     destinations, or name the placeholder variable with secret.env",
                 )
             }
             (Some((SecretScheme::Aws | SecretScheme::Credsd, _)), Some(_)) => {
@@ -2787,31 +2767,29 @@ mod tests {
         }
     }
 
-    /// **`secret.env` needs the `secret-sources` switch**, also on an `env://NAME` route, where the
-    /// key has no effect.
+    /// **`secret.env` loads without the `secret-sources` switch**, on a route and on a remote MCP
+    /// server: it names a placeholder variable and runs no host program.
     #[test]
-    fn a_placeholder_variable_key_needs_the_secret_sources_switch() {
+    fn a_placeholder_variable_key_loads_without_the_secret_sources_switch() {
         let variable = present_variable();
         let route = format!(
             "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"env://{variable}\"\n\
              secret.env = {variable:?}\n"
         );
-        let expected = |host: &str| {
-            format!(
-                "invalid credential entry for host {host:?}: secret.env is experimental: set \
-                 `secret-sources = true` in `[experimental-features]` to load it, or remove \
-                 secret.env, because an env:// reference already names its variable"
-            )
-        };
+        let entries = load(&route).expect("the key needs no switch");
         assert_eq!(
-            load(&route).expect_err("the switch is off").to_string(),
-            expected("api.test")
+            routes_for(&entries).expect("the route builds")[0].provisioned_name(),
+            Some(variable.as_str())
         );
-        load_with(&route, &switched_on()).expect("the switch is on");
-        load(&format!(
-            "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"env://{variable}\"\n"
-        ))
-        .expect("a route without the key needs no switch");
+        let token = load(
+            "[egress.a]\ndestinations = [\"api.github.com\"]\nsecret.ref = \"credsd://github\"\n\
+             secret.type = \"token\"\nsecret.env = \"GH_TOKEN\"\n",
+        )
+        .expect("a credsd token takes a placeholder variable with no switch");
+        assert_eq!(
+            routes_for(&token).expect("the route builds")[0].provisioned_name(),
+            Some("GH_TOKEN")
+        );
 
         // The same holds for a remote MCP server.
         let remote = BTreeMap::from([(
@@ -2834,16 +2812,10 @@ mod tests {
                 backends: Vec::new(),
             },
         )]);
-        assert_eq!(
-            validate_egress_and_remote(&BTreeMap::new(), &remote, &DeclaredSources::none())
-                .expect_err("the switch is off")
-                .to_string(),
-            expected("mcp.test")
-        );
-        validate_egress_and_remote(&BTreeMap::new(), &remote, &switched_on())
-            .expect("the switch is on");
+        validate_egress_and_remote(&BTreeMap::new(), &remote, &DeclaredSources::none())
+            .expect("a remote MCP server takes the key with no switch");
 
-        // A key that the entry cannot take is named first, with the switch off.
+        // A signed route still refuses the key, with the switch off.
         assert_eq!(
             load(
                 "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"aws://prod\"\n\
@@ -3796,26 +3768,6 @@ mod tests {
         assert!(
             !typed.to_string().contains("secret.type = \"token\""),
             "a typed route needs no hint: {typed}"
-        );
-    }
-
-    /// With the switch off, `secret.env` on a credsd token route names the stable alternative,
-    /// `secret.inject = "always"`, not the `env://` reason.
-    #[test]
-    fn a_credsd_token_placeholder_variable_without_the_switch_names_inject_always() {
-        let error = load(
-            "[egress.a]\ndestinations = [\"api.github.com\"]\nsecret.ref = \"credsd://github\"\n\
-             secret.type = \"token\"\nsecret.env = \"GH_TOKEN\"\n",
-        )
-        .expect_err("secret.env needs the switch");
-        let message = error.to_string();
-        assert!(
-            message.contains(r#"remove secret.env and set secret.inject = "always""#),
-            "{message}"
-        );
-        assert!(
-            !message.contains("env:// reference already names"),
-            "{message}"
         );
     }
 

@@ -2698,6 +2698,36 @@ contain at most 64 characters, and use only the RFC 3986 unreserved set. A custo
 looks like a real key, so a reader of a log or a bug report can no longer recognize it as a
 placeholder.
 
+
+<a id="a-credsd-route-declares-its-credential-type"></a>
+### A credsd route declares its credential type, because Box fixes the route kind before the daemon answers
+
+A `credsd://NAME` reference does not say what credsd holds under that name, so the route names it
+with `secret.type`: `aws` for session credentials Box signs with, or `token` for an access token
+Box attaches. Box builds each route when the configuration loads, before it contacts the daemon,
+and a token route mints a placeholder at that point while a signed route does not. A route with no
+type signs as `aws` and warns, and a later release requires the key. The startup preflight checks
+each declared type against the kind credsd lists.
+
+**Rejected.** Inferring the type from the daemon's reply: it can choose only between routes that
+mint no placeholder, so it worked only while AWS was credsd's one kind.
+
+**Cost.** An operator states what credsd already knows, and a mismatch stops the box at startup.
+
+<a id="a-credsd-token-is-read-once-at-startup"></a>
+### A credsd token is read once at startup, as a declared secret source is
+
+A token route reads its access token when the vault opens, before the workload starts, and holds it
+for the run. It behaves as an `env://` route or a secret source does: the workload holds a
+placeholder, routes that name one token under one placeholder variable share one read, and two
+variables for one token are allowed, as they are for `env://`.
+
+**Rejected.** Fetching the token on each request, or caching it until its expiry: either one
+needs a token lifecycle that no source has yet, and redaction that follows a changing value.
+
+**Cost.** A token that expires during a run stops working until the next run. Box warns at startup
+when the token names an expiry.
+
 ## Telemetry
 
 <a id="one-collector-per-box-in-the-trusted-process"></a>

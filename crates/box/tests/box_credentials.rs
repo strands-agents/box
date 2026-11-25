@@ -1487,10 +1487,10 @@ fn an_unsafe_secret_source_configuration_is_refused_at_configure() {
     }
 }
 
-/// **`secret.env` is refused while `secret-sources` is off**, through the shipped binary, on each
-/// operating system.
+/// **`secret.env` loads while `secret-sources` is off**, through the shipped binary, on each
+/// operating system, and the box stores its record.
 #[test]
-fn a_placeholder_variable_key_is_refused_while_the_switch_is_off() {
+fn a_placeholder_variable_key_loads_while_the_switch_is_off() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
@@ -1502,18 +1502,11 @@ fn a_placeholder_variable_key_is_refused_while_the_switch_is_off() {
              secret.ref = \"env://{SECRET_VARIABLE}\"\nsecret.env = \"{SECRET_VARIABLE}\"\n"
         ),
     );
-    assert_refused(
-        &box_,
-        &output,
-        &[
-            "secret.env is experimental: set `secret-sources = true` in \
-           `[experimental-features]` to load it, or remove secret.env, because an env:// \
-           reference already names its variable",
-        ],
-    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "the box must start: {stderr}");
     assert!(
-        !box_.root().join("private/box.toml").exists(),
-        "a refused configuration stores no record"
+        box_.root().join("private/box.toml").exists(),
+        "the box stores its record"
     );
 }
 

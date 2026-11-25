@@ -5412,23 +5412,10 @@ command = ["mcp-server-fetch"]
         };
         let plain = pinned_record(&route(""));
         assert_eq!(plain.version, RECORD_VERSION);
-        // The key needs the switch, on each operating system.
-        let refused = load(&route(&format!("secret.env = {variable:?}\n")))
-            .expect_err("the switch is off")
-            .to_string();
-        assert!(
-            refused.contains(
-                "secret.env is experimental: set `secret-sources = true` in \
-                 `[experimental-features]` to load it"
-            ),
-            "{refused}"
-        );
-        let stored = pinned_record(&format!(
-            "{SECRET_SOURCES_ON}{}",
-            route(&format!("secret.env = {variable:?}\n"))
-        ));
+        // The key needs no switch, and still stores the version an older build refuses.
+        let stored = pinned_record(&route(&format!("secret.env = {variable:?}\n")));
         assert_eq!(stored.version, SECRET_SOURCE_RECORD_VERSION);
-        assert!(stored.experimental_features.secret_sources);
+        assert!(!stored.experimental_features.secret_sources);
         let text = stored.to_toml().unwrap();
         assert_eq!(
             Record::parse(&text, Path::new("record.toml"))
@@ -5503,10 +5490,10 @@ command = ["mcp-server-fetch"]
         );
     }
 
-    /// **A stored `secret.env` key needs the stored switch**: a record that holds the key while
-    /// its switch is off builds no route.
+    /// **A stored `secret.env` key builds its route with the stored switch off**: the key is not
+    /// part of the experimental feature.
     #[test]
-    fn a_stored_placeholder_variable_key_needs_the_stored_switch() {
+    fn a_stored_placeholder_variable_key_needs_no_stored_switch() {
         let variable = present_variable();
         let mut stored = record(
             None,
@@ -5532,16 +5519,7 @@ command = ["mcp-server-fetch"]
             )]),
         );
         stored.version = SECRET_SOURCE_RECORD_VERSION;
-        let error = match stored.egress_routes() {
-            Ok(_) => panic!("the stored switch is off"),
-            Err(error) => error,
-        };
-        assert!(
-            error.to_string().contains("secret.env is experimental"),
-            "{error}"
-        );
-        stored.experimental_features.secret_sources = true;
-        let routes = stored.egress_routes().expect("the stored switch is on");
+        let routes = stored.egress_routes().expect("the stored switch is off");
         assert_eq!(routes[0].provisioned_name(), Some(variable.as_str()));
     }
 
