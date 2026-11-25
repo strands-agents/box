@@ -1,184 +1,227 @@
-# Design: Mount event forwarding
+# Design: Direct propagation of trusted storage mounts
 
 **Author**: Kevin Orellana
 
-**Date**: November 21, 2026
+**Status**: Draft for review; the interface and restricted set of supported configurations below are proposals, not shipped behavior.
+
+**Updated**: November 25, 2026
 
 ## Overview
 
-This proposal makes storage mounts accessible to a running box while preserving the filesystem rules in `box.toml`.
+This proposal connects selected storage mounts directly to Box sandboxes before their processes start. In a deployment that snapshots a running sandbox, the connection is established before the snapshot. Linux then makes an incoming mount visible through that connection as part of the external mount operation. Box does not run a watcher or prepare a second filesystem view after the mount arrives.
 
-## 1. Background
+The trade-off is configuration support. Direct propagation does not apply Box's per-path read-only mounts, execution restrictions, or denied-path covers to a newly arriving filesystem. The proposed first version therefore accepts only whole-directory access and rejects configurations that require finer restrictions inside a forwarded directory. Listing a mount still grants no access: the recipient must explicitly grant the whole directory's read and write access, and the agent must also grant execution. Source filesystem restrictions can further reduce that access.
 
-Box creates a *private mount namespace,* which isolates the host's filesystem from the sandboxed workload. Host-mounted storage, like AgentCore Runtime’s *Bring Your Own Storage* (BYOS), can propagate new mounts into the customer’s application. However, those mounts do not automatically reach Box’s private filesystem view after box initialization.
+This replaces the protected-publication proposal in the earlier revision of this document. It does not establish that direct propagation preserves every existing `box.toml` filesystem configuration. The narrower contract needs review before implementation.
 
-While starting Box *after* storage arrives avoids this ordering problem, it does not support a Box workload already running. This proposal builds on Ravi Kandury’s mount-propagation [prototype](https://github.com/rvkandury/box-public/commit/5816878c44741ac6ee681cba937049b84ac6196d).
+## 1. Problem and required outcome
 
-This type of *direct propagation* into the Box workload would expose incoming mounts before Box applied its filesystem restrictions. Box must therefore prepare its filesystem restrictions before making the storage mounts accessible.
+Box normally builds a private mount namespace: a process-specific arrangement of mounted filesystems. A mount added outside that namespace after Box starts does not automatically appear inside it.
 
-## 2. Filesystems and mounts
+[AgentCore Runtime filesystem configurations](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-filesystem-configurations.html) make configured storage available for invocation, not container initialization. A Box sandbox created during initialization must therefore receive storage added later. Starting Box after storage arrives is an alternative, but it changes when the sandbox starts and does not solve the case of an already running sandbox.
 
-**A filesystem** organizes data into files and directories in a tree structure. It provides the operations (read, write, etc) that programs need. The data can live on your computer’s disk, a USB drive, or remote storage.
+The previous design received mounts in a helper, built restricted views, and published them to the sandboxes. Runtime could finish its mount operation and deliver an invocation before that separate publication finished. Application retries accommodated this gap but did not preserve first-invocation filesystem availability.
 
-**A mount** tells the operating system which filesystem to use at a particular path.
+The required outcome is that a successful external mount attachment has already reached every connected recipient when that operation returns. This requirement concerns mount visibility. It does not promise that every remote file is downloaded or that subsequent file operations cannot fail.
 
-For example, your computer may have an empty `/data` directory, while a USB drive’s filesystem contains `report.txt` at its top level. If we mount the USB drive’s filesystem at `/data`, processes that can see this mount can request the file through `/data/report.txt`.
+## 2. What direct propagation does
 
-![Before mounting, /data is empty. After mounting the USB filesystem at /data, a process can read report.txt through /data/report.txt without copying the file.](https://github.com/user-attachments/assets/fd16f52c-1d15-4df0-a028-3ab6a2a61a50)
+A mount attaches a filesystem at a path. Attaching a filesystem containing `report.txt` at `/mnt/data` makes the file reachable as `/mnt/data/report.txt`; it does not copy the file.
 
-[Editable diagram](https://github.com/user-attachments/files/35204839/mount-before-after.drawio)
+Linux associates propagation relationships with **mount objects**, not directory names. A shared mount can forward new child mounts to its peers and downstream receivers. A slave mount receives changes from its upstream mount without forwarding its own changes upstream. `rslave` applies this receiver setting recursively to the mount subtree that exists when the setting is made. It does not recursively inspect files or wait for a future filesystem to arrive.
 
-## 3. How mounts are used to enforce Box Core filesystem perms today
+In the Linux attachment path, propagation runs inside the mount operation: the kernel constructs the propagated attachments, commits them, and then returns success. The receiving process does not need to run a watcher. See the [shared-subtree documentation](https://docs.kernel.org/filesystems/sharedsubtree.html), the [attachment and commit path](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/fs/namespace.c#L2482-L2535), and [propagation through peers and receivers](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/fs/pnode.c#L304-L322).
 
-On Linux, Strands Box builds a restricted filesystem view before starting the sandboxed process. It uses the filesystem permissions in `box.toml` to decide what appears in that view. Box exposes permitted paths through mounts and sets whether those mounts allow writes and direct program execution.
+The guarantee is conditional on the complete relationship remaining connected. Marking an arbitrary directory `rslave` is insufficient if it has no upstream shared mount. A private intermediate mount breaks the chain. In a multilevel arrangement, an intermediate mount may receive from upstream and share with its own downstream receivers.
 
-For example, Box can expose `/data` as read-only while making `/data/output` writable through a separate mount. Denied contents are omitted or covered with empty mounts. Linux enforces these restrictions while the process runs.
+The attachment point also matters. Mounting over `/mnt/data` is an event on the mount containing that directory. Box must preserve the appropriate upstream parent relationship; marking an unrelated bind at `/mnt/data` does not prove that an overmount at the source will arrive. The implementation must test the actual Runtime topology and prevent undeclared siblings from becoming reachable.
 
-This mechanism cannot express every permission independently. Write access requires read access, and list-only grants prevent sandbox startup.
+One-way propagation describes mount and unmount events. It does not make storage read-only: file writes still affect the shared filesystem when the source permissions permit them.
 
-***Table 1: Mapping box.toml permissions to mount operations***
+## 3. Filesystem permissions and the supported contract
 
-| Permission | Operator configures in Box Core box.toml | Mount behavior |
-| --- | --- | --- |
-| **Read without write** | `read` | Remounts using `mount()` **with** `MS_RDONLY`. |
-| **Write** | Both `read` and `write` | Remounts using `mount()` **without** `MS_RDONLY`. |
-| **Execute** | `exec` | Remounts using `mount()` **without** `MS_NOEXEC`. |
-| **Alternative to list-only access** | Remove `list`; use `read` if reading contents is acceptable. | Same as read. This permits reading contents, not just listing filenames. |
-| **Alternative to metadata-only access** | Use `read` if reading contents is acceptable. | Same as read. This permits reading contents, not just file details. |
-| **Deny** | `deny` | Leaves contents out or covers the path with an empty, read-only mount. |
+Box's existing filesystem lists govern a sandbox's direct file operations. Requests through hosted Strands Shell and Monty instead pass through policy and reachable-path checks in the box's trusted process. These are separate enforcement routes.
 
-## 4. Why Box can miss Runtime storage
+The [Box Core configuration reference](../../docs/user/config.md#agentfilesystem-and-toolnamefilesystem) defines `read`, `write`, `read_file`, `write_file`, `list`, `metadata`, `exec`, `deny`, and `deny_write`. The agent accepts all nine lists; tools do not accept `metadata` or `exec`. Local Model Context Protocol (MCP) servers have their own filesystem configuration. Existing operating-system limitations remain relevant: for example, Linux requires read access over the complete write scope and rejects list-only grants.
 
-In [AgentCore CLI](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-cli-way-to-interact.html) deployments that start Box during AgentCore Runtime Agent container initialization, Box builds the agent’s restricted filesystem view before session storage is available. If Runtime snapshots the host's filesystem at this stage, the sandbox's filesystem preserves that earlier view.
+With ordinary private mounts, Box can expose a directory read-only, add a writable child, and cover a denied child. Directly propagating a new filesystem can cover that arrangement with the incoming mount. The kernel does not evaluate the lists again. Applying restrictions to the old placeholder does not establish that the new filesystem has them.
 
-Runtime Agent storage follows the agent's session lifecycle. When a new session starts, Runtime mounts the configured bring-your-own filesystem inside that session’s host. Critically, the mounted path is available at session creation, not during Runtime agent initialization (which is snapshotted).
+The proposed contract avoids silently ignoring those lists:
 
-Box makes its mounts **private**, which means that new mounts added outside the sandbox do not automatically appear inside it. The restored Runtime agent snapshot (snapshot is restored for a new session VM) can therefore retain its earlier filesystem view even after Runtime successfully mounts the storage.
+| Configuration for a forwarded directory | Proposed result |
+| --- | --- |
+| Agent grants directory-wide `read`, `write`, and `exec`, with no intersecting `deny` or `deny_write` | Accept if the remaining startup checks pass. The source can still refuse operations. |
+| Tool or local MCP server grants directory-wide `read` and `write`, with no intersecting `deny` or `deny_write` | Accept if the remaining startup checks pass. These recipients already have broader execution permissions; do not add unsupported `exec` keys to their configuration. |
+| Read-only access, writable-child exceptions, execution restricted to selected files, list-only or metadata-only access | Reject sandbox startup. This first version cannot preserve that configuration through direct propagation. |
+| A `deny` or `deny_write` intersects the forwarded directory, whether it names an ancestor, the directory, or a descendant | Reject sandbox startup, including when the named path does not yet exist. |
+| Exact-file grants without covering directory grants | Reject sandbox startup. They do not authorize the entire arriving tree. |
+| Ordinary grants and denials outside every forwarded directory | Preserve their existing behavior. |
 
-To support this agent init -> session creation + new mounted filesystem startup sequence, Box must make the new mount visible inside the sandbox and apply the `box.toml` restrictions before the agent accesses its contents.
+A covering directory grant can name the forwarded directory or an ancestor. Additional child grants do not remove the requirement for complete coverage. Validation uses the existing path semantics and protected-path checks, including aliases that those checks recognize; string-prefix matching alone is insufficient.
 
-## 5. Going forward, how can Box expose new mounts via mount event forwarding?
+This version does not accept a read-only Box configuration merely because today's upstream mount happens to be read-only. That would rely on an external promise about every later mount. A future design can consider that contract separately.
 
-### 5.1 At Box startup
+The trusted storage publisher remains responsible for mounting the intended storage with appropriate source permissions. Box does not grant the workload mount-administration capabilities or change storage authentication. Provider authorization, ownership checks where the filesystem enforces them, source mount flags, and Box's other sandbox controls still apply. Box checks configured paths and known aliases against its protected paths at startup. It cannot inspect an absent future filesystem or validate every later attachment. The publisher trust assumption therefore includes never mounting Box state, installed programs, protected credential sources, or aliases to those objects beneath an admitted root. A deployment that cannot satisfy this prerequisite is unsupported. This is an external trust obligation, not a new post-attachment Box check or a requirement to scan every file.
 
-Box starts a (new) trusted helper that monitors the source paths listed in each agent, tool, and local server's filesystem `mounts` array in `box.toml`. Each sandbox keeps its private mount namespace. An empty filesystem covers each source path in that sandbox's list while its mount is pending.
+## 4. Proposed interface
 
-For paths under a source in a sandbox's `mounts` list, Box no longer requires the source paths to exist at startup. It defers existence, file-type, and filesystem-object identity checks until the mount arrives. Configuration syntax, mount path syntax, conflicting grants, and restrictions on Box state and credentials remain checked at startup. Paths outside that sandbox's listed mount sources retain their existing startup checks.
+Keep absolute paths in each recipient's existing filesystem table. Do not add a separate storage configuration file or named mount groups.
 
-### 5.2 When a new mount arrives
+The proposed Box Core `box.toml` flag `[experimental-features] linux-passthrough-mounts` explicitly selects the direct-propagation contract. The `mounts` array identifies the external attachment paths that recipient needs; the ordinary grant lists authorize access. The earlier experimental `linux-storage-mounts` flag must not silently acquire these different semantics. Migration must reject the old selection with an explanation, or retain it as a separately supported implementation.
 
-Linux notifies the Box helper when the mounts visible in its namespace change. Box observes these changes through `/proc`. The helper uses `open_tree()` to create a private *inspection* and *preparation* views. These views reference the same files; they do not copy the data.
-
-### 5.3 Before the workload receives the mount
-
-1. Box checks the required paths in the inspection view, records their filesystem-object identities, and evaluates the existing `box.toml` rules. It repeats these checks against the arriving filesystem even if placeholder directories existed at startup.
-2. The helper prepares restricted file and directory attachments, applies mount attributes with `mount_setattr()`, then attaches the completed view with `move_mount()`. The helper retains mount-administration privileges within Box’s user namespace.
-
-For example, Box can expose `/mnt/data` as read-only, permit writes under `/mnt/data/output`, and cover `/mnt/data/private`. The workload receives the completed arrangement without exposure to the unprotected source mount.
-
-A source mount that has not arrived remains pending while the workload runs. Once a mount arrives, a missing required permission target or another preparation failure keeps it covered and stops Box with an error. Deferring startup checks does not remove the checks required before exposing storage.
-
-Each agent, tool, and local Model Context Protocol (MCP) server receives its own protected view.
-
-## 6. Key decisions
-
-### D1. Listing a mount path grants no access
-
-The proposed Box Core `box.toml` interface adds a `mounts` array to `[agent.filesystem]`, `[tool.<name>.filesystem]`, and `[mcp.<name>.filesystem]`. Each array contains absolute directory paths where that recipient expects externally supplied filesystems whose mounts can arrive after startup. A recipient lists only the mount paths it needs to receive.
+This excerpt illustrates proposed configuration fields. It is not a complete runnable `box.toml`, and current releases do not support it.
 
 ```toml
 [experimental-features]
-linux-storage-mounts = true
+linux-passthrough-mounts = true
 
-# Forward both mounts to the agent; allow reading both directories.
+# The agent accepts complete access to both arriving trees.
 [agent.filesystem]
 mounts = ["/mnt/data", "/mnt/shared"]
 read = ["/mnt/data", "/mnt/shared"]
+write = ["/mnt/data", "/mnt/shared"]
+exec = ["/mnt/data", "/mnt/shared"]
 
-# Forward only /mnt/data to the indexer; allow reading that directory.
+# The indexer receives only /mnt/data. It does not inherit the agent's list.
 [tool.indexer.filesystem]
 mounts = ["/mnt/data"]
 read = ["/mnt/data"]
+write = ["/mnt/data"]
 ```
 
-Each recipient declares its own mount paths and does not inherit another recipient's list. An omitted or empty `mounts` list enables no mount event forwarding for that sandbox. A malformed or non-absolute mount path fails configuration validation at startup. Listing a path does not create a filesystem or tell Runtime to mount one; the external storage manager still owns mounting.
+A local MCP server uses the same pattern under `[mcp.<name>.filesystem]`. An empty or omitted `mounts` array establishes no propagation for that recipient. Box CLI profiles must expose the same contract and pass it to Core. The CLI's existing `[storage]` feature for persistent directories remains separate.
 
-In this example, the agent receives both mounts, while `indexer` receives only `/mnt/data`. Listing a mount enables forwarding; it grants no filesystem access. Existing `read`, `write`, `exec`, file-specific grants, `deny`, and `deny_write` rules remain authoritative for the recipients that support them. Linux's existing rule limitations still apply. Each source is prepared when its mount arrives; the listed sources do not need to arrive together.
+At startup, Box must reject:
 
-Box CLI already uses `[storage]` in profiles and packs for persistent directories, copied files, and hooks. For example, `[storage] directories = ["config"]` makes the CLI create a profile storage directory and grant the agent read and write access to it. The [CLI storage reference](../../docs/cli/packs-reference.md#storage) describes that existing feature. This proposal keeps external mount paths in each recipient's filesystem configuration instead of adding them to `[storage]`.
+1. The opt-in on an unsupported platform, or a nonempty mount list without the opt-in.
+2. Relative paths, `/`, duplicate or overlapping roots, malformed paths, and roots that expose Box state or conflict with protected paths.
+3. Missing whole-directory grants or intersecting restrictions described in section 3.
+4. A missing or unsuitable attachment anchor, insufficient namespace permissions, or an upstream relationship that cannot deliver the expected attachment without exposing undeclared paths.
+5. A root used for an executable or other mandatory startup input that is not available yet. Forwarding does not defer ordinary program startup requirements.
+6. A combination with native filesystem policy checks unless tests establish compatible behavior. Do not silently disable those checks.
 
-Named groups are an alternative, not part of the first version. Although `[egress.<name>]` provides a naming precedent, direct paths let readers see each recipient's mount sources without resolving another configuration table. Groups could become useful if several tools or local servers repeatedly select the same bundle of mount paths. They would not remove the need to configure each recipient's filesystem permissions using actual paths.
+The storage filesystem itself can be absent at startup. The namespace anchor needed to receive it must exist or be constructed safely by Box. This differs from deferring checks for an arbitrary set of permission exceptions inside the arriving filesystem: those exceptions are unsupported here.
 
-Declaring mount paths requires the `linux-storage-mounts` experimental flag and Linux; otherwise Box rejects startup. Box CLI profiles expose the same per-recipient lists and Linux-only opt-in. The feature remains experimental until regression and security testing qualify the supported environments.
+The startup disclosure must identify each recipient and mount root and state that the whole arriving tree is admitted. It must not describe the source as permission-free or claim that Box applies per-path restrictions after arrival.
 
-### D2. Source restrictions remain
+## 5. Sequence and implementation
 
-1. Access is the intersection of Box’s rules and the source mount’s restrictions. For example, Box cannot make a read-only source writable.
-2. Runtime owns storage authentication and mounting. Box applies its own filesystem rules. Runtime does not interpret `box.toml`.
+![Proposed Runtime and Box mount flow. Box configures one-way receivers before the snapshot. After restore, Linux attaches storage through the container to selected Box sandboxes before the source operation returns. Complete directory grants are required; finer Box restrictions are rejected.](https://github.com/user-attachments/assets/89c34a69-0e01-4fb9-bd5a-7dfd04524892)
 
-### D3. Storage does not block Strands Box workload execution
+Proposed Linux arrangement, using Amazon Elastic File System (EFS) as an example provider. The namespace ordering has a local probe; this diagram does not claim completed Box or Runtime qualification.
 
-The Box workload and Runtime continue while storage is pending. Early file operations may fail and require workload retries.
+[Editable diagram](https://github.com/user-attachments/files/35389690/runtime-direct-mount-propagation.drawio)
 
-## 7. Limitations
+### 5.1 Before the snapshot
 
-1. Linux is the only platform explored so far. We will focus on macOS after AgentCore Runtime is unblocked.
-2. Paths needed for permission exceptions must exist when Box prepares the mount. A missing deny target fails preparation. Files created later inside admitted directories remain subject to their existing protections.
-3. This first version supports the initial arrival of each configured storage mount. Box trusts the external storage manager, such as AgentCore Runtime, to mount the intended filesystem. Replacing or removing an admitted mount, or adding new mounts beneath it, remains follow-up work.
-4. **P1 (deferred hardening): concurrent directory changes.** The first version assumes that paths requiring different permissions remain stable while Box checks and prepares storage. Another application or a writable alias can rename or replace those directories during preparation. Box could then apply restrictions to a different directory from the one it checked. Hardening against this edge case remains follow-up work; trusting the storage manager does not prevent other writers from changing directories.
+During `box run`, Box validates configuration and builds the propagation relationship for every selected recipient before starting its sandboxed process. Other paths retain private mounts. Box verifies the connection and removes mount-administration authority from the workload as part of its existing startup boundary.
 
-## 8. Frequently asked questions
+Changing propagation needs mount-administration authority in the user namespace that owns the affected mount namespace. Authority inside a child user namespace does not grant authority to reconfigure the Runtime host's mounts. The design must work with Runtime's existing upstream setup; requiring additional host privileges is a qualification failure to investigate, not a permission granted to the agent.
 
-### 8.1 Why not start Box after storage becomes available?
+The Runtime deployment can then snapshot the running sandbox and its namespace arrangement. Box adds no polling interval, publication process, or storage-ready response to Runtime.
 
-That works when the application can delay sandbox startup. This proposal also supports applications that start Box before storage arrives, including sandboxes preserved in a Runtime snapshot.
+### 5.2 After restore and on invocation
 
-### 8.2 Why not propagate mounts directly, and how does forwarding reach agents and tools?
+```mermaid
+sequenceDiagram
+    participant R as AgentCore Runtime
+    participant B as Box startup
+    participant K as Linux kernel
+    participant A as Agent sandbox
+    R->>B: Start container and box run during initialization
+    B->>K: Establish selected propagation relationships
+    K-->>B: Setup succeeds
+    B->>A: Start workload
+    Note over R,A: Runtime snapshots the running environment
+    R->>K: Restore environment, then attach session storage
+    K->>K: Commit source and propagated attachments
+    Note over K,A: Storage is visible in each connected sandbox
+    K-->>R: Attachment returns success
+    R->>R: Complete storage initialization
+    R->>A: Deliver invocation
+    A->>K: Open a file through the arriving mount
+```
 
-Direct propagation could expose storage before Box applies its restrictions. The helper receives the mount separately, prepares the permitted filesystem view, and then exposes that view to the workload.
+Runtime documents that configured filesystems are available when the agent is invoked. The proposed integration uses that existing ordering; it does not introduce a new Runtime readiness handshake. The Linux result supports the mechanism, but a real Box snapshot-and-restore test must prove that the required connections survive in Runtime.
 
-The proposed hierarchy has one helper per box watching the distinct source paths listed across the recipients' filesystem `mounts` arrays. Each recipient can list multiple paths. A box has one agent sandbox and can run multiple separate tool and local MCP server sandboxes. Forwarding serves those sandboxes independently; it does not pass storage through the agent sandbox to reach a tool.
+An application background thread can still access the path before Runtime attaches storage. A mount setup call does not wait for future storage. Earlier operations may fail, or may read and write the underlying placeholder directory before the incoming mount hides it. Existing file descriptors and working-directory references do not automatically switch to the arriving filesystem. Applications must not treat container initialization as storage readiness. First-invocation qualification uses a fresh absolute-path lookup; retained-reference behavior needs separate tests before any broader guarantee.
 
-| Recipient | Filesystem configuration in Box Core's `box.toml` | Application of mount forwarding |
+### 5.3 Agents, tools, servers, and hosted interpreters
+
+| Recipient | Required implementation |
+| --- | --- |
+| Agent sandbox | Establish its selected receivers before the agent starts and retain them across snapshot/restore. |
+| Each configured tool sandbox | Use that tool's own roots and grants. A tool created before attachment receives the event; one created afterward must see the current source at startup. |
+| Each local MCP server sandbox | Use that server's own roots and grants, with the same before/after attachment cases. Remote servers are outside this mechanism. |
+| Hosted Strands Shell and Monty | Extend their reachable-path handling for the agent's selected roots while preserving per-operation policy decisions and protected-path refusals. They run outside the agent sandbox, so changing only its namespace is insufficient. |
+
+The implementation must prove that an internal shared parent does not reveal another recipient's roots or unrelated siblings. Reuse validated namespace construction, configuration parsing, and test fixtures where appropriate. Do not retain a watcher, protected-view compiler, or publication receiver solely to reuse the previous implementation.
+
+## 6. Evidence and performance
+
+A local Linux ARM64 probe completed 100 attachment-and-unmount cycles through a shared source, an intermediate receiver/shared mount, and two downstream receivers. One downstream receiver used a child user namespace. Both receiver processes were stopped throughout each attachment. Immediately after the source operation returned, the probe checked mount tables and read a marker through each receiver's root, without sleeps or retries. Both receivers passed all 100 cycles. A private intermediate control received none, and receiver-originated mounts did not appear upstream.
+
+The source bind-mount operation measured a median of 0.041 ms and a maximum of 0.065 ms on that machine. These measurements include the local operation and Python call overhead. They are not isolated propagation overhead, a Runtime latency prediction, or a service-level objective.
+
+This probe did not run Box, restore a virtual-machine snapshot, use remote storage, or test access under the eventual workload identity. The kernel source supplies the ordering argument; the probe verifies the tested topology. Earlier successful tests of the helper-based implementation do not qualify this new implementation.
+
+Direct propagation works on mount objects, not every file in the filesystem. Box does not need to enumerate an S3 bucket. Propagation work can depend on the number of mounts and recipients. Provider initialization and later remote file access still have their own costs. Measure setup time, the external attachment operation, and first-invocation file access separately.
+
+## 7. Implementation milestones and acceptance tests
+
+Use four implementation pull requests after this design review. Put meaningful tests and the documentation for each changed surface in the same pull request as its implementation.
+
+| Milestone | Scope | Required evidence |
 | --- | --- | --- |
-| Agent sandbox | `[agent.filesystem]` | Lists source paths in `mounts` and receives a view restricted by the agent's rules. |
-| Each sandboxed tool execution | `[tool.<name>.filesystem]` | Lists its own source paths in `mounts` and receives a view restricted by that tool's rules. Calling a tool does not give it the agent's mount list or grants. |
-| Each local MCP server sandbox | `[mcp.<name>.filesystem]` | Lists its own source paths in `mounts` and receives a view restricted by that server's rules. Remote MCP servers are outside this local mount mechanism. |
+| 1. Interface and validation | Core configuration and CLI profiles; explicit experimental opt-in; whole-root grants; startup errors, disclosure, and reference documentation. Keep activation unavailable until its mechanism exists. | Positive and negative cases for every recipient, missing paths, ancestor/descendant restrictions, protected aliases, disabled flags, and platform selection. |
+| 2. Linux namespace mechanism | Build and verify selective one-way relationships during sandbox startup. Preserve private paths, privilege dropping, current mounts, and later attachments. | Linux ARM64 and x86-64. Stopped receivers; same/child user namespaces; broken-chain control; exact-root overmounts and child mounts; unlisted siblings; multiple roots; read-only/no-exec source controls; upstream isolation; ordinary containment regressions. |
+| 3. End-to-end Box recipients | Agent, configured tools, local MCP servers, hosted Shell and Monty, startup failure cleanup, and runnable examples. | Real Box operations under workload identities, before/after attachment, multiple recipients, forbidden source aliases, policy denials on hosted operations, and absence of leaked helpers or mounts. |
+| 4. Runtime qualification and operator guide | Build from the replacement series; document deployment and replication steps; enable the advertised Runtime path only after qualification. | Box started before snapshot; fresh absolute-path lookup on the first invocation with no retry or sleep; retained-reference controls; stop/resume; all supported mount slots; each claimed provider; expected source denials; mount failure; timestamped first-file access; environment and source revisions. |
 
-One source mount can therefore supply several differently restricted views, one for each sandbox that lists that source path and has permission to access its contents. These views reference the same stored data. For example, the agent can receive read-only access to `/mnt/data`, while a tool receives read and write access only to `/mnt/data/output`. Both list `/mnt/data` in `mounts`, but their permission lists differ. A tool without a storage grant receives no access to that storage's contents.
+Linux ARM64 and x86-64 are required for the initial release. macOS support is follow-up work and must reject this Linux feature explicitly in the meantime. Runtime's current filesystem-configuration limits determine the multiple-mount test cases; local tests can exercise larger topologies without implying Runtime supports them.
 
-For an already running sandbox, Box attaches its prepared view after storage arrives. For a tool or server started after storage arrives, Box prepares the view under that recipient's rules before starting its process.
+A passing source-attachment probe is not sufficient for milestones 3 or 4. A provider-specific pass qualifies that provider and environment only. A permission test must demonstrate the denied operation outside the restriction as a positive control where practical.
 
-### 8.3 Why does Box currently reject paths that do not exist?
+## 8. Limits and alternatives
 
-Box cannot inspect a missing path or apply restrictions to it. For sources in a sandbox's `mounts` list, the proposal moves those checks from startup to mount preparation. Configuration checks remain at startup, and storage must pass the deferred checks before exposure.
+### 8.1 What remains trusted or deferred?
 
-### 8.4 What happens if the agent accesses storage too early?
+The external mount publisher is trusted to supply the intended filesystem. Direct propagation may also carry later child mounts, replacement mounts, and unmounts where the topology permits them. Do not claim those events are rejected or delayed for validation: there is no watcher doing so.
 
-The storage path remains covered, so file operations may fail until preparation finishes. The agent can retry. If storage arrives but Box cannot apply the configured restrictions, Box keeps it covered and stops with an error.
+Initial arrival is the first qualification target. Detailed guarantees for replacement, removal, already-open file descriptors, concurrent renames, and recovery remain follow-up work. An open descriptor can continue to refer to the earlier filesystem after a path is overmounted; propagation is not revocation.
 
-### 8.5 Does Box copy the filesystem or scan every S3 object?
+Filesystem-specific ownership rules, unsupported operations, and remote availability remain provider concerns. Source restrictions are effective only where that provider enforces them. The direct-propagation design does not normalize different providers into one filesystem implementation.
 
-The design does not require either operation. Preparation works with mounts and paths referenced by filesystem rules. Remote lookups for those paths can still add latency; preparation cost does not depend simply on the total object count.
+### 8.2 Why not keep protected publication?
 
-### 8.6 What happens when files or directories appear later?
+It can preserve different permissions within one arriving tree. It requires Box to inspect and prepare that view after attachment. To guarantee availability at the first invocation, deployment must then wait for publication or provide another explicit synchronization mechanism. Keep it as an alternative if fine-grained Box filesystem restrictions are required; do not claim direct propagation provides both contracts.
 
-Ordinary files created within an exposed directory become subject to that directory's existing protections. A configured permission exception, such as a denied subdirectory, must exist during preparation. Adding another filesystem mount underneath an exposed directory remains outside the initial scope.
+### 8.3 Why not set `rslave` and keep every existing rule?
 
-### 8.7 Which permissions win: Runtime's or Box's?
+The kernel forwards mounts, not Box rules. A later mount can cover existing read-only mounts and denied-path covers. Without a separately proven enforcement mechanism, accepting those configurations would promise restrictions that the workload might bypass.
 
-Both must permit the operation. Box cannot make a read-only source writable or grant storage access that the underlying service refuses. Runtime manages storage authentication and mounting; Box applies the filesystem rules from `box.toml`.
+### 8.4 Why not start Box after storage arrives?
 
-### 8.8 What remains experimental or requires further hardening?
+That lets ordinary startup construct a protected view from existing storage. It is appropriate when the harness can change its startup order. It does not preserve the requirement to snapshot an already running Box workload.
 
-The feature remains experimental because testing is ongoing and we do not yet have sufficient confidence in its behavior and containment. Linux is the only platform explored so far, so the current implementation proposal requires a Linux opt-in. We will focus on macOS after AgentCore Runtime is unblocked. The initial version supports mount arrival. Mount replacement, removal, and later nested mounts remain follow-up work. Concurrent directory renames or replacements during preparation are a documented P1 hardening item.
+### 8.5 Could stronger native checks preserve all rules later?
 
-## 9. References
+Possibly, but this proposal does not assume it. Support must be demonstrated across the required architectures, access routes, and filesystem operations. Availability on one platform or enforcement of a subset of operations does not establish a replacement for the existing mount restrictions.
 
-[Detailed design and diagrams](https://chorus.aws.dev/doc/Lfn1GdTjHZI6)
+## 9. Review questions and references
 
-[Runtime filesystem configurations](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-filesystem-configurations.html)
+1. Accept the whole-directory contract for this experimental feature, or retain protected publication when per-path Box restrictions are required? The proposal recommends whole-directory propagation for the Runtime integration, with incompatible configurations rejected.
+2. Approve the proposed `linux-passthrough-mounts` flag while retaining per-recipient `mounts` and explicit grants? The earlier experimental configuration must not silently change meaning.
+3. Can the actual Runtime parent-mount topology provide selective receivers without exposing undeclared siblings or requiring new host privileges? Milestones 2 and 4 must resolve this with tests before support is claimed.
 
-## 10. Feedback
+References:
 
-Following feedback from siwabhi, AgentCore Runtime Principal Engineer, we clarified that ongoing testing and incomplete confidence in containment keep the feature experimental. Linux is the only platform explored so far; macOS work follows after Runtime is unblocked. The first version uses absolute paths directly in each recipient's filesystem `mounts` list, without named groups or a separate `[storage]` mount declaration. Agents, tools, and local MCP servers declare their mount paths independently. Listing a mount enables forwarding; each recipient's existing filesystem rules still determine access.
+- [Runtime filesystem configuration and invocation lifecycle](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-filesystem-configurations.html)
+- [Linux shared-subtree propagation semantics](https://docs.kernel.org/filesystems/sharedsubtree.html)
+- [Linux v6.12 mount attachment and commit path](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/fs/namespace.c#L2482-L2535)
+- [Ravi Kandury's direct-propagation prototype](https://github.com/rvkandury/box-public/commit/e2ed1b5bb3352cb2c8ceea5c97e1d235c3e5765e)
+- [Current Box filesystem configuration](../../docs/user/config.md#agentfilesystem-and-toolnamefilesystem)
+
+## 10. What changes in this revision
+
+The proposal replaces asynchronous helper publication with a propagation relationship established during Box startup. It separates the synchronous kernel attachment ordering from provider readiness and from background application access before attachment. It narrows the accepted filesystem configurations explicitly instead of promising to reapply every Box rule. It retains per-recipient path lists, includes hosted Shell and Monty, and requires Linux ARM64, Linux x86-64, and real Runtime qualification. The interface and permission trade-off remain visible review questions; the local probe is not presented as a completed product implementation.
