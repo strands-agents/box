@@ -6,13 +6,15 @@ mod host;
 
 use std::collections::HashMap;
 
+use credentials::ResponseRedactor;
+
 pub use credential::CredentialCapability;
 pub use host::{is_bindable_host, normalize_host};
 
-#[cfg(feature = "tls-intercept")]
-use crate::boundary::HeaderMap;
 use crate::boundary::{InterceptedRequest, InterceptedResponse, Mutation, MutationTarget, Target};
 use crate::error::{ProxyError, Result};
+#[cfg(feature = "tls-intercept")]
+use {crate::boundary::HeaderMap, zeroize::Zeroizing};
 // `BackendDial` lives in the `tls-intercept`-gated `intercept::mitm` module, and the backend
 // signature pass that uses it runs only there, so keep this socket-free module buildable with
 // `--no-default-features`.
@@ -23,6 +25,65 @@ use crate::intercept::mitm::BackendDial;
 /// does not apply), or the non-secret reason it cannot perform its edit safely, so nothing may
 /// egress.
 type Outcome = std::result::Result<Vec<Mutation>, String>;
+
+/// Whether the caller can retain the response scrubbers from the attachments it applies.
+#[derive(Clone, Copy)]
+enum RequestMode {
+    Unpaired,
+    #[cfg(feature = "tls-intercept")]
+    Paired,
+}
+
+/// The response checks from the capabilities matched by this exchange's request.
+pub(crate) enum ExchangeResponse {
+    Unmatched,
+    Matched(Vec<ResponseRedactor>),
+}
+
+impl ExchangeResponse {
+    fn capture(&mut self, redactor: Option<ResponseRedactor>) {
+        match self {
+            Self::Unmatched => *self = Self::Matched(redactor.into_iter().collect()),
+            Self::Matched(redactors) => redactors.extend(redactor),
+        }
+    }
+
+    /// Apply the header checks and return the body checks from this request's attachments.
+    #[cfg(feature = "tls-intercept")]
+    pub(crate) fn controls(
+        self,
+        headers: &mut HeaderMap,
+    ) -> std::result::Result<ResponseControls, String> {
+        let Self::Matched(redactors) = self else {
+            return Ok(ResponseControls::default());
+        };
+        let requires_empty_body = credential::content_encoding(headers).is_some();
+        let outcomes = redactors
+            .iter()
+            .map(|redactor| {
+                Ok(headers
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        redactor
+                            .redact_header(value)
+                            .map(|value| Mutation::SetHeader {
+                                name: name.to_string(),
+                                value: Zeroizing::new(value),
+                            })
+                    })
+                    .collect())
+            })
+            .collect();
+        let mut scratch = Target::new("", 0);
+        for mutation in fold(outcomes)? {
+            mutation.apply(headers, &mut scratch);
+        }
+        Ok(ResponseControls {
+            redactors,
+            requires_empty_body,
+        })
+    }
+}
 
 /// The host half of `pattern` as written, without its port or path, so a wildcard keeps its `*`.
 #[cfg(feature = "tls-intercept")]
@@ -88,19 +149,52 @@ impl CapabilitySet {
     /// Apply the edits of every credential that matches `req` in place, or return why the request
     /// must not go out. Cedar already authorized the request at the effect seam, so a request no
     /// credential matches goes out unedited.
+    ///
+    /// Rotating credentials require the gateway's paired request and response legs and are refused
+    /// by this method before the request edits are applied.
     pub fn apply_to_request(
         &self,
         req: &mut InterceptedRequest,
     ) -> std::result::Result<(), String> {
+        self.apply_request_edits(req, RequestMode::Unpaired)
+            .map(|_| ())
+    }
+
+    /// Apply the request edits and retain the response checks from the matched capabilities.
+    #[cfg(feature = "tls-intercept")]
+    pub(crate) fn apply_exchange_request(
+        &self,
+        req: &mut InterceptedRequest,
+    ) -> std::result::Result<ExchangeResponse, String> {
+        self.apply_request_edits(req, RequestMode::Paired)
+    }
+
+    fn apply_request_edits(
+        &self,
+        req: &mut InterceptedRequest,
+        mode: RequestMode,
+    ) -> std::result::Result<ExchangeResponse, String> {
+        let mut response = ExchangeResponse::Unmatched;
+        let mut advisory = None;
         let outcomes = self
             .matching(&req.target.as_destination())
             .into_iter()
-            .map(|credential| credential.on_request(req))
+            .map(|credential| {
+                let edits = credential.on_request(req, mode)?;
+                response.capture(edits.redactor);
+                if let Some(reason) = edits.advisory {
+                    advisory = Some(reason);
+                }
+                Ok(edits.mutations)
+            })
             .collect::<Vec<_>>();
         for mutation in fold(outcomes)? {
             mutation.apply(&mut req.headers, &mut req.target);
         }
-        Ok(())
+        if advisory.is_some() {
+            req.advisory_note = advisory;
+        }
+        Ok(response)
     }
 
     /// Sign a re-routed request for its backend, AFTER the gateway has rewritten the `Host` to the
@@ -178,28 +272,6 @@ impl CapabilitySet {
             mutation.apply(&mut res.headers, &mut scratch);
         }
         Ok(())
-    }
-
-    /// Scrub response headers and retain the ordered body checks for a streamed response.
-    #[cfg(feature = "tls-intercept")]
-    pub(crate) fn response_controls(
-        &self,
-        headers: &mut HeaderMap,
-        target: &Target,
-    ) -> std::result::Result<ResponseControls, String> {
-        let mut controls = ResponseControls::default();
-        let mut outcomes = Vec::new();
-        for credential in self.matching(&target.as_destination()) {
-            let (edits, body) = credential.response_controls(headers, target);
-            outcomes.push(Ok(edits));
-            controls.redactors.extend(body.redactors);
-            controls.requires_empty_body |= body.requires_empty_body;
-        }
-        let mut scratch = Target::new("", 0);
-        for mutation in fold(outcomes)? {
-            mutation.apply(headers, &mut scratch);
-        }
-        Ok(controls)
     }
 
     /// Config-load fail-closed gate: a hard [`Config`](ProxyError::Config) error, never a silent
@@ -470,13 +542,26 @@ mod tests {
     #[cfg(feature = "tls-intercept")]
     mod streaming {
         use super::*;
+        use crate::capability::credential::tests::advisory_header_capability;
+
+        // Build the response state independently of the request edit fold to exercise two
+        // overlapping scrubbers, whose request edits would conflict on Accept-Encoding.
+        fn overlapping_response(set: &CapabilitySet, target: &Target) -> ExchangeResponse {
+            let req = request(&target.host, HeaderMap::new());
+            let mut response = ExchangeResponse::Unmatched;
+            for credential in set.matching(&target.as_destination()) {
+                let edits = credential.on_request(&req, RequestMode::Paired).unwrap();
+                response.capture(edits.redactor);
+            }
+            response
+        }
 
         #[test]
         fn redactors_preserve_the_whole_body_capability_order() {
             for reverse in [false, true] {
                 let mut credentials = vec![
-                    header_capability("*.example.com", "red").0,
-                    header_capability("api.example.com", "[REDACTED]-blue").0,
+                    advisory_header_capability("*.example.com", "red").0,
+                    advisory_header_capability("api.example.com", "[REDACTED]-blue").0,
                 ];
                 if reverse {
                     credentials.reverse();
@@ -488,8 +573,8 @@ mod tests {
                     InterceptedResponse::http(200, HeaderMap::new(), b"red-blue".to_vec());
                 set.apply_to_response(&mut baseline, &target).unwrap();
 
-                let controls = set
-                    .response_controls(&mut HeaderMap::new(), &target)
+                let controls = overlapping_response(&set, &target)
+                    .controls(&mut HeaderMap::new())
                     .unwrap();
                 let mut body = b"red-blue".to_vec();
                 for mut redactor in controls.redactors {
@@ -512,8 +597,8 @@ mod tests {
         #[test]
         fn header_collisions_use_original_values_and_apply_no_edits() {
             let set = CapabilitySet::new(vec![
-                header_capability("*.example.com", "red").0,
-                header_capability("api.example.com", "red-blue").0,
+                advisory_header_capability("*.example.com", "red").0,
+                advisory_header_capability("api.example.com", "red-blue").0,
             ]);
             let target = Target::new("api.example.com", 443);
             let mut headers = HeaderMap::new();
@@ -521,7 +606,9 @@ mod tests {
             let original = headers.clone();
             let mut baseline = InterceptedResponse::http(200, original.clone(), Vec::new());
             let expected = set.apply_to_response(&mut baseline, &target).unwrap_err();
-            let actual = set.response_controls(&mut headers, &target).unwrap_err();
+            let actual = overlapping_response(&set, &target)
+                .controls(&mut headers)
+                .unwrap_err();
             assert_eq!(actual, expected);
             assert!(actual.starts_with("mutation collision:"));
             assert_eq!(headers, original);
@@ -529,22 +616,35 @@ mod tests {
 
         #[test]
         fn only_matching_capabilities_produce_response_controls() {
-            let (credentials, _) =
+            let (credentials, phantoms) =
                 shared_vault(&["api.github.com", "api.stripe.com"], "real-secret");
             let target = Target::new("api.github.com", 443);
             let mut headers = HeaderMap::new();
             headers.append("X-Echo", "real-secret");
             headers.append("Content-Encoding", "gzip");
 
-            let (edits, off_route) = credentials[1].response_controls(&headers, &target);
-            assert!(edits.is_empty());
+            let set = CapabilitySet::new(credentials);
+            let mut outside = request("unmatched.example.com", HeaderMap::new());
+            let mut original = headers.clone();
+            let off_route = set
+                .apply_exchange_request(&mut outside)
+                .unwrap()
+                .controls(&mut original)
+                .unwrap();
+            assert_eq!(original, headers);
             assert!(off_route.redactors.is_empty());
             assert!(!off_route.requires_empty_body);
 
-            let set = CapabilitySet::new(credentials);
+            let mut outbound = HeaderMap::new();
+            outbound.append("Authorization", format!("Bearer {}", phantoms[0]));
+            let mut req = request(&target.host, outbound);
             let mut baseline = InterceptedResponse::http(200, headers.clone(), Vec::new());
             set.apply_to_response(&mut baseline, &target).unwrap();
-            let controls = set.response_controls(&mut headers, &target).unwrap();
+            let controls = set
+                .apply_exchange_request(&mut req)
+                .unwrap()
+                .controls(&mut headers)
+                .unwrap();
             assert_eq!(controls.redactors.len(), 1);
             assert!(controls.requires_empty_body);
             assert_eq!(headers, baseline.headers);
@@ -570,7 +670,11 @@ mod tests {
                     set.apply_to_response(&mut baseline, &target).is_err(),
                     must_be_empty
                 );
-                let controls = set.response_controls(&mut headers, &target).unwrap();
+                let controls = set
+                    .apply_exchange_request(&mut request(&target.host, HeaderMap::new()))
+                    .unwrap()
+                    .controls(&mut headers)
+                    .unwrap();
                 assert!(controls.redactors.is_empty());
                 assert_eq!(controls.requires_empty_body, must_be_empty);
             }
@@ -578,14 +682,22 @@ mod tests {
 
         #[test]
         fn encoding_is_checked_before_its_header_value_is_redacted() {
-            let set = CapabilitySet::new(vec![header_capability("api.example.com", "gzip").0]);
-            let mut headers = HeaderMap::new();
-            headers.append("Content-Encoding", "gzip");
-            let controls = set
-                .response_controls(&mut headers, &Target::new("api.example.com", 443))
-                .unwrap();
-            assert_eq!(headers.get("content-encoding"), Some("[REDACTED]"));
-            assert!(controls.requires_empty_body);
+            for (secret, requires_empty_body) in [("gzip", true), ("identity", false)] {
+                let (capability, phantom) = header_capability("api.example.com", secret);
+                let set = CapabilitySet::new(vec![capability]);
+                let mut outbound = HeaderMap::new();
+                outbound.append("Authorization", format!("Bearer {phantom}"));
+                let mut req = request("api.example.com", outbound);
+                let mut headers = HeaderMap::new();
+                headers.append("Content-Encoding", secret);
+                let controls = set
+                    .apply_exchange_request(&mut req)
+                    .unwrap()
+                    .controls(&mut headers)
+                    .unwrap();
+                assert_eq!(headers.get("content-encoding"), Some("[REDACTED]"));
+                assert_eq!(controls.requires_empty_body, requires_empty_body);
+            }
         }
     }
 }

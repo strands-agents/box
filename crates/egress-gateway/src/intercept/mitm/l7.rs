@@ -161,8 +161,6 @@ async fn run_l7_legs(
     // value instead, so an attempt or a durable record never carries credential material.
     let method = req.method.clone();
     let workload_path = req.target.path.clone();
-    // The target every credential matches, on the request and on its response.
-    let target = req.target.clone();
     let refuse = |reason: &str, refusal: WorkloadResponse| {
         let request = (method.as_str(), workload_path.as_str());
         deny(
@@ -195,7 +193,7 @@ async fn run_l7_legs(
     // The one exception is the reserved loopback name, when it is mapped to loopback, not
     // re-routed, and every matching route names it exactly: that plaintext leg never leaves the
     // surrounding OS (docs/design/decisions.md#a-secret-rides-only-tls).
-    let destination = target.as_destination();
+    let destination = req.target.as_destination();
     let stays_on_host_loopback = state.is_mapped_host_loopback(&connect.host, backend)
         && state
             .controls
@@ -207,12 +205,15 @@ async fn run_l7_legs(
         ));
     }
 
-    if let Err(reason) = state.controls.apply_to_request(&mut req) {
-        return Ok(refuse(
-            &reason,
-            WorkloadResponse::refusal(403, b"blocked by egress control"),
-        ));
-    }
+    let response_checks = match state.controls.apply_exchange_request(&mut req) {
+        Ok(response_checks) => response_checks,
+        Err(reason) => {
+            return Ok(refuse(
+                &reason,
+                WorkloadResponse::refusal(403, b"blocked by egress control"),
+            ));
+        }
+    };
 
     // A capability may annotate this allow — an advisory credential injection records that a secret
     // was attached against an absent or unrecognised placeholder. Journalled on the allow decision
@@ -443,7 +444,7 @@ async fn run_l7_legs(
     // line as the reason.
     head.headers.remove(crate::PROXY_ORIGIN_HEADER);
 
-    let controls = match state.controls.response_controls(&mut head.headers, &target) {
+    let controls = match response_checks.controls(&mut head.headers) {
         Ok(controls) => controls,
         Err(_) => {
             return Ok(WorkloadResponse::refusal(

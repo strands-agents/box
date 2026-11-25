@@ -67,9 +67,14 @@ signed route the call is accepted and changes nothing, because there is no injec
 
 | Call | Answers |
 |---|---|
-| `attach_for(&self, req: Outbound<'_>) -> Result<Option<Attachment>>` | What to edit before this request goes upstream, as an `Attachment` of header, path, and query edits. `Ok(None)` when this vault governs no credential for the destination. |
-| `redact_leaks(&self, res: Inbound<'_>) -> Option<Redactions>` | The `Redactions` a response needs because it echoed the injected secret back, or `None` when nothing leaked. It returns no `Result`: a response is already received, so there is nothing to fail closed on. |
-| `response_redactor(&self, destination: Destination<'_>) -> Option<ResponseRedactor>` | An owned scrubber for a streamed response, or `None` when no unique opaque binding matches. |
+| `attach_with_redactor(req)` | The request edits and the optional response scrubber for this exchange. Returns `Ok(None)` if no route matches. |
+| `attach_for(req)` | The request edits alone. Refuses routes with rotating tokens. |
+| `redact_leaks(res)` | Edits for literal echoes of a fixed secret in a complete response. |
+| `response_redactor(destination)` | An owned scrubber for a fixed secret in a streamed response. |
+
+Use `attach_with_redactor` for expiring tokens. Keep the returned scrubber with the request
+until its response completes. Looking up the destination again cannot identify which token
+an earlier request sent. Neither destination-based response method handles rotating tokens.
 
 `ResponseRedactor` keeps credential material private and replaces exact secret occurrences with
 `[REDACTED]`. Use `redact_header()` for each header value and `push()` for each body chunk. Each
@@ -79,17 +84,12 @@ to release the tail; on failure, drop the scrubber. Matches can cross chunk boun
 can wait for more bytes or clean completion. Retained state depends on the credential size, not the
 total response size.
 
-`attach_for` performs binding dispatch, phantom location, phantom **validation**,
-and SigV4 signing internally, so the phantom check is not a step a caller can skip.
-It fails closed — rather than sending a request whose credential material is wrong —
-when more than one **opaque** binding matches the destination, when the request presents no
-phantom or a phantom that does not match its binding, or when a signed route's
-service and region cannot be derived from the host.
+Both request methods select the binding, check the phantom and sign AWS requests. They refuse
+ambiguous opaque bindings, missing or incorrect phantoms on strict routes, and signed requests
+whose service or region cannot be derived from the host.
 
-Two things `attach_for` does in a fixed order, and a caller depends on both. A signed AWS
-binding is tried first, so a destination matched by both a signed and an opaque route signs.
-And the signed-route lookup takes the **first** matching pattern rather than refusing an
-overlap, so two overlapping signed patterns let declaration order decide which profile signs.
+Signed AWS bindings take precedence over opaque bindings. The first matching signed pattern
+selects the profile, even if another signed pattern also matches.
 Declare signed patterns that do not overlap.
 
 `Backend::local().resolve(&locator)` resolves one locator to plaintext. Its signature is
@@ -112,7 +112,7 @@ through one. See [Declared secret sources](#declared-secret-sources).
 | `aws://` (no profile) | Structured AWS session credentials from the AWS SDK default credential provider chain (the host's ambient identity), driven on a worker thread and cached. Not a single secret, so `Backend::resolve` rejects it. | hard |
 | `SCHEME://NAME` or `SCHEME://NAME#FIELD`, for a declared `SCHEME` | The stdout of the declared program, or one string field of it. Only `Backend::declared` resolves it. | hard: a program cannot signal "absent" |
 | `credsd://credential` on `RouteSpec::signed_aws` | Structured AWS session credentials from one `credential/get` of that credential to the credsd daemon, on each request. Not a single secret, so `Backend::resolve` rejects it. | hard |
-| `credsd://credential` on `RouteSpec::opaque` | The credential's `access_token`, read with one `credential/get` when the vault opens and held for the run. A `token_type` other than `Bearer` is refused. A token with an expiry warns at open, because the vault does not refresh it. | hard |
+| `credsd://credential` on `RouteSpec::opaque` | Box reads the `access_token` when the vault opens. Requests near expiry share a fresh `credential/get`. The daemon must return a usable bearer token. Tokens without an expiry are read only at startup. | hard |
 
 `credsd_preflight(socket, signed, tokens)` checks the daemon before a workload starts: its
 protocol version, and with one `credential/list`, that each named credential exists and is

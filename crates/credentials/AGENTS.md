@@ -110,8 +110,8 @@ the scrub of an echoed secret. `strands-box-egress-gateway` applies the edits to
 - Strip the harness location when it differs from the attach location, so no phantom rides upstream.
   The strip is unconditional, so an `Advisory` route cannot carry a foreign token upstream either.
 - Resolve signed AWS routes per request; session credentials expire.
-- Read an opaque `credsd://` route's `access_token` once at open, and refuse any other material
-  type and any `token_type` but `Bearer`. A `RouteKind::Opaque` over a `credsd://` locator is the
+- Read an opaque `credsd://` route's `access_token` at open and refresh it near expiry. On
+  every read, refuse any other material type or a `token_type` other than `Bearer`. A `RouteKind::Opaque` over a `credsd://` locator is the
   token route and `RouteKind::SignedAws` over one is the AWS route, so the route kind is the type
   and the client still names none. `credsd_preflight` checks the first listed credential's kind
   against each list it gets.
@@ -319,8 +319,8 @@ link when this surface shrinks. Build and test the four consumers: `strands-box-
   broken chain fails at `box run` rather than on the first request. Only when a bare route exists and
   `ambient_policy != Deny`; a named-profile-only or signed `credsd://` vault does no AWS resolve at
   open, so a box that never signs a bare route forces no credentials to exist. An opaque `credsd://`
-  route is different: it reads its access token once at open, as a declared source reads its
-  secret, and holds it for the run with no refresh. The resolve primes the shared
+  route reads its token at open and again on requests near or past its expiry. Each exchange
+  scrubs the response with the token it attached. The bare AWS resolve primes the shared
   cache and emits the one prepare-step audit record. It is also where the vault prints the one
   ambient-identity warning (`warn_at_open`), one line for each bare route, naming its destination. `sign_aws` warns no more: each sign keeps its audit
   record, and a repeated warning told the operator nothing new.

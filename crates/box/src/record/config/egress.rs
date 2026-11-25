@@ -853,8 +853,8 @@ enum SecretScheme {
     /// `credsd://credential`: a credsd credential. It signs in the boundary; the daemon's
     /// `material.type` picks the signer per request, and the entry names no credential type.
     Credsd,
-    /// `credsd://credential` with `secret.type = "token"`: a credsd access token the box reads once
-    /// at start, which the workload presents as a placeholder.
+    /// `credsd://credential` with `secret.type = "token"`: an access token behind a stable placeholder.
+    /// Box reads it at startup and refreshes it near expiry.
     CredsdToken,
     /// A scheme that a `[secret-source.<scheme>]` table can declare: a host program reads the
     /// secret, and the workload presents a placeholder.

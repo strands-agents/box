@@ -4984,6 +4984,7 @@ dependencies = [
  "aws-credential-types",
  "aws-smithy-http-client",
  "base64 0.23.1",
+ "chrono",
  "getrandom 0.4.3",
  "hmac",
  "libc",

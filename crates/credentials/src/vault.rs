@@ -1,11 +1,13 @@
 //! The tenant-keyed [`Vault`] for credential attachment and response redaction.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use crate::attach::{Attachment, Inbound, Outbound, Redactions};
 use crate::config::MissingRoutePolicy;
 use crate::model::RouteKind;
-use std::sync::Arc;
 
 use crate::sources::{
     AmbientFallbackPolicy, AwsCredentialProvider, CREDSD_SCHEME, CredsdClient, credsd_access_token,
@@ -26,6 +28,126 @@ pub(crate) const CMD_SCHEME: &str = "cmd";
 /// The deferred-mint scheme an operator config could once name.
 pub(crate) const OAUTH2_SCHEME: &str = "oauth2";
 
+/// Bindings of one credsd reference share its current acquisition within this vault.
+#[derive(Clone)]
+enum BoundSecret {
+    Fixed(Secret),
+    Rotating(Arc<RotatingToken>),
+}
+
+struct RotatingToken {
+    credential: String,
+    current: Mutex<Option<CachedToken>>,
+    failures: AtomicU64,
+}
+
+struct CachedToken {
+    secret: Arc<Secret>,
+    refresh_at: SystemTime,
+}
+
+impl CachedToken {
+    fn new(credential: &str, secret: Secret, expires_at: &str) -> Result<Self> {
+        Ok(Self {
+            secret: Arc::new(secret),
+            refresh_at: refresh_at(credential, expires_at, token_now())?,
+        })
+    }
+}
+
+impl RotatingToken {
+    fn acquire(&self, vault: &Vault) -> Result<Arc<Secret>> {
+        // A waiter shares a failed acquisition even if a later retry succeeds before it resumes.
+        let failures = self.failures.load(Ordering::Acquire);
+        #[cfg(test)]
+        if let Some(wait) = BEFORE_TOKEN_LOCK.take() {
+            wait();
+        }
+        let mut current = self
+            .current
+            .lock()
+            .map_err(|_| CredentialError::Credential("credsd token lock poisoned".into()))?;
+        if self.failures.load(Ordering::Relaxed) != failures {
+            return Err(CredentialError::Credential(format!(
+                "credsd refresh failed for credential {:?}",
+                self.credential
+            )));
+        }
+        if let Some(cached) = current.as_ref()
+            && token_now() < cached.refresh_at
+        {
+            return Ok(Arc::clone(&cached.secret));
+        }
+        match vault.refresh_credsd_token(&self.credential) {
+            Ok(next) => Ok(Arc::clone(&current.insert(next).secret)),
+            Err(error) => {
+                *current = None;
+                self.failures.fetch_add(1, Ordering::Release);
+                Err(error)
+            }
+        }
+    }
+}
+
+impl BoundSecret {
+    fn attach(
+        &self,
+        vault: &Vault,
+        inject: &InjectMode,
+        attachment: &mut Attachment,
+        paired: bool,
+    ) -> Result<Option<ResponseRedactor>> {
+        let acquired;
+        let secret = match self {
+            Self::Fixed(secret) => secret,
+            Self::Rotating(_) if !paired => {
+                return Err(CredentialError::Credential(
+                    "a rotating credential requires a paired response redactor".into(),
+                ));
+            }
+            Self::Rotating(token) => {
+                acquired = token.acquire(vault)?;
+                acquired.as_ref()
+            }
+        };
+        crate::legs::attach_secret(inject, secret.as_str(), attachment);
+        Ok(paired.then(|| ResponseRedactor::new(secret)))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TOKEN_CLOCK: std::cell::Cell<Option<SystemTime>> = const { std::cell::Cell::new(None) };
+    static BEFORE_TOKEN_LOCK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn token_now() -> SystemTime {
+    #[cfg(test)]
+    if let Some(now) = TOKEN_CLOCK.get() {
+        return now;
+    }
+    SystemTime::now()
+}
+
+/// Refresh in the last fifth of the remaining lifetime, at most a minute before expiry.
+fn refresh_at(credential: &str, expires_at: &str, now: SystemTime) -> Result<SystemTime> {
+    let expiry: SystemTime = chrono::DateTime::parse_from_rfc3339(expires_at)
+        .map_err(|_| {
+            CredentialError::Credential(format!(
+                "credsd credential {credential:?} has an invalid expires_at"
+            ))
+        })?
+        .into();
+    let remaining = expiry.duration_since(now).unwrap_or_default();
+    if remaining.is_zero() {
+        return Err(CredentialError::Credential(format!(
+            "credsd returned an expired token for credential {credential:?}"
+        )));
+    }
+    Ok(expiry - (remaining / 5).min(Duration::from_secs(60)))
+}
+
 /// One resolved opaque binding: the secret, how it attaches, and the phantom standing in for it.
 pub(crate) struct OpaqueBinding {
     /// How the real secret attaches to the outbound request.
@@ -34,7 +156,7 @@ pub(crate) struct OpaqueBinding {
     harness: InjectMode,
     /// The resolved secret, wiped on drop and validated at construction
     /// (docs/design/decisions.md#an-unusable-secret-value-is-unrepresentable).
-    secret: Secret,
+    secret: BoundSecret,
     /// The phantom minted to stand in for this secret.
     phantom: PhantomToken,
     /// How strictly `swap_phantom` checks the placeholder before it attaches the secret.
@@ -42,25 +164,18 @@ pub(crate) struct OpaqueBinding {
 }
 
 impl OpaqueBinding {
-    /// How the real secret attaches to the outbound request.
-    pub(crate) fn inject(&self) -> &InjectMode {
-        &self.inject
+    pub(crate) fn attach(
+        &self,
+        vault: &Vault,
+        attachment: &mut Attachment,
+        paired: bool,
+    ) -> Result<Option<ResponseRedactor>> {
+        self.secret.attach(vault, &self.inject, attachment, paired)
     }
 
     /// Where the harness placed the phantom, so it can be recognised and stripped.
     pub(crate) fn harness(&self) -> &InjectMode {
         &self.harness
-    }
-
-    /// The resolved plaintext. `pub(crate)` and nothing more, so no accessor for it exists
-    /// outside the crate.
-    pub(crate) fn secret(&self) -> &str {
-        self.secret.as_str()
-    }
-
-    /// The resolved secret itself, for the response leg's scan.
-    pub(crate) fn secret_value(&self) -> &Secret {
-        &self.secret
     }
 
     /// The phantom minted to stand in for this secret (non-secret, unguessable).
@@ -90,25 +205,11 @@ impl std::fmt::Debug for OpaqueBinding {
 
 /// One resolved box-owned binding: the real secret and where the box attaches it. No phantom is
 /// minted, because the workload never presents a placeholder for it.
-pub(crate) struct BoxOwnedBinding {
+struct BoxOwnedBinding {
     /// How the real secret attaches to the outbound request.
     inject: InjectMode,
     /// The resolved secret, wiped on drop and validated at construction.
-    secret: Secret,
-}
-
-impl BoxOwnedBinding {
-    pub(crate) fn inject(&self) -> &InjectMode {
-        &self.inject
-    }
-
-    pub(crate) fn secret(&self) -> &str {
-        self.secret.as_str()
-    }
-
-    pub(crate) fn secret_value(&self) -> &Secret {
-        &self.secret
-    }
+    secret: BoundSecret,
 }
 
 impl std::fmt::Debug for BoxOwnedBinding {
@@ -152,8 +253,7 @@ pub struct Vault {
     strip: Vec<(DestinationPattern, StripBinding)>,
     /// destination pattern → the structured AWS config a signed route signs with.
     signed_aws: Vec<(DestinationPattern, SignedAwsRoute)>,
-    /// The backend, retained because a signed route resolves its credentials per request (they
-    /// expire), unlike an opaque secret which is resolved once at open.
+    /// The backend that resolves fixed secrets at open.
     backend: Backend,
     /// Whether a signed route may fall back to the ambient AWS provider chain when it declares no
     /// scoped profile. Held here because the resolve happens per request, so the policy has to outlive
@@ -244,7 +344,7 @@ impl Vault {
         let mut minted: Vec<(Locator, String, PhantomToken)> = Vec::new();
         // Each `credsd://` token this open read, keyed by its reference, so every route that names
         // one token reads it once.
-        let mut credsd_tokens: Vec<(Locator, Secret)> = Vec::new();
+        let mut credsd_tokens: Vec<(Locator, BoundSecret)> = Vec::new();
 
         // Mint a unique phantom, failing closed on a vault-wide collision. The caller records the
         // per-destination `phantoms` mapping, so a shared phantom is recorded at each host it serves.
@@ -395,11 +495,11 @@ impl Vault {
     /// the skip policy (recorded in `skipped`), and `Err` a hard failure. Shared by the opaque and
     /// box-owned routes, which both resolve a real secret.
     fn classify_resolve(
-        result: Result<Secret>,
+        result: Result<BoundSecret>,
         route: &RouteSpec,
         missing: MissingRoutePolicy,
         skipped: &mut Vec<Skipped>,
-    ) -> Result<Option<Secret>> {
+    ) -> Result<Option<BoundSecret>> {
         match result {
             Ok(secret) => Ok(Some(secret)),
             // A genuinely absent secret is the one soft failure — unless the caller asked for no soft
@@ -443,74 +543,75 @@ impl Vault {
         Ok(())
     }
 
-    /// Resolve one route's secret, reading a `credsd://` token once for every route that names it:
-    /// the first route reads the daemon and records the read, and each later one takes a copy.
+    /// Resolve a route at open, sharing one acquisition and refresh lock per credsd reference.
     fn resolve_secret_once(
         &self,
         route: &RouteSpec,
-        read: &mut Vec<(Locator, Secret)>,
-    ) -> Result<Secret> {
+        read: &mut Vec<(Locator, BoundSecret)>,
+    ) -> Result<BoundSecret> {
         let locator = route.credential_ref();
-        if locator.scheme() != CREDSD_SCHEME {
-            return self.resolve_secret(route);
-        }
-        let copy = |secret: &Secret| {
-            Secret::new(
-                zeroize::Zeroizing::new(secret.as_str().to_owned()),
-                &route.reference_display(),
-            )
-        };
         if let Some((_, secret)) = read.iter().find(|(earlier, _)| earlier == locator) {
-            return copy(secret);
+            return Ok(secret.clone());
         }
-        let secret = self.resolve_secret(route)?;
-        read.push((locator.clone(), copy(&secret)?));
-        Ok(secret)
-    }
-
-    /// Resolve one opaque route's secret, auditing the attempt: a `credsd://` reference through the
-    /// daemon's access token, and every other reference through the backend.
-    fn resolve_secret(&self, route: &RouteSpec) -> Result<Secret> {
-        let locator = route.credential_ref();
-        let request_id = RequestId::new(LOAD_CORRELATION);
         crate::audit_resolve(
             self.emitter.as_ref(),
             &self.tenant,
             locator.scheme(),
             &route.reference_display(),
-            &request_id,
+            &RequestId::new(LOAD_CORRELATION),
             || {
-                if locator.scheme() == CREDSD_SCHEME {
-                    self.resolve_credsd_token(route)
-                } else {
-                    self.backend.resolve_secret(locator)
+                if locator.scheme() != CREDSD_SCHEME {
+                    let secret = self.backend.resolve_secret(locator)?;
+                    return Ok(BoundSecret::Fixed(secret));
                 }
+                let credential = crate::legs::credsd_credential(locator)?;
+                let (secret, expires_at) = self.read_credsd_token(credential)?;
+                let binding = match expires_at {
+                    Some(expiry) => BoundSecret::Rotating(Arc::new(RotatingToken {
+                        credential: credential.to_owned(),
+                        current: Mutex::new(Some(CachedToken::new(credential, secret, &expiry)?)),
+                        failures: AtomicU64::new(0),
+                    })),
+                    None => BoundSecret::Fixed(secret),
+                };
+                read.push((locator.clone(), binding.clone()));
+                Ok(binding)
             },
         )
     }
 
-    /// Read a `credsd://<credential>` route's access token once, for the run.
-    ///
-    /// A declared secret source reads its secret once before the workload starts, and a credsd token
-    /// follows the same model: the vault holds it for the run and does not refresh it. A token that
-    /// names an expiry warns once at open, so an operator learns why a long run stops working.
-    fn resolve_credsd_token(&self, route: &RouteSpec) -> Result<Secret> {
-        let environment = crate::legs::credsd_credential(route.credential_ref())?;
+    fn refresh_credsd_token(&self, credential: &str) -> Result<CachedToken> {
+        crate::audit_resolve(
+            self.emitter.as_ref(),
+            &self.tenant,
+            CREDSD_SCHEME,
+            &format!("{CREDSD_SCHEME}://{credential}"),
+            &RequestId::new("credential-store-refresh"),
+            || {
+                // Gateway refusals must not echo daemon-supplied material or type labels.
+                let (secret, expiry) = self.read_credsd_token(credential).map_err(|_| {
+                    CredentialError::Credential(format!(
+                        "credsd refresh failed for credential {credential:?}"
+                    ))
+                })?;
+                let expiry = expiry.ok_or_else(|| {
+                    CredentialError::Credential(format!(
+                        "credsd refresh for credential {credential:?} returned no expires_at"
+                    ))
+                })?;
+                CachedToken::new(credential, secret, &expiry)
+            },
+        )
+    }
+
+    fn read_credsd_token(&self, credential: &str) -> Result<(Secret, Option<String>)> {
         let socket = self.credsd_socket().ok_or_else(|| {
             CredentialError::KeystoreAccess(format!(
-                "no credsd socket was resolved for credential {environment:?}"
+                "no credsd socket was resolved for credential {credential:?}"
             ))
         })?;
-        let token = credsd_access_token(&CredsdClient::new(socket.to_path_buf()), environment)?;
-        if let Some(expires_at) = &token.expires_at {
-            self.warn_at_open(&format!(
-                "credsd://{environment} for {destination} reads a token that expires at \
-                 {expires_at}; the box reads it once, when the box starts, and does not refresh it \
-                 during the run",
-                destination = route.destination_display(),
-            ));
-        }
-        Ok(token.token)
+        let token = credsd_access_token(&CredsdClient::new(socket.to_path_buf()), credential)?;
+        Ok((token.token, token.expires_at))
     }
 
     /// The tenant this vault is bound to. Read by the acquisition audit, which is what makes a record
@@ -563,13 +664,33 @@ impl Vault {
         CAPTURED_WARNINGS.with(|warnings| warnings.borrow_mut().push(line));
     }
 
-    /// What must be edited on `req` before it goes upstream, or `None` when this vault governs no
-    /// credential for its destination.
+    /// Return request edits, refusing rotating credentials that require [`Self::attach_with_redactor`].
     pub fn attach_for(&self, req: Outbound<'_>) -> Result<Option<Attachment>> {
+        Ok(self.attach(req, false)?.map(|(attachment, _)| attachment))
+    }
+
+    /// Return edits with a scrubber for the attached token or a matching fixed secret.
+    pub fn attach_with_redactor(
+        &self,
+        req: Outbound<'_>,
+    ) -> Result<Option<(Attachment, Option<ResponseRedactor>)>> {
+        let Some((attachment, redactor)) = self.attach(req, true)? else {
+            return Ok(None);
+        };
+        // Signing and stripping can take precedence over a fixed secret that still needs scrubbing.
+        let redactor = redactor.or_else(|| self.response_redactor(req.destination));
+        Ok(Some((attachment, redactor)))
+    }
+
+    fn attach(
+        &self,
+        req: Outbound<'_>,
+        paired: bool,
+    ) -> Result<Option<(Attachment, Option<ResponseRedactor>)>> {
         // A signed AWS binding first: it is signed in-boundary and never phantom-swapped, because
         // nothing was minted to match.
         if let Some((config, scope)) = Self::first_match(&self.signed_aws, &req.destination) {
-            return self.sign_aws(config, scope.as_ref(), &req).map(Some);
+            return Ok(Some((self.sign_aws(config, scope.as_ref(), &req)?, None)));
         }
         // A re-route composes two edits on one destination (one credential authority, so one control):
         // a strip-phantom binding removes the workload's placeholder, and a box-owned binding attaches
@@ -582,41 +703,41 @@ impl Vault {
             if let Some(binding) = strip {
                 crate::legs::strip_phantom(binding, &mut attachment)?;
             }
-            if let Some(binding) = box_owned {
-                crate::legs::attach_box_owned(binding, &mut attachment);
-            }
-            return Ok(Some(attachment));
+            let redactor = match box_owned {
+                Some(binding) => {
+                    binding
+                        .secret
+                        .attach(self, &binding.inject, &mut attachment, paired)?
+                }
+                None => None,
+            };
+            return Ok(Some((attachment, redactor)));
         }
         match self.resolve_opaque(&req.destination)? {
-            Some(binding) => self.swap_phantom(binding, &req).map(Some),
+            Some(binding) => self.swap_phantom(binding, &req, paired).map(Some),
             None => Ok(None),
         }
     }
 
-    /// Scan `res` for an injected secret and return the redactions needed, or `None` when nothing is
-    /// bound for its destination or nothing leaked.
+    /// Scan for the fixed secret bound to this destination, if any.
     pub fn redact_leaks(&self, res: Inbound<'_>) -> Option<Redactions> {
-        // A box-owned credential is really attached, so an echo of it is scrubbed like any other.
-        if let Some(binding) = Self::first_match(&self.box_owned, &res.destination) {
-            return Redactions::scan(&res, binding.secret_value());
-        }
-        // An ambiguous binding is not a fault on the response leg: there is nothing to attach, so the
-        // conservative move is to scan nothing rather than fail a response already received.
-        let binding = self.resolve_opaque(&res.destination).ok()??;
-        Redactions::scan(&res, binding.secret_value())
+        Redactions::scan(&res, self.response_secret(&res.destination)?)
     }
 
-    /// Create an owned response scrubber, or `None` when no box-owned or unique opaque binding
-    /// matches the destination.
+    /// Create a scrubber for a fixed secret, or use [`Self::attach_with_redactor`] for a rotating token.
     pub fn response_redactor(&self, destination: Destination<'_>) -> Option<ResponseRedactor> {
-        // A box-owned credential (a re-route's backend token) is really attached, so an echo of it in
-        // a streamed response is scrubbed like any opaque secret. Match it first, as `redact_leaks`
-        // does, or a backend that echoes `Authorization` returns the backend token to the workload.
-        if let Some(binding) = Self::first_match(&self.box_owned, &destination) {
-            return Some(ResponseRedactor::new(binding.secret_value()));
+        Some(ResponseRedactor::new(self.response_secret(&destination)?))
+    }
+
+    fn response_secret(&self, destination: &Destination<'_>) -> Option<&Secret> {
+        let binding = match Self::first_match(&self.box_owned, destination) {
+            Some(owner) => &owner.secret,
+            None => &self.resolve_opaque(destination).ok()??.secret,
+        };
+        match binding {
+            BoundSecret::Fixed(secret) => Some(secret),
+            BoundSecret::Rotating(_) => None,
         }
-        let binding = self.resolve_opaque(&destination).ok()??;
-        Some(ResponseRedactor::new(binding.secret_value()))
     }
 
     /// Resolve the opaque binding for `dest`, failing closed on ambiguity.
@@ -1240,19 +1361,34 @@ mod tests {
 
     // --- credsd token routes -------------------------------------------------
 
-    /// A fake credsd that answers one connection with `response`, at a socket unique to the test.
     fn credsd_answering_once(name: &str, response: String) -> PathBuf {
+        credsd_answering(name, [response])
+    }
+
+    fn credsd_answering<const N: usize>(name: &str, responses: [String; N]) -> PathBuf {
+        credsd_answering_with(name, responses, |_| {})
+    }
+
+    /// A fake daemon returning successive acquisitions at a socket unique to this test.
+    fn credsd_answering_with<const N: usize>(
+        name: &str,
+        responses: [String; N],
+        mut before_reply: impl FnMut(usize) + Send + 'static,
+    ) -> PathBuf {
         use std::io::{BufRead, Write};
         let path =
             std::env::temp_dir().join(format!("credsd-vault-{name}-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind the socket");
         std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept one connection");
-            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
-            let mut request = Vec::new();
-            let _ = reader.read_until(b'\n', &mut request);
-            let _ = stream.write_all(response.as_bytes());
+            for (index, response) in responses.into_iter().enumerate() {
+                let (mut stream, _) = listener.accept().expect("accept one connection");
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut request = Vec::new();
+                let _ = reader.read_until(b'\n', &mut request);
+                before_reply(index);
+                stream.write_all(response.as_bytes()).unwrap();
+            }
         });
         path
     }
@@ -1273,43 +1409,282 @@ mod tests {
         )
     }
 
-    /// An opaque `credsd://` route reads its token at open, with one audit record, and a token that
-    /// names an expiry warns that the box does not refresh it.
+    fn token_request(headers: &[(String, String)]) -> Outbound<'_> {
+        Outbound {
+            destination: dest("first.example.com", 443, "/"),
+            method: "GET",
+            url: "https://first.example.com/",
+            query: "",
+            headers,
+            body: &[],
+        }
+    }
+
     #[test]
-    fn a_credsd_token_route_reads_at_open_and_warns_on_an_expiry() {
-        drain_captured_warnings();
-        let socket = credsd_answering_once("expiring", token_reply("\"2027-01-01T00:00:00Z\""));
+    fn stripping_preserves_the_response_check_for_an_overlapping_fixed_secret() {
+        let host = "first.example.com";
+        let vault = Vault::open(
+            VaultConfig::new(backend_with(Box::new(FixedSource("fixed-token"))), "t")
+                .route(opaque_route(host))
+                .route(RouteSpec::strip_phantom(
+                    DestinationPattern::parse(host).unwrap(),
+                    header_mode(),
+                )),
+        )
+        .unwrap()
+        .into_vault();
+        let (attachment, redactor) = vault
+            .attach_with_redactor(token_request(&[]))
+            .unwrap()
+            .unwrap();
+        assert!(attachment.set_headers().next().is_none());
+        assert_eq!(
+            redactor.unwrap().redact_header("fixed-token").as_deref(),
+            Some("[REDACTED]")
+        );
+    }
+
+    #[test]
+    fn refresh_window_scales_with_lifetime_and_does_not_extend_expiry() {
+        let at = |seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
+        let expiry = "1970-01-01T01:00:00Z";
+        assert_eq!(refresh_at("name", expiry, at(0)).unwrap(), at(3540));
+        // A daemon may still return the same credential in the early refresh window.
+        assert_eq!(refresh_at("name", expiry, at(3540)).unwrap(), at(3588));
+        assert!(refresh_at("name", expiry, at(3600)).is_err());
+        assert!(refresh_at("name", expiry, at(3601)).is_err());
+        assert_eq!(
+            refresh_at("name", "1970-01-01T01:00:00.500+01:00", at(0)).unwrap(),
+            at(0) + Duration::from_millis(400)
+        );
+    }
+
+    #[test]
+    fn credsd_refresh_is_shared_audited_and_pins_each_response() {
+        TOKEN_CLOCK.set(Some(SystemTime::UNIX_EPOCH));
+        let first = token_reply(r#""1970-01-01T00:01:40Z""#);
+        let second =
+            token_reply(r#""2099-01-01T00:00:00Z""#).replace("ghp_vault_example", "second-token");
+        let socket = credsd_answering(
+            "rotate",
+            [
+                first,
+                token_reply("null").replace("Bearer", "sensitive-token-type"),
+                token_reply(r#""invalid-sensitive-expiry""#),
+                token_reply("null"),
+                token_reply(r#""1970-01-01T00:00:00Z""#),
+                second,
+            ],
+        );
         let recorder = Recorder::new();
         let opened = Vault::open_with_emitter(
             VaultConfig::new(Backend::local(), "t")
                 .credsd_socket(socket.clone())
-                .route(credsd_token_route("expiring.example.com"))
-                .require_every_route(),
+                .route(credsd_token_route("first.example.com"))
+                .route(RouteSpec::box_owned(
+                    DestinationPattern::parse("second.example.com").unwrap(),
+                    Locator::parse_uri("credsd://github").unwrap(),
+                    InjectMode::header("Bearer {}", None).unwrap(),
+                )),
             Box::new(recorder.clone()),
         )
-        .expect("the token route opens");
-        assert_eq!(opened.phantoms().len(), 1, "a token route mints a phantom");
-
-        let records = recorder.records();
-        assert_eq!(records.len(), 1, "one read, one record");
-        assert!(records[0].ok);
-        assert_eq!(records[0].source, "credsd");
+        .unwrap();
+        let phantom = opened.phantoms()[0].token().to_owned();
+        let vault = opened.into_vault();
+        let headers = [("authorization".into(), format!("Bearer {phantom}"))];
+        let request = token_request(&headers);
+        let (original, redactor) = vault.attach_with_redactor(request).unwrap().unwrap();
         assert_eq!(
-            records[0].credential_ref, "credsd://github",
-            "the record names the environment, as a signed credsd route's does"
+            original.set_headers().next().unwrap().1.as_str(),
+            "Bearer ghp_vault_example"
+        );
+        TOKEN_CLOCK.set(Some(SystemTime::UNIX_EPOCH + Duration::from_secs(80)));
+        assert!(
+            vault
+                .attach_for(request)
+                .unwrap_err()
+                .to_string()
+                .contains("paired")
+        );
+        assert!(vault.response_redactor(request.destination).is_none());
+
+        // A missing placeholder cannot provoke an acquisition.
+        assert!(
+            vault
+                .attach_with_redactor(Outbound {
+                    headers: &[],
+                    ..request
+                })
+                .is_err()
+        );
+        assert_eq!(recorder.records().len(), 1);
+        for reason in [
+            "credsd refresh failed",
+            "invalid expires_at",
+            "no expires_at",
+            "expired token",
+        ] {
+            let refusal = vault.attach_with_redactor(request).unwrap_err().to_string();
+            assert!(refusal.contains(reason), "{refusal}");
+            assert!(!refusal.contains("ghp_vault_example"));
+            assert!(!refusal.contains("sensitive"));
+        }
+
+        TOKEN_CLOCK.set(None);
+        let start = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                let req = if index % 2 == 0 {
+                    request
+                } else {
+                    Outbound {
+                        destination: dest("second.example.com", 443, "/"),
+                        url: "https://second.example.com/",
+                        headers: &[],
+                        ..request
+                    }
+                };
+                let (vault, start) = (&vault, &start);
+                scope.spawn(move || {
+                    start.wait();
+                    let (next, scrubber) = vault.attach_with_redactor(req).unwrap().unwrap();
+                    assert_eq!(
+                        next.set_headers().next().unwrap().1.as_str(),
+                        "Bearer second-token"
+                    );
+                    assert_eq!(
+                        scrubber.unwrap().redact_header("second-token").as_deref(),
+                        Some("[REDACTED]")
+                    );
+                });
+            }
+        });
+        let records = recorder.records();
+        assert_eq!(
+            records.iter().map(|r| r.ok).collect::<Vec<_>>(),
+            [true, false, false, false, false, true]
+        );
+        assert!(
+            records
+                .iter()
+                .all(|r| r.source == "credsd" && r.credential_ref == "credsd://github")
+        );
+        assert_eq!(records[0].request_id, RequestId::new(LOAD_CORRELATION));
+        assert!(
+            records[1..]
+                .iter()
+                .all(|r| r.request_id == RequestId::new("credential-store-refresh"))
+        );
+        // Rotation cannot affect a response still in flight.
+        let mut redactor = redactor.unwrap();
+        let mut body = redactor.push(b"ghp_vault");
+        body.extend(redactor.push(b"_example"));
+        body.extend(redactor.finish());
+        assert_eq!(body, b"[REDACTED]");
+        std::fs::remove_file(&socket).unwrap();
+    }
+
+    #[test]
+    fn early_credsd_refresh_failure_refuses_an_overtaken_waiter() {
+        use std::sync::mpsc::channel;
+
+        struct Restore(PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                TOKEN_CLOCK.set(None);
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
+        let timeout = Duration::from_secs(5);
+        let (refresh_started, refresh_seen) = channel();
+        let (reply_to_refresh, await_reply) = channel();
+        let socket = credsd_answering_with(
+            "refresh-overlap",
+            [
+                token_reply(r#""1970-01-01T01:00:00Z""#),
+                token_reply("null").replace("Bearer", "unsupported"),
+                token_reply(r#""1970-01-01T02:00:00Z""#)
+                    .replace("ghp_vault_example", "replacement-token"),
+            ],
+            move |index| {
+                if index == 1 {
+                    refresh_started.send(()).unwrap();
+                    await_reply
+                        .recv_timeout(timeout)
+                        .expect("release failed reply");
+                }
+            },
+        );
+        let _restore = Restore(socket.clone());
+        let start = SystemTime::UNIX_EPOCH;
+        TOKEN_CLOCK.set(Some(start));
+        let recorder = Recorder::new();
+        let opened = Vault::open_with_emitter(
+            VaultConfig::new(Backend::local(), "t")
+                .credsd_socket(socket)
+                .route(credsd_token_route("first.example.com")),
+            Box::new(recorder.clone()),
+        )
+        .unwrap();
+        let headers = [(
+            "authorization".into(),
+            format!("Bearer {}", opened.phantoms()[0].token()),
+        )];
+        let vault = opened.into_vault();
+        let vault = &vault;
+        let request = token_request(&headers);
+        let early_refresh = start + Duration::from_secs(3540);
+        TOKEN_CLOCK.set(Some(early_refresh - Duration::from_secs(1)));
+        let (cached, _) = vault.attach_with_redactor(request).unwrap().unwrap();
+        assert_eq!(
+            cached.set_headers().next().unwrap().1.as_str(),
+            "Bearer ghp_vault_example"
         );
 
-        let warnings = drain_captured_warnings();
-        assert!(
-            warnings
+        std::thread::scope(|scope| {
+            let failed = scope.spawn(|| {
+                TOKEN_CLOCK.set(Some(early_refresh));
+                vault.attach_with_redactor(request)
+            });
+            refresh_seen
+                .recv_timeout(timeout)
+                .expect("refresh reaches daemon");
+
+            let (waiter_observed_epoch, waiter_seen) = channel();
+            let (release_waiter, await_release) = channel();
+            let waiter = scope.spawn(move || {
+                TOKEN_CLOCK.set(Some(early_refresh));
+                BEFORE_TOKEN_LOCK.set(Some(Box::new(move || {
+                    waiter_observed_epoch.send(()).unwrap();
+                    await_release.recv_timeout(timeout).expect("release waiter");
+                })));
+                vault.attach_with_redactor(request)
+            });
+            waiter_seen
+                .recv_timeout(timeout)
+                .expect("waiter observes epoch");
+            reply_to_refresh.send(()).unwrap();
+            assert!(failed.join().unwrap().is_err());
+
+            // A request arriving after the failure retries with a minute left on the original token.
+            TOKEN_CLOCK.set(Some(early_refresh));
+            let (replacement, _) = vault.attach_with_redactor(request).unwrap().unwrap();
+            assert_eq!(
+                replacement.set_headers().next().unwrap().1.as_str(),
+                "Bearer replacement-token"
+            );
+            release_waiter.send(()).unwrap();
+            assert!(waiter.join().unwrap().is_err());
+        });
+        assert_eq!(
+            recorder
+                .records()
                 .iter()
-                .any(|warning| warning.contains("credsd://github")
-                    && warning.contains("expiring.example.com")
-                    && warning.contains("2027-01-01T00:00:00Z")
-                    && warning.contains("does not refresh")),
-            "{warnings:?}"
+                .map(|record| record.ok)
+                .collect::<Vec<_>>(),
+            [true, false, true]
         );
-        let _ = std::fs::remove_file(&socket);
     }
 
     /// A token with no expiry opens with no warning.

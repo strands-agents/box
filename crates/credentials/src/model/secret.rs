@@ -6,6 +6,7 @@ use zeroize::Zeroizing;
 use crate::{CredentialError, Result, redact_credential_ref};
 
 /// One resolved opaque secret, wiped on drop and redacted in `Debug`.
+#[derive(Clone)]
 pub(crate) struct Secret(Zeroizing<String>);
 
 impl Secret {

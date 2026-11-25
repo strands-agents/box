@@ -140,11 +140,14 @@ unrepresentable](./decisions.md#an-unusable-secret-value-is-unrepresentable).
 A `credsd://NAME` route reads one credsd credential, by name, over the daemon's Unix socket,
 and `secret.type` says what kind it is. The type is fixed when the configuration loads, before Box contacts
 the daemon, because the two kinds open different routes. An `aws` route is a signed route, and it
-fetches session credentials on each request, as `aws://` does. A `token` route is an opaque route,
-like `env://`: Box reads the access token once, when the vault opens, and holds it for the run, as
-it holds the secret of a declared source. Box does not refresh the token, so a token that expires
-stops working until the next run, and Box warns at startup when the token names an expiry. Every
-route that names one token shares one read. Before either read, the credential preflight checks
+fetches session credentials on each request, as `aws://` does. A `token` route reads the access token when
+the vault opens. If the daemon supplies an expiry, the first request near or past that deadline
+asks it for the current token. The daemon owns issuance. Routes that name the same token share
+the result and keep the same placeholder. A failed refresh refuses the request. Each response is
+checked against the token used for its request, even if another request has since refreshed it.
+Without an expiry, Box holds the token for the run.
+
+Before the workload starts, the credential preflight checks
 that credsd lists each named credential with the kind its routes name. A route with no
 `secret.type` is an `aws` route, and Box warns that it should name the type.
 

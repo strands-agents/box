@@ -437,7 +437,7 @@ impl std::fmt::Debug for CredentialResult {
     }
 }
 
-/// A credsd access token, read once for an opaque route.
+/// A credsd access token and the expiry of this acquisition.
 pub(crate) struct AccessToken {
     /// The token, validated as an attachable secret.
     pub(crate) token: Secret,
