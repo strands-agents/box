@@ -635,7 +635,7 @@ impl McpLeafLauncher {
         &self,
         boundary: Boundary,
     ) -> Result<crate::run::contain::supervise::StreamingLeaf, BoxError> {
-        eprintln!("{}", boundary.disclosure());
+        boundary.disclose();
         crate::run::contain::supervise::LeafBox::spawn_streaming(
             boundary,
             &self.layout,
@@ -981,13 +981,15 @@ impl HostedBox {
         )
         .map_err(BoxError::from)?;
         if let Some(roots) = proxy.upstream_host_roots() {
-            eprintln!(
-                "strands-box: the egress gateway also trusts {} root certificates from this \
+            ::diagnostics::diag!(
+                B0204,
+                "the egress gateway also trusts {} root certificates from this \
                  host's trust store for upstream servers ({} ignored)",
-                roots.added, roots.ignored
+                roots.added,
+                roots.ignored
             );
             for error in &roots.errors {
-                eprintln!("strands-box: warning: reading the host's trust store: {error}");
+                ::diagnostics::diag!(B0205, "reading the host's trust store: {error}");
             }
         }
         let proxy_port = proxy
@@ -1201,10 +1203,14 @@ impl HostedBox {
         drop(self._proxy.take());
         #[cfg(feature = "experimental-idle-flush")]
         let history = match self._history_flusher.take() {
-            Some(flusher) if native.is_ok() && !std::thread::panicking() => {
-                flusher.shutdown().map(|_| ()).map_err(BoxError::from)
-            }
-            Some(flusher) => flusher.stop().map(|_| ()).map_err(BoxError::from),
+            Some(flusher) if native.is_ok() && !std::thread::panicking() => flusher
+                .shutdown()
+                .map(|_| ())
+                .map_err(|error| crate::error::Internal::HistoryFlush(error).into()),
+            Some(flusher) => flusher
+                .stop()
+                .map(|_| ())
+                .map_err(|error| crate::error::Internal::HistoryFlush(error).into()),
             None => Ok(()),
         };
         #[cfg(not(feature = "experimental-idle-flush"))]
@@ -1314,7 +1320,7 @@ fn program_finds_command(
 impl Drop for HostedBox {
     fn drop(&mut self) {
         if let Err(error) = self.shutdown() {
-            eprintln!("strands-box: shutdown failed: {error}");
+            ::diagnostics::diag!(B1001, "shutdown failed: {error}");
         }
     }
 }
@@ -1327,8 +1333,9 @@ pub(crate) fn with_shutdown<T>(
     match (outcome, shutdown) {
         (result, Ok(())) => result,
         (Ok(_), Err(error)) => Err(error),
-        (Err(outcome), Err(shutdown)) => Err(crate::error::SuperviseError::Control {
-            reason: format!("{outcome}; shutdown also failed: {shutdown}"),
+        (Err(outcome), Err(shutdown)) => Err(crate::error::SuperviseError::AlsoShutdown {
+            outcome: Box::new(outcome),
+            shutdown: Box::new(shutdown),
         }
         .into()),
     }
@@ -1339,10 +1346,10 @@ async fn history_failed(snapshot: impl Fn() -> policy::HistoryFlushSnapshot) -> 
     loop {
         let state = snapshot();
         if let Some(error) = state.last_error {
-            return policy::PolicyError::Evaluation(format!(
+            return crate::error::Internal::HistoryFlush(policy::PolicyError::Evaluation(format!(
                 "history flush failed {} time(s): {error}",
                 state.failures
-            ))
+            )))
             .into();
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

@@ -92,7 +92,7 @@ impl HistoryFlusher {
 impl Drop for HistoryFlusher {
     fn drop(&mut self) {
         if let Err(error) = self.finish(!thread::panicking()) {
-            eprintln!("policy: history flush shutdown failed: {error}");
+            diagnostics::diag!(P0302, "history flush shutdown failed: {error}");
         }
     }
 }
@@ -179,7 +179,7 @@ fn perform(flush: &Arc<Flush>, stats: &Mutex<HistoryFlushSnapshot>, final_flush:
 
 fn record(stats: &Mutex<HistoryFlushSnapshot>, elapsed: Duration, outcome: Result<(), String>) {
     let Ok(mut stats) = stats.lock() else {
-        eprintln!("policy: history flush counters lock poisoned");
+        diagnostics::diag!(P0302, "history flush counters lock poisoned");
         return;
     };
     stats.attempts = stats.attempts.saturating_add(1);
@@ -190,7 +190,7 @@ fn record(stats: &Mutex<HistoryFlushSnapshot>, elapsed: Duration, outcome: Resul
         Ok(()) => stats.successes = stats.successes.saturating_add(1),
         Err(error) => {
             stats.failures = stats.failures.saturating_add(1);
-            eprintln!("policy: periodic history flush failed: {error}");
+            diagnostics::diag!(P0302, "periodic history flush failed: {error}");
             stats.last_error = Some(error);
         }
     }

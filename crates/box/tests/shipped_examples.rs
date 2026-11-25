@@ -6,7 +6,7 @@
 //! operator is most likely to copy failed to load:
 //!
 //! ```text
-//! strands-box: error: cannot parse config file …/strands-box.toml:
+//! strands-box: error[B0101]: cannot parse config file …/strands-box.toml:
 //! TOML parse error at line 49, column 1
 //!    |
 //! 49 | endpoint   = "bedrock-mantle.us-east-2.api.aws"

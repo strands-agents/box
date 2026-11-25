@@ -216,7 +216,7 @@ root, Kiro CLI waits about 15 seconds each time it starts. See
 ### Kiro CLI's runtime folder is missing or out of date
 
 ```text
-strands-box: error: `[agent]` filesystem entry "/Users/you/.kiro-runtime" is refused: /Users/you/.kiro-runtime is not there
+strands-box: error[B0102]: `[agent]` filesystem entry "/Users/you/.kiro-runtime" is refused: /Users/you/.kiro-runtime is not there
 ```
 
 ```text

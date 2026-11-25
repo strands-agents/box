@@ -29,6 +29,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 signal-hook = "0.4"
 strands-box = { path = "../../box" }
+diagnostics = { package = "strands-box-diagnostics", path = "../../diagnostics" }
 strands-box-cli-profile = { path = "../profile" }
 strands-box-cli-telemetry = { path = "../telemetry" }
 tempfile = "3"

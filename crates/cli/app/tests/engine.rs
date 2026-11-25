@@ -888,7 +888,10 @@ fn a_profile_that_turns_file_attributes_off_cannot_set_file_times_on_macos() {
     if cfg!(target_os = "macos") {
         let text = stderr(&output);
         assert!(!output.status.success(), "{text}");
-        assert!(text.contains("strands-box: starting workload"), "{text}");
+        assert!(
+            text.contains("strands-box: note[B0302]: starting workload"),
+            "{text}"
+        );
         assert!(
             text.contains("stamped.txt: Operation not permitted"),
             "{text}"
@@ -3745,7 +3748,7 @@ fn a_run_prints_the_box_id_that_brings_it_back() {
         "Box Core stores the box ID that box prints"
     );
     assert!(
-        stderr(&output).contains(&format!("strands-box: box {id} created")),
+        stderr(&output).contains(&format!("strands-box: note[B0301]: box {id} created")),
         "{}",
         stderr(&output)
     );
@@ -3768,10 +3771,10 @@ fn a_redirected_run_prints_the_startup_disclosure_on_stderr() {
     let text = stderr(&output);
     let workload = text.find("WORKLOAD_RAN").expect("the workload ran");
     for heading in [
-        "strands-box: [agent] runs ",
-        "strands-box: [agent] runtime minimum, added by Core:",
+        "strands-box: note[B0201]: [agent] runs ",
+        "strands-box: note[B0201]: [agent] runtime minimum, added by Core:",
         "\n  exec        /bin/bash",
-        "strands-box: [agent] HOME=",
+        "strands-box: note[B0201]: [agent] HOME=",
     ] {
         let at = text
             .find(heading)
@@ -3823,7 +3826,7 @@ fn a_terminal_run_ends_with_the_exit_block_and_logs_the_disclosure() {
     assert!(!text.contains("runtime minimum, added by Core"), "{text}");
     let log = std::fs::read_to_string(run.join("box.log")).expect("the run log");
     assert!(
-        log.contains("strands-box: [agent] runtime minimum, added by Core:"),
+        log.contains("strands-box: note[B0201]: [agent] runtime minimum, added by Core:"),
         "{log}"
     );
 }
@@ -4083,7 +4086,7 @@ fn a_startup_failure_at_a_terminal_shows_the_error_and_leaves_no_run_folder() {
     let text = String::from_utf8_lossy(&text).replace('\r', "");
     assert_eq!(result.status.code(), Some(1));
     assert!(
-        text.contains("box: recent log output\n  strands-box: error: ")
+        text.contains("box: recent log output\n  strands-box: error[")
             && text.contains("its broker socket path exceeds the platform limit"),
         "{text}"
     );

@@ -4870,6 +4870,7 @@ dependencies = [
  "sha2 0.11.0",
  "strands-box-containment",
  "strands-box-credentials",
+ "strands-box-diagnostics",
  "strands-box-egress-gateway",
  "strands-box-ingress",
  "strands-box-policy",
@@ -4905,6 +4906,7 @@ dependencies = [
  "strands-box",
  "strands-box-cli-profile",
  "strands-box-cli-telemetry",
+ "strands-box-diagnostics",
  "sysinfo",
  "tempfile",
  "toml",
@@ -4969,6 +4971,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "strands-box-credentials",
+ "strands-box-diagnostics",
  "strands-box-egress-gateway",
  "strands-box-ingress",
  "tempfile",
@@ -4990,10 +4993,15 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "strands-box-diagnostics",
  "thiserror 2.0.21",
  "tokio",
  "zeroize",
 ]
+
+[[package]]
+name = "strands-box-diagnostics"
+version = "0.1.0"
 
 [[package]]
 name = "strands-box-egress-gateway"
@@ -5012,6 +5020,7 @@ dependencies = [
  "serde",
  "serde_json",
  "strands-box-credentials",
+ "strands-box-diagnostics",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
@@ -5024,6 +5033,7 @@ name = "strands-box-ingress"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "strands-box-diagnostics",
  "thiserror 2.0.21",
  "tokio",
 ]
@@ -5046,6 +5056,7 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
+ "strands-box-diagnostics",
  "strands-box-egress-gateway",
  "strands-box-shell",
  "strands-shell",
@@ -5062,6 +5073,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "libc",
+ "strands-box-diagnostics",
  "strands-shell",
  "tempfile",
  "tokio",
@@ -5083,6 +5095,7 @@ dependencies = [
  "serde",
  "serde_json",
  "strands-box-credentials",
+ "strands-box-diagnostics",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

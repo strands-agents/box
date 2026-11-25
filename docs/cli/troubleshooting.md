@@ -81,7 +81,7 @@ the box checks that no name of the tool is in your project. On a Mac, and on Lin
 btrfs, it reads every folder to do that, and if it can't finish, the run stops:
 
 ```text
-strands-box: error: `[agent]` filesystem entry "<project>" is refused: this write grant cannot be inspected for configured command hard links: directory inspection failed: Permission denied (os error 13).
+strands-box: error[B0102]: `[agent]` filesystem entry "<project>" is refused: this write grant cannot be inspected for configured command hard links: directory inspection failed: Permission denied (os error 13).
 ```
 
 That happens when a folder in your project is one you can't read, such as a database folder
@@ -169,7 +169,7 @@ profile name does not help.
 ### A run in an earlier box stops on a clock error
 
 ```text
-strands-box: error: policy staging failed: policy staging history failure: durable timestamp 1795305600000000000 is 3600000000000 ns ahead of the current clock 1795302000000000000, exceeding the maximum allowed future skew of 300000000000 ns; refusing the operation rather than issuing future-dated timestamps
+strands-box: error[B0103]: policy staging failed: policy staging history failure: durable timestamp 1795305600000000000 is 3600000000000 ns ahead of the current clock 1795302000000000000, exceeding the maximum allowed future skew of 300000000000 ns; refusing the operation rather than issuing future-dated timestamps
 ```
 
 The box's history is stamped more than five minutes ahead of the clock. This happens after the
@@ -391,7 +391,7 @@ box profile create claude-api --with claude,anthropic --option claude.host=anthr
 ### The credential variable isn't set
 
 ```text
-strands-box: error: credential setup failed: credential variable AWS_BEARER_TOKEN_BEDROCK is not set, or holds only whitespace
+strands-box: error[B0104]: credential setup failed: credential variable AWS_BEARER_TOKEN_BEDROCK is not set, or holds only whitespace
 ```
 
 The box reads the model key from the variable the message names, in the shell you ran `box run`

@@ -85,7 +85,7 @@ wl_checks() {
   wl_assert_no_denial resume-no-config-denial "project/.codex"
   wl_assert_tree_unchanged home-config-untouched "$WL_ORACLE_DIR/home-config.before" "$WL_HOME/.codex"
   wl_assert_same_box "$run/box-state.1.json" "$run/box-state.2.json"
-  wl_assert_no_line box-not-recreated "$run/stderr.2.log" 'strands-box: box .* (created|updated)'
+  wl_assert_no_line box-not-recreated "$run/stderr.2.log" 'strands-box: note\[B0301\]: box .* (created|updated)'
   wl_assert_disclosure_stable disclosure-stable "$run/stderr.1.log" "$run/stderr.2.log"
   # Run one's spend is the directories it left behind.
   wl_assert_budget_carried budget "$WL_RESUME_RULE" fs:write mkdir "$WL_RESUME_BUDGET" \

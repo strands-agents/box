@@ -2815,13 +2815,13 @@ zsh -lc 'touch "{leaf_write}"'
         "the selected touch leaf must write the credential cache: {output:?}"
     );
     let read_announcement = errors
-        .find("strands-box: [tool.wc]: exposes ~/.aws (read)")
+        .find("strands-box: note[B0202]: [tool.wc]: exposes ~/.aws (read)")
         .expect("the read announcement is present");
     let write_announcement = errors
-        .find("strands-box: [tool.touch]: exposes ~/.aws/sso/cache (write)")
+        .find("strands-box: note[B0202]: [tool.touch]: exposes ~/.aws/sso/cache (write)")
         .expect("the write announcement is present");
     let started_at = errors
-        .find("strands-box: starting workload")
+        .find("strands-box: note[B0302]: starting workload")
         .expect("the workload start line is present");
     assert!(
         read_announcement < started_at && write_announcement < started_at,

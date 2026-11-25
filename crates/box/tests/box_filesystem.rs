@@ -402,12 +402,12 @@ fn the_startup_disclosure_names_every_grant_and_the_home_and_path() {
     assert_ran(&output);
     let reported = raw_stderr(&output);
     for needle in [
-        "strands-box: [agent] runs",
+        "strands-box: note[B0201]: [agent] runs",
         "no policy decision over these paths",
         &format!("read        {}", box_.box_home().display()),
         &format!("write       {}", box_.box_home().display()),
         &format!("read        {}", listed.display()),
-        "strands-box: [agent] runtime minimum, added by Core:",
+        "strands-box: note[B0201]: [agent] runtime minimum, added by Core:",
         "/dev/null",
         &format!("HOME={}", box_.box_home().display()),
         &format!("PATH={}:", box_.root().join("bin").display()),

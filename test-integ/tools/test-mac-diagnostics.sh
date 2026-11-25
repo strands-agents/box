@@ -39,7 +39,7 @@ mkdir -p "$W/results" "$W/bin" "$W/realhome/Library/Logs/DiagnosticReports" "$W/
 "$PY" - "$W/results/verdict.json" <<'PYEOF'
 import json, sys
 note = ("F1 needs the box at c7d0f41d or later: ...; out=[DET_ENTERED\n"
-        "strands-box: [agent] HOME=/var/tmp/det-home PATH=/private/var/tmp/det-home/.det-harness-boxes/det-box-0RE7me/state/bin:/var/tmp/det-home/box/target/release:/usr/bin\n"
+        "strands-box: note[B0201]: [agent] HOME=/var/tmp/det-home PATH=/private/var/tmp/det-home/.det-harness-boxes/det-box-0RE7me/state/bin:/var/tmp/det-home/box/target/release:/usr/bin\n"
         "/bin/bash: line 1:  2298 Killed: 9               zsh -c '/private/var/tmp/det-home/.det-harness-boxes/det-box-0RE7me/workspace/out/free-hello from-the-agent'\n]")
 json.dump({"platform": "macos", "box_commit": "4c915da4", "verdict": "RED",
            "counts": {"total": 28, "pass": 24, "fail": 1, "error": 0, "skip": 3},

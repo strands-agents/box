@@ -621,10 +621,7 @@ pub(super) fn io_exception(error: &io::Error) -> MontyException {
 /// Record a permit's outcome, warning to stderr if the durable write was not confirmed.
 fn record(permit: ScriptPermit<'_>, result: FsResult) {
     if permit.record(result).is_err() {
-        let _ = writeln!(
-            io::stderr().lock(),
-            "strands-box: warning: policy outcome recording was not confirmed"
-        );
+        ::diagnostics::diag!(P0301, "policy outcome recording was not confirmed");
     }
 }
 
