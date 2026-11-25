@@ -2045,9 +2045,15 @@ fn ask_input(
         }
     }
     let labels: Vec<&str> = allowed.iter().map(String::as_str).collect();
+    let suggestions: &[&str] = if name == "bedrock.region" && allowed.is_empty() {
+        crate::prompt::BEDROCK_REGIONS
+    } else {
+        &[]
+    };
     if terminal.choice_controls
         && allowed.is_empty()
         && let Some(default) = default
+        && !suggestions.contains(&default)
     {
         terminal.detail(&format!("  Default: {}\n\n", label(default)));
     }
@@ -2060,6 +2066,10 @@ fn ask_input(
             } else {
                 crate::prompt::choose(terminal, &labels, selected)?
             }
+        } else if terminal.choice_controls && !suggestions.is_empty() {
+            let selected =
+                default.and_then(|default| suggestions.iter().position(|value| *value == default));
+            crate::prompt::suggest(terminal, suggestions, selected)?
         } else if terminal.choice_controls {
             crate::prompt::text(terminal)?
         } else {
