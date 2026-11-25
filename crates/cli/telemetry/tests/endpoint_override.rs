@@ -74,6 +74,9 @@ fn endpoint_override_reaches_the_local_receiver() {
             Err(error) => panic!("accept telemetry: {error}"),
         }
     };
+    // On macOS an accepted socket inherits the listener's non-blocking mode, so a read before the
+    // request arrives would fail with WouldBlock instead of waiting for the timeout.
+    stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
