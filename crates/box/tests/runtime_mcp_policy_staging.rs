@@ -856,6 +856,109 @@ fn an_absent_catalog_tool_reaches_neither_policy_observer_nor_server() {
     assert_eq!(ended, ["read"], "{tools:#?}");
 }
 
+/// A running box warns about a tool whose schema it cannot read, refuses its calls before policy,
+/// and serves the server's other tool.
+#[test]
+fn a_tool_whose_schema_does_not_generate_is_left_out_of_a_running_box() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-unreadable-tool");
+    let alpha = Server::new(
+        "alpha",
+        "alpha-mcp",
+        "read",
+        DiscoveryBehavior::UnreadableTool,
+    );
+    box_.install_server(&alpha);
+    box_.write_workspace(&mcp_call_policy_for("alpha"), &[alpha], BLOCKING_WORKLOAD);
+
+    let mut run = box_.spawn();
+    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+    let mut client = box_.open_client("alpha-mcp");
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
+    client.initialize_and_activate(json!(1), STARTUP);
+    let list = client.list_root(json!(2), STARTUP);
+    assert_eq!(
+        list.pointer("/result/tools")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(2),
+        "the list reaches the client as the server sent it: {list}"
+    );
+
+    let left_out = client.call(json!(3), "create_account", STARTUP);
+    assert_eq!(error_code(&left_out), Some(-32003), "{left_out}");
+    assert_eq!(
+        box_.call_count("alpha-mcp"),
+        0,
+        "the refused call never runs"
+    );
+    let read = client.call(json!(4), "read", STARTUP);
+    assert!(read.get("result").is_some(), "{read}");
+    assert_eq!(box_.call_count("alpha-mcp"), 1);
+
+    drop(client);
+    box_.release_workload();
+    let output = run.wait(SHUTDOWN);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|line| line.contains("is left out"))
+            .collect::<Vec<_>>(),
+        [
+            "strands-box: warning[B0403]: MCP server \"alpha\" tool \"create_account\" is left \
+             out, and its calls are refused: unexpected token `-`"
+        ],
+        "{stderr}"
+    );
+    assert!(!stderr.contains("schema generation failed"), "{stderr}");
+    assert_eq!(
+        control_detail(&records_path(&box_), "schema_installed", "alpha").as_deref(),
+        Some("1 tools, 1 left out"),
+        "the installed schema counts the accepted tools and the left-out ones"
+    );
+}
+
+/// The `strands.box.control.detail` of the first control record with `operation` and `subject`.
+fn control_detail(path: &Path, operation: &str, subject: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read control records at {}: {error}", path.display()));
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .flat_map(|request| {
+            request["resourceLogs"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .flat_map(|resource| {
+            resource["scopeLogs"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter(|scope| scope["scope"]["name"] == "strands-box.control")
+        .flat_map(|scope| scope["logRecords"].as_array().cloned().unwrap_or_default())
+        .find_map(|record| {
+            let value = |key: &str| {
+                record["attributes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|attribute| attribute["key"] == key)
+                    .and_then(|attribute| attribute["value"]["stringValue"].as_str())
+                    .map(str::to_string)
+            };
+            (value("strands.box.control.operation").as_deref() == Some(operation)
+                && value("strands.box.control.subject").as_deref() == Some(subject))
+            .then(|| value("strands.box.control.detail"))
+            .flatten()
+        })
+}
+
 #[test]
 fn a_policy_denied_list_reaches_neither_discovery_nor_the_server() {
     if !fixture::namespace_launcher_is_usable() {

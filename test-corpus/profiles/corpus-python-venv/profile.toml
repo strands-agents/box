@@ -1,0 +1,34 @@
+# The profile the venv cell runs under: no packs, with bash in place of a model agent, as in the
+# corpus profile. The runner makes the project's .venv before the box starts, from a Python 3.12
+# that uv installs, and this profile lets the agent run that venv and keeps it read-only. Nothing
+# in the box can install into the venv, so a new package means stopping the box, installing it
+# outside, and starting the box again.
+packs = []
+# A copy of the @box/scoped policy starter, which lets the box's shell run, and a permit for
+# `.venv/bin/python`.
+policies = ["policy.dw"]
+
+[agent]
+command = ["/bin/bash", "--noprofile", "--norc"]
+env.PATH = "/usr/bin:/bin"
+env.TMPDIR = "${{ workspace }}"
+
+# The venv's python links to a Python in uv's own folder, and the venv holds compiled modules, so
+# the agent runs both. A program the Shell starts under one of these entries runs with the agent's
+# lists. The agent is the only process with the project's write grant, so its deny_write keeps
+# .venv read-only in the box, and closes it to the box's Shell and Monty too. A file written into
+# site-packages, such as a .pth, would run at the next Python start.
+[agent.filesystem]
+read = ["${{ home }}/.local/share/uv/python"]
+exec = ["${{ workspace }}/.venv", "${{ home }}/.local/share/uv/python"]
+deny_write = ["${{ workspace }}/.venv"]
+
+# issues.py asks the GitHub API for pallets/flask's open issues and sends no token, so the API's
+# limit for a client with no token applies: 60 requests an hour from one address. With the bench's
+# job token, the API leaves out the repository's one open issue today.
+[egress.github]
+destinations = ["api.github.com"]
+
+# The project access that `box profile create --policy scoped` writes.
+[project]
+access = "write"

@@ -1,0 +1,160 @@
+# The profile guide's prompt tests. run_guide.py gives each cell's prompt to a coding agent that
+# runs on the host, not in a box, with a home folder made for the cell. test-corpus/README.md says
+# how to run them.
+#
+# One [[cell]] per task. Fields:
+#   id          The cell's name.
+#   profile     The profile the cell checks. Default: test.
+#   start       The profile.toml the cell starts with. Without it, the cell starts with no profile.
+#   rules       Text added to the starting policy.dw.
+#   task        What the operator asks for. Before it, the runner puts "Run box help agent and
+#               follow it to update profile <profile>." for a cell with a start profile, and "Run
+#               box help agent and follow it to create a profile." for a cell without one.
+#               {home} is the cell's home folder.
+#   shows       Text that `box profile show --full <profile>` must print after the agent finishes.
+#   absent      Text that it must not print.
+#   matches     Regular expressions that must each match somewhere in that output. Use one where
+#               plain text also matches before the agent changes anything.
+#   may_change  The files the agent may add or change, as patterns relative to the home folder. A
+#               change to any other file, or to a file that ships with box, fails the cell.
+#
+# Every start profile runs /usr/bin/true as its agent, so a cell needs no agent or model in the
+# box. The home folder holds two operator packs, `extra` and `other`, each with one route.
+
+[[cell]]
+id = "policy-demo"
+start = """
+policies = ["policy.dw"]
+
+[project]
+access = "write"
+
+[agent]
+command = ["/usr/bin/true"]
+"""
+task = """Change the test profile so:
+1. the agent can read {home}/workspace/box-demo/team-handbook, read-only;
+2. it enforces the handbook's dependency rule: `npm install <package>` is refused with the reason
+   "New dependencies need review by the team", and a plain `npm install` still works.
+Check the change with `box profile show --full test`, then list the files you changed."""
+shows = ["team-handbook"]
+# One rule, from `forbid` to its `;`, is on `shell:spawn` (the action the box decides for npm), names
+# npm, and tests the second argument or the argument count, so a plain `npm install` is not refused.
+matches = ['forbid[^;]*shell:spawn[^;]*"npm"[^;]*(arg2|arg_count)']
+may_change = [".strands/box/profiles/test/*"]
+
+[[cell]]
+id = "create-from-starter"
+profile = "work"
+task = """Create a profile named work that runs Claude Code on Amazon Bedrock in us-east-1 and \
+starts from the scoped policy."""
+shows = ["@box/claude", "@box/bedrock", "us-east-1", "docs_connect"]
+absent = ["open_connect"]
+may_change = [".strands/box/profiles/work/*"]
+
+[[cell]]
+id = "add-pack"
+start = """
+policies = ["policy.dw"]
+
+[agent]
+command = ["/usr/bin/true"]
+"""
+task = "Add my pack named extra to the test profile, and set its host to docs.rs."
+shows = ["route_extra_connect", "docs.rs"]
+may_change = [".strands/box/profiles/test/*"]
+
+[[cell]]
+id = "remove-pack"
+start = """
+packs = ["extra", "other"]
+policies = ["policy.dw"]
+
+[options]
+extra.host = "docs.rs"
+other.host = "crates.io"
+
+[agent]
+command = ["/usr/bin/true"]
+"""
+task = "Take the pack named extra out of the test profile. Keep the pack named other."
+shows = ["route_other_connect", "crates.io"]
+absent = ["route_extra_connect", "docs.rs"]
+may_change = [".strands/box/profiles/test/*"]
+
+[[cell]]
+id = "add-tool"
+start = """
+policies = ["policy.dw"]
+
+[project]
+access = "write"
+
+[agent]
+command = ["/usr/bin/true"]
+"""
+task = """Let the agent in the test profile run the program at /usr/bin/true as a tool named \
+truth. The tool reads the project and nothing else."""
+shows = ["[tool.truth]"]
+# The tool's own table holds the command, in the lines before the next table starts.
+matches = ['\[tool\.truth\]\n(?:[^\n\[][^\n]*\n)*?command = \["/usr/bin/true"']
+may_change = [".strands/box/profiles/test/*"]
+
+[[cell]]
+id = "add-mcp"
+start = """
+policies = ["policy.dw"]
+
+[agent]
+command = ["/usr/bin/true"]
+"""
+task = """Declare a local MCP server named notes in the test profile. Its program is \
+/usr/bin/true, and its one argument is serve."""
+shows = ["[mcp.notes]", "mcp_notes_call"]
+may_change = [".strands/box/profiles/test/*"]
+
+[[cell]]
+id = "change-provider"
+start = """
+packs = ["extra"]
+policies = ["policy.dw"]
+
+[options]
+extra.host = "docs.rs"
+
+[agent]
+command = ["/usr/bin/true"]
+"""
+task = """The test profile reaches its model through my pack named extra. Change it to my pack \
+named other, with the host model.example.org, and take extra out."""
+shows = ["route_other_connect", "model.example.org"]
+absent = ["route_extra_connect"]
+may_change = [".strands/box/profiles/test/*"]
+
+[[cell]]
+id = "storage-file"
+start = """
+policies = ["policy.dw"]
+
+[agent]
+command = ["/usr/bin/true"]
+"""
+task = """Copy only the theme key of {home}/settings.json into the test profile's storage, as \
+settings.json in a storage directory named config."""
+shows = ["agent/config/settings.json", "storage/test/default/agent/config", "token in agent/config/settings.json"]
+may_change = [".strands/box/profiles/test/*"]
+
+[[cell]]
+id = "fix-error"
+start = """
+policies = ["policy.dw"]
+
+[agent]
+command = ["/usr/bin/true"]
+
+[agent.filesytem]
+read = ["{home}/notes"]
+"""
+task = "box refuses the test profile. Repair it, and keep what it was meant to grant."
+shows = ["/notes"]
+may_change = [".strands/box/profiles/test/*"]

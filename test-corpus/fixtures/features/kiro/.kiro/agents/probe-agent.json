@@ -1,0 +1,10 @@
+{
+  "name": "probe-agent",
+  "description": "feature-probe-agent",
+  "prompt": "feature-probe-agent-prompt",
+  "tools": ["*"],
+  "allowedTools": ["feature-probe-allow"],
+  "hooks": {
+    "agentSpawn": [{ "command": "echo probe-hook > hook-marker.txt" }]
+  }
+}

@@ -140,11 +140,30 @@ impl Log {
         preview
     }
 
-    /// What `box` prints on exit. A run that `box` removes gets only the preview.
+    /// The code of the last coded error that the preview shows, which `box explain` explains.
+    fn explain(&self) -> Option<diagnostics::Code> {
+        self.tail
+            .lines()
+            .rev()
+            .find_map(|line| match diagnostics::parse(line) {
+                diagnostics::Line::Message(message)
+                    if message.severity == diagnostics::Severity::Error =>
+                {
+                    message.code
+                }
+                _ => None,
+            })
+    }
+
+    /// What `box` prints on exit. A run that `box` removes gets only the preview and the hint.
     pub(super) fn report(mut self, launch: &Launch, kept: bool) -> String {
         let preview = self.preview();
+        let explain = self.explain();
         if !kept {
-            return preview;
+            return match explain {
+                Some(code) => format!("{preview}box: to see what to do, run: box explain {code}\n"),
+                None => preview,
+            };
         }
         let path = launch.config.with_file_name(FILE);
         let path = match path.to_str() {
@@ -167,13 +186,16 @@ impl Log {
         };
         format!(
             "\n{preview}box: run {id} ended\n  startup disclosure \u{b7} {}\n  log      {log}\n  \
-             history  {}\n  reuse    {}\n{reminder}\n",
+             history  {}\n  reuse    {}\n{}{reminder}\n",
             match self.unshown {
                 1 => "1 more message".to_owned(),
                 count => format!("{count} more messages"),
             },
             launch.history_command(false),
             launch.reuse_command(),
+            explain
+                .map(|code| format!("  explain  box explain {code}\n"))
+                .unwrap_or_default(),
         )
     }
 }
@@ -240,6 +262,57 @@ mod tests {
         assert!(error.len() <= PREVIEW_BYTES);
     }
 
+    #[test]
+    fn the_last_coded_error_names_the_command_that_explains_it() {
+        let host = crate::FakeHost::new();
+        let profile = host.home().join("profile.toml");
+        crate::fixtures::write(
+            &profile,
+            "[profile]\nname = \"test\"\n[agent]\ncommand = [\"/usr/bin/true\"]\n",
+        );
+        let launch = host
+            .launcher()
+            .prepare(profile.to_str().unwrap(), &host.project(), None)
+            .unwrap();
+        let failed = || {
+            let mut log = Log::new(File::open("/dev/null").unwrap(), tempfile::tempfile());
+            log.push(b"strands-box: error[B0102]: first\n");
+            log.push(b"strands-box: error[B0105]: refused\npolicy: warning[P0201]: x\n");
+            log
+        };
+        assert_eq!(
+            failed().report(&launch, false),
+            "box: recent log output\n  strands-box: error[B0102]: first\n  \
+             strands-box: error[B0105]: refused\nbox: to see what to do, run: box explain B0105\n",
+        );
+        let kept = failed().report(&launch, true);
+        assert!(
+            kept.ends_with(&format!(
+                "\n  reuse    {}\n  explain  box explain B0105\n\n",
+                launch.reuse_command()
+            )),
+            "{kept}"
+        );
+
+        let mut pushed_out = b"strands-box: error[B0102]: first\n".to_vec();
+        for number in 0..PREVIEW_LINES {
+            pushed_out.extend_from_slice(format!("box: error: later {number}\n").as_bytes());
+        }
+        for lines in [
+            &pushed_out[..],
+            &b"strands-box: error: internal\nbox: error: x\n"[..],
+            b"policy: warning[P0201]: x\n",
+            b"strands-box: error[X0101]: not a code\n",
+        ] {
+            let mut log = Log::new(File::open("/dev/null").unwrap(), tempfile::tempfile());
+            log.push(lines);
+            assert!(!log.report(&launch, true).contains("explain"));
+            let mut log = Log::new(File::open("/dev/null").unwrap(), tempfile::tempfile());
+            log.push(lines);
+            assert!(!log.report(&launch, false).contains("explain"));
+        }
+    }
+
     fn log_report(launch: &Launch) -> String {
         Log::new(File::open("/dev/null").unwrap(), tempfile::tempfile()).report(launch, true)
     }
@@ -299,12 +372,13 @@ mod tests {
             .push("selected settings differ".into());
         let mut log = Log::open(&launch, File::open("/dev/null").unwrap());
         for number in 0..8 {
-            log.push(format!("box: error: failure {number}\n").as_bytes());
+            log.push(format!("strands-box: error[B0105]: failure {number}\n").as_bytes());
         }
         let console = log.report(&launch, true);
         assert!(console.contains("startup reminder: saved settings differed"));
+        assert!(console.contains("  explain  box explain B0105\n"));
         for number in 2..8 {
-            assert!(console.contains(&format!("  box: error: failure {number}\n")));
+            assert!(console.contains(&format!("  strands-box: error[B0105]: failure {number}\n")));
         }
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("box: warning: selected settings differ\n"));
@@ -333,7 +407,8 @@ mod tests {
         log.push(b"strands-box: error[B0105]: refused\nbox: running profile\n");
         assert_eq!(
             log.report(&launch, false),
-            "box: recent log output\n  strands-box: error[B0105]: refused\n",
+            "box: recent log output\n  strands-box: error[B0105]: refused\n\
+             box: to see what to do, run: box explain B0105\n",
         );
 
         for argument in [
