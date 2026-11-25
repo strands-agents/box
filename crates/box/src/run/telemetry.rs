@@ -714,7 +714,7 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
     ) -> io::Result<()> {
         let staged = self.inner.stage_mcp_catalog(server, reply);
         if let Some(catalogs) = &self.catalogs {
-            crate::run::broker::mcp::report_omitted(catalogs);
+            crate::run::broker::mcp::report_omitted(catalogs, server);
         }
         staged
     }
@@ -1347,7 +1347,7 @@ mod tests {
             Err(policy::CatalogRefusal::NotListed)
         );
         assert!(
-            catalogs.take_omitted().is_empty(),
+            catalogs.take_omitted("demo").is_empty(),
             "the box took the left-out tool to report it"
         );
     }

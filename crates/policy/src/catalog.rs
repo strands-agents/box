@@ -162,7 +162,7 @@ pub struct ToolCatalogs {
     policy: Arc<PolicyEngine>,
     inner: Mutex<Catalogs>,
     staging: Mutex<()>,
-    omitted: Mutex<Vec<crate::OmittedTool>>,
+    omitted: Mutex<BTreeMap<String, Vec<crate::OmittedTool>>>,
 }
 
 struct Catalogs {
@@ -343,19 +343,18 @@ impl ToolCatalogs {
                 next_list: 0,
             }),
             staging: Mutex::new(()),
-            omitted: Mutex::new(Vec::new()),
+            omitted: Mutex::new(BTreeMap::new()),
         }
     }
 
-    /// Each tool that staging left out of an accepted catalog since the last call, for the box to
-    /// report.
-    pub fn take_omitted(&self) -> Vec<crate::OmittedTool> {
-        std::mem::take(
-            &mut *self
-                .omitted
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+    /// Each tool that staging left out of `server`'s accepted catalog since the last call, for the
+    /// box to report.
+    pub fn take_omitted(&self, server: &str) -> Vec<crate::OmittedTool> {
+        self.omitted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(server)
+            .unwrap_or_default()
     }
 
     /// Observe one reply to a client's `tools/list` on `connection`.
@@ -559,10 +558,14 @@ impl ToolCatalogs {
                 });
                 entry.state = ServerDiscovery::Ready;
                 drop(inner);
-                self.omitted
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .extend(omitted);
+                if !omitted.is_empty() {
+                    self.omitted
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .entry(server.clone())
+                        .or_default()
+                        .extend(omitted);
+                }
                 Ok(CatalogStage::Accepted {
                     tools: accepted_tools,
                 })
@@ -827,7 +830,7 @@ mod tests {
             Err(CatalogRefusal::NotListed)
         );
         assert_eq!(fixture.catalogs.state("demo"), Some(ServerDiscovery::Ready));
-        let omitted = fixture.catalogs.take_omitted();
+        let omitted = fixture.catalogs.take_omitted("demo");
         assert_eq!(
             omitted
                 .iter()
@@ -836,9 +839,56 @@ mod tests {
             [("demo", "create_account")]
         );
         assert!(
-            fixture.catalogs.take_omitted().is_empty(),
+            fixture.catalogs.take_omitted("demo").is_empty(),
             "each left-out tool is taken once"
         );
+    }
+
+    #[test]
+    fn each_server_takes_only_its_own_left_out_tools() {
+        let history = tempfile::tempdir().expect("history directory");
+        let policy = Arc::new(
+            PolicyEngine::open_staged(
+                &Operator::unanchored(),
+                vec![Policy {
+                    origin: PathBuf::from("catalog-test.cedar"),
+                    text: r#"permit(principal, action == Box::Action::"mcp:call", resource);"#
+                        .to_string(),
+                }],
+                &history.path().join("dogwood.redb"),
+            )
+            .expect("the staged policy opens"),
+        );
+        let catalogs = ToolCatalogs::new(
+            policy,
+            [
+                ("alpha".to_string(), McpServerKind::Stdio),
+                ("beta".to_string(), McpServerKind::Stdio),
+            ],
+        );
+        let with_bad = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "read", "inputSchema": {"type": "object"}},
+            {"name": "create_account", "inputSchema": {"type": "object",
+                "properties": {"account": {"$ref": "#/$defs/create-account"}},
+                "$defs": {"create-account": {"type": "object"}}}}
+        ]}});
+        let clean = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "read", "inputSchema": {"type": "object"}}
+        ]}});
+        for (server, response) in [("alpha", &with_bad), ("beta", &clean)] {
+            let ListPage::Complete(catalog) = catalogs
+                .observe_page(server, "a", None, response, 64)
+                .expect("the page is a valid catalog")
+            else {
+                panic!("one page completes the list");
+            };
+            catalogs.stage(catalog).expect("staging runs");
+        }
+        assert!(
+            catalogs.take_omitted("beta").is_empty(),
+            "a server takes no other server's left-out tools"
+        );
+        assert_eq!(catalogs.take_omitted("alpha").len(), 1);
     }
 
     #[test]
