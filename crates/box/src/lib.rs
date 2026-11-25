@@ -28,9 +28,7 @@ pub use run::decisions::{
     DecisionEnforcement, PolicyDecision, PolicyDecisionReceiver, PolicyDecisionSender,
     policy_decisions,
 };
-pub use run::events::{
-    ContainmentStage, RefusalKind, RunEvent, RunEventReceiver, RunEventSender, run_events,
-};
+pub use run::events::{RunEvent, RunEventReceiver, RunEventSender, run_events};
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -64,7 +62,7 @@ pub fn run(config: PathBuf, workload: Vec<OsString>, options: RunOptions<'_>) ->
             found: found.to_string(),
         };
         ::diagnostics::diag!({ error.code() }, "{error}");
-        refuse(options.events.as_ref(), RefusalKind::BoxId, error.code());
+        refuse(options.events.as_ref(), error.code());
         return ExitCode::FAILURE;
     }
     if STARTED.swap(true, Ordering::SeqCst) {
@@ -72,11 +70,7 @@ pub fn run(config: PathBuf, workload: Vec<OsString>, options: RunOptions<'_>) ->
             B0106,
             "refusing to run: this process already attempted to run a box"
         );
-        refuse(
-            options.events.as_ref(),
-            RefusalKind::AlreadyRan,
-            ::diagnostics::Code::B0106.into(),
-        );
+        refuse(options.events.as_ref(), ::diagnostics::Code::B0106.into());
         return ExitCode::FAILURE;
     }
 
@@ -88,15 +82,11 @@ pub fn run(config: PathBuf, workload: Vec<OsString>, options: RunOptions<'_>) ->
     )
 }
 
-/// Tell the caller's channel, if it gave one, the kind of the box's own failure and the code its
-/// stderr line carries.
-pub(crate) fn refuse(
-    events: Option<&RunEventSender>,
-    kind: RefusalKind,
-    code: ::diagnostics::Kind,
-) {
+/// Tell the caller's channel, if it gave one, the code of the box's own failure, as its stderr
+/// line prints it.
+pub(crate) fn refuse(events: Option<&RunEventSender>, code: ::diagnostics::Kind) {
     if let Some(events) = events {
-        events.send(RunEvent::Refused { kind, code });
+        events.send(RunEvent::Refused { code });
     }
 }
 

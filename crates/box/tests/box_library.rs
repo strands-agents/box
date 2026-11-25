@@ -1297,7 +1297,7 @@ mod event_tests {
     use std::path::Path;
     use std::process::{Command, ExitCode};
     use std::sync::mpsc::TryRecvError;
-    use strands_box::{RefusalKind, RunEvent, RunOptions};
+    use strands_box::{RunEvent, RunOptions};
 
     pub(super) fn dispatch() -> bool {
         let arguments: Vec<_> = std::env::args().collect();
@@ -1333,18 +1333,14 @@ mod event_tests {
             (
                 "library-events-missing",
                 "box-events-agent-not-installed",
-                "AgentNotFound:B0114",
+                "B0114",
             ),
             (
                 "library-events-absolute",
                 "/nonexistent-box-events/bin/claude",
-                "AgentNotFound:B0114",
+                "B0114",
             ),
-            (
-                "library-events-unexp",
-                "${{ inputs.claude.path }}",
-                "Config:B0101",
-            ),
+            ("library-events-unexp", "${{ inputs.claude.path }}", "B0101"),
             (
                 "library-events-success",
                 executable.to_str().unwrap(),
@@ -1397,13 +1393,10 @@ mod event_tests {
         (code, events)
     }
 
-    fn refused(kind: RefusalKind, code: Code) -> (ExitCode, Vec<RunEvent>) {
+    fn refused(code: Code) -> (ExitCode, Vec<RunEvent>) {
         (
             ExitCode::FAILURE,
-            vec![RunEvent::Refused {
-                kind,
-                code: code.into(),
-            }],
+            vec![RunEvent::Refused { code: code.into() }],
         )
     }
 
@@ -1418,15 +1411,15 @@ mod event_tests {
                     ..Default::default()
                 }
             ),
-            refused(RefusalKind::BoxId, Code::B0101)
+            refused(Code::B0101)
         );
         assert_eq!(
             attempt(missing, RunOptions::default()),
-            refused(RefusalKind::Config, Code::B0102)
+            refused(Code::B0102)
         );
         assert_eq!(
             attempt(missing, RunOptions::default()),
-            refused(RefusalKind::AlreadyRan, Code::B0106)
+            refused(Code::B0106)
         );
     }
 
@@ -1439,7 +1432,7 @@ mod event_tests {
                     ..Default::default()
                 }
             ),
-            refused(RefusalKind::Supervise, Code::B0112)
+            refused(Code::B0112)
         );
     }
 
@@ -1449,16 +1442,10 @@ mod event_tests {
             assert_eq!((code, events), (ExitCode::SUCCESS, Vec::new()));
             return;
         }
-        let (kind, wanted) = expected.split_once(':').unwrap();
-        let kind = match kind {
-            "AgentNotFound" => RefusalKind::AgentNotFound,
-            "Config" => RefusalKind::Config,
-            other => panic!("unknown expectation {other}"),
-        };
         let wanted = *Code::ALL
             .iter()
-            .find(|code| code.as_str() == wanted)
+            .find(|code| code.as_str() == expected)
             .unwrap();
-        assert_eq!((code, events), refused(kind, wanted));
+        assert_eq!((code, events), refused(wanted));
     }
 }

@@ -2,8 +2,6 @@
 
 use std::path::PathBuf;
 
-use crate::run::events::RefusalKind;
-
 /// Why a box refused to run or reload, or stopped running.
 #[derive(Debug)]
 pub(crate) struct BoxError(Internal);
@@ -18,42 +16,6 @@ impl BoxError {
     /// `AgentNotFound`. The message stays as it was.
     pub(crate) fn agent_not_found(self) -> Self {
         Self(Internal::AgentNotFound(Box::new(self.0)))
-    }
-
-    /// The kind of this failure, without its diagnostic text. The match names every group, so a
-    /// new group must choose its kind before it compiles.
-    pub(crate) fn kind(&self) -> RefusalKind {
-        match &self.0 {
-            Internal::Config(_) => RefusalKind::Config,
-            Internal::Layout(_) => RefusalKind::Layout,
-            Internal::Daemon(_) => RefusalKind::Daemon,
-            Internal::AgentNotFound(_) => RefusalKind::AgentNotFound,
-            Internal::Executable(_) => RefusalKind::Executable,
-            Internal::Trampoline(TrampolineError::SetupFailed { stage, .. }) => {
-                RefusalKind::ContainmentSetup(stage.public())
-            }
-            Internal::Trampoline(_) => RefusalKind::Trampoline,
-            Internal::Installation(_) => RefusalKind::Installation,
-            // The run's failure names the kind, as it names the code.
-            Internal::Supervise(SuperviseError::AlsoShutdown { outcome, .. }) => outcome.kind(),
-            Internal::Supervise(_) => RefusalKind::Supervise,
-            Internal::Shell(_) => RefusalKind::Shell,
-            Internal::McpSchema(_) => RefusalKind::McpSchema,
-            Internal::Policy(_) => RefusalKind::Policy,
-            Internal::PolicyStaging(_) => RefusalKind::PolicyStaging,
-            Internal::GrammarBinding(_) => RefusalKind::GrammarBinding,
-            Internal::HistoryDisagreesWithRecord { .. } => RefusalKind::HistoryMismatch,
-            Internal::HistoryFlush(_) => RefusalKind::HistoryFlush,
-            Internal::Credential(_) | Internal::CredentialProjection(_) => RefusalKind::Credential,
-            Internal::Proxy(_) => RefusalKind::Proxy,
-            Internal::Containment(_) => RefusalKind::Containment,
-            Internal::Telemetry(_) => RefusalKind::Telemetry,
-            #[cfg(target_os = "linux")]
-            Internal::Relay(_) => RefusalKind::Relay,
-            Internal::McpDiscovery(_) => RefusalKind::McpDiscovery,
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-            Internal::NativeFilesystem(_) => RefusalKind::NativeFilesystem,
-        }
     }
 
     /// The message code of this refusal (docs/user/message-codes.md), or an uncoded error for a
@@ -96,7 +58,7 @@ impl Internal {
                 ExecutableError::NotExecutable { .. }
                 | ExecutableError::NotOnPath { .. }
                 | ExecutableError::RelativeProgram { .. }
-                | ExecutableError::NotUtf8 { .. } => Code::B0107.into(),
+                | ExecutableError::NotUtf8 { .. } => Code::B0116.into(),
             },
             Self::Trampoline(error) => match error {
                 TrampolineError::Missing { .. }
@@ -107,16 +69,23 @@ impl Internal {
                 TrampolineError::UnsupportedPlatform { .. }
                 | TrampolineError::StatusPipe { .. }
                 | TrampolineError::StatusRead { .. }
-                | TrampolineError::SetupIncomplete
-                | TrampolineError::SetupFailed { .. } => Code::B0108.into(),
+                | TrampolineError::SetupIncomplete => Code::B0108.into(),
+                TrampolineError::SetupFailed { stage, .. } => match stage {
+                    SetupStage::Apply => Code::B0119.into(),
+                    SetupStage::Exec => Code::B0120.into(),
+                    SetupStage::ConfigRead
+                    | SetupStage::ConfigValidation
+                    | SetupStage::TargetEnvironment => Code::B0108.into(),
+                },
                 TrampolineError::StatusProtocol { .. }
                 | TrampolineError::Environment { .. }
                 | TrampolineError::WorkloadPath { .. } => DEFECT,
             },
             Self::Installation(error) => match error {
-                InstallationError::Locate { .. }
-                | InstallationError::Invalid { .. }
-                | InstallationError::Changed { .. } => Code::B0107.into(),
+                InstallationError::Locate { .. } | InstallationError::Invalid { .. } => {
+                    Code::B0107.into()
+                }
+                InstallationError::Changed { .. } => Code::B0117.into(),
             },
             Self::Supervise(error) => match error {
                 SuperviseError::Spawn { .. } | SuperviseError::Native { .. } => Code::B0108.into(),
@@ -151,6 +120,11 @@ impl Internal {
             Self::HistoryFlush(_) => Code::P0303.into(),
             Self::Credential(_) | Self::CredentialProjection(_) => Code::B0104.into(),
             Self::Proxy(_) => Code::B0110.into(),
+            Self::Containment(
+                containment::ContainmentError::PathNotFound(_)
+                | containment::ContainmentError::ExpectedDirectory(_)
+                | containment::ContainmentError::ExpectedFile(_),
+            ) => Code::B0115.into(),
             Self::Containment(_) => Code::B0108.into(),
             Self::Telemetry(_) => Code::T0103.into(),
             #[cfg(target_os = "linux")]
@@ -874,18 +848,6 @@ impl SetupStage {
         }
     }
 
-    /// The stage as the public kind a library caller matches on.
-    pub(crate) fn public(self) -> crate::run::events::ContainmentStage {
-        use crate::run::events::ContainmentStage;
-        match self {
-            Self::ConfigRead => ContainmentStage::ConfigRead,
-            Self::ConfigValidation => ContainmentStage::ConfigValidation,
-            Self::Apply => ContainmentStage::Apply,
-            Self::TargetEnvironment => ContainmentStage::TargetEnvironment,
-            Self::Exec => ContainmentStage::Exec,
-        }
-    }
-
     /// Decode the byte the trampoline wrote.
     pub(crate) fn decode(byte: u8) -> Result<Self, TrampolineError> {
         match byte {
@@ -910,56 +872,6 @@ impl std::fmt::Display for SetupStage {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn each_group_names_its_kind_and_a_marked_agent_is_agent_not_found() {
-        let missing = || -> BoxError {
-            ExecutableError::NotOnPath {
-                program: "private".into(),
-            }
-            .into()
-        };
-        let cases: [(BoxError, RefusalKind); 7] = [
-            (
-                SuperviseError::AlsoShutdown {
-                    outcome: Box::new(DaemonError::NoProxyPort.into()),
-                    shutdown: Box::new(
-                        Internal::HistoryFlush(policy::PolicyError::Evaluation("full".into()))
-                            .into(),
-                    ),
-                }
-                .into(),
-                RefusalKind::Daemon,
-            ),
-            (ConfigError::EmptyWorkload.into(), RefusalKind::Config),
-            (DaemonError::Busy.into(), RefusalKind::Daemon),
-            (missing(), RefusalKind::Executable),
-            (missing().agent_not_found(), RefusalKind::AgentNotFound),
-            (
-                ExecutableError::NotExecutable {
-                    path: "private".into(),
-                }
-                .into(),
-                RefusalKind::Executable,
-            ),
-            (
-                TrampolineError::SetupFailed {
-                    stage: SetupStage::Apply,
-                    detail: Some("private".into()),
-                }
-                .into(),
-                RefusalKind::ContainmentSetup(crate::run::events::ContainmentStage::Apply),
-            ),
-        ];
-        for (error, expected) in cases {
-            assert_eq!(error.kind(), expected, "{error}");
-        }
-        assert_eq!(
-            missing().agent_not_found().to_string(),
-            missing().to_string(),
-            "the mark leaves the message as it was"
-        );
-    }
 
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     #[test]
@@ -1035,7 +947,7 @@ mod tests {
     #[test]
     fn refusals_name_their_code() {
         use ::diagnostics::{Code, Kind, Severity};
-        let cases: [(BoxError, Kind); 23] = [
+        let cases: [(BoxError, Kind); 29] = [
             (
                 SuperviseError::NativeDuringRun {
                     reason: "native request deadline exceeded".into(),
@@ -1125,7 +1037,49 @@ mod tests {
                     program: "claude".into(),
                 }
                 .into(),
-                Code::B0107.into(),
+                Code::B0116.into(),
+            ),
+            (
+                BoxError::from(ExecutableError::NotOnPath {
+                    program: "claude".into(),
+                })
+                .agent_not_found(),
+                Code::B0114.into(),
+            ),
+            (
+                containment::ContainmentError::PathNotFound("/missing".into()).into(),
+                Code::B0115.into(),
+            ),
+            (
+                InstallationError::Changed {
+                    path: "/box".into(),
+                }
+                .into(),
+                Code::B0117.into(),
+            ),
+            (
+                TrampolineError::SetupFailed {
+                    stage: SetupStage::Apply,
+                    detail: None,
+                }
+                .into(),
+                Code::B0119.into(),
+            ),
+            (
+                TrampolineError::SetupFailed {
+                    stage: SetupStage::Exec,
+                    detail: None,
+                }
+                .into(),
+                Code::B0120.into(),
+            ),
+            (
+                TrampolineError::SetupFailed {
+                    stage: SetupStage::ConfigRead,
+                    detail: None,
+                }
+                .into(),
+                Code::B0108.into(),
             ),
             (McpDiscoveryError::NoOutcome.into(), Code::B0109.into()),
             (DaemonError::NoProxyPort.into(), Code::B0110.into()),
@@ -1159,7 +1113,7 @@ mod tests {
             ),
             (
                 TrampolineError::SetupFailed {
-                    stage: SetupStage::Apply,
+                    stage: SetupStage::TargetEnvironment,
                     detail: None,
                 }
                 .into(),

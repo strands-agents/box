@@ -784,24 +784,18 @@ let code = strands_box::run(config, workload, strands_box::RunOptions {
 });
 while let Ok(event) = receiver.try_recv() {
     match event {
-        strands_box::RunEvent::Refused { kind, code } => eprintln!("box failed: {kind:?} {code:?}"),
+        strands_box::RunEvent::Refused { code } => eprintln!("box failed: {code:?}"),
         _ => {}
     }
 }
 ```
 
-When the box itself fails, before or after its workload starts, it sends one
-`RunEvent::Refused` with two values. `kind`, a `RefusalKind`, names the part of Box Core that
-failed, such as `Config`, `Policy`, `Credential`, or `AgentNotFound`, which means the agent's own
-program is not installed: a bare name on no `PATH` entry, or an absolute path that does not exist.
-`ContainmentSetup` also carries a `ContainmentStage`, the stage at which containment failed.
-`code` is the [message code](../../docs/user/message-codes.md) of the failure's stderr line, which
-groups failures by what the reader can fix, so one kind can arrive with different codes. Neither
-holds a path, host, or message; the message still goes to stderr. A workload that exits non-zero
-sends nothing. The
-channel is unbounded, so no event is dropped. `RunEvent` may gain variants, so match it with a
-wildcard arm. `RefusalKind` is exhaustive, so a caller that maps each kind decides for a new one
-before it compiles.
+When the box itself ends the run, before or after its workload starts, it sends one
+`RunEvent::Refused` with the [message code](../../docs/user/message-codes.md) of the failure's
+stderr line, such as `B0101` or `B0114`. The code holds no path, host, or message; the message
+still goes to stderr. An error or warning in a run that keeps going, and a workload that exits
+non-zero, send nothing. The channel is unbounded, so no event is dropped. `RunEvent` may gain
+variants, so match it with a wildcard arm.
 
 ## Running
 
