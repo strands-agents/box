@@ -46,6 +46,32 @@ The connection belongs to mount objects, not matching path names. To receive a n
 
 “One-way” refers to mount and unmount events. It does not make files read-only: a permitted write still changes the shared filesystem.
 
+### 2.1 Connect each selected storage root
+
+The initial implementation requires each selected container path to be an existing mount point with an upstream propagation connection. For example, `/mnt/data` must have its own connected mount; an ordinary directory beneath a shared `/mnt` is not sufficient for this supported layout. This requirement concerns mount objects, not filesystem grants: a covering parent grant can still satisfy section 3.
+
+The storage provider prepares a separate shared source for each storage root before container creation. A self-bind followed by `mount --make-shared` is one way to prepare that source. The container receives a bind of it. Box then binds that receiving mount into the sandbox while preserving its upstream connection. Box does not need to make the container mount shared or change the host's mount settings.
+
+```mermaid
+flowchart LR
+    HD["Host: shared data source"] --> CD["Container: /mnt/data receiver"]
+    HD --> BD["Sandbox A: /mnt/data receiver"]
+    HO["Host: shared other source"] --> CO["Container: /mnt/other receiver"]
+    HO --> BO["Sandbox B: /mnt/other receiver"]
+```
+
+Arrows show kernel propagation relationships. Box creates the sandbox mounts from the container mounts during startup. A bind of a receiving mount into a private destination retains the same upstream source, as described in the [Linux bind semantics](https://docs.kernel.org/filesystems/sharedsubtree.html#detailed-semantics). It does not forward mount events created locally in the container receiver. Sandbox A receives no events from the other source. Ordinary access to `/mnt/other`, if separately granted, remains a private Box view.
+
+During each sandbox's startup, Box performs these steps:
+
+1. Identify the currently reachable mount at every selected path. Require an exact mount point with a shared or receiving relationship. Do not accept an older mount hidden beneath the current one, or a matching directory name without the connection.
+2. Enter the sandbox's mount namespace. Convert inherited shared mounts to one-way receivers with `MS_SLAVE | MS_REC`, preserving existing receiving connections. Do not first make these source mounts private: that would discard their upstream connections.
+3. Build Box's private filesystem view. Recursively bind each selected source at its exact sandbox destination, including existing submounts. Preserve the receiving relationships within selected subtrees; make all other mounts private. Do not recursively privatize a parent after attaching a selected child, because that would also disconnect the child.
+4. Switch to the completed view, detach the old root, and check the reachable mount arrangement again. Each selected root must retain an upstream relationship, and no path outside the selected subtrees may receive external mounts. A `master:` field in Linux's mount information identifies an upstream group; it does not alone prove that the provider will mount storage at the intended source.
+5. Drop mount-changing privileges before starting sandboxed code. Any failed connection or isolation check rejects sandbox startup. Box does not respond by forwarding a wider parent directory or requesting new host privileges.
+
+Use this sequence in `crates/containment/src/backend/linux/namespace/view.rs`. Preserve existing grant and protected-path validation before materializing the view. Test preexisting submounts as well as newly arriving submounts: disconnecting an existing child mount can prevent later mounts beneath that child from arriving.
+
 ## 3. Which permission settings are supported
 
 Box's filesystem lists in `box.toml` control direct file access by sandboxed processes. A **grant** is a list entry that allows an operation on a path.
@@ -119,7 +145,7 @@ Box rejects startup when:
 5. A program or other required startup file is still missing. Forwarding does not let a program start before its executable exists.
 6. A sandbox has native filesystem policy checks enabled, but that Box version does not support combining them with mount forwarding. Compatibility tests must pass before a release enables this combination. The `box.toml` setting `[experimental-features] native-filesystem-policy` enables these checks on direct file operations; individual process settings can turn them off. Box must not silently disable them. See the [native filesystem policy reference](../../docs/user/native-filesystem-policy.md) for configuration.
 
-The storage filesystem may arrive later, but the receiving mount and its parent directory must already exist or be created safely during Box startup. Box prints each sandbox's selected paths and the required whole-directory access at startup.
+The storage filesystem may arrive later, but the connected source mount described in section 2.1 must already exist. Box may safely create its sandbox-side destination directories. Creating an ordinary directory or a disconnected self-bind does not establish an upstream connection. Box prints each sandbox's selected paths and the required whole-directory access at startup.
 
 ## 5. Startup and invocation sequence
 
@@ -186,12 +212,22 @@ The test used neither Box nor a virtual-machine restore nor remote storage. Root
 
 Forwarding mounts does not require listing every Amazon Simple Storage Service (S3) object. Work can grow with the number of mounts and connected sandboxes. Remote storage startup and later file access have separate costs. Measure Box startup, the Runtime mount call, and the first file operation separately.
 
+### 6.1 Selective connections through a container namespace
+
+A separate Linux ARM64 probe on kernel `6.12.115-140.210.amzn2023.aarch64` exercised the layout in section 2.1. It ran inside an unprivileged user namespace and a private mount namespace. All test files and mounts lived on temporary memory-backed storage.
+
+The probe prepared two independent shared sources and bound them into an intermediate namespace representing a container. Four child processes received different views: data only, other storage only, neither source, and data in a further user namespace. Unselected paths had ordinary private binds of their original directories. Each child changed its filesystem root and dropped all effective, permitted, and inheritable capabilities before reading files.
+
+All four children were stopped before attachment. The source process mounted new filesystems over both source roots, added a nested mount beneath data, and wrote marker files. After those operations completed, the children resumed and read fresh absolute paths without sleeps or retries. Both data receivers read the data and nested markers; the other receiver read only its marker. Unselected paths retained their original files, and the fully private control received neither new filesystem.
+
+This demonstrates selective kernel propagation through an intermediate namespace, including a separate user namespace and file reads after capability removal. It was one synthetic attachment sequence, not a Box integration test. It used `chroot`, not Box's `pivot_root` implementation, and tested neither Runtime, snapshot restoration, remote storage, source permissions, nor preexisting nested mounts. Those remain required integration checks.
+
 ## 7. Implementation plan and tests
 
 Use four implementation pull requests. Each includes tests and documentation for the behavior it adds.
 
 1. **Configuration and validation.** Add Core settings, CLI profile support, startup errors, and disclosure of selected paths. Test valid and invalid settings for every sandbox type, missing paths, parent/child restrictions, protected aliases, disabled flags, and unsupported platforms. Do not enable the feature until its implementation exists.
-2. **Linux mount connections.** Build selective one-way connections during startup and drop mount-changing privileges before running sandboxed code. Test Linux ARM64 and x86-64, pausing and resuming sandboxed processes, same and separate user namespaces, broken connections, mounts over the selected path and beneath it, multiple paths, unlisted siblings, read-only and `noexec` source mounts, reverse isolation, and existing sandbox restrictions.
+2. **Linux mount connections.** Build selective one-way connections during startup and drop mount-changing privileges before running sandboxed code. Test Linux ARM64 and x86-64, pausing and resuming sandboxed processes, same and separate user namespaces, broken connections, mounts over the selected path and beneath it, existing nested receiving mounts, ordinary directories without a dedicated connected mount, multiple paths, unlisted siblings, read-only and `noexec` source mounts, reverse isolation, and existing sandbox restrictions.
 3. **All Box processes.** Integrate the agent, tools, local MCP servers, Shell, and Monty. Test actual file operations as the agent and tool users, processes started before and after attachment, multiple sandboxes, protected aliases, hosted policy denials, and cleanup after failed startup. Add runnable examples.
 4. **Runtime tests and operator guide.** Start Box before snapshot and open storage on the first invocation without sleeps or retries. Verify that each sandbox receives only its selected storage paths. Confirm that Box's mount connections survive snapshot restoration and that setup needs no additional host privileges. Test already-open files and working directories, the maximum number of mounts Runtime supports, each claimed storage provider, source permission denials, and mount failures. Record the Box revision, Linux kernel version, Runtime deployment settings, and event times. Publish reproducible setup instructions; claim support only for tested environments.
 
