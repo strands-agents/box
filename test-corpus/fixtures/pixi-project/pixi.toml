@@ -1,0 +1,8 @@
+[workspace]
+name = "maps"
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "linux-64", "linux-aarch64"]
+exclude-newer = "2025-06-01"
+
+[dependencies]
+python = "3.12.*"

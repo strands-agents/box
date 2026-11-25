@@ -128,12 +128,14 @@ codes! {
     B0211 => strands_box note, "native trust disclosures", "Box gives a process with native egress no proxy and no certificate authority, so its client uses its own defaults.";
     B0212 => strands_box warning, "replaceable programs", "A process's write grant reaches the program it runs, so the process can replace that program.";
     B0213 => strands_box note, "log-only mode disclosures", "The policy runs in log-only mode, so each denial is recorded and the action goes ahead.";
+    B0214 => strands_box warning, "untyped credsd routes", "A credsd route names no secret.type, so it signs with AWS credentials.";
     // Box: lifecycle.
     B0301 => strands_box note, "box state changes", "The box was created, opened, or refreshed.";
     B0302 => strands_box note, "workload starts", "The box starts its workload.";
     // Box: MCP at run time.
     B0401 => strands_box warning, "unread MCP catalogs", "A server's tool catalog could not be read, so its calls are decided without per-tool actions.";
     B0402 => strands_box warning, "unloaded MCP tool rules", "A server's per-tool policy rules did not load, so they decide none of its calls.";
+    B0403 => strands_box warning, "left-out MCP tools", "A tool's schema could not be read, so Box left the tool out of its server's catalog and refuses its calls.";
     // Box: egress and fetch.
     B0501 => strands_box warning, "failed upstream requests", "A request through the egress gateway to an upstream failed.";
     B0502 => strands_box warning, "fetches with no egress route", "A Monty fetch was refused because no egress route reaches it.";

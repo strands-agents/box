@@ -136,7 +136,7 @@ that the workload's log records and metrics reach every target.
 ### The credential
 
 `secret.ref` names where the box reads the key: `env://NAME` or `secret://NAME` for a variable in the
-environment of `strands-box run`, `aws://PROFILE` or `credsd://CREDENTIAL` for a SigV4 signature, or
+environment of `strands-box run`, `aws://PROFILE` or `credsd://NAME` for a SigV4 signature, or
 a reference in a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table
 declares. The box holds the key in a vault of its own for each target, and attaches it on each
 request. A literal key is refused, and so is a `file://` reference. An `op://` reference is refused
@@ -177,6 +177,9 @@ Box binds one loopback port for the workload and sets three variables in its env
 
 Box owns every name that begins with `OTEL_EXPORTER_OTLP_`, so `[agent] env` may not set one. The
 receiver answers `/v1/traces`, `/v1/logs`, and `/v1/metrics`, and answers `404` on every other route.
+It relays one payload at a time. It answers a payload that arrives during a relay with `503` and
+`Retry-After: 2`. An exporter that retries, as the OpenTelemetry Python and JavaScript OTLP/HTTP
+exporters do, sends that payload again.
 
 The exporter switches belong to the workload, so write them in `[agent] env`:
 

@@ -61,6 +61,7 @@ pub enum DiscoveryBehavior {
     RepeatedCursor,
     RepeatedTool,
     ConflictingDefinitions,
+    UnreadableTool,
     InvalidResponse,
     ErrorResponse,
     ExitAfterReady,
@@ -78,6 +79,7 @@ impl DiscoveryBehavior {
             Self::RepeatedCursor => "repeated-cursor",
             Self::RepeatedTool => "repeated-tool",
             Self::ConflictingDefinitions => "conflicting-definitions",
+            Self::UnreadableTool => "unreadable-tool",
             Self::InvalidResponse => "invalid-response",
             Self::ErrorResponse => "error-response",
             Self::ExitAfterReady => "exit-after-ready",
@@ -407,6 +409,16 @@ while True:
             }}],
             "fixturePageField": "page-" + str(page)
         }}
+        if behavior == "unreadable-tool":
+            result["tools"].append({{
+                "name": "create_account",
+                "description": "A tool whose schema Box cannot read",
+                "inputSchema": {{
+                    "type": "object",
+                    "properties": {{"account": {{"$ref": chr(35) + "/$defs/create-account"}}}},
+                    "$defs": {{"create-account": {{"type": "object"}}}}
+                }}
+            }})
         if behavior in ("exchange", "conflicting-definitions"):
             result["$defs"] = {{
                 "Shared": {{

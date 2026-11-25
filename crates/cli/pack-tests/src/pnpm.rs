@@ -167,7 +167,7 @@ fn pnpm_gets_the_variables_of_box_node_which_it_extends() {
         env["npm_config_cache"].as_str(),
         Some(format!("{}/.npm", text(&host.project())).as_str())
     );
-    assert_eq!(env["npm_config_script_shell"].as_str(), Some("/bin/bash"));
+    assert_eq!(env["npm_config_script_shell"].as_str(), Some("/bin/sh"));
     assert_eq!(env["npm_config_audit"].as_str(), Some("false"));
     assert_eq!(env["npm_config_fund"].as_str(), Some("false"));
     assert_ne!(env["TMPDIR"], tool(&generated, "node")["env"]["TMPDIR"]);

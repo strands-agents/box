@@ -341,8 +341,8 @@ by default.
 `ingress = true` turns on [`[[agent.ingress]]`](#agentingress), which is experimental and off by
 default.
 
-`secret-sources = true` turns on [`[secret-source.<scheme>]`](#secret-sourcescheme) and the
-`secret.env` key of a route or a remote MCP server, which are experimental and off by default.
+`secret-sources = true` turns on [`[secret-source.<scheme>]`](#secret-sourcescheme), which is
+experimental and off by default.
 
 The former `linux-storage-mounts` key is rejected even when its value is `false`.
 Remove that key; this build has no replacement that enables incoming mount forwarding.
@@ -1089,14 +1089,15 @@ requests out. The current reference for this table is
 |---|---|---|
 | `destinations` | string array | A host, `host:port`, a path prefix or `/*` suffix, or a `*.` wildcard. A pattern that matches every host is refused, and two entries may not overlap. |
 | `protocol` | string | `http`, the default and the only accepted value. |
-| `secret.ref` | string | `env://NAME` for a variable on the operator's side, `aws://PROFILE` to SigV4-sign as a named profile (resolved through the AWS SDK), a bare `aws://` to sign with the AWS SDK default credential provider chain (the host's ambient identity), or a reference in a scheme that a [`[secret-source.<scheme>]`](#secret-sourcescheme) table declares, such as `op://Personal/GitHub/token`. Required. A literal value, or any other scheme, is refused. |
-| `secret.env` | string | Experimental: needs `secret-sources = true` in [`[experimental-features]`](#experimental-features). The variable that holds the placeholder in the workload. Required with a reference in a declared scheme. Optional with `env://NAME`, where it must equal `NAME`. Refused with `aws://`. |
+| `secret.ref` | string | `env://NAME` for a variable on the operator's side, `aws://PROFILE` to SigV4-sign as a named profile (resolved through the AWS SDK), a bare `aws://` to sign with the AWS SDK default credential provider chain (the host's ambient identity), `credsd://NAME` for a credential that the credsd daemon serves, or a reference in a scheme that a [`[secret-source.<scheme>]`](#secret-sourcescheme) table declares, such as `op://Personal/GitHub/token`. Required. A literal value, or any other scheme, is refused. |
+| `secret.type` | string | For a `credsd://` reference only: `aws`, which signs each request with SigV4, or `token`, which attaches the credential's access token at the placement below, behind a placeholder. Without the key the route signs as `aws`, and the box warns when it starts. Refused with any other scheme. See [Credential sources](egress.md#credential-sources). |
+| `secret.env` | string | The variable that holds the placeholder in the workload. Required with a reference in a declared scheme. Optional with `env://NAME`, where it must equal `NAME`, and with a credsd token. Refused with `aws://` and a credsd AWS route. |
 | `secret.placement` | string | `header` (default), `basic_auth`, or `query_param`. |
 | `secret.header` | string | The header the secret lands in. Defaults to `Authorization`. |
 | `secret.prefix` | string | Text before the secret in the header value. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |
 | `secret.param` | string | The query-parameter name. Required by, and only valid for, `placement = "query_param"`. |
-| `secret.inject` | string | `phantom` (default) or `always`. `phantom` attaches the real secret only to a request that presents the box's placeholder, and rejects any other. `always` attaches the real secret to every request to the destinations, with or without a placeholder, and the decision record carries an advisory note. Valid only for an `env://` route or a route in a declared scheme. |
-| `secret.phantom_prefix` | string | The literal prefix of the minted placeholder, before its random suffix. Defaults to `strands_box_`. Set it, such as `sk-ant-`, so a harness that checks its key format accepts the placeholder. At most 64 characters from `A-Z`, `a-z`, `0-9`, `-`, `_`, `.`, `~`. Valid only for an `env://` route or a route in a declared scheme. |
+| `secret.inject` | string | `phantom` (default) or `always`. `phantom` attaches the real secret only to a request that presents the box's placeholder, and rejects any other. `always` attaches the real secret to every request to the destinations, with or without a placeholder, and the decision record carries an advisory note. Valid only for an `env://` route, a route in a declared scheme, or a credsd token. |
+| `secret.phantom_prefix` | string | The literal prefix of the minted placeholder, before its random suffix. Defaults to `strands_box_`. Set it, such as `sk-ant-`, so a harness that checks its key format accepts the placeholder. At most 64 characters from `A-Z`, `a-z`, `0-9`, `-`, `_`, `.`, `~`. Valid only for an `env://` route, a route in a declared scheme, or a credsd token. |
 
 The example takes every default: the key lands in the `Authorization` header with a `Bearer `
 prefix, and only a request that carries the placeholder gets it.
@@ -1135,8 +1136,8 @@ refuses more than one backend, a destination that is not one exact host, a host 
 another entry also names (on any port), a `url` with a query,
 fragment, or a non-`http(s)` scheme, a `credsd://` `auth`, an `aws://` `auth` without a valid
 `auth.aws.service`/`auth.aws.region` (each non-empty and only lowercase `[a-z0-9-]`, or those keys on
-a non-`aws://` auth), a signed (`aws://` or `credsd://`) destination `secret`, a destination `secret`
-in a declared scheme, a destination `secret`
+a non-`aws://` auth), a signed (`aws://` or `credsd://`) destination `secret`, a credsd token
+destination `secret`, a destination `secret` in a declared scheme, a destination `secret`
 beside an `http` backend, a destination `secret.inject` beside a backend (the re-routed secret is
 phantom-only, so `inject` has no effect), and an `auth` on an `http` backend.
 [The egress table](egress.md#backends) describes the backend, and
@@ -1216,10 +1217,6 @@ Each of these is refused when the configuration loads:
   route, a remote MCP server, and a backend `auth` get ``credential locator "op://" is invalid``,
   and a telemetry target gets ``names no scheme this box reads``. Name the secret after `://`.
 - A route or a remote MCP server in a declared scheme with no `secret.env`.
-- A `secret.env` key while `secret-sources` is off. With `env://NAME`
-  the key has no effect, so you can also remove it: ``secret.env is experimental: set
-  `secret-sources = true` in `[experimental-features]` to load it, or remove secret.env, because
-  an env:// reference already names its variable``.
 - An `env://NAME` or `secret://NAME` reference whose `NAME` a `pass-secret-env` entry names, on a
   route, a remote MCP server, a backend `auth`, or a telemetry target: ``the variable
   OP_SERVICE_ACCOUNT_TOKEN is a credential of the secret source `op` (its `pass-secret-env` names
@@ -1401,7 +1398,8 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | `file-watching` | boolean | For `stdio`: `false` by default. Permit macOS FSEvents with the [limitations](#file-watching). Linux ignores this setting. Remote `http` entries refuse this field. |
 | `destinations` | string array | For `http`: the hosts the server answers on. |
 | `secret.ref` | string | For `http`: the credential the gateway attaches on the way out. |
-| `secret.env` | string | For `http`, and experimental: needs `secret-sources = true` in [`[experimental-features]`](#experimental-features). The variable that holds the placeholder in the workload. Required with a reference in a [declared scheme](#secret-sourcescheme). |
+| `secret.type` | string | For `http`, with a `credsd://` reference: `aws` or `token`, as on [`[egress.<name>]`](#egressname). |
+| `secret.env` | string | For `http`: the variable that holds the placeholder in the workload. Required with a reference in a [declared scheme](#secret-sourcescheme). |
 | `backends` | table array | For `http`: a backend to re-route the server's requests to, at most one. The same shape and rules as an `[egress.<name>]` backend; a `stdio` table refuses it. See [Backends](mcp.md#backends). |
 
 Without native filesystem mediation, no `fs:*` decision covers a `stdio` server's direct file operations.
@@ -1424,7 +1422,7 @@ started reads with `jq`.
 | `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, `metrics`, or `mcp_tool_calls`. `trace` names the agent's own spans and the box's control-plane records. `logs` includes unmatched MCP routing diagnostics. `mcp_tool_calls` names each MCP tool call's arguments and output in clear text, and how it ended. **Absent means every signal except `mcp_tool_calls`**, which a target receives only when it names it. An empty list is refused, and so is a repeated word. |
 | `accepts` | string array | For `otlp`: which OTLP payloads the endpoint takes, from `traces`, `logs`, and `metrics`. Absent means all three. The box sends no batch of a payload the list leaves out. |
 | `headers` | table | For `otlp`: fixed headers sent on every request. A header that carries a credential or a signature is refused here. |
-| `secret.ref` | string | `env://NAME`, `secret://NAME`, `aws://PROFILE`, `credsd://CREDENTIAL`, or a reference in a [declared scheme](#secret-sourcescheme). `aws://` and `credsd://` sign each request with SigV4. A literal value is refused. The box attaches this secret itself, so the target takes no `secret.env`. |
+| `secret.ref` | string | `env://NAME`, `secret://NAME`, `aws://PROFILE`, `credsd://NAME`, or a reference in a [declared scheme](#secret-sourcescheme). `aws://` and `credsd://` sign each request with SigV4. A literal value is refused. The box attaches this secret itself, so the target takes no `secret.env`. |
 | `secret.placement` | string | For `otlp`: `header` (default) or `basic_auth`. `basic_auth` sends a `user:password` secret as `Authorization: Basic`. |
 | `secret.header` | string | For `otlp`: the header the secret lands in. Defaults to `Authorization`. |
 | `secret.prefix` | string | For `otlp`: text before the secret in the header. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |

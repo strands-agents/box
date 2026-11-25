@@ -1,0 +1,357 @@
+name: Corpus
+
+# The on-demand corpus bench: the scripted layer of test-corpus/corpus.toml, one job per section.
+# It runs on dispatch and on a schedule, never on a pull request, and CI Gate does not need it.
+# test-corpus/README.md says how to dispatch it and fetch the results.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ids:
+        description: "Cell ids, comma-separated. Empty runs every cell."
+        required: false
+        default: ""
+      section:
+        description: "One section, such as TypeScript. Empty runs every section."
+        required: false
+        default: ""
+      platform:
+        description: "Where the cells run. The Linux leg is advisory."
+        type: choice
+        options: [macos, linux, both]
+        default: macos
+      no_skip:
+        description: "Fail a cell that has a script but is SKIP, unless its note quarantines it."
+        type: boolean
+        default: false
+  # UTC: weekday working hours in the US, and twice each night. test-corpus/README.md has the times.
+  schedule:
+    - cron: "47 14,18,22 * * 1-5"
+    - cron: "47 2 * * 2-6"
+    - cron: "47 6,10 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: corpus-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C debuginfo=0"
+  # Corpus runs send no telemetry.
+  BOX_TELEMETRY: "0"
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      macos: ${{ steps.plan.outputs.macos }}
+      linux: ${{ steps.plan.outputs.linux }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Plan the jobs
+        id: plan
+        env:
+          IDS: ${{ inputs.ids }}
+          SECTION: ${{ inputs.section }}
+          # The scheduled run has no inputs, and runs both platforms.
+          PLATFORM: ${{ inputs.platform || 'both' }}
+        run: |
+          matrix="$(python3 test-corpus/bench.py plan --ids "$IDS" --section "$SECTION")"
+          echo "matrix: $matrix"
+          if [ "$matrix" = "[]" ]; then
+            echo "::error::no cell with a script matches ids='$IDS' section='$SECTION'"
+            exit 1
+          fi
+          {
+            echo "matrix=$matrix"
+            echo "macos=$([ "$PLATFORM" != linux ] && echo true || echo false)"
+            echo "linux=$([ "$PLATFORM" != macos ] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: macOS ${{ matrix.entry.name }}
+    needs: plan
+    if: needs.plan.outputs.macos == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ github.event_name == 'schedule' && 3 || 7 }}
+      matrix:
+        entry: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: corpus-${{ runner.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build Box and helpers
+        run: cargo build --locked -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.22.2"
+          package-manager-cache: false
+
+      # Each job installs only the toolchains its cells name in `needs` (test-corpus/bench.py).
+      - name: Set up Go
+        if: contains(matrix.entry.needs, 'go')
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: false
+
+      - name: Set up uv
+        if: contains(matrix.entry.needs, 'uv')
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.7"
+          enable-cache: false
+
+      - name: Set up PHP and Composer
+        if: contains(matrix.entry.needs, 'php') || contains(matrix.entry.needs, 'composer')
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.4"
+          tools: composer:v2
+          coverage: none
+
+      - name: Install the other toolchains
+        env:
+          NEEDS: ${{ join(matrix.entry.needs, ' ') }}
+        run: bash test-corpus/bench-toolchains.sh
+
+      # The runner's cargo is Homebrew rustup's bash script, which @box/cargo cannot run, so
+      # install rustup's own proxies into ~/.cargo/bin, as most developer Macs have them.
+      - name: Install rustup's proxies
+        run: |
+          if [[ ! -x $HOME/.cargo/bin/cargo ]]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+              sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+          fi
+
+      - name: Corpus cells
+        id: cells
+        env:
+          IDS: ${{ inputs.ids }}
+          SECTION: ${{ matrix.entry.section }}
+          SHARD: ${{ matrix.entry.shard }}
+          # The scheduled run fails a cell that has a script and is SKIP, so a lost toolchain shows.
+          # A cell its note quarantines stays SKIP.
+          NO_SKIP: ${{ github.event_name == 'schedule' || inputs.no_skip }}
+          # The GitHub cells read the repository with the job's own read-only token. The box puts
+          # it on each request, and the agent holds a stand-in.
+          GH_TOKEN: ${{ github.token }}
+          GIT_GITHUB: x-access-token:${{ github.token }}
+          # GO-04 downloads a Go module from a private repository, which the job token cannot read.
+          # CORPUS_PRIVATE_TOKEN can read only that repository. Without it, GO-04 is SKIP, which fails a
+          # scheduled run.
+          GIT_CORPUS_PRIVATE: ${{ secrets.CORPUS_PRIVATE_TOKEN && format('x-access-token:{0}', secrets.CORPUS_PRIVATE_TOKEN) || '' }}
+        run: |
+          export PATH="$PWD/target/debug:$HOME/.cargo/bin:$PATH"
+          echo "cargo for the cells: $(command -v cargo) ($(file -b "$(command -v cargo)" | cut -c1-60))"
+          bash test-corpus/bench-cells.sh "$RUNNER_TEMP/cells-out"
+
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: python3 test-corpus/bench.py report "$RUNNER_TEMP/cells-out" --platform macos >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the cell results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cells-macos-${{ matrix.entry.name }}
+          path: |
+            ${{ runner.temp }}/cells-out/results.*
+            ${{ runner.temp }}/cells-out/*.log
+            ${{ runner.temp }}/cells-out/*/serve.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Advisory: a red Linux cell does not fail the run.
+  linux:
+    name: Linux ${{ matrix.entry.name }}
+    needs: plan
+    if: needs.plan.outputs.linux == 'true'
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        entry: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # Ubuntu's AppArmor refuses an unprivileged user namespace, which Box Core's Linux
+      # containment needs.
+      - name: Allow unprivileged user namespaces
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: corpus-${{ runner.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build Box and helpers
+        run: cargo build --locked -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.22.2"
+          package-manager-cache: false
+
+      # Each job installs only the toolchains its cells name in `needs` (test-corpus/bench.py).
+      - name: Set up Go
+        if: contains(matrix.entry.needs, 'go')
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: false
+
+      - name: Set up uv
+        if: contains(matrix.entry.needs, 'uv')
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.7"
+          enable-cache: false
+
+      - name: Set up PHP and Composer
+        if: contains(matrix.entry.needs, 'php') || contains(matrix.entry.needs, 'composer')
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.4"
+          tools: composer:v2
+          coverage: none
+
+      - name: Install the other toolchains
+        env:
+          NEEDS: ${{ join(matrix.entry.needs, ' ') }}
+        run: bash test-corpus/bench-toolchains.sh
+
+      - name: Corpus cells
+        id: cells
+        env:
+          IDS: ${{ inputs.ids }}
+          SECTION: ${{ matrix.entry.section }}
+          SHARD: ${{ matrix.entry.shard }}
+          # The scheduled run fails a cell that has a script and is SKIP, so a lost toolchain shows.
+          # A cell its note quarantines stays SKIP.
+          NO_SKIP: ${{ github.event_name == 'schedule' || inputs.no_skip }}
+          # The GitHub cells read the repository with the job's own read-only token. The box puts
+          # it on each request, and the agent holds a stand-in.
+          GH_TOKEN: ${{ github.token }}
+          GIT_GITHUB: x-access-token:${{ github.token }}
+          # GO-04 downloads a Go module from a private repository, which the job token cannot read.
+          # CORPUS_PRIVATE_TOKEN can read only that repository. Without it, GO-04 is SKIP, which fails a
+          # scheduled run.
+          GIT_CORPUS_PRIVATE: ${{ secrets.CORPUS_PRIVATE_TOKEN && format('x-access-token:{0}', secrets.CORPUS_PRIVATE_TOKEN) || '' }}
+        run: |
+          export PATH="$PWD/target/debug:$HOME/.cargo/bin:$PATH"
+          bash test-corpus/bench-cells.sh "$RUNNER_TEMP/cells-out"
+
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: python3 test-corpus/bench.py report "$RUNNER_TEMP/cells-out" --platform linux >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the cell results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cells-linux-${{ matrix.entry.name }}
+          path: |
+            ${{ runner.temp }}/cells-out/results.*
+            ${{ runner.temp }}/cells-out/*.log
+            ${{ runner.temp }}/cells-out/*/serve.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  # One table for the whole run, and one artifact, corpus-results, that holds every row.
+  report:
+    name: Report
+    needs: [plan, macos, linux]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Download the cell results
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: cells-*
+          path: ${{ runner.temp }}/results
+
+      - name: Report
+        env:
+          MATRIX: ${{ needs.plan.outputs.matrix }}
+          MACOS: ${{ needs.plan.outputs.macos }}
+          LINUX: ${{ needs.plan.outputs.linux }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/report" "$RUNNER_TEMP/results"
+          platforms=()
+          if [ "$MACOS" = true ]; then platforms+=(macos); fi
+          if [ "$LINUX" = true ]; then platforms+=(linux); fi
+          python3 test-corpus/bench.py report --root "$RUNNER_TEMP/results" --matrix "$MATRIX" \
+            --platforms "${platforms[@]}" --json "$RUNNER_TEMP/report/results.json" |
+            tee "$RUNNER_TEMP/report/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: corpus-results
+          path: ${{ runner.temp }}/report
+          retention-days: 30

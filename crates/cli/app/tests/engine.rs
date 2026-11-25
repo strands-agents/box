@@ -4092,6 +4092,10 @@ fn a_startup_failure_at_a_terminal_shows_the_error_and_leaves_no_run_folder() {
     );
     assert!(!text.contains("to reuse this box run"), "{text}");
     assert!(!text.contains(" ended\n  "), "{text}");
+    assert!(
+        text.contains("\nbox: to see what to do, run: box explain B"),
+        "{text}"
+    );
     let leftovers: Vec<PathBuf> = std::fs::read_dir(long.join("r"))
         .expect("the runs folder")
         .map(|entry| entry.expect("a run").path())

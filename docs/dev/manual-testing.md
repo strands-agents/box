@@ -26,7 +26,7 @@ and prints where it is:
 
 ```text
 try-build: downloading the build for PR 142 at 93d3646f9b
-try-build: box is /var/folders/.../T/box-try/93d3646f9b.../bin/box (PR 142 at 93d3646f9b), with BOX_HOME /var/folders/.../T/box-try/93d3646f9b.../home.
+try-build: box is /var/folders/.../T/box-try/93d3646f9b.../bin/box (PR 142 at 93d3646f9b), with BOX_HOME /Users/you/.box-try/93d3646f9b.
 ```
 
 Go on from step 3 below, and skip the `alias`. Open a new terminal to go back to your usual `box`.
@@ -39,8 +39,10 @@ scripts/try-build.sh 142 -- box profile show claude
 Without `--env` or `--`, the script starts your shell with the build first on `PATH`. Your shell's
 startup file can put another `box` first again, so `--env` is the reliable form.
 
-- The build starts with no profiles. `BOX_HOME` is a folder for that build alone, so a pull
-  request cannot leave profiles that your usual `box` cannot read. Create a profile first:
+- The build starts with no profiles. `BOX_HOME` is `~/.box-try/<commit>`, a folder for that
+  build alone, so a pull request cannot leave profiles that your usual `box` cannot read. It is in
+  your home folder and not in `$TMPDIR`, because a box home in `$TMPDIR` on macOS makes the socket
+  path [too long](../cli/troubleshooting.md#the-box-folder-path-is-too-long). Create a profile first:
   `box profile create claude`. A new commit gets a new, empty folder, also when you run `--env`
   again in the same shell.
 - To try the build on your own profiles, set `BOX_HOME=~/.strands/box` before you run the script.
@@ -48,7 +50,7 @@ startup file can put another `box` first again, so `--env` is the reliable form.
 - The script keeps each build in `$TMPDIR/box-try`, so it downloads a commit once. macOS removes
   old files there by itself. When a file of a build is gone, the script downloads the build
   again. It stops when `TMPDIR` is not set.
-  `scripts/try-build.sh --clean` removes every build and its profiles.
+  `scripts/try-build.sh --clean` removes every build, and `~/.box-try` with its profiles.
 - A pull request's build is the pull request merged into `main` as it was when CI ran. The
   script takes the build from the newest CI run for the commit.
 - `BOX_TRY` names the build, for example `142@93d3646f9b`.

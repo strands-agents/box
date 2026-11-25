@@ -159,6 +159,15 @@ per-tool actions and their argument types:
 arguments of each tool. A JSON `integer` or `number` is a `Long`, and an `enum` is its base type.
 A `type` list of one type and `null` is that type.
 
+Box can't read some input schemas, for example a `$defs` name with a hyphen. Box leaves such a tool
+out and prints a warning that names it. The other tools of the server work as usual. The agent
+still sees the left-out tool in `tools/list`, but Box refuses each call to it, and a rule that names
+it doesn't load. `policy generate-schema` and `box run` print the same warning:
+
+```text
+strands-box: warning[B0403]: MCP server "repro" tool "create_account" is left out, and its calls are refused: unexpected token `-`
+```
+
 An argument that can have more than one type, from `anyOf`, `oneOf`, or a `type` list, is a record
 with one optional field for each type: `typeChoice0`, `typeChoice1`, and so on, in the server's
 order. Box puts the value in every field whose type matches, and refuses a call whose value
@@ -314,7 +323,7 @@ that `forbid` and the per-tool action. The agent gets each refusal as an MCP err
 | `MCP command matches multiple servers` | No exact entry matched, and more than one wildcard entry matched the received command. The launch is refused. |
 | The harness shows the server with zero tools | A rule refuses `tools/list` for the server. |
 | `the MCP tool catalog is not accepted` | The agent called a tool before the server's `tools/list` succeeded. |
-| `the tool is not in the accepted MCP catalog` | The server's `tools/list` does not name the tool, spelled exactly. |
+| `the tool is not in the accepted MCP catalog` | The server's `tools/list` does not name the tool, spelled exactly. Or Box left the tool out because it can't read the tool's input schema, and printed `warning[B0403]` naming the tool. See [step 3](#step-3-find-the-tool-and-argument-names). |
 | A refusal that says `[default-deny]` | No `mcp:call` permit names the server. |
 | A refusal that says `[default-deny]`, and the startup warning `a per-tool rule never loaded` printed | Box cannot enforce a per-tool rule and refuses the calls it can identify. See [When a rule cannot load](#when-a-rule-cannot-load) for causes and fixes. |
 | A refusal that names an `@id` | That `forbid` matched, on `mcp:call` or on the per-tool action. |

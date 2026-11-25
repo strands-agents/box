@@ -110,6 +110,7 @@ impl Internal {
                 | McpSchemaError::Discover { .. }
                 | McpSchemaError::Credential { .. }
                 | McpSchemaError::UnsupportedPlacement { .. }
+                | McpSchemaError::CredsdSecret { .. }
                 | McpSchemaError::Policy(_)
                 | McpSchemaError::Write { .. } => Code::B0109.into(),
             },
@@ -375,6 +376,12 @@ pub(crate) enum McpSchemaError {
         "MCP server {server:?} uses credential placement {placement:?}, which schema discovery does not support"
     )]
     UnsupportedPlacement { server: String, placement: String },
+
+    #[error(
+        "MCP server {server:?} reads its secret from credsd, which `box run` reads and schema \
+         discovery does not: generate the schema from a box.toml without this server"
+    )]
+    CredsdSecret { server: String },
 
     #[error(transparent)]
     Policy(#[from] policy::McpSchemaError),

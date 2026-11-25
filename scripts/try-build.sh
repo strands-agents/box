@@ -6,6 +6,8 @@
 #   scripts/try-build.sh <pr-number|main> -- <command...>  one command with that PATH
 #   scripts/try-build.sh --clean                           remove every cached build
 set -euo pipefail
+# bash 5.2 and later treat a backslash in a replacement as an escape; quote() needs it literal.
+shopt -u patsub_replacement 2>/dev/null || true
 
 repo="${BOX_TRY_REPO:-strands-agents/box}"
 triple="aarch64-apple-darwin"
@@ -14,6 +16,12 @@ triple="aarch64-apple-darwin"
   exit 1
 }
 cache="${TMPDIR%/}/box-try"
+[[ "${HOME:-}" == /* ]] || {
+  echo "try-build: HOME is not a full path" >&2
+  exit 1
+}
+# Box Core refuses a box_dir whose socket path passes 103 bytes, and $TMPDIR on macOS is too long.
+homes="${HOME%/}/.box-try"
 
 die() {
   echo "try-build: $*" >&2
@@ -29,8 +37,8 @@ usage() {
 [[ $# -ge 1 ]] || usage
 if [[ "$1" == "--clean" ]]; then
   [[ $# -eq 1 ]] || usage
-  rm -rf "$cache"
-  echo "try-build: removed $cache" >&2
+  rm -rf "$cache" "$homes"
+  echo "try-build: removed $cache and $homes" >&2
   exit 0
 fi
 target="$1"
@@ -122,11 +130,14 @@ else
   mv "$work/bin.files" "$files"
 fi
 
-# A BOX_HOME in the cache is one that an earlier run of this script set, so a new build gets its own.
-if [[ -n "${BOX_HOME:-}" && "$BOX_HOME" != "$cache/"* ]]; then
+# A BOX_HOME in $homes, or in $cache from an older script, is one this script set, so a new build gets its own.
+if [[ -n "${BOX_HOME:-}" && "$BOX_HOME" != "$homes/"* && "$BOX_HOME" != "$cache/"* ]]; then
   box_home="$BOX_HOME"
 else
-  box_home="$dir/home"
+  mkdir -p -m 700 "$homes"
+  [[ -d "$homes" && ! -L "$homes" && -O "$homes" ]] || die "$homes is not a folder that you own"
+  chmod 700 "$homes"
+  box_home="$homes/$short"
 fi
 mkdir -p -m 700 "$box_home"
 if BOX_HOME=box-try-probe BOX_RESOURCES="$bin/resources" "$bin/box" profile list >/dev/null 2>&1 </dev/null; then
@@ -140,14 +151,22 @@ if [[ "$mode" == "env" ]]; then
     [[ "${SHELL##*/}" != "fish" ]] || syntax=fish
   fi
   if [[ "$syntax" == "fish" ]]; then
-    quote() { local value="${1//\\/\\\\}"; printf "'%s'" "${value//\'/\\\'}"; }
+    # The replacements are variables: bash 3.2, as macOS ships it, keeps the backslashes of a quoted literal one.
+    quote() {
+      local slash='\' slashes='\\' mark="'" marked="\\'"
+      local value="${1//"$slash"/$slashes}"
+      printf "'%s'" "${value//$mark/$marked}"
+    }
     echo "set -gx PATH $(quote "$bin") \$PATH;"
     echo "set -gx BOX_RESOURCES $(quote "$bin/resources");"
     echo "set -gx BOX_HOME $(quote "$box_home");"
     echo "set -gx BOX_TRY $(quote "$try");"
     echo "functions -e box;"
   else
-    quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+    quote() {
+      local mark="'" closed="'\\''"
+      printf "'%s'" "${1//$mark/$closed}"
+    }
     echo "export PATH=$(quote "$bin"):\"\$PATH\";"
     echo "export BOX_RESOURCES=$(quote "$bin/resources");"
     echo "export BOX_HOME=$(quote "$box_home");"

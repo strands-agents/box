@@ -1493,7 +1493,10 @@ mod tests {
                 access_key_id: "ASIACREDSDEXAMPLE".to_string(),
                 secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_string(),
                 session_token: session_token.to_string(),
+                token: Default::default(),
+                token_type: String::new(),
             },
+            expires_at: None,
         }
     }
 
@@ -1552,7 +1555,10 @@ mod tests {
                     access_key_id: access_key_id.to_string(),
                     secret_access_key: secret_access_key.to_string(),
                     session_token: session_token.to_string(),
+                    token: Default::default(),
+                    token_type: String::new(),
                 },
+                expires_at: None,
             };
             let error = session_credentials_from(result, "prod-inference")
                 .expect_err("empty AWS fields must fail closed");

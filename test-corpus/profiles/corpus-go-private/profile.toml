@@ -1,0 +1,30 @@
+# The profile GO-04 runs under: @box/go, with bash in place of a model agent, as in the corpus
+# profile. go downloads the private module with git, which @box/go runs with @box/git's settings
+# because @box/go extends @box/git. Its route
+# puts a GitHub token on git's requests to github.com, so no ~/.netrc or credential helper is
+# needed. The bench sets GIT_CORPUS_PRIVATE from a token that can read only the module's private
+# repository; test-corpus/README.md says how to run the cell with a token of your own.
+packs = ["@box/go"]
+# A copy of the @box/scoped policy starter, which lets the box's shell run.
+policies = ["policy.dw"]
+
+# The project access that `box profile create --policy scoped` writes.
+[project]
+access = "write"
+
+[agent]
+command = ["/bin/bash", "--noprofile", "--norc"]
+env.PATH = "/usr/bin:/bin"
+env.TMPDIR = "${{ workspace }}"
+
+# git over HTTPS gets no stand-in to send, so the box adds the token as Basic auth to every request
+# to github.com. GIT_CORPUS_PRIVATE holds `x-access-token:<token>`.
+[egress.github_git]
+destinations = ["github.com"]
+secret.ref = "env://GIT_CORPUS_PRIVATE"
+secret.placement = "basic_auth"
+secret.inject = "always"
+
+# go skips proxy.golang.org and sum.golang.org for these paths and downloads them with git.
+[tool.go.env]
+GOPRIVATE = "github.com/strands-agents/*"

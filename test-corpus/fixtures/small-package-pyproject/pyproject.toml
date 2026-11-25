@@ -1,0 +1,13 @@
+[project]
+name = "smallpkg"
+version = "0.1.0"
+description = "A small package whose utils module has no type hints yet."
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.mypy]
+strict = true

@@ -216,7 +216,8 @@ just check
 that `check` lists, and each recipe it depends on first (such as `build-cli` before `test`), in
 that order, and paste each tail.
 
-If a test passes and the feature looks absent, find out why.
+If a test passes and the feature looks absent, find out why. When the diff changes a pack or the
+generated policy, say whether a cell in the golden corpus (`test-corpus/README.md`) covers it.
 
 ### Claims that only a real run proves
 
