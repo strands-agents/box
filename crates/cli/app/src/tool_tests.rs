@@ -1111,12 +1111,16 @@ fn a_tool_under_a_write_grant_of_the_run_is_skipped() {
     let host = FakeHost::new();
     let local = host.home().join("tools/bin");
     binary(&local.join("git"));
+    // `PATH` finds git through a link, so the write grant holds the program but no `PATH` folder.
+    let on_path = host.home().join("on-path");
+    std::fs::create_dir_all(&on_path).expect("a PATH folder");
+    std::os::unix::fs::symlink(local.join("git"), on_path.join("git")).expect("a link to git");
     pack(
         &host,
         "writes",
         &format!("[agent.filesystem]\nwrite = [{:?}]", text(&local)),
     );
-    let generated = trial(&host, &[&local])
+    let generated = trial(&host, &[&on_path])
         .with("writes")
         .tools(["git"])
         .generate()

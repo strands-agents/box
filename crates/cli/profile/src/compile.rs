@@ -606,7 +606,227 @@ fn generated_policy(
     }
     protected_root_rules(&mut rules, run);
     trusted_file_rules(&mut rules, run);
+    launch_rules(&mut rules, run)?;
     Ok((rules, unstarted))
+}
+
+/// The spellings of `box` that a shell finds on a volume that ignores case.
+const LAUNCHER_SPELLINGS: [&str; 8] = ["box", "boX", "bOx", "bOX", "Box", "BoX", "BOx", "BOX"];
+
+/// The most letters in a missing `PATH` folder's name that `box` writes every case of.
+const MOST_CASED_LETTERS: usize = 12;
+
+/// A folder on the operator's `PATH`, from which the operator's next shell may start `box`.
+struct LaunchFolder {
+    /// As `PATH` names it.
+    written: PathBuf,
+    /// With each link followed, and an absent rest kept.
+    real: PathBuf,
+}
+
+impl LaunchFolder {
+    /// The folder and each folder or link on its written path, as a decision reports it, up to
+    /// the home or the root.
+    fn chain(&self, run: &Run<'_>, home: &Path) -> Vec<PathBuf> {
+        let mut chain: Vec<PathBuf> = Vec::new();
+        let mut keep = |folder: PathBuf| {
+            if !chain.contains(&folder) {
+                chain.push(folder);
+            }
+        };
+        for step in self.written.ancestors() {
+            if (run.resolve)(step) == home {
+                break;
+            }
+            let (Some(parent), Some(name)) = (step.parent(), step.file_name()) else {
+                break;
+            };
+            keep((run.resolve)(parent).join(name));
+        }
+        for parent in self
+            .real
+            .ancestors()
+            .take_while(|parent| *parent != home && parent.parent().is_some())
+        {
+            keep(parent.to_path_buf());
+        }
+        chain
+    }
+}
+
+/// Each absolute folder on the operator's `PATH` outside the workspace and every box home. The
+/// workload can write the workspace anyway, and a box home has forbids of its own.
+fn launch_folders(run: &Run<'_>) -> Vec<LaunchFolder> {
+    let workspace = (run.resolve)(run.workspace);
+    let box_homes: Vec<PathBuf> = run
+        .box_homes
+        .iter()
+        .map(|box_home| (run.resolve)(box_home))
+        .collect();
+    let mut found: Vec<LaunchFolder> = Vec::new();
+    for folder in std::env::split_paths(run.search_path) {
+        if !folder.is_absolute() {
+            continue;
+        }
+        let written = std::path::absolute(&folder).unwrap_or(folder);
+        let real = (run.resolve)(&written);
+        if within(&real, &workspace)
+            || box_homes.iter().any(|box_home| within(&real, box_home))
+            || found.iter().any(|launch| launch.written == written)
+        {
+            continue;
+        }
+        found.push(LaunchFolder { written, real });
+    }
+    found
+}
+
+/// The deepest existing folder above `path` and the name below it, when `path` is absent.
+fn first_missing(path: &Path) -> Option<(&Path, &OsStr)> {
+    if std::fs::symlink_metadata(path).is_ok() {
+        return None;
+    }
+    let mut below = path;
+    for folder in path.ancestors().skip(1) {
+        if std::fs::symlink_metadata(folder).is_ok() {
+            return below.file_name().map(|name| (folder, name));
+        }
+        below = folder;
+    }
+    None
+}
+
+/// Whether the volume of `folder` matches a name in any case: a name above it, with its case
+/// changed, names the same folder.
+fn ignores_case(folder: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    for named in folder.ancestors() {
+        let (Some(parent), Some(name)) =
+            (named.parent(), named.file_name().and_then(OsStr::to_str))
+        else {
+            continue;
+        };
+        let changed: String = name
+            .chars()
+            .map(|letter| {
+                if letter.is_lowercase() {
+                    letter.to_uppercase().next().unwrap_or(letter)
+                } else {
+                    letter.to_lowercase().next().unwrap_or(letter)
+                }
+            })
+            .collect();
+        if changed == name {
+            continue;
+        }
+        let (Ok(own), Ok(other)) = (
+            std::fs::metadata(named),
+            std::fs::metadata(parent.join(&changed)),
+        ) else {
+            return false;
+        };
+        return own.dev() == other.dev() && own.ino() == other.ino();
+    }
+    cfg!(target_os = "macos")
+}
+
+/// Every spelling of `name` in upper and lower case, or `None` when it has too many letters.
+fn case_spellings(name: &str) -> Option<Vec<String>> {
+    let mut spellings = vec![String::new()];
+    let mut cased = 0;
+    for letter in name.chars() {
+        let lower: String = letter.to_lowercase().collect();
+        let upper: String = letter.to_uppercase().collect();
+        if lower == upper {
+            spellings
+                .iter_mut()
+                .for_each(|spelling| spelling.push(letter));
+            continue;
+        }
+        cased += 1;
+        if cased > MOST_CASED_LETTERS {
+            return None;
+        }
+        spellings = spellings
+            .into_iter()
+            .flat_map(|spelling| [format!("{spelling}{lower}"), format!("{spelling}{upper}")])
+            .collect();
+    }
+    Some(spellings)
+}
+
+/// A `forbid` on changing `box` in each folder on the operator's `PATH`, and on creating, moving,
+/// and deleting each such folder and each folder above it, so the Shell and Monty cannot change
+/// which `box` the operator's next shell starts.
+fn launch_rules(rules: &mut Rules, run: &Run<'_>) -> Result<(), Error> {
+    let home = (run.resolve)(run.home);
+    let mut files: Vec<String> = Vec::new();
+    let mut folders: Vec<String> = Vec::new();
+    let keep = |list: &mut Vec<String>, path: &Path| {
+        let named = tilde(&home, path);
+        if !list.contains(&named) {
+            list.push(named);
+        }
+    };
+    for launch in launch_folders(run) {
+        let mut spellings = vec![launch.real.clone()];
+        if let (Some(parent), Some(name)) = (launch.written.parent(), launch.written.file_name()) {
+            let step = (run.resolve)(parent).join(name);
+            if !spellings.contains(&step) {
+                spellings.push(step);
+            }
+        }
+        for spelling in &spellings {
+            for name in LAUNCHER_SPELLINGS {
+                keep(&mut files, &spelling.join(name));
+            }
+        }
+        for folder in launch.chain(run, &home) {
+            keep(&mut folders, &folder);
+        }
+        // On a volume that ignores case, the folder can be made under another case of its first
+        // missing name, which the shell then finds.
+        if let Some((parent, name)) = first_missing(&launch.real)
+            && ignores_case(parent)
+        {
+            let spellings = name.to_str().and_then(case_spellings).ok_or_else(|| {
+                Error::UnprotectedLaunchFolder {
+                    folder: launch.real.clone(),
+                }
+            })?;
+            for spelling in spellings {
+                keep(&mut folders, &parent.join(spelling));
+            }
+        }
+    }
+    if files.is_empty() {
+        return Ok(());
+    }
+    let exactly = |paths: &[String]| {
+        any_of(
+            &paths
+                .iter()
+                .map(|path| format!("context.input.path == {}", literal(path)))
+                .collect::<Vec<_>>(),
+        )
+    };
+    rules.gap();
+    for (list, kind) in [(&files, "file"), (&folders, "folder")] {
+        for (action, verb) in [
+            ("fs:write", "write"),
+            ("fs:delete", "delete"),
+            ("fs:move", "move"),
+        ] {
+            rules.forbid(
+                &format!("launch_{kind}_{verb}"),
+                &format!(
+                    "(principal, action == Box::Action::{action:?}, resource) when {{ {} }};",
+                    exactly(list)
+                ),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The forbids on each protected root, so the Shell and Monty cannot change a pack, a policy
@@ -1373,6 +1593,47 @@ fn refuse_reach(profile: &Resolved, run: &Run<'_>) -> Result<(), Error> {
                     grant: grant.clone(),
                     writer: owner.table.clone(),
                 });
+            }
+        }
+    }
+    // A process that can write a folder on the operator's `PATH`, or a link on the way to it, can
+    // put a `box` there that the operator's next shell starts, outside every box.
+    let home = (run.resolve)(run.home);
+    let launch: Vec<(LaunchFolder, Vec<PathBuf>)> = launch_folders(run)
+        .into_iter()
+        .map(|folder| {
+            let chain = folder.chain(run, &home);
+            (folder, chain)
+        })
+        .collect();
+    for reach in &reaches {
+        for grant in reach.write.iter().map(|entry| expand(entry)) {
+            if storage.iter().any(|directory| within(&grant, directory))
+                || grant.parent() == Some(scratch.as_path())
+            {
+                continue;
+            }
+            for (folder, chain) in &launch {
+                let names_box = grant.parent() == Some(folder.real.as_path())
+                    && grant
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .is_some_and(|name| name.eq_ignore_ascii_case("box"));
+                let kept = reach
+                    .write_protected
+                    .iter()
+                    .any(|tree| within(&folder.real, &expand(tree)));
+                let through_a_link = chain.iter().any(|step| {
+                    *step != folder.real && !within(&folder.real, step) && within(step, &grant)
+                });
+                if through_a_link || names_box || (within(&folder.real, &grant) && !kept) {
+                    return Err(Error::LaunchFolderUnderWrite {
+                        grant,
+                        folder: folder.real.clone(),
+                        writer: reach.table.clone(),
+                        exists: folder.real.is_dir(),
+                    });
+                }
             }
         }
     }

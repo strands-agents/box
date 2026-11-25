@@ -24,6 +24,11 @@ jobs:
       - name: Build Box and helpers
         timeout-minutes: 40
         run: cargo build --locked -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline
+      - name: Unit tests
+        timeout-minutes: 30
+        run: |
+          cargo test --locked -p strands-box-cli-profile --lib 2>&1 | tail -5
+          cargo test --locked -p strands-box-cli --lib 2>&1 | tail -15
       - name: Run the probe
         timeout-minutes: 30
         run: cargo test --locked -p strands-box-cli --all-features --test launch_probe -- --nocapture --test-threads 1 2>&1 | tee probe-macos.log

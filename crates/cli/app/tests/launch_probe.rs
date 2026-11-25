@@ -72,10 +72,26 @@ impl Scene {
         };
         profile("probe", "");
         // The agent itself may write `~/.cargo`, but not its `bin`, as a profile must say.
+        let program = |name: &str| {
+            [format!("/bin/{name}"), format!("/usr/bin/{name}")]
+                .into_iter()
+                .find(|path| Path::new(path).exists())
+                .map(|path| Path::new(&path).canonicalize().unwrap().display().to_string())
+                .expect("a system program")
+        };
         profile(
             "native",
-            "[agent.filesystem]\nread = [\"${{ home }}/.cargo\"]\nwrite = [\"${{ home }}/.cargo\"]\n\n\
-             [filesystem]\ndeny_write = [\"${{ home }}/.cargo/bin\"]\n",
+            &format!(
+                "[agent.filesystem]\nread = [\"${{{{ home }}}}/.cargo\"]\nwrite = [\"${{{{ home }}}}/.cargo\"]\n\
+                 exec = [{:?}]\n\n[filesystem]\ndeny_write = [\"${{{{ home }}}}/.cargo/bin\"]\n",
+                program("mv")
+            ),
+        );
+        // The agent itself may write a folder that holds no `PATH` folder.
+        std::fs::create_dir_all(home.join("workarea")).unwrap();
+        profile(
+            "native-ok",
+            "[agent.filesystem]\nread = [\"${{ home }}/workarea\"]\nwrite = [\"${{ home }}/workarea\"]\n",
         );
         // The agent itself may write `~/goexists`, whose `bin` is on `PATH` but missing.
         let mkdir = ["/bin/mkdir", "/usr/bin/mkdir"]
@@ -278,6 +294,8 @@ fn cases() -> Vec<(&'static str, &'static str, String)> {
         ("A8 monty: new ~/.cargo/bin/box", "probe", monty("open('HOME/.cargo/bin/box', 'w').write('evil')")),
         ("A9 monty: rename to ~/.cargo/bin/box", "probe", monty("import os; os.rename('HOME/evil', 'HOME/.cargo/bin/box')")),
         ("A10 monty: new ~/.cargo/bin/BOX (one file on macOS)", "probe", monty("open('HOME/.cargo/bin/BOX', 'w').write('evil')")),
+        ("A11 shell: new ~/.CARGO/bin/box (one file on macOS)", "probe", shell("echo evil > HOME/.CARGO/bin/box")),
+        ("A12 shell: new ~/.cargo/BIN/Box (one file on macOS)", "probe", shell("echo evil > HOME/.cargo/BIN/Box")),
         // Replace a PATH folder.
         ("B1 shell: move ~/.cargo/bin aside", "probe", shell("mv HOME/.cargo/bin HOME/.cargo/bin.old && mkdir HOME/.cargo/bin && echo evil > HOME/.cargo/bin/box")),
         ("B2 shell: move ~/.cargo aside", "probe", shell("mv HOME/.cargo HOME/cargo.old && mkdir -p HOME/.cargo/bin && echo evil > HOME/.cargo/bin/box")),
@@ -310,6 +328,7 @@ fn cases() -> Vec<(&'static str, &'static str, String)> {
         ("E1 agent: new ~/.cargo/bin/box", "native", agent("echo evil > HOME/.cargo/bin/box")),
         ("E2 agent: mkdir ~/goexists/bin and plant box", "native-go", agent("mkdir HOME/goexists/bin && echo evil > HOME/goexists/bin/box")),
         ("E3 agent: write grant on all of ~/.cargo, new ~/.cargo/bin/box", "native-cargo", agent("echo evil > HOME/.cargo/bin/box")),
+        ("E4 agent: move ~/.cargo/bin aside (deny_write on it)", "native", agent("mv HOME/.cargo/bin HOME/.cargo/bin.old")),
         // Writes that should keep working.
         ("N1 shell: write ~/bin/tool", "probe", shell("echo changed > HOME/bin/tool")),
         ("N2 shell: new ~/bin/new", "probe", shell("echo new > HOME/bin/new")),
@@ -320,6 +339,10 @@ fn cases() -> Vec<(&'static str, &'static str, String)> {
         ("N7 agent: write ~/.cargo/new", "native", agent("echo ok > HOME/.cargo/new")),
         ("N8 agent: write ~/goexists/file", "native-go", agent("echo ok > HOME/goexists/file")),
         ("N9 shell: new ~/.cargo/bin/boxer", "probe", shell("echo new > HOME/.cargo/bin/boxer")),
+        ("N10 shell: mkdir -p ~/.cargo/bin/sub", "probe", shell("mkdir -p HOME/.cargo/bin/sub && echo new > HOME/.cargo/bin/sub/file")),
+        ("N11 shell: mkdir -p ~/goexists/sub", "probe", shell("mkdir -p HOME/goexists/sub && echo new > HOME/goexists/sub/file")),
+        ("N12 shell: new ~/.cargo/config.toml", "probe", shell("echo new > HOME/.cargo/config.toml")),
+        ("N13 agent: write ~/workarea/file", "native-ok", agent("echo ok > HOME/workarea/file")),
     ]
 }
 
@@ -348,7 +371,14 @@ fn launch_probe() {
         let stderr = scene.shown(&String::from_utf8_lossy(&output.stderr));
         for line in stderr
             .lines()
-            .filter(|line| !line.contains("note[") && !line.starts_with("box: ") && !line.starts_with("  "))
+            .filter(|line| {
+                !line.contains("note[")
+                    && !line.starts_with("  ")
+                    && !line.trim().is_empty()
+                    && !["box: running", "box: to reuse", "box: policy history", "Usage:", "Examples:", "Tip:", "For more"]
+                        .iter()
+                        .any(|start| line.starts_with(start))
+            })
         {
             println!("  err: {line}");
         }

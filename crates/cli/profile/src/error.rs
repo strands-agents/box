@@ -351,6 +351,35 @@ pub enum Error {
         /// `mcp.<name>`.
         writer: String,
     },
+    /// A write grant holds a folder on the operator's `PATH`, where the workload can put a `box`
+    /// that the operator's next shell starts, outside every box.
+    #[error(
+        "the write grant {grant} of `[{writer}]` holds {folder}, a folder on your PATH, so the workload could put a `box` there that your shell starts next; {}",
+        if *.exists {
+            format!("narrow the grant, or list {} in your profile's `[filesystem] deny_write`", .folder.display())
+        } else {
+            "narrow the grant, or create the folder and list it in your profile's `[filesystem] deny_write`".to_string()
+        }
+    )]
+    LaunchFolderUnderWrite {
+        /// The write grant.
+        grant: PathBuf,
+        /// The folder on `PATH`, with each link followed.
+        folder: PathBuf,
+        /// The table whose write grant holds it.
+        writer: String,
+        /// Whether the folder exists, so that `deny_write` can name it.
+        exists: bool,
+    },
+    /// A folder on the operator's `PATH` is missing, on a volume that ignores case, and its first
+    /// missing name has too many letters for `box` to forbid every case of it.
+    #[error(
+        "{folder} is on your PATH but missing, and its volume ignores case, so box cannot keep a box from making it under another case of its name; create the folder, or remove it from PATH"
+    )]
+    UnprotectedLaunchFolder {
+        /// The missing folder.
+        folder: PathBuf,
+    },
     /// The program of a secret source, its `#!` interpreter, or a path in its `command`, lies under
     /// a write grant, where the workload can replace it, or holds one, where the workload can change
     /// what is in it. The path can be a file, a folder, or absent. A `deny_write` does not keep it,
