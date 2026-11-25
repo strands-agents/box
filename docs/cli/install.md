@@ -168,9 +168,11 @@ This adds the tap, trusts the `box` cask, and puts `box` in Homebrew's `bin` fol
 [Linux requirements](../user/linux-requirements.md). To install by the short name `box`, see the
 tap's [Install by short name](https://github.com/strands-agents/homebrew-tap#install-by-short-name).
 
-Homebrew's default prefix (`/opt/homebrew`, `/usr/local`, or `/home/linuxbrew/.linuxbrew`) is
-outside every box's reach. A Homebrew prefix inside your home isn't protected yet, apart from the
-release folder of the `box` you run.
+`box` keeps a box from changing the release folder of the `box` you run, in Homebrew's Caskroom,
+but not the rest of Homebrew's prefix. The default prefix (`/opt/homebrew`, `/usr/local`, or
+`/home/linuxbrew/.linuxbrew`) is outside your home, so a write rule over your home doesn't reach
+it. A prefix inside your home isn't protected yet. Either way, keep your write grants and `permit`
+rules out of `$(brew --prefix)` ([Keep write rules narrow](policies.md#keep-write-rules-narrow)).
 
 Check that `box` runs:
 
@@ -203,32 +205,6 @@ brew uninstall --cask box
 
 This removes `box` and its release files. Your profiles, packs, storage, and run records stay in
 `~/.strands/box`. To remove them too, delete that folder.
-
-### Switch from the installer to Homebrew
-
-Use one install method on a computer, so that the `box` on your `PATH` is the one you upgrade.
-Install the cask first:
-
-```sh
-brew install --cask strands-agents/tap/box
-```
-
-Then remove the installer's release files and its link:
-
-```sh
-rm -rf ~/.strands/box/packages
-rm ~/.local/bin/box
-```
-
-Your profiles in `~/.strands/box` keep working. To remove the lines the installer added to your
-shell's startup files, see [Uninstall](#uninstall). Check that your shell finds Homebrew's `box`
-first:
-
-```sh
-which -a box
-```
-
-If `box --version` shows an older release, another `box` comes first on your `PATH`.
 
 ## Build from source
 
