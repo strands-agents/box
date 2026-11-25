@@ -909,16 +909,16 @@ fn a_tool_whose_schema_does_not_generate_is_left_out_of_a_running_box() {
             .filter(|line| line.contains("is left out"))
             .collect::<Vec<_>>(),
         [
-            "strands-box: warning: MCP server \"alpha\" tool \"create_account\" is left out, and \
-             its calls are refused: unexpected token `-`"
+            "strands-box: warning[B0403]: MCP server \"alpha\" tool \"create_account\" is left \
+             out, and its calls are refused: unexpected token `-`"
         ],
         "{stderr}"
     );
     assert!(!stderr.contains("schema generation failed"), "{stderr}");
     assert_eq!(
         control_detail(&records_path(&box_), "schema_installed", "alpha").as_deref(),
-        Some("1 tools"),
-        "the installed schema counts the accepted tools only"
+        Some("1 tools, 1 left out"),
+        "the installed schema counts the accepted tools and the left-out ones"
     );
 }
 

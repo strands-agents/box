@@ -111,7 +111,7 @@ fn generate_left_out_warned(server: &str, tools_list: &str) -> Result<String, Mc
     let (schema, omitted) =
         generate_mcp_schema_with_omissions(server, tools_list).map_err(McpSchemaError::from)?;
     for tool in omitted {
-        eprintln!("strands-box: warning: {tool}");
+        ::diagnostics::diag!(B0403, "{tool}");
     }
     Ok(schema)
 }

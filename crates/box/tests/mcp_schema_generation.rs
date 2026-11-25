@@ -531,8 +531,8 @@ fn generate_schema_leaves_out_a_tool_whose_schema_does_not_generate() {
     assert!(output.status.success(), "{stderr}");
     assert_eq!(
         stderr.trim(),
-        "strands-box: warning: MCP server \"repro\" tool \"create_account\" is left out, and its \
-         calls are refused: unexpected token `-`"
+        "strands-box: warning[B0403]: MCP server \"repro\" tool \"create_account\" is left out, \
+         and its calls are refused: unexpected token `-`"
     );
     let actions = std::fs::read_to_string(root.path().join("schemas/actions.cedarschema"))
         .expect("read actions");

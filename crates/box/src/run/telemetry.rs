@@ -470,15 +470,35 @@ pub(crate) fn capture_policy_action(
 pub(crate) struct EgressDecisionInterceptor {
     inner: Arc<dyn EgressEffectInterceptor>,
     recorder: Arc<DecisionRecorder>,
+    catalogs: Option<Arc<policy::ToolCatalogs>>,
 }
 
 impl EgressDecisionInterceptor {
-    /// Wrap the policy adapter without changing its public seam.
+    /// Wrap the policy adapter without changing its public seam, reporting no left-out tools.
+    #[cfg(test)]
     pub(crate) fn over(
         inner: Arc<dyn EgressEffectInterceptor>,
         recorder: Arc<DecisionRecorder>,
     ) -> Arc<dyn EgressEffectInterceptor> {
-        Arc::new(Self { inner, recorder })
+        Arc::new(Self {
+            inner,
+            recorder,
+            catalogs: None,
+        })
+    }
+
+    /// [`Self::over`], also warning about each tool that staging a remote catalog leaves out of
+    /// `catalogs`.
+    pub(crate) fn over_reporting(
+        inner: Arc<dyn EgressEffectInterceptor>,
+        recorder: Arc<DecisionRecorder>,
+        catalogs: Arc<policy::ToolCatalogs>,
+    ) -> Arc<dyn EgressEffectInterceptor> {
+        Arc::new(Self {
+            inner,
+            recorder,
+            catalogs: Some(catalogs),
+        })
     }
 }
 
@@ -692,7 +712,11 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
         server: &str,
         reply: egress_gateway::McpListReply<'_>,
     ) -> io::Result<()> {
-        self.inner.stage_mcp_catalog(server, reply)
+        let staged = self.inner.stage_mcp_catalog(server, reply);
+        if let Some(catalogs) = &self.catalogs {
+            crate::run::broker::mcp::report_omitted(catalogs);
+        }
+        staged
     }
 }
 
@@ -1265,6 +1289,68 @@ mod tests {
     use policy::{EgressPolicyInterceptor, GovernedBox, Policy, PolicyEngine, Principal};
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    /// A remote catalog that leaves a tool out is reported by the box, which takes the left-out
+    /// tools from the catalogs as it stages the list.
+    #[test]
+    fn a_remote_catalog_reports_the_tools_it_leaves_out() {
+        let history = tempfile::tempdir().expect("history directory");
+        let policy = Arc::new(
+            PolicyEngine::open_staged(
+                &policy::Operator::unanchored(),
+                vec![Policy {
+                    origin: PathBuf::from("left-out.dw"),
+                    text: r#"permit(principal, action == Box::Action::"mcp:call", resource);"#
+                        .to_string(),
+                }],
+                &history.path().join("dogwood.redb"),
+            )
+            .expect("the staged policy opens"),
+        );
+        let catalogs = Arc::new(policy::ToolCatalogs::new(
+            Arc::clone(&policy),
+            [("demo".to_string(), policy::McpServerKind::Http)],
+        ));
+        let inner = EgressPolicyInterceptor::into_handle_with_discovery(
+            policy,
+            Principal::agent(),
+            GovernedBox::assigned("test-box"),
+            vec![("mcp-fixture.demo".to_string(), "demo".to_string())],
+            Arc::clone(&catalogs),
+            Arc::new(|| {}),
+        );
+        let interceptor = EgressDecisionInterceptor::over_reporting(
+            inner,
+            DecisionRecorder::discarding(),
+            Arc::clone(&catalogs),
+        );
+        let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "read", "inputSchema": {"type": "object"}},
+            {"name": "create_account", "inputSchema": {"type": "object",
+                "properties": {"account": {"$ref": "#/$defs/create-account"}},
+                "$defs": {"create-account": {"type": "object"}}}}
+        ]}})
+        .to_string();
+        interceptor
+            .stage_mcp_catalog(
+                "demo",
+                egress_gateway::McpListReply {
+                    session: None,
+                    cursor: None,
+                    body: body.as_bytes(),
+                },
+            )
+            .expect("the list stages without its unreadable tool");
+        assert_eq!(catalogs.require_listed("demo", "read"), Ok(()));
+        assert_eq!(
+            catalogs.require_listed("demo", "create_account"),
+            Err(policy::CatalogRefusal::NotListed)
+        );
+        assert!(
+            catalogs.take_omitted().is_empty(),
+            "the box took the left-out tool to report it"
+        );
+    }
 
     #[test]
     fn a_request_recorder_sends_to_the_callers_channel() {

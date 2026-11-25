@@ -162,6 +162,7 @@ pub struct ToolCatalogs {
     policy: Arc<PolicyEngine>,
     inner: Mutex<Catalogs>,
     staging: Mutex<()>,
+    omitted: Mutex<Vec<crate::OmittedTool>>,
 }
 
 struct Catalogs {
@@ -342,7 +343,19 @@ impl ToolCatalogs {
                 next_list: 0,
             }),
             staging: Mutex::new(()),
+            omitted: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Each tool that staging left out of an accepted catalog since the last call, for the box to
+    /// report.
+    pub fn take_omitted(&self) -> Vec<crate::OmittedTool> {
+        std::mem::take(
+            &mut *self
+                .omitted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     /// Observe one reply to a client's `tools/list` on `connection`.
@@ -546,9 +559,10 @@ impl ToolCatalogs {
                 });
                 entry.state = ServerDiscovery::Ready;
                 drop(inner);
-                for tool in &omitted {
-                    eprintln!("strands-box: warning: {tool}");
-                }
+                self.omitted
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend(omitted);
                 Ok(CatalogStage::Accepted {
                     tools: accepted_tools,
                 })
@@ -813,6 +827,18 @@ mod tests {
             Err(CatalogRefusal::NotListed)
         );
         assert_eq!(fixture.catalogs.state("demo"), Some(ServerDiscovery::Ready));
+        let omitted = fixture.catalogs.take_omitted();
+        assert_eq!(
+            omitted
+                .iter()
+                .map(|tool| (tool.server.as_str(), tool.tool.as_str()))
+                .collect::<Vec<_>>(),
+            [("demo", "create_account")]
+        );
+        assert!(
+            fixture.catalogs.take_omitted().is_empty(),
+            "each left-out tool is taken once"
+        );
     }
 
     #[test]

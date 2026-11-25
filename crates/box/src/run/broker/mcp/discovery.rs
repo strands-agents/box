@@ -338,12 +338,21 @@ impl DiscoveryRegistry {
         let staged = self.stage_with_test_faults(catalog);
         let outcome = match staged {
             Ok(CatalogStage::Accepted { tools }) => {
+                let left_out = report_omitted(&self.catalogs)
+                    .iter()
+                    .filter(|tool| tool.server == server)
+                    .count();
+                let detail = if left_out == 0 {
+                    format!("{tools} tools")
+                } else {
+                    format!("{tools} tools, {left_out} left out")
+                };
                 self.coordinator.control(
                     telemetry::ControlRecord::completed(
                         telemetry::ControlOperation::SchemaInstalled,
                         &server,
                     )
-                    .detailed(&format!("{tools} tools")),
+                    .detailed(&detail),
                 );
                 StagedList::Released
             }
@@ -599,6 +608,15 @@ fn catalog_server(catalog: &CompleteCatalog) -> String {
 }
 
 /// The JSON-RPC error a client receives when its server's discovery failed.
+/// Warn about each tool that staging left out since the last report, and return them.
+pub(crate) fn report_omitted(catalogs: &ToolCatalogs) -> Vec<policy::OmittedTool> {
+    let omitted = catalogs.take_omitted();
+    for tool in &omitted {
+        ::diagnostics::diag!(B0403, "{tool}");
+    }
+    omitted
+}
+
 pub(super) fn failure_response(server: &str, failure: DiscoveryFailure, id: &Value) -> String {
     let message = format!("MCP server {server:?} failed during {failure}");
     let message = if message.len() > MAXIMUM_DISCOVERY_FAILURE_BYTES {
