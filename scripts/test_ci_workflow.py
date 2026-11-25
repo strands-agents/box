@@ -161,6 +161,17 @@ class SuiteStepTests(unittest.TestCase):
             with self.subTest(step=name):
                 self.assertEqual(self.step_if(name), self.TESTS)
 
+    def test_endpoint_override_is_checked_without_the_apps_test_transport_feature(self):
+        name = "Test telemetry endpoint without test transport"
+        for job_name in ["build-test-lint", "macos"]:
+            with self.subTest(job=job_name):
+                self.assertEqual(self.step_if(name, job_name=job_name), self.ALL)
+                self.assertEqual(
+                    step_run(CLI_TEST, job_name, name).split(),
+                    ["cargo", "test", "--locked", "-p", "strands-box-cli-telemetry",
+                     "--no-default-features", "--test", "endpoint_override"],
+                )
+
 
 class CiWorkflowTests(unittest.TestCase):
     def test_ci_calls_cli_test_with_the_change_classes(self):
