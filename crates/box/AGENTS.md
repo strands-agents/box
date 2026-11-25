@@ -144,6 +144,12 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     decision as dropped. So a caller that reads slowly, or never, cannot block or delay a decision.
     `decisions.rs::a_full_channel_drops_and_counts_without_waiting` pins this. A `PolicyDecision`
     is a copy of the record's values, with no principal, so it cannot change a verdict.
+  - **A run event channel only receives, and names only kinds.** `RunEventSender` has no public
+    method. `RunEvent::Refused` carries a `RefusalKind` from `BoxError::kind`, whose match names
+    every `Internal` group, and the message code from `BoxError::code`, the code its stderr line
+    prints. It never carries a path or message. The sender stays at the exit points in
+    `lib.rs` and `command::execute`, where every refusal already arrives, so no phase takes it.
+    `box_library.rs::event_tests` pins one event per exit point and none for a successful run.
 
   **A library caller shares the box's trusted process, so the caller is trusted.** It still
   **cannot** open a `PolicyEngine`, build a `ContainmentConfig`, hold a proxy handle, or resolve a

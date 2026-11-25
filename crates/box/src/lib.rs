@@ -28,6 +28,9 @@ pub use run::decisions::{
     DecisionEnforcement, PolicyDecision, PolicyDecisionReceiver, PolicyDecisionSender,
     policy_decisions,
 };
+pub use run::events::{
+    ContainmentStage, RefusalKind, RunEvent, RunEventReceiver, RunEventSender, run_events,
+};
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -47,6 +50,9 @@ pub struct RunOptions<'a> {
     /// The channel that receives each policy decision of the run as it is made; a full channel
     /// drops the decision rather than delay it.
     pub policy_decisions: Option<PolicyDecisionSender>,
+    /// The channel that receives what happens to the run, such as the kind of a failure of the
+    /// box itself; no event is ever dropped.
+    pub events: Option<RunEventSender>,
 }
 
 /// Run the existing Box command with a configuration.
@@ -58,12 +64,18 @@ pub fn run(config: PathBuf, workload: Vec<OsString>, options: RunOptions<'_>) ->
             found: found.to_string(),
         };
         ::diagnostics::diag!({ error.code() }, "{error}");
+        refuse(options.events.as_ref(), RefusalKind::BoxId, error.code());
         return ExitCode::FAILURE;
     }
     if STARTED.swap(true, Ordering::SeqCst) {
         ::diagnostics::diag!(
             B0106,
             "refusing to run: this process already attempted to run a box"
+        );
+        refuse(
+            options.events.as_ref(),
+            RefusalKind::AlreadyRan,
+            ::diagnostics::Code::B0106.into(),
         );
         return ExitCode::FAILURE;
     }
@@ -74,6 +86,18 @@ pub fn run(config: PathBuf, workload: Vec<OsString>, options: RunOptions<'_>) ->
         },
         options,
     )
+}
+
+/// Tell the caller's channel, if it gave one, the kind of the box's own failure and the code its
+/// stderr line carries.
+pub(crate) fn refuse(
+    events: Option<&RunEventSender>,
+    kind: RefusalKind,
+    code: ::diagnostics::Kind,
+) {
+    if let Some(events) = events {
+        events.send(RunEvent::Refused { kind, code });
+    }
 }
 
 /// Replace the running box's authored policies with the supplied text.
