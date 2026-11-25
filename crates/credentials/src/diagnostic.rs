@@ -5,13 +5,13 @@ use crate::sources::CREDSD_SCHEME;
 
 /// Redact a credential reference for display/audit.
 ///
-/// A `credsd://<environment>` reference keeps its body: the environment is a non-secret routing
+/// A `credsd://<credential>` reference keeps its body: the credential name is a non-secret routing
 /// label the operator authors in cleartext, and the acquisition audit must name it. Every other
 /// scheme's body is disclosure-sensitive and is redacted.
 pub(crate) fn redact_credential_ref(reference: &str) -> String {
     match reference.split_once("://") {
-        Some((scheme, environment)) if scheme == CREDSD_SCHEME => {
-            format!("{scheme}://{environment}")
+        Some((scheme, credential)) if scheme == CREDSD_SCHEME => {
+            format!("{scheme}://{credential}")
         }
         Some((scheme, _)) if !scheme.is_empty() => format!("{scheme}://[REDACTED]"),
         _ => "[REDACTED]".to_string(),
@@ -83,10 +83,10 @@ mod tests {
         assert_eq!(redact_credential_ref("://orphan"), "[REDACTED]");
     }
 
-    /// A credsd reference keeps its environment: it is a non-secret routing label the audit names,
+    /// A credsd reference keeps its credential name: it is a non-secret routing label the audit names,
     /// unlike every other scheme's body.
     #[test]
-    fn redact_credential_ref_keeps_the_credsd_environment() {
+    fn redact_credential_ref_keeps_the_credsd_credential() {
         assert_eq!(
             redact_credential_ref("credsd://prod-inference"),
             "credsd://prod-inference"

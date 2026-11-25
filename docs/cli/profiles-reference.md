@@ -543,8 +543,7 @@ With native filesystem policy, your policy also decides the file operations that
 tools, and its local MCP servers make directly, on top of their filesystem grants. It needs a
 `box` built with the `native-filesystem-policy` Cargo feature, and:
 
-- On macOS: macOS 27 or later, and a `box` built with the macOS 27 SDK or later, with a valid
-  signature and Apple's Endpoint Security entitlement.
+- On macOS: the [native policy requirements](../user/native-filesystem-policy.md#macos-requirements).
 - On Linux: an ARM64 machine with the required kernel support, and the `CAP_BPF` and
   `CAP_PERFMON` capabilities for `box`, which a normal install does not give it. Linux x86-64
   refuses selection.
@@ -552,6 +551,9 @@ tools, and its local MCP servers make directly, on top of their filesystem grant
 See the
 [prerequisites in Box's own guide](../user/native-filesystem-policy.md)
 and the [build instructions](../dev/manual-testing.md#build-the-native-filesystem-policy-experiment).
+
+These prerequisites apply only when you enable this feature. With it disabled, the
+[standard installation requirements](install.md#requirements) apply.
 
 Turn it on in `profile.toml`. Only a profile holds this table:
 
