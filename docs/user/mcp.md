@@ -412,8 +412,10 @@ refuses a `[mcp.<name>]` with a backend by name, which stops the whole run. Gene
 `box.toml` without that server to get the rest, then write its `mcp:call` rules by hand.
 
 `policy generate-schema` cannot read a `credsd://` secret either: only `box run` reads credsd. It
-refuses a server whose `secret.ref` is `credsd://` by name, which stops the whole run. Give that
-server an `env://` secret while you generate the schema, or leave it out.
+refuses a server whose `secret.ref` is `credsd://` by name, which stops the whole run. Generate the
+schema from a `box.toml` without that server. For a token, you can instead give the server an
+`env://` secret and remove its `secret.type` while you generate the schema; a route that signs with
+AWS has no such stand-in.
 
 `policy generate-schema` also runs the load checks of `box run` on each remote MCP server. A server
 whose `secret`, destinations, or name the loader rejects stops the whole run.

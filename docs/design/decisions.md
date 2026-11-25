@@ -2720,7 +2720,7 @@ mint no placeholder, so it worked only while AWS was credsd's one kind.
 A token route reads its access token when the vault opens, before the workload starts, and holds it
 for the run. It behaves as an `env://` route or a secret source does: the workload holds a
 placeholder, routes that name one token under one placeholder variable share one read, and two
-variables for one token are allowed, as they are for `env://`.
+variables for one token are allowed, as they are for a declared secret source, with one read each.
 
 **Rejected.** Fetching the token on each request, or caching it until its expiry: either one
 needs a token lifecycle that no source has yet, and redaction that follows a changing value.

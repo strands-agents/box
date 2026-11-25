@@ -154,8 +154,8 @@ states why the configuration names it rather than Box asking the daemon.
 A token route follows the model of a declared secret source on purpose: Box reads the token before
 the workload starts and holds it for the run
 ([a credsd token is read once at startup](./decisions.md#a-credsd-token-is-read-once-at-startup)).
-Because it matches `env://` and declared sources, it allows what they allow: two routes can read one
-token under two placeholder variables, and each vault reads it. A token with an expiry warns at
+Because it matches a declared source, it allows what a declared source allows: two routes can read
+one token under two placeholder variables, with one read for each variable. A token with an expiry warns at
 startup, and a `token_type` other than `Bearer` is refused, because Box cannot make a DPoP proof.
 
 `secret.env` is stable, not experimental. It only names the variable that holds a placeholder, and

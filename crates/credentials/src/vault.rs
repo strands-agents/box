@@ -508,8 +508,8 @@ impl Vault {
         if let Some(expires_at) = &token.expires_at {
             self.warn_at_open(&format!(
                 "credsd://{credential} for {destination} reads a token that expires at \
-                 {expires_at:?}; the box reads it once, when the box starts, and does not refresh \
-                 it during the run",
+                 {expires_at:?}; the box reads it when the box starts and does not refresh it \
+                 during the run",
                 destination = route.destination_display(),
             ));
         }
@@ -1391,13 +1391,18 @@ mod tests {
     /// and no daemon is contacted for it.
     #[test]
     fn a_box_owned_credsd_route_is_refused() {
-        let unbound = std::env::temp_dir().join(format!(
+        let socket = std::env::temp_dir().join(format!(
             "credsd-vault-box-owned-{}.sock",
             std::process::id()
         ));
+        let _ = std::fs::remove_file(&socket);
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind the socket");
+        listener
+            .set_nonblocking(true)
+            .expect("a nonblocking listener");
         let error = Vault::open(
             VaultConfig::new(Backend::local(), "t")
-                .credsd_socket(unbound)
+                .credsd_socket(socket.clone())
                 .route(RouteSpec::box_owned(
                     DestinationPattern::parse("api.github.com").unwrap(),
                     Locator::parse_uri("credsd://github").unwrap(),
@@ -1405,6 +1410,16 @@ mod tests {
                 )),
         )
         .expect_err("a box-owned credsd route has no source");
-        assert!(error.to_string().contains("credsd"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("no credential source registered for scheme \"credsd\""),
+            "{error}"
+        );
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "no daemon is contacted"
+        );
+        let _ = std::fs::remove_file(&socket);
     }
 }

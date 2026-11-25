@@ -354,7 +354,7 @@ pub(crate) enum McpSchemaError {
 
     #[error(
         "MCP server {server:?} reads its secret from credsd, which `box run` reads and schema \
-         discovery does not: generate the schema with an env:// secret on this server, or without it"
+         discovery does not: generate the schema from a box.toml without this server"
     )]
     CredsdSecret { server: String },
 
