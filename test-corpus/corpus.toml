@@ -1,0 +1,1802 @@
+# The golden corpus: the sessions a developer runs in their first days with Box.
+# This file is the source of the cells. The runner reads it (see test-corpus/README.md).
+#
+# One [[cell]] per test. Fields:
+#   id         The cell's stable id (TS-01 .. DT-01).
+#   section    The cell's section ("TypeScript", "Python", ...). `--section` picks one.
+#   gate       launch | first-update | follows. Sections 1 to 3 gate launch.
+#   machine    clean | lived-in. 9 cells need the lived-in image.
+#   prompt     The agent-layer prompt, as a developer would type it.
+#   script     The bash the scripted layer runs as the agent. Each command an agent would run
+#              goes to Box's Shell as `bash -c '...'`; see test-corpus/README.md. A cell with
+#              no script is SKIP(no-scripted-commands) on that layer.
+#   expect     What the script gives on CI's runner today. No expect means GREEN. A red cell
+#              is { verdict = "red", denies = ["<action> <resource>", ...] }, where `*` matches
+#              anything; an error is { verdict = "error", log = "<text in the log>" }. A run
+#              that differs fails the scripted layer.
+#   fixture    What the project directory starts as: a folder under test-corpus/fixtures/, a
+#              clone:<owner>/<repo>, or one the runner builds (empty, any-repo, sqlite-app-db).
+#   fixture_ref  The tag or full commit SHA a clone: fixture checks out. A clone without one is SKIP.
+#   needs      Toolchains the cell needs. The runner marks a cell SKIP(no-toolchain)
+#              when a tool here is absent, so a missing tool is never a false FAIL.
+#   net        Hosts the cell legitimately reaches. Informs the denial analysis:
+#              a deny outside this list is a real finding; a deny of a host here is
+#              a pack gap.
+#   pass_check The cell's task-outcome check. With --judge, the agent layer grades it.
+#   note       Anything the runner or a reader must know (known denials, caveats).
+#
+# Every cell must also meet the suite-wide bar: Box's event log shows 0 asks and
+# 0 blocks, the harness shows none of its own prompts, and it hits no sandbox,
+# daemon, or update error.
+
+# ------------------------------------------------------------------ Section 1
+# TypeScript and JavaScript. Launch gate.
+
+[[cell]]
+id = "TS-01"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "Create a Next.js app with TypeScript and Tailwind and start the dev server."
+fixture = "empty"
+needs = ["node", "npm"]
+net = ["registry.npmjs.org"]
+pass_check = "curl localhost:3000 returns 200"
+# The dev server can't be checked after the run: it is gone, and the box cannot listen on a port
+# anyway (strands-agents/box#285). So the check verifies the step below the pass_check, that the
+# app was scaffolded and builds. The prompt names no folder, so the check takes the first of
+# package.json and */package.json that lists next. If create-next-app was refused (its write to
+# ~/Library/Preferences), no such package.json exists and the check fails, which is the honest
+# result. The template's layout imports Geist from next/font/google, and `next build` fails when
+# that fetch fails, so profiles/corpus/downloads.dw permits the two Google Fonts hosts.
+check = "d=$(grep -l '\"next\":' package.json */package.json 2>/dev/null | head -n1); [ -n \"$d\" ] && cd \"$(dirname \"$d\")\" && npm run build"
+note = "Exercises npm cache, TMPDIR compile cache, wildcard bind on :3000, a localhost browser open. create-next-app saves its answers under $HOME/Library/Preferences, outside the project, so the corpus profile moves npx's HOME into the project (its comment says why). On the bench, the scaffold and its npm install pass, and the box then refuses next dev's bind on 0.0.0.0:3000, which Box Core cannot grant yet (strands-agents/box#285). On a Mac with Homebrew's Node 26, create-next-app's own npm install fails earlier with spawn EPERM. create-next-app prints an install error but exits 0, so the script checks for web/node_modules before it starts the dev server. create-next-app is pinned, but the packages its template installs are not."
+script = '''
+bash -c 'npx create-next-app@15.5.28 web --yes --ts --tailwind --eslint --app --no-src-dir --use-npm --no-turbopack --import-alias "@/*"'
+[ -d web/node_modules ]
+serve bash -c 'cd web && npm run dev -- --port 3000'
+until_ok 180 bash -c 'curl -sf http://localhost:3000' || { while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done < serve.log; exit 1; }
+'''
+expect = { verdict = "error", log = "Error: listen EPERM: operation not permitted 0.0.0.0:3000" }
+
+[[cell]]
+id = "TS-02"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "Scaffold a React and TypeScript app with Vite, add a counter component with a test."
+fixture = "empty"
+needs = ["node", "npm"]
+net = ["registry.npmjs.org"]
+pass_check = "npx vitest run passes; dev server responds"
+note = "Exercises an IPv6-only bind on [::1]:5173 and FSEvents file watching. create-vite's template copy and both installs now succeed. The vitest test passes. Today the box then refuses the dev server's bind on [::1]:5173 (strands-agents/box#285). create-vite is pinned, but the packages its template installs are not."
+script = '''
+bash -c 'npm create vite@6.5.0 web -- --template react-ts'
+bash -c 'cd web && npm install'
+bash -c 'cd web && npm install -D vitest@3.2.7 jsdom@26.1.0 @testing-library/react@16.3.3 @testing-library/dom@10.4.2'
+write web/src/Counter.tsx <<'EOF'
+import { useState } from "react";
+
+export function Counter() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount(count + 1)}>count is {count}</button>;
+}
+EOF
+write web/src/Counter.test.tsx <<'EOF'
+import { fireEvent, render, screen } from "@testing-library/react";
+import { expect, test } from "vitest";
+import { Counter } from "./Counter";
+
+test("counts clicks", () => {
+  render(<Counter />);
+  fireEvent.click(screen.getByRole("button"));
+  expect(screen.getByRole("button").textContent).toBe("count is 1");
+});
+EOF
+write web/vitest.config.ts <<'EOF'
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({ plugins: [react()], test: { environment: "jsdom" } });
+EOF
+bash -c 'cd web && npx vitest run'
+serve bash -c 'cd web && npm run dev -- --host ::1 --port 5173'
+until_ok 60 bash -c 'curl -sf "http://[::1]:5173"' || { while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done < serve.log; exit 1; }
+'''
+expect = { verdict = "error", log = "Error: listen EPERM: operation not permitted ::1:5173" }
+
+[[cell]]
+id = "TS-03"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "Get this repo's frontend running and tell me what it does."
+fixture = "clone:fastapi/full-stack-fastapi-template#frontend"
+needs = ["bun"]
+net = ["registry.npmjs.org"]
+pass_check = "page loads on its dev port"
+note = "Uses the bun install cache."
+
+[[cell]]
+id = "TS-04"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "CI is red on the formatPrice test. Fix it."
+fixture = "pnpm-workspace-one-failing-vitest"
+needs = ["node", "pnpm"]
+net = ["registry.npmjs.org"]
+pass_check = "pnpm test passes"
+# check: the agent-layer grader re-runs the cell's success criterion over the workspace the
+# agent left, on the host. GREEN box + check exit 0 is a task PASS.
+check = "pnpm test"
+note = "The pnpm store and its state go in the project's .cache/pnpm under @box/pnpm. The fixture names the pnpm the runner installs in `packageManager`, so pnpm does not fetch another."
+script = '''
+bash -c 'pnpm install --frozen-lockfile'
+if bash -c 'pnpm test'; then exit 1; fi
+write packages/format/src/formatPrice.js <<'EOF'
+export function formatPrice(cents) {
+  return "$" + (cents / 100).toFixed(2);
+}
+EOF
+bash -c 'pnpm test'
+'''
+
+[[cell]]
+id = "TS-05"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "Fix all lint errors and format the codebase."
+fixture = "repo-eslint-prettier"
+needs = ["node", "npm"]
+net = ["registry.npmjs.org"]
+pass_check = "lint exits 0; prettier --check passes"
+note = "A second Biome variant has no cell yet. Track as TS-05b."
+script = '''
+bash -c 'npm install'
+bash -c 'npm run lint' || true
+write src/total.js <<'EOF'
+export function total(items) {
+  let sum = 0;
+  for (const item of items) {
+    sum += item.price * item.qty;
+  }
+  return sum;
+}
+EOF
+write src/report.js <<'EOF'
+import { total } from "./total.js";
+
+export function report(items) {
+  return `total: ${total(items)}`;
+}
+EOF
+bash -c 'npm run format'
+bash -c 'npm run lint'
+bash -c 'npm run format:check'
+'''
+
+[[cell]]
+id = "TS-06"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "Add a Playwright test for the login flow and run it."
+fixture = "nextjs-login-page"
+needs = ["node", "npm"]
+net = ["registry.npmjs.org", "cdn.playwright.dev", "playwright.download.prss.microsoft.com"]
+pass_check = "npx playwright test passes"
+note = "Downloads a browser into ~/Library/Caches/ms-playwright and runs it from there; report server on :9323. Under the corpus profile, npx's HOME is inside the project, so the browser lands in .npx-home and this cell does not test the real home-folder write. With the corpus profile's 600-second Shell limit, npm install passes. The profile lets npx reach the download hosts, so Chromium downloads. Today Playwright's webServer then cannot listen on :3100, because the box has no listening port (strands-agents/box#285)."
+script = '''
+bash -c 'npm install'
+bash -c 'npm install -D @playwright/test@1.56.1'
+bash -c 'npx playwright install chromium'
+write playwright.config.ts <<'EOF'
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  testDir: "tests",
+  use: { baseURL: "http://localhost:3100" },
+  webServer: { command: "npm run dev -- --port 3100", url: "http://localhost:3100/login", timeout: 180000 },
+});
+EOF
+bash -c 'mkdir -p tests'
+write tests/login.spec.ts <<'EOF'
+import { expect, test } from "@playwright/test";
+
+test("signs in", async ({ page }) => {
+  await page.goto("/login");
+  await page.getByLabel("Email").fill("demo@example.com");
+  await page.getByLabel("Password").fill("secret");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible();
+});
+EOF
+bash -c 'npx playwright test'
+'''
+expect = { verdict = "error", log = "Error: listen EPERM: operation not permitted 0.0.0.0:3100" }
+
+[[cell]]
+id = "TS-07"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "Add Prisma with SQLite, create a User model, migrate, and seed three users."
+fixture = "nextjs-tailwind-app"
+needs = ["node", "npm"]
+net = ["registry.npmjs.org", "binaries.prisma.sh"]
+pass_check = "migration applied; three rows in the DB"
+note = "Downloads the Prisma engine into ~/.cache/prisma and runs it from there. Under the corpus profile, npx's HOME is inside the project, so the engine lands in .npx-home and this cell does not test the real home-folder write. With the corpus profile's 600-second Shell limit, npm install passes. The profile lets npx reach binaries.prisma.sh and turns off Prisma's report to checkpoint.prisma.io, so the cell passes."
+script = '''
+bash -c 'npm install'
+bash -c 'npm install -D prisma@6.19.3'
+bash -c 'npm install @prisma/client@6.19.3'
+bash -c 'npx prisma init --datasource-provider sqlite'
+write prisma/schema.prisma <<'EOF'
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id    Int    @id @default(autoincrement())
+  email String @unique
+  name  String
+}
+EOF
+bash -c 'npx prisma migrate dev --name init'
+write prisma/seed.mjs <<'EOF'
+import { PrismaClient } from "@prisma/client";
+
+const prisma = new PrismaClient();
+for (const [email, name] of [["ada@example.com", "Ada"], ["grace@example.com", "Grace"], ["linus@example.com", "Linus"]]) {
+  await prisma.user.create({ data: { email, name } });
+}
+console.log(await prisma.user.count());
+await prisma.$disconnect();
+EOF
+bash -c 'node prisma/seed.mjs > seed.out'
+[[ $(< seed.out) == 3 ]]
+'''
+
+[[cell]]
+id = "TS-08"
+section = "TypeScript"
+gate = "launch"
+machine = "lived-in"
+prompt = "Add better-sqlite3 and sharp and make the build work on Node 24."
+fixture = "express-app-nvm-node24"
+needs = ["node", "nvm"]
+net = ["registry.npmjs.org", "release-assets.githubusercontent.com"]
+pass_check = "node -e \"require('better-sqlite3'); require('sharp')\" exits 0"
+note = "Native builds: node-gyp headers cache, Xcode CLT clang, /var/folders module cache."
+
+[[cell]]
+id = "TS-09"
+section = "TypeScript"
+gate = "launch"
+machine = "lived-in"
+prompt = "This repo pins Node 20 in .nvmrc. Switch to it and run the tests."
+fixture = "repo-nvmrc-20"
+needs = ["nvm"]
+net = ["nodejs.org"]
+pass_check = "tests pass and node -v reports v20"
+note = "nvm writes ~/.nvm/versions."
+
+[[cell]]
+id = "TS-10"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "Add a shared ui package to this Turborepo, use it in both apps, and build everything."
+fixture = "create-turbo-pnpm"
+needs = ["node", "pnpm"]
+net = ["registry.npmjs.org"]
+pass_check = "pnpm turbo build exits 0"
+note = "Turbo daemon socket in TMPDIR; telemetry file in Application Support. The fixture is a two-app pnpm workspace that builds with tsc, so the cell tests turbo and pnpm rather than Next.js. Today the install passes and turbo starts the build. turbo's strict environment mode drops TMPDIR, so the pnpm it runs falls back to /tmp, which a tool in the box cannot stat."
+expect = { verdict = "error", log = "@repo/ui:build: Error: EPERM: operation not permitted, lstat '/tmp'" }
+script = '''
+bash -c 'mkdir -p packages/ui/src'
+write packages/ui/package.json <<'EOF'
+{
+  "name": "@repo/ui",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}
+EOF
+write packages/ui/tsconfig.json <<'EOF'
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "declaration": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src"]
+}
+EOF
+write packages/ui/src/index.ts <<'EOF'
+export function button(label: string): string {
+  return `<button class="ui">${label}</button>`;
+}
+EOF
+for app in web docs; do
+write apps/$app/package.json <<EOF
+{
+  "name": "$app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@repo/ui": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}
+EOF
+write apps/$app/src/index.ts <<EOF
+import { button } from "@repo/ui";
+
+export function page(): string {
+  return "<h1>$app</h1>" + button("Sign in");
+}
+EOF
+done
+bash -c 'pnpm install'
+bash -c 'pnpm turbo build'
+[ -f apps/web/dist/index.js ]
+[[ -f apps/docs/dist/index.js ]]
+'''
+
+[[cell]]
+id = "TS-11"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "Upgrade to React 19 and fix the type errors."
+fixture = "yarn4-workspace-react18"
+needs = ["node", "yarn"]
+net = ["repo.yarnpkg.com", "registry.npmjs.org"]
+pass_check = "yarn tsc --noEmit passes"
+# The fixture type-checks on React 18 already, so `yarn tsc --noEmit` alone passes with no work
+# done. Require react 19 in the app's package.json first, so the check proves the upgrade happened.
+check = "grep -Eq '\"react\": *\"[~^]?19' packages/app/package.json && cd packages/app && yarn tsc --noEmit"
+note = "The `yarn` on PATH is Corepack's, which fetches the Yarn 4 that `packageManager` names into the project's .cache/yarn under @box/yarn. The upgrade breaks two React 18 typings: the global JSX namespace and useRef with no argument."
+script = '''
+bash -c 'yarn install --immutable'
+bash -c 'cd packages/app && yarn tsc --noEmit'
+bash -c 'yarn workspace app add react@19.2.9 react-dom@19.2.9'
+bash -c 'yarn workspace app add -D @types/react@19.2.18 @types/react-dom@19.2.7'
+if bash -c 'cd packages/app && yarn tsc --noEmit'; then exit 1; fi
+write packages/app/src/Timer.tsx <<'EOF'
+import { useEffect, useRef, useState, type JSX } from "react";
+
+export function Timer(): JSX.Element {
+  const [ticks, setTicks] = useState(0);
+  const handle = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    handle.current = window.setInterval(() => setTicks((t) => t + 1), 1000);
+    return () => window.clearInterval(handle.current);
+  }, []);
+  return <span>{ticks}</span>;
+}
+EOF
+bash -c 'cd packages/app && yarn tsc --noEmit'
+'''
+
+[[cell]]
+id = "TS-11b"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "Install this project's dependencies with Yarn and check that is-number loads."
+fixture = "yarn1-app"
+needs = ["node", "yarn"]
+net = ["registry.yarnpkg.com", "registry.npmjs.org"]
+pass_check = "yarn install succeeds; a package script requires is-number and sees no unexpanded npm_config_*proxy setting"
+note = "A project with no `packageManager`, so the `yarn` on PATH runs Yarn 1. It guards @box/yarn's Yarn 4 proxy settings against breaking Yarn 1, which reads YARN_* variables as written."
+script = '''
+bash -c 'yarn --version > version.log'
+read -r version < version.log
+[ "${version%%.*}" = 1 ]
+bash -c 'yarn install --frozen-lockfile --non-interactive'
+write check.js <<'EOF'
+const proxies = Object.entries(process.env).filter(([name, value]) => /^npm_config_.*proxy$/i.test(name) && value.includes("${"));
+console.log(require("is-number")(7) && proxies.length === 0);
+EOF
+bash -c 'yarn run --silent check > check.log'
+[[ $(< check.log) == true ]]
+'''
+
+[[cell]]
+id = "TS-12"
+section = "TypeScript"
+gate = "launch"
+machine = "lived-in"
+prompt = "Add @acme/ui-kit from our private registry and render its Button."
+fixture = "npmrc-private-registry-token"
+needs = ["node", "npm"]
+net = ["private-registry.test"]
+pass_check = "install succeeds; the token is not readable inside the box"
+note = "Credential injection at the proxy: a placeholder ~/.npmrc in the box, the real token added on the way out."
+
+[[cell]]
+id = "TS-13"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "Remember that our staging URL is staging.acme.dev, then list the files in src/."
+fixture = "harness-mcp-memory-filesystem"
+needs = ["node", "npm"]
+net = ["registry.npmjs.org"]
+pass_check = "both MCP tool calls succeed"
+note = "Inherited MCP servers via npx. The runner turns the harness's MCP import off, and the fixture is not built, so this is not runnable on the agent layer today."
+
+[[cell]]
+id = "TS-14"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "Run this Cloudflare Worker locally and call its /hello route."
+fixture = "create-cloudflare-worker"
+needs = ["node", "npm"]
+net = ["registry.npmjs.org"]
+pass_check = "curl localhost:8787/hello returns 200"
+note = "Binds :8787 and an inspector port. wrangler dev writes its logs and state under ~/Library/Preferences/.wrangler, which the box refuses. Once that state is writable, it also sends metrics to sparrow.cloudflare.com, which the box denies. So the corpus profile gives npm an XDG_CONFIG_HOME in the project and sets WRANGLER_SEND_METRICS=false (its comment says why). With the corpus profile's 600-second Shell limit, npm install passes. Today wrangler dev then cannot bind its inspector port 127.0.0.1:9229 (strands-agents/box#285), so the dev server exits."
+script = '''
+bash -c 'npm install'
+serve bash -c 'npm run dev -- --port 8787'
+until_ok 120 bash -c 'curl -sf http://localhost:8787/hello' || { while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done < serve.log; exit 1; }
+'''
+expect = { verdict = "error", log = "Failed to bind to 127.0.0.1:9229: permission denied" }
+
+[[cell]]
+id = "TS-15"
+section = "TypeScript"
+gate = "launch"
+machine = "lived-in"
+prompt = "Install tsx globally and use it to run scripts/report.ts."
+fixture = "repo-ts-script"
+needs = ["node", "npm"]
+net = ["registry.npmjs.org"]
+pass_check = "script output matches the expected text"
+note = "npm i -g into the nvm prefix, which the operator owns."
+
+[[cell]]
+id = "TS-15b"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "Install tsx globally into a folder in the project and use it to run report.ts."
+fixture = "empty"
+needs = ["node", "npm"]
+net = ["registry.npmjs.org"]
+pass_check = "script output matches the expected text"
+note = "The box fixes its tools when it starts, so a CLI installed during the run does not run. The global install goes to a prefix in the project, which npm can write, so it succeeds. The installed tsx is then refused, because no `shell:spawn` permit names a program in the project: `box` sets up no tool there, since the agent can change it. With a permit, the box would still find no tool that runs it. TS-15e records the global install into node's own folder. TS-15c and TS-15d run tsx through npx instead."
+script = '''
+write report.ts <<'EOF'
+const total: number = [1, 2, 3].reduce((a, b) => a + b, 0);
+console.log(`total: ${total}`);
+EOF
+bash -c 'npm i -g --prefix="$PWD/.npm-global" tsx@4.23.15'
+[ -e .npm-global/bin/tsx ]
+bash -c '.npm-global/bin/tsx report.ts > out.log'
+read -r out < out.log
+[ "$out" = "total: 6" ]
+'''
+expect = { verdict = "red", denies = ["shell:spawn */.npm-global/lib/node_modules/tsx/dist/cli.mjs"] }
+
+[[cell]]
+id = "TS-15e"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "Install tsx globally."
+fixture = "empty"
+needs = ["node", "npm"]
+net = ["registry.npmjs.org"]
+pass_check = "the install succeeds"
+note = "A global install goes to node's own folder, which no tool may write, so npm fails. TS-15b installs into the project instead."
+script = '''
+bash -c 'npm i -g tsx@4.23.15'
+'''
+expect = { verdict = "error", log = "code: 'EPERM'" }
+
+[[cell]]
+id = "TS-15c"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "Add tsx to the project and run report.ts with npx tsx."
+fixture = "empty"
+needs = ["node", "npm"]
+net = ["registry.npmjs.org"]
+pass_check = "script output matches the expected text"
+note = "The path the box supports in place of a global install: tsx is a project dependency, and npx runs it."
+script = '''
+write package.json <<'EOF'
+{ "name": "report", "version": "1.0.0", "private": true }
+EOF
+write report.ts <<'EOF'
+const total: number = [1, 2, 3].reduce((a, b) => a + b, 0);
+console.log(`total: ${total}`);
+EOF
+bash -c 'npm i -D tsx@4.23.15'
+[ -e node_modules/.bin/tsx ]
+bash -c 'npx tsx report.ts > out.log'
+read -r out < out.log
+[ "$out" = "total: 6" ]
+'''
+
+[[cell]]
+id = "TS-15d"
+section = "TypeScript"
+gate = "launch"
+machine = "clean"
+prompt = "Run report.ts with npx tsx, without installing anything first."
+fixture = "empty"
+needs = ["node", "npm"]
+net = ["registry.npmjs.org"]
+pass_check = "script output matches the expected text"
+note = "npx fetches tsx into npm's cache and runs it, with no install."
+script = '''
+write report.ts <<'EOF'
+const total: number = [1, 2, 3].reduce((a, b) => a + b, 0);
+console.log(`total: ${total}`);
+EOF
+bash -c 'npx --yes tsx@4.23.15 report.ts > out.log'
+read -r out < out.log
+[ "$out" = "total: 6" ]
+'''
+
+# ------------------------------------------------------------------ Section 2
+# Python. Launch gate.
+
+[[cell]]
+id = "PY-01"
+section = "Python"
+gate = "launch"
+machine = "clean"
+prompt = "Set up a virtualenv, install requests, and write a script that lists the open issues on pallets/flask."
+fixture = "empty"
+needs = ["python-venv"]
+net = ["pypi.org", "api.github.com"]
+pass_check = "script prints issue titles"
+note = "Today the box's Shell runs `python3` as Monty, its built-in Python subset, so `python3 -m venv` fails at once. A pack whose program is python3 does not change that: the bare name still reaches Monty. In a probe on a Mac, the full path of the host python matched no permit, and the venv's own python was refused because it sits in the project, which the agent can write, while `uv venv`, `uv pip install`, and `uv run python` worked. A lived-in pip rustc-probe variant has no cell yet: track as PY-01b."
+script = '''
+bash -c 'python3 -m venv .venv'
+bash -c '.venv/bin/pip install requests==2.32.3'
+write issues.py <<'EOF'
+import requests
+
+resp = requests.get(
+    "https://api.github.com/repos/pallets/flask/issues",
+    params={"state": "open", "per_page": 20},
+    timeout=30,
+)
+resp.raise_for_status()
+issues = [i for i in resp.json() if "pull_request" not in i]
+for issue in issues:
+    print(f"#{issue['number']} {issue['title']}")
+print(f"{len(issues)} open issues")
+EOF
+bash -c '.venv/bin/python issues.py'
+'''
+expect = { verdict = "error", log = "python3: -m is not supported by Monty" }
+
+[[cell]]
+id = "PY-01C"
+section = "Python"
+gate = "launch"
+machine = "clean"
+prompt = "Write a script that lists the open issues on pallets/flask, and run it with the virtualenv in .venv, which has requests installed."
+fixture = "python-venv-requests"
+profile = "corpus-python-venv"
+needs = ["uv"]
+net = ["api.github.com"]
+pass_check = "script prints issue titles"
+note = "The runner makes .venv before the box starts, with uv and a Python 3.12 that uv installs, and installs requests into it, because a box runs a virtual environment that no process in it can write, and nothing in the box can install into one. To add a package, stop the box, install it outside, and start the box again. A framework Python, such as setup-python's on macOS, does not work: its bin/python3.12 starts the interpreter in Python.app from the file the box runs, so the interpreter never sees the venv and `import requests` fails. The corpus-python-venv profile lets the agent run .venv and uv's Pythons, lists .venv in deny_write, and permits a spawn of `.venv/bin/python`. The request goes out with no token, because with the bench's job token the API leaves out pallets/flask's one open issue today. PY-01 records the other half: the agent can't make the venv inside the box, because `python3 -m venv` reaches Monty, and with Monty off `.venv/bin/pip` runs from a folder the agent can write, which Box refuses. This cell has its own profile, so the agent layer skips it, and PY-01 keeps the agent-layer prompt."
+script = '''
+write issues.py <<'EOF'
+import requests
+
+resp = requests.get(
+    "https://api.github.com/repos/pallets/flask/issues",
+    params={"state": "open", "per_page": 20},
+    timeout=30,
+)
+resp.raise_for_status()
+issues = [i for i in resp.json() if "pull_request" not in i]
+for issue in issues:
+    print(f"#{issue['number']} {issue['title']}")
+print(f"{len(issues)} open issues")
+EOF
+bash -c '.venv/bin/python issues.py'
+'''
+
+[[cell]]
+id = "PY-02"
+section = "Python"
+gate = "launch"
+machine = "clean"
+prompt = "Create a FastAPI service with uv, add a /health route, and run it with reload."
+fixture = "empty"
+needs = ["uv"]
+net = ["pypi.org", "releases.astral.sh"]
+pass_check = "curl localhost:8000/health returns 200"
+note = "Quarantined until strands-agents/box#285 lets a box listen on a port. On Linux the box refuses bash's setpgid for each child and the server never answers, so the expect below holds on macOS only. @box/uv points uv's Python downloads into the project's .cache/uv, because the box refuses a write to ~/.local/share/uv/python. uv then installs Python 3.12 and the app, and uvicorn's bind on :8000 gets EPERM, because Box Core cannot grant a listening port yet (strands-agents/box#285). The script prints serve.log when the server never answers, so the bind error is in the cell's log."
+script = '''
+bash -c 'uv init --app --name health --python 3.12'
+bash -c 'uv add fastapi==0.115.12 uvicorn==0.34.2'
+write main.py <<'EOF'
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+EOF
+serve bash -c 'uv run uvicorn main:app --reload --port 8000'
+until_ok 120 bash -c 'curl -sf http://localhost:8000/health' || { while IFS= read -r line; do echo "serve: $line"; done < serve.log; exit 1; }
+'''
+expect = { verdict = "error", log = "serve: ERROR:    [Errno 1] Operation not permitted" }
+
+[[cell]]
+id = "PY-03"
+section = "Python"
+gate = "launch"
+machine = "clean"
+prompt = "Run Flask's test suite and tell me if anything fails."
+fixture = "clone:pallets/flask"
+needs = ["uv"]
+net = ["pypi.org"]
+pass_check = "pytest exits 0"
+fixture_ref = "3.1.0"
+script = '''
+bash -c 'uv run --exclude-newer 2024-11-14T00:00:00Z --python 3.12 --with pytest==8.3.3 pytest -q'
+'''
+note = "The run resolves Flask's dependencies as of Flask 3.1.0's release, because a later Werkzeug fails test_bad_environ_raises_bad_request outside any box. uv downloads Python 3.12 into the project's .cache/uv."
+
+[[cell]]
+id = "PY-04"
+section = "Python"
+gate = "launch"
+machine = "clean"
+prompt = "Add type hints to utils.py and make mypy and ruff pass."
+fixture = "small-package-pyproject"
+needs = ["uv"]
+net = ["pypi.org"]
+pass_check = "uvx ruff check and uvx mypy both exit 0"
+script = '''
+write src/smallpkg/utils.py <<'EOF'
+import json
+from collections.abc import Mapping, Sequence
+from typing import Any, TypeVar
+
+T = TypeVar("T")
+
+
+def slugify(text: str, sep: str = "-") -> str:
+    words = [w for w in text.lower().split() if w.isalnum()]
+    return sep.join(words)
+
+
+def chunk(items: Sequence[T], size: int) -> list[Sequence[T]]:
+    if size <= 0:
+        raise ValueError("size must be positive")
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def load_config(path: str, defaults: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    with open(path) as f:
+        data: dict[str, Any] = json.load(f)
+    merged = dict(defaults or {})
+    merged.update(data)
+    return merged
+
+
+def mean(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+EOF
+bash -c 'uvx ruff@0.11.8 check .'
+bash -c 'uvx mypy@1.15.0 src'
+'''
+note = "uvx runs ruff and mypy with no Python download (@box/uvx sets UV_PYTHON_DOWNLOADS=never), so it needs a python3 on the PATH the runner passes in."
+
+[[cell]]
+id = "PY-05"
+section = "Python"
+gate = "launch"
+machine = "clean"
+prompt = "Make sure this library works on Python 3.10 through 3.13."
+fixture = "library-with-tests"
+needs = ["uv"]
+net = ["pypi.org"]
+pass_check = "tests pass on all four versions"
+note = "Four Python downloads, into the project's .cache/uv/python (@box/uv)."
+script = '''
+for version in 3.10 3.11 3.12 3.13; do
+  bash -c "uv run --isolated --python $version --with pytest==8.3.5 pytest -q"
+done
+'''
+
+[[cell]]
+id = "PY-06"
+section = "Python"
+gate = "launch"
+machine = "clean"
+prompt = "Add pandas and a report command that summarizes sales.csv, with a test."
+fixture = "poetry-project"
+needs = ["poetry"]
+net = ["pypi.org"]
+pass_check = "poetry run pytest passes"
+script = '''
+bash -c 'poetry add pandas==3.1.1 numpy==2.5.4 python-dateutil==4.0.0 tzdata==2026.6'
+bash -c 'poetry add --group dev pytest==8.3.5 pluggy==1.7.0 iniconfig==2.3.1 packaging==26.3'
+write sales_report/report.py <<'EOF'
+import sys
+
+import pandas as pd
+
+
+def summarize(path: str) -> pd.DataFrame:
+    sales = pd.read_csv(path)
+    sales["revenue"] = sales["units"] * sales["unit_price"]
+    return sales.groupby("product").agg(units=("units", "sum"), revenue=("revenue", "sum")).sort_values(
+        "revenue", ascending=False
+    )
+
+
+def main() -> None:
+    print(summarize(sys.argv[1] if len(sys.argv) > 1 else "sales.csv").to_string())
+EOF
+bash -c 'mkdir -p tests'
+write tests/test_report.py <<'EOF'
+from sales_report.report import summarize
+
+
+def test_summarize_totals_each_product(tmp_path):
+    csv = tmp_path / "s.csv"
+    csv.write_text("date,product,units,unit_price\n2026-01-01,a,2,10\n2026-01-02,a,1,10\n2026-01-03,b,5,1\n")
+    report = summarize(str(csv))
+    assert list(report.index) == ["a", "b"]
+    assert report.loc["a", "revenue"] == 30
+    assert report.loc["b", "units"] == 5
+EOF
+printf '\n[project.scripts]\nreport = "sales_report.report:main"\n' >> pyproject.toml
+bash -c 'poetry install'
+bash -c 'poetry run pytest -q'
+'''
+note = "poetry is a script whose #! line names its own virtualenv's python, so it starts only when that python is the real file of the python3 tool (test-corpus/packs/python3). The bench installs poetry with pipx on the runner's python3 for that reason; a poetry on another Python is skipped, and the box then refuses to start it."
+
+[[cell]]
+id = "PY-07"
+section = "Python"
+gate = "launch"
+machine = "clean"
+prompt = "In a notebook, load sales.csv and plot monthly revenue."
+fixture = "data-dir-csv"
+needs = ["uv"]
+net = ["pypi.org"]
+pass_check = "jupyter nbconvert --execute succeeds"
+note = "Quarantined until strands-agents/box#285 lets a box listen on a port. On Linux the kernel aborts in libzmq before it opens a port, for a reason not yet traced, so the expect below holds on macOS only. The notebook runs through uv, with jupyter, pandas, and matplotlib pinned, because a jupyter on PATH has no pandas. @box/uv caps uv at four downloads at a time: with uv's default, the box's egress gateway fails to resolve pypi.org and files.pythonhosted.org for a dozen of its connections, and the cell is RED with those denials. Today nbconvert then cannot start the kernel, because Box Core cannot grant the loopback ports it binds (strands-agents/box#285)."
+script = '''
+write revenue.ipynb <<'EOF'
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import pandas as pd\n",
+    "import matplotlib\n",
+    "matplotlib.use(\"Agg\")\n",
+    "import matplotlib.pyplot as plt\n"
+   ],
+   "id": "cell-0"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "sales = pd.read_csv(\"data/sales.csv\", parse_dates=[\"date\"])\n",
+    "sales[\"revenue\"] = sales[\"units\"] * sales[\"unit_price\"]\n",
+    "monthly = sales.set_index(\"date\")[\"revenue\"].resample(\"MS\").sum()\n",
+    "monthly"
+   ],
+   "id": "cell-1"
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "ax = monthly.plot(kind=\"bar\", title=\"Monthly revenue\")\n",
+    "ax.set_xticklabels([d.strftime(\"%b\") for d in monthly.index])\n",
+    "ax.set_ylabel(\"Revenue\")\n",
+    "plt.tight_layout()\n",
+    "plt.savefig(\"monthly_revenue.png\")"
+   ],
+   "id": "cell-2"
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
+EOF
+bash -c 'uv run --python 3.12 --with jupyter==1.1.1 --with pandas==2.2.3 --with matplotlib==3.10.1 jupyter nbconvert --to notebook --execute --inplace revenue.ipynb'
+[[ -f monthly_revenue.png ]]
+'''
+expect = { verdict = "error", log = "*/jupyter_client/connect.py\", line *, in find_available_port" }
+
+[[cell]]
+id = "PY-08"
+section = "Python"
+gate = "launch"
+machine = "clean"
+prompt = "Fine-tune distilbert on reviews.csv for one epoch and report accuracy."
+fixture = "labeled-csv"
+needs = ["uv"]
+net = ["pypi.org", "huggingface.co"]
+pass_check = "script prints an accuracy figure"
+note = "Multi-GB torch wheel and a 268 MB model download. Heaviest cell; long timeout. On macOS, torch's OpenMP runtime aborts at start with `OMP: System error #1: Operation not permitted` (exit 134), because the box refuses its shared memory (strands-agents/box#379). The model comes from huggingface.co and hosts under hf.co, which downloads.dw permits. transformers keeps it in ~/.cache/huggingface, which the box refuses, so the corpus profile points HF_HOME into the project: that hides a write a real @box/uv user still has refused."
+script = '''
+write train.py <<'EOF'
+import csv
+import random
+
+import torch
+from torch.utils.data import DataLoader
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+MODEL = "distilbert-base-uncased"
+random.seed(0)
+torch.manual_seed(0)
+
+with open("reviews.csv", newline="") as f:
+    rows = [(r["text"], int(r["label"])) for r in csv.DictReader(f)]
+random.shuffle(rows)
+split = int(len(rows) * 0.8)
+train, test = rows[:split], rows[split:]
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL)
+model = AutoModelForSequenceClassification.from_pretrained(MODEL, num_labels=2)
+
+
+def batches(data, shuffle):
+    def collate(items):
+        texts, labels = zip(*items)
+        enc = tokenizer(list(texts), padding=True, truncation=True, return_tensors="pt")
+        enc["labels"] = torch.tensor(labels)
+        return enc
+    return DataLoader(data, batch_size=16, shuffle=shuffle, collate_fn=collate)
+
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
+model.train()
+for batch in batches(train, True):
+    loss = model(**batch).loss
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+
+model.eval()
+correct = 0
+with torch.no_grad():
+    for batch in batches(test, False):
+        labels = batch.pop("labels")
+        correct += (model(**batch).logits.argmax(-1) == labels).sum().item()
+print(f"accuracy: {correct / len(test):.3f}")
+EOF
+bash -c 'uv run --python 3.12 --with torch==2.6.0 --with transformers==4.51.3 python train.py'
+'''
+expect = { verdict = "error", log = "OMP: System error #1: Operation not permitted" }
+
+[[cell]]
+id = "PY-09"
+section = "Python"
+gate = "launch"
+machine = "clean"
+prompt = "Add a Comment model with a migration and an admin page, and test it."
+fixture = "django-startproject-sqlite"
+needs = ["uv"]
+net = ["pypi.org"]
+pass_check = "python manage.py test passes"
+script = '''
+bash -c 'uv run python manage.py startapp comments'
+printf '\nINSTALLED_APPS += ["comments"]\n' >> mysite/settings.py
+write comments/models.py <<'EOF'
+from django.db import models
+
+
+class Comment(models.Model):
+    author = models.CharField(max_length=100)
+    body = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.author}: {self.body[:40]}"
+EOF
+write comments/admin.py <<'EOF'
+from django.contrib import admin
+
+from .models import Comment
+
+
+@admin.register(Comment)
+class CommentAdmin(admin.ModelAdmin):
+    list_display = ["author", "created_at"]
+    search_fields = ["author", "body"]
+EOF
+write comments/tests.py <<'EOF'
+from django.contrib.auth.models import User
+from django.test import TestCase
+from django.urls import reverse
+
+from .models import Comment
+
+
+class CommentTests(TestCase):
+    def setUp(self) -> None:
+        self.comment = Comment.objects.create(author="ada", body="First!")
+
+    def test_str(self) -> None:
+        self.assertEqual(str(self.comment), "ada: First!")
+
+    def test_admin_lists_comments(self) -> None:
+        User.objects.create_superuser("admin", "admin@example.com", "pw")
+        self.client.login(username="admin", password="pw")
+        response = self.client.get(reverse("admin:comments_comment_changelist"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "ada")
+EOF
+bash -c 'uv run python manage.py makemigrations comments'
+[ -f comments/migrations/0001_initial.py ]
+bash -c 'uv run python manage.py test'
+'''
+
+[[cell]]
+id = "PY-10"
+section = "Python"
+gate = "launch"
+machine = "clean"
+prompt = "Add ruff pre-commit hooks and make the commit pass."
+fixture = "repo-as-linked-worktree"
+needs = ["uv", "git"]
+net = ["pypi.org"]
+pass_check = "git commit succeeds with the hooks running"
+note = "Hook written into the main repo's .git/hooks; the git common dir counts as the project. The runner builds the project as a linked worktree of a repository beside it. Today pre-commit stops on import: os.sysconf('SC_ARG_MAX') gets EPERM, most likely because Box Core's macOS profile grants no sysctl-read of kern.argmax, which sysconf reads (inferred from the profile, not traced). The hook write and the commit are not reached yet."
+script = '''
+write .pre-commit-config.yaml <<'EOF'
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.8
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+EOF
+bash -c 'uvx pre-commit@4.2.0 install'
+write app.py <<'EOF'
+import json
+import sys
+
+
+def load(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+def main():
+    print(load(sys.argv[1]))
+
+
+if __name__ == "__main__":
+    main()
+EOF
+bash -c 'git add -A'
+bash -c 'git -c user.email=agent@example.invalid -c user.name=Agent commit -m "Add ruff pre-commit hooks"'
+'''
+expect = { verdict = "error", log = "maximum = os.sysconf('SC_ARG_MAX') - 2048 - _environ_size()" }
+
+[[cell]]
+id = "PY-10B"
+section = "Python"
+gate = "launch"
+machine = "clean"
+prompt = "Add ruff pre-commit hooks and make the commit pass."
+fixture = "any-repo"
+needs = ["uv", "git"]
+net = ["pypi.org", "github.com"]
+pass_check = "git commit succeeds with the hooks running"
+note = "PY-10 in an ordinary repository, with .git inside the project. Today pre-commit stops on import, as PY-10 does: os.sysconf('SC_ARG_MAX') gets EPERM, because Box Core's macOS profile grants no sysctl-read of kern.argmax. With that name granted (strands-agents/box#373), pre-commit installs its hook, which runs pre-commit's own Python inside the git tool when git commit runs it. That tool gets no read of the Python, so the hook fails, and the hook also cannot find dirname."
+script = '''
+write .pre-commit-config.yaml <<'EOF'
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.8
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+EOF
+bash -c 'uvx pre-commit@4.2.0 install'
+write app.py <<'EOF'
+import json
+import sys
+
+
+def load(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+def main():
+    print(load(sys.argv[1]))
+
+
+if __name__ == "__main__":
+    main()
+EOF
+bash -c 'git add -A'
+bash -c 'git -c user.email=agent@example.invalid -c user.name=Agent commit -m "Add ruff pre-commit hooks"'
+'''
+expect = { verdict = "error", log = "maximum = os.sysconf('SC_ARG_MAX') - 2048 - _environ_size()" }
+
+[[cell]]
+id = "PY-11"
+section = "Python"
+gate = "launch"
+machine = "clean"
+prompt = "Set up an environment with geopandas and GDAL and run map.ipynb."
+fixture = "pixi-project"
+needs = ["pixi"]
+net = ["conda.anaconda.org"]
+pass_check = "notebook executes"
+script = '''
+bash -c 'pixi add geopandas==1.0.1 gdal==3.10.2 matplotlib-base==3.10.1 nbconvert==7.16.6 ipykernel==6.29.5'
+bash -c 'pixi run jupyter nbconvert --to notebook --execute --inplace map.ipynb'
+[[ -f map.png ]]
+'''
+note = "Quarantined until strands-agents/box#285 lets a box listen on a port. On Linux the kernel aborts in libzmq before it opens a port, for a reason not yet traced, so the expect below holds on macOS only. pixi installs geopandas and GDAL and activates the environment: it reads its own program, runs its activation script with bash, and writes that script into its own TMPDIR in the run's directory. pixi still sees the Mac as x86_64, not arm64, most likely because the box refuses its read of machdep.cpu.brand_string (not yet confirmed). Today nbconvert then cannot start the kernel, because Box Core cannot grant the loopback ports it binds (strands-agents/box#285). On a Mac where the egress gateway fails some conda.anaconda.org lookups, the cell is RED with those denials instead, so this record can differ from run to run."
+expect = { verdict = "error", log = "*/jupyter_client/connect.py\", line *, in find_available_port" }
+
+[[cell]]
+id = "PY-12"
+section = "Python"
+gate = "launch"
+machine = "clean"
+prompt = "Use the fetch tool to summarize https://docs.python.org/3/whatsnew/."
+fixture = "harness-mcp-uvx-fetch"
+needs = ["uv"]
+net = ["pypi.org", "docs.python.org"]
+pass_check = "summary returned through the MCP tool"
+note = "Inherited MCP via uvx. Same MCP-not-in-box limitation as TS-13."
+
+[[cell]]
+id = "PY-13"
+section = "Python"
+gate = "launch"
+machine = "clean"
+prompt = "Turn cli.py into a Typer app and install it as a tool with uv."
+fixture = "script-in-package"
+needs = ["uv"]
+net = ["pypi.org"]
+pass_check = "running the installed command prints its help"
+script = '''
+bash -c 'uv add typer==0.16.0'
+write src/greet/cli.py <<'EOF'
+import typer
+
+app = typer.Typer(help="Greet someone.")
+
+
+@app.command()
+def hello(name: str, shout: bool = False) -> None:
+    """Say hello to NAME."""
+    message = f"Hello, {name}!"
+    typer.echo(message.upper() if shout else message)
+
+
+def main() -> None:
+    app()
+EOF
+printf '\n[project.scripts]\ngreet = "greet.cli:main"\n' >> pyproject.toml
+bash -c 'uv tool install --python 3.12 .'
+bash -c 'uv tool run greet --help'
+bash -c 'uvx --offline greet --help'
+'''
+note = "@box/uv points UV_TOOL_DIR at @box/uvx's tool folder and UV_TOOL_BIN_DIR into its cache, both in the project, so `uv tool install` installs greet. `uv tool run greet` and `uvx greet` both run it; `--offline` makes a uvx that misses the installed tool fail instead of fetching PyPI's `greet`. typer is pinned at 0.16.0: the corpus profile's UV_EXCLUDE_NEWER selects click 8.2.1, and typer 0.15.2 crashes on it with `TyperArgument.make_metavar() takes 1 positional argument`. The script does not run `greet` by its name, because a box does not start it by design (resources/packs/uv/README.md#a-command-that-uv-tool-install-adds-runs-through-uv). uv links greet into the project's .cache/uv/bin, which is not on the PATH of `box run`, so the Shell prints `greet: command not found`. With that folder on the PATH, the Shell finds greet and refuses `shell:spawn`. With a `shell:spawn` permit too, the Shell finds no `[tool]` that runs greet. An agent `exec` grant on the folder stops `box` at startup, because it refuses programs under write grants (docs/design/cli/decisions.md#a-run-cannot-write-what-a-later-run-trusts). uv does not git-ignore .cache/uv/bin, so the command link shows in `git status`."
+
+# ------------------------------------------------------------------ Section 3
+# Every repo: git, GitHub, shell, databases. Launch gate.
+
+[[cell]]
+id = "EV-01"
+section = "Everything"
+gate = "launch"
+machine = "clean"
+prompt = "Commit this change on a new branch and open a PR."
+fixture = "test-github-repo-https"
+needs = ["git", "gh"]
+net = ["github.com", "api.github.com"]
+pass_check = "PR exists on GitHub"
+profile = "corpus-github"
+env_vars = ["GH_TOKEN", "GIT_GITHUB"]
+note = "Runs on the clean bench until strands-agents/box#564 decides the lived-in image. The script stops before the write: GREEN means the box blocks nothing, not that a PR opens. The cell runs under the corpus-github profile with the bench's read-only job token, and the box puts the real token on each request, so the agent holds only a stand-in. The runner builds the fixture: one commit, an uncommitted change to README.md, and an https origin, strands-agents/box. The script commits the change on a new branch, reads the repository with git ls-remote, and runs git push --dry-run, which must stop at GitHub's own 403 because the token cannot write, so nothing is written. gh api reads the repository, and gh pr list reads its pull requests. gh pr create is not run, because a read-only token cannot open a PR. On macOS, gh must be 2.101.0 or later for the box's TLS (strands-agents/box#344), as EV-01b checks."
+script = '''
+has() { case $(< "$1") in *"$2"*) ;; *) printf '%s does not contain %s:\n%s\n' "$1" "$2" "$(< "$1")"; exit 1 ;; esac; }
+bash -c 'gh --version' > gh-version.out
+v=$(< gh-version.out); v=${v#gh version }; v=${v%% *}; minor=${v#*.}; minor=${minor%%.*}
+if [[ $OSTYPE == darwin* ]] && (( ${v%%.*} < 2 || (${v%%.*} == 2 && minor < 101) )); then printf 'gh %s is older than 2.101.0; macOS TLS in the box needs gh 2.101+ (strands-agents/box#344)\n' "$v"; exit 1; fi
+bash -c 'git switch -c readme-usage'
+bash -c 'git add README.md && git -c user.name=Agent -c user.email=agent@example.invalid commit -qm "Say how to run greet"'
+bash -c 'git ls-remote https://github.com/strands-agents/box.git HEAD' > ls-remote.out
+has ls-remote.out $'\tHEAD'
+if bash -c 'git push --dry-run origin readme-usage' 2> push.err; then printf 'the dry-run push succeeded, so the token can write\n'; exit 1; fi
+has push.err "The requested URL returned error: 403"
+bash -c 'gh api repos/strands-agents/box --jq .full_name' > repo.out
+has repo.out "strands-agents/box"
+bash -c 'gh pr list -R strands-agents/box --state all --limit 1 --json number' > prs.out
+has prs.out '"number"'
+'''
+
+[[cell]]
+id = "EV-02"
+section = "Everything"
+gate = "launch"
+machine = "clean"
+prompt = "Commit this change on a new branch and open a PR."
+fixture = "test-github-repo-ssh"
+needs = ["git", "gh"]
+net = ["github.com", "api.github.com"]
+pass_check = "push succeeds; PR exists"
+profile = "corpus-github"
+env_vars = ["GH_TOKEN", "GIT_GITHUB"]
+note = "SSH remote rewritten to HTTPS inside the box. Runs on the clean bench until strands-agents/box#564 decides the lived-in image. The script stops before the write: GREEN means the box blocks nothing, not that a PR opens. The cell runs under the corpus-github profile with the bench's read-only job token, as EV-01 does. The runner builds the fixture: one commit, an uncommitted change to README.md, and an SSH origin, git@github.com:strands-agents/box.git. No SSH key is planted. @box/git rewrites a github.com SSH remote to HTTPS, so git ls-remote origin reads the repository with the token, and git push --dry-run must stop at GitHub's own 403 because the token cannot write. gh pr list reads the pull requests. gh pr create is not run, because a read-only token cannot open a PR. On macOS, gh must be 2.101.0 or later for the box's TLS (strands-agents/box#344), and the script's first check stops the cell when it is not."
+script = '''
+has() { case $(< "$1") in *"$2"*) ;; *) printf '%s does not contain %s:\n%s\n' "$1" "$2" "$(< "$1")"; exit 1 ;; esac; }
+bash -c 'gh --version' > gh-version.out
+v=$(< gh-version.out); v=${v#gh version }; v=${v%% *}; minor=${v#*.}; minor=${minor%%.*}
+if [[ $OSTYPE == darwin* ]] && (( ${v%%.*} < 2 || (${v%%.*} == 2 && minor < 101) )); then printf 'gh %s is older than 2.101.0; macOS TLS in the box needs gh 2.101+ (strands-agents/box#344)\n' "$v"; exit 1; fi
+bash -c 'git switch -c readme-usage'
+bash -c 'git add README.md && git -c user.name=Agent -c user.email=agent@example.invalid commit -qm "Say how to run greet"'
+bash -c 'git ls-remote origin HEAD' > ls-remote.out
+has ls-remote.out $'\tHEAD'
+if bash -c 'git push --dry-run origin readme-usage' 2> push.err; then printf 'the dry-run push succeeded, so the token can write\n'; exit 1; fi
+has push.err "The requested URL returned error: 403"
+bash -c 'gh pr list -R strands-agents/box --state all --limit 1 --json number' > prs.out
+has prs.out '"number"'
+'''
+
+[[cell]]
+id = "EV-03"
+section = "Everything"
+gate = "launch"
+machine = "clean"
+prompt = "Why is CI failing on my PR? Fix it and push."
+fixture = "pr-one-failing-check"
+needs = ["git", "gh"]
+net = ["github.com", "api.github.com"]
+pass_check = "a new run on the PR goes green"
+profile = "corpus-github"
+env_vars = ["GH_TOKEN", "GIT_GITHUB"]
+note = "Runs on the clean bench until strands-agents/box#564 decides the lived-in image. The script reads and never writes: it runs under the corpus-github profile with the bench's read-only job token, and the box puts the real token on each request, so the agent holds only a stand-in. The fix-and-push half of the prompt is a write, which the bench does not do, so the script has no fix or push step. It finds the newest failed run of strands-agents/box with gh run list, runs gh pr checks on the newest open PR with a failed check when there is one, and reads the failed jobs' logs with gh run view --log-failed, the why-is-CI-failing step. GitHub answers that read with a redirect to results-receiver.actions.githubusercontent.com, which @box/gh lists, so the log comes through. GitHub serves some logs from Azure blob storage instead, such as productionresultssa10.blob.core.windows.net, which @box/gh does not allow, and then the cell is RED (strands-agents/box#569). gh pr checks also fails, with `Resource not accessible by integration` on statusCheckRollup, because the job token has no checks or statuses read; the script lets that optional step fail. On macOS, gh must be 2.101.0 or later for the box's TLS (strands-agents/box#344), as EV-01 checks."
+script = '''
+bash -c 'gh --version' > gh-version.out
+v=$(< gh-version.out); v=${v#gh version }; v=${v%% *}; minor=${v#*.}; minor=${minor%%.*}
+if [[ $OSTYPE == darwin* ]] && (( ${v%%.*} < 2 || (${v%%.*} == 2 && minor < 101) )); then printf 'gh %s is older than 2.101.0; macOS TLS in the box needs gh 2.101+ (strands-agents/box#344)\n' "$v"; exit 1; fi
+bash -c 'gh run list -R strands-agents/box --status failure --limit 1 --json databaseId --jq ".[0].databaseId"' > run-id.out
+run=$(< run-id.out)
+case $run in ''|*[!0-9]*) printf 'no failed run found: %s\n' "$run"; exit 1 ;; esac
+bash -c 'gh pr list -R strands-agents/box --state open --search "status:failure" --limit 1 --json number --jq ".[0].number // empty"' > pr.out
+pr=$(< pr.out)
+if [[ $pr =~ ^[0-9]+$ ]]; then bash -c "gh pr checks $pr -R strands-agents/box" > checks.out || true; fi
+bash -c "gh run view $run -R strands-agents/box --log-failed" > failed.log
+[[ -s failed.log ]] || { printf 'gh run view --log-failed printed nothing for run %s\n' "$run"; exit 1; }
+'''
+
+[[cell]]
+id = "EV-04"
+section = "Everything"
+gate = "launch"
+machine = "clean"
+prompt = "Do this refactor in a separate git worktree so my branch stays clean."
+fixture = "any-repo"
+needs = ["git"]
+net = []
+pass_check = "worktree created; changes committed there"
+note = "Decision pending: which worktree locations outside the project are allowed. Claude, Codex, and Kiro each choose differently. The script puts the worktree inside the project, where Claude Code puts its own, so it tests the git work and not that decision. GREEN on macOS and Linux now that @box/git starts its own helpers."
+script = '''
+bash -c 'git worktree add -b refactor .worktrees/refactor'
+write .worktrees/refactor/README.md <<'EOF'
+# Project
+
+Refactored in its own worktree.
+EOF
+bash -c 'cd .worktrees/refactor && git add README.md && git -c user.name=Agent -c user.email=agent@example.invalid commit -qm "Refactor the README"'
+bash -c 'git log -1 --format=%s refactor > refactor.log'
+bash -c 'git diff --quiet HEAD'
+[[ $(< refactor.log) == "Refactor the README" ]]
+'''
+
+[[cell]]
+id = "EV-05"
+section = "Everything"
+gate = "launch"
+machine = "clean"
+prompt = "Install jq with Homebrew and use it to list this project's dependencies."
+fixture = "node-repo"
+needs = ["brew"]
+net = ["formulae.brew.sh", "ghcr.io"]
+pass_check = "jq installed by the run, then the correct list printed"
+note = "There is no brew tool pack, and a tool is a pack. The pass check must assert the run installed jq, not that the host already had it."
+
+[[cell]]
+id = "EV-06"
+section = "Everything"
+gate = "launch"
+machine = "lived-in"
+prompt = "Add an index on orders.created_at in a migration and verify it on my local Postgres."
+fixture = "homebrew-postgres-5432"
+needs = ["psql"]
+net = []
+pass_check = "index visible in \\d orders"
+note = "Loopback connect to a host service on :5432."
+
+[[cell]]
+id = "EV-07"
+section = "Everything"
+gate = "launch"
+machine = "clean"
+prompt = "Explore app.db and write a query for the top customers by revenue."
+fixture = "sqlite-app-db"
+needs = ["sqlite3"]
+net = []
+pass_check = "query output matches the expected top three"
+note = "The corpus carries its own sqlite3 pack in test-corpus/packs/, because box ships no sqlite3 tool pack and the corpus needs the tool only for its own profile. The query goes through sqlite3's own `.read`: a `<` redirect reaches the program empty and says nothing (strands-agents/box#319)."
+script = '''
+bash -c 'sqlite3 app.db ".tables"'
+write top.sql <<'EOF'
+select name, revenue from customers order by revenue desc limit 3;
+EOF
+bash -c 'sqlite3 app.db ".read top.sql" > top.out'
+[[ $(< top.out) == $'globex|900.25\numbrella|700.75\nacme|100.5' ]]
+'''
+
+[[cell]]
+id = "EV-08"
+section = "Everything"
+gate = "launch"
+machine = "clean"
+prompt = "Bring up the stack, run the backend tests against it, then tear it down."
+fixture = "clone:fastapi/full-stack-fastapi-template"
+needs = ["docker"]
+net = []
+pass_check = "backend tests pass; containers removed"
+note = "This cell needs one ask, accepted, until the socket proxy ships. So it is a documented exception to 0-asks, not a passing cell. Quarantine with that disposition."
+
+# ------------------------------------------------------------------ Section 4
+# C# and .NET. First-update gate.
+
+[[cell]]
+id = "CS-01"
+section = "CSharp"
+gate = "first-update"
+machine = "clean"
+prompt = "Create a minimal API with GET /todos/{id} and xUnit tests, and run them."
+fixture = "dotnet-new-webapi"
+needs = ["dotnet"]
+net = ["api.nuget.org"]
+pass_check = "dotnet test passes"
+note = "dev-cert keychain write turned off; MSBuild node reuse off."
+
+[[cell]]
+id = "CS-02"
+section = "CSharp"
+gate = "first-update"
+machine = "clean"
+prompt = "Add an Orders table with an EF Core migration and apply it to SQLite."
+fixture = "cs-01-output"
+needs = ["dotnet"]
+net = ["api.nuget.org"]
+pass_check = "migration applied; table exists"
+
+[[cell]]
+id = "CS-03"
+section = "CSharp"
+gate = "first-update"
+machine = "clean"
+prompt = "Build Jellyfin and run the tests for Jellyfin.Api."
+fixture = "clone:jellyfin/jellyfin"
+fixture_ref = "v12.4"
+needs = ["dotnet"]
+net = ["api.nuget.org"]
+pass_check = "those tests pass"
+note = "Large NuGet restore; long timeout."
+
+# ------------------------------------------------------------------ Section 5
+# Java and Kotlin. First-update gate.
+
+[[cell]]
+id = "JV-01"
+section = "Java"
+gate = "first-update"
+machine = "clean"
+prompt = "Run petclinic, then add a GET /api/owners/{id} JSON endpoint with a test."
+fixture = "clone:spring-projects/spring-petclinic"
+fixture_ref = "500158f732419217507c7656904b8e6aa1bcc0d6"
+needs = ["java"]
+net = ["repo.maven.apache.org"]
+pass_check = "./mvnw test passes; endpoint returns JSON"
+note = "Maven wrapper downloads its distribution into ~/.m2/wrapper; binds :8080."
+
+[[cell]]
+id = "JV-02"
+section = "Java"
+gate = "first-update"
+machine = "clean"
+prompt = "Upgrade Spring Boot to the latest 3.x and make ./gradlew build pass."
+fixture = "clone:spring-projects/spring-petclinic#gradle"
+fixture_ref = "b26f235250627a235a2974a22f2317dbef27338d"
+needs = ["java"]
+net = ["services.gradle.org", "github.com", "release-assets.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org"]
+pass_check = "build passes"
+note = "Gradle daemon private to the session; a user-started daemon outside the box is not attached."
+
+[[cell]]
+id = "JV-03"
+section = "Java"
+gate = "first-update"
+machine = "lived-in"
+prompt = "Fix the failing unit test in :feature:foryou and run it."
+fixture = "clone:android/nowinandroid"
+needs = ["java", "android-sdk"]
+net = ["dl.google.com", "repo.maven.apache.org"]
+pass_check = "that module's tests pass"
+
+[[cell]]
+id = "JV-04"
+section = "Java"
+gate = "first-update"
+machine = "lived-in"
+prompt = "Build this service."
+fixture = "m2-settings-mirror-creds"
+needs = ["java"]
+net = ["test-repo-manager.internal"]
+pass_check = "dependencies resolve and the build passes"
+note = "Placeholder settings.xml in the box; the proxy adds the real credentials."
+
+# ------------------------------------------------------------------ Section 6
+# Rust. First-update gate.
+
+[[cell]]
+id = "RS-01"
+section = "Rust"
+gate = "first-update"
+machine = "clean"
+prompt = "Run ripgrep's test suite and fix anything that fails."
+fixture = "clone:BurntSushi/ripgrep"
+needs = ["cargo"]
+net = ["index.crates.io", "static.crates.io"]
+pass_check = "cargo test passes"
+note = "f1414_no_require_git makes its folder under the temporary folder and expects no git repository above it. It passes because each tool's temporary folder is in its run's directory, outside the project. Since Rust 1.100, cargo builds test programs in a new folder layout, and ripgrep 14.1.1's tests look for rg next to the test program, so about 280 of them fail with No such file or directory, in or out of a box. The script makes the fix ripgrep made upstream (BurntSushi/ripgrep@7525479a9): the tests find rg through CARGO_BIN_EXE_rg."
+fixture_ref = "14.1.1"
+script = '''
+old='self.root.join(format!("../rg{}", env::consts::EXE_SUFFIX))'
+new='PathBuf::from(env!("CARGO_BIN_EXE_rg"))'
+IFS= read -r -d '' s < tests/util.rs || true
+[ "${s/"$old"/}" != "$s" ]
+printf '%s' "${s/"$old"/$new}" > tests/util.rs
+bash -c 'cargo test'
+'''
+
+[[cell]]
+id = "RS-02"
+section = "Rust"
+gate = "first-update"
+machine = "clean"
+prompt = "Write a CLI with clap and serde that converts CSV to JSON, with tests."
+fixture = "cargo-new"
+needs = ["cargo"]
+net = ["index.crates.io", "static.crates.io"]
+pass_check = "cargo test passes; sample conversion is correct"
+note = "The crates that clap, serde, and csv depend on are not pinned, because the cell starts from an empty project."
+script = '''
+bash -c 'cargo add clap@=4.6.7 --features derive'
+bash -c 'cargo add serde@=1.0.229 --features derive'
+bash -c 'cargo add serde_json@=1.0.154 csv@=1.4.0'
+write src/main.rs <<'EOF'
+use std::error::Error;
+use std::fs::File;
+use std::io::Read;
+
+use clap::Parser;
+use serde_json::{Map, Value};
+
+/// Convert a CSV file to a JSON array with one object per row.
+#[derive(Parser)]
+struct Args {
+    /// The CSV file to read.
+    input: String,
+}
+
+fn convert(reader: impl Read) -> Result<String, Box<dyn Error>> {
+    let mut csv = csv::Reader::from_reader(reader);
+    let headers = csv.headers()?.clone();
+    let mut rows = Vec::new();
+    for record in csv.records() {
+        let record = record?;
+        let row: Map<String, Value> = headers
+            .iter()
+            .zip(record.iter())
+            .map(|(key, value)| (key.to_string(), Value::String(value.to_string())))
+            .collect();
+        rows.push(Value::Object(row));
+    }
+    Ok(serde_json::to_string(&rows)?)
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let args = Args::parse();
+    println!("{}", convert(File::open(args.input)?)?);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::convert;
+
+    #[test]
+    fn each_row_becomes_an_object() {
+        let json = convert("name,revenue\nacme,100.5\n".as_bytes()).unwrap();
+        assert_eq!(json, r#"[{"name":"acme","revenue":"100.5"}]"#);
+    }
+}
+EOF
+bash -c 'cargo test'
+write sample.csv <<'EOF'
+name,revenue
+acme,100.5
+globex,900.25
+EOF
+bash -c 'cargo run -q -- sample.csv > out.json'
+[[ $(< out.json) == '[{"name":"acme","revenue":"100.5"},{"name":"globex","revenue":"900.25"}]' ]]
+'''
+
+[[cell]]
+id = "RS-03"
+section = "Rust"
+gate = "first-update"
+machine = "clean"
+prompt = "Install cargo-nextest and run the tests with it."
+fixture = "csv-to-json-cli"
+needs = ["cargo"]
+net = ["index.crates.io", "static.crates.io"]
+pass_check = "cargo nextest run passes; nothing new in ~/.cargo/bin"
+note = "The install that nextest's docs give, cargo install cargo-nextest --locked, still fails in a box on macOS: the default features include usdt, whose build runs dtrace -h, and dtrace cannot open /dev/stdin in a box (strands-agents/box#380). --no-default-features drops usdt and self-update, which a box needs neither of. The cargo pack sets CARGO_HOME to the project's .cargo, so cargo install puts cargo-nextest in .cargo/bin there, and cargo finds the subcommand in it. The cargo tool can only read ~/.cargo/bin, so a write there would be a deny."
+script = '''
+bash -c 'cargo install cargo-nextest@0.9.150 --locked --no-default-features'
+[ -f .cargo/bin/cargo-nextest ]
+bash -c 'cargo nextest run'
+'''
+
+[[cell]]
+id = "RS-04"
+section = "Rust"
+gate = "first-update"
+machine = "clean"
+prompt = "This repo pins nightly. Run clippy and fix the warnings."
+fixture = "repo-rust-toolchain-nightly"
+needs = ["rustup"]
+net = ["static.rust-lang.org"]
+pass_check = "cargo clippy -- -D warnings exits 0"
+note = "@box/cargo's rustup home is in its own storage, which links to the operator's toolchains and settings, read-only, and rustup installs the pinned nightly there, so ~/.rustup is never written. On macOS, rustup's download backends cannot trust the box's CA, so @box/cargo sets RUSTUP_DIST_SERVER to http://static.rust-lang.org on macOS, with upgrade_http, and the gateway makes the https call."
+script = '''
+bash -c 'cargo clippy'
+write src/main.rs <<'EOF'
+fn main() {
+    let names: Vec<String> = std::env::args().skip(1).collect();
+    if names.is_empty() {
+        println!("no names");
+        return;
+    }
+    for name in &names {
+        println!("hello, {name}");
+    }
+}
+EOF
+bash -c 'cargo clippy -- -D warnings'
+'''
+
+# ------------------------------------------------------------------ Section 7
+# C and C++. First-update gate.
+
+[[cell]]
+id = "CC-01"
+section = "Cpp"
+gate = "first-update"
+machine = "clean"
+prompt = "Add GoogleTest with FetchContent, write tests for the parser, and run ctest."
+fixture = "small-cmake-project"
+needs = ["cmake"]
+net = ["github.com"]
+pass_check = "ctest passes"
+note = "macOS SDK reads via xcrun; clang module cache."
+
+[[cell]]
+id = "CC-02"
+section = "Cpp"
+gate = "first-update"
+machine = "clean"
+prompt = "Build nlohmann/json and run its unit tests."
+fixture = "clone:nlohmann/json"
+fixture_ref = "v3.12.0"
+needs = ["cmake"]
+net = ["github.com"]
+pass_check = "the selected ctest labels pass"
+
+# ------------------------------------------------------------------ Section 8
+# Go. First-update gate.
+
+[[cell]]
+id = "GO-01"
+section = "Go"
+gate = "first-update"
+machine = "clean"
+prompt = "Add a /healthz endpoint with a table-driven test to this gin example."
+fixture = "clone:gin-gonic/examples"
+fixture_ref = "115c869356cd02a84f34f5913bedc75fbee87efa"
+needs = ["go"]
+net = ["proxy.golang.org", "sum.golang.org"]
+pass_check = "go test ./... passes"
+note = "A denied ~/Library/Caches/go-build fails go test but not go build. @box/go keeps the build cache, the module cache, and GOPATH in the project. The script adds the endpoint to the basic example, and edits its main.go with bash builtins, as a harness's file edit would."
+script = '''
+write basic/healthz.go <<'EOF'
+package main
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
+func healthz(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+EOF
+main=""
+while IFS= read -r line || [[ -n $line ]]; do
+  main+="$line"$'\n'
+  if [[ $line == *'router := gin.Default()'* ]]; then main+=$'\trouter.GET("/healthz", healthz)\n'; fi
+done < basic/main.go
+printf '%s' "$main" > basic/main.go
+write basic/healthz_test.go <<'EOF'
+package main
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestHealthz(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		code   int
+		body   string
+	}{
+		{"get", http.MethodGet, http.StatusOK, `{"status":"ok"}`},
+		{"post is not routed", http.MethodPost, http.StatusNotFound, ""},
+		{"delete is not routed", http.MethodDelete, http.StatusNotFound, ""},
+	}
+	router := setupRouter()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			req, _ := http.NewRequestWithContext(t.Context(), tt.method, "/healthz", nil)
+			router.ServeHTTP(w, req)
+			assert.Equal(t, tt.code, w.Code)
+			if tt.body != "" {
+				assert.JSONEq(t, tt.body, w.Body.String())
+			}
+		})
+	}
+}
+EOF
+bash -c 'go test ./...'
+'''
+
+[[cell]]
+id = "GO-02"
+section = "Go"
+gate = "first-update"
+machine = "clean"
+prompt = "Install golangci-lint and fix the findings."
+fixture = "go-01-output"
+needs = ["go"]
+net = ["proxy.golang.org"]
+pass_check = "golangci-lint run exits 0; nothing new in ~/go/bin"
+
+[[cell]]
+id = "GO-03"
+section = "Go"
+gate = "first-update"
+machine = "clean"
+prompt = "Run the tests for the pr command in the GitHub CLI."
+fixture = "clone:cli/cli"
+fixture_ref = "v2.103.3"
+needs = ["go"]
+net = ["proxy.golang.org"]
+pass_check = "go test ./pkg/cmd/pr/... passes"
+note = "The pr create tests look git up on PATH and run a stub in its place, so the corpus profile lets go read /usr/bin/git."
+script = '''
+bash -c 'go test ./pkg/cmd/pr/...'
+'''
+
+[[cell]]
+id = "GO-04"
+section = "Go"
+gate = "first-update"
+machine = "clean"
+prompt = "Make this service build. It imports our private module."
+fixture = "private-go-module-GOPRIVATE"
+needs = ["go"]
+net = ["github.com"]
+pass_check = "go build ./... passes"
+profile = "corpus-go-private"
+env_vars = ["GIT_CORPUS_PRIVATE"]
+note = "git over HTTPS with the injected token; no ~/.netrc. Runs on the clean bench: the private module and the token stand in for a lived-in machine's. The module is github.com/strands-agents/box-corpus-private, a private repository, so go can download it only with a token. The runner copies the service and adds a require of the module at its v0.1.0 tag. The cell runs under the corpus-go-private profile with GOPRIVATE set, so go skips proxy.golang.org and starts git, which @box/go runs with @box/git's settings because @box/go extends @box/git. The box puts GIT_CORPUS_PRIVATE, a token that can only read that repository, on git's requests to github.com. The script runs go mod tidy, which writes go.sum, then go build."
+script = '''
+bash -c 'go mod tidy'
+bash -c 'go build ./...'
+'''
+
+# ------------------------------------------------------------------ Section 9
+# PHP. Follows.
+
+[[cell]]
+id = "PHP-01"
+section = "PHP"
+gate = "follows"
+machine = "clean"
+prompt = "Create a Laravel app with CRUD for posts and feature tests, and run them."
+fixture = "composer-create-laravel"
+note = "The fixture's composer.lock needs PHP 8.4.1 or newer (Symfony 8.1), as create-project resolved it."
+needs = ["php", "composer"]
+net = ["packagist.org", "repo.packagist.org", "api.github.com", "codeload.github.com", "registry.npmjs.org"]
+pass_check = "php artisan test passes"
+
+[[cell]]
+id = "PHP-02"
+section = "PHP"
+gate = "follows"
+machine = "clean"
+prompt = "Start the app and the Vite dev server together."
+fixture = "php-01-output"
+needs = ["php", "composer", "node"]
+net = ["packagist.org", "repo.packagist.org", "api.github.com", "codeload.github.com", "registry.npmjs.org"]
+pass_check = "both ports respond"
+
+# ------------------------------------------------------------------ Section 10
+# Swift. Follows.
+
+[[cell]]
+id = "SW-01"
+section = "Swift"
+gate = "follows"
+machine = "clean"
+prompt = "Write a Swift package CLI that parses CSV, with tests."
+fixture = "swift-package-init-executable"
+needs = ["swift"]
+net = []
+pass_check = "swift test passes"
+note = "SwiftPM runs its own sandbox under the box's (a shim)."
+
+[[cell]]
+id = "SW-02"
+section = "Swift"
+gate = "follows"
+machine = "clean"
+prompt = "Add swift-collections and use OrderedSet for the column list."
+fixture = "sw-01-output"
+needs = ["swift"]
+net = ["github.com"]
+pass_check = "swift build passes after the manifest changes"
+note = "Exercises the intermittent nested-sandbox failure; a pass or fail here is inherently noisy."
+
+[[cell]]
+id = "SW-03"
+section = "Swift"
+gate = "follows"
+machine = "clean"
+prompt = "Add a Settings screen to this SwiftUI app and run the tests on the iPhone simulator."
+fixture = "xcode-swiftui-template"
+needs = ["xcodebuild"]
+net = []
+pass_check = "xcodebuild test on the simulator passes"
+note = "DerivedData, CoreSimulator services, CODE_SIGNING_ALLOWED=NO."
+
+# ------------------------------------------------------------------ Section 11
+# Ruby. Follows.
+
+[[cell]]
+id = "RB-01"
+section = "Ruby"
+gate = "follows"
+machine = "clean"
+prompt = "Create a Rails app with a Post model, a migration, and passing tests."
+fixture = "rails-new"
+needs = ["ruby", "rails"]
+net = ["rubygems.org"]
+pass_check = "bin/rails test passes"
+note = "Spring server private to the session."
+
+[[cell]]
+id = "RB-02"
+section = "Ruby"
+gate = "follows"
+machine = "lived-in"
+prompt = "This repo needs the Ruby in .ruby-version. Install it and run the specs."
+fixture = "repo-ruby-version-3.4"
+needs = ["rbenv"]
+net = ["rubygems.org", "cache.ruby-lang.org"]
+pass_check = "bundle exec rspec passes"
+note = "ruby-build download and compile; native extension builds."
+
+# ------------------------------------------------------------------ Section 12
+# Dart and Flutter. Follows.
+
+[[cell]]
+id = "DT-01"
+section = "Dart"
+gate = "follows"
+machine = "lived-in"
+prompt = "Run the tests for this Flutter sample and fix any failure."
+fixture = "clone:flutter/samples"
+needs = ["flutter"]
+net = ["pub.dev"]
+pass_check = "flutter test passes"
