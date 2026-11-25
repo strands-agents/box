@@ -1135,6 +1135,8 @@ class SandboxRefusals(unittest.TestCase):
                               ("strands-box: error: internal failure", True),
                               ("box: error: no profile named x", True),
                               ("strands-box: note[B0201]: [agent] runs /bin/bash", False),
+                              ("strands-box-sock-alias: error[H0301]: no ordinary executable for \"rg\"", False),
+                              ("strands-box-contain-trampoline: error[H0401]: apply sandbox: x", False),
                               ("npm error: ENOENT", False)):
             with self.subTest(line=line):
                 self.assertEqual(rc.startup_error("ok\n" + line + "\n"), line if stopped else "")

@@ -1,6 +1,7 @@
 """Hermetic tests for the judge (judge.py). No model is called: the transport is faked."""
 import io
 import json
+import re
 import os
 import shutil
 import tempfile
@@ -130,6 +131,13 @@ class Steps(unittest.TestCase):
                  "The formatPrice test passes now."]
         self.assertEqual(judge.plain_steps(other),
                          [{"kind": "final", "text": "The formatPrice test passes now."}])
+
+    def test_the_source_list_matches_box_cores_message_codes_page(self):
+        page = (Path(__file__).resolve().parents[1] / "docs/user/message-codes.md").read_text()
+        block = page.split("A message has one of five sources:", 1)[1].split("\n\n", 2)[1]
+        documented = set(re.findall(r"^- `([a-z-]+)`:", block, re.M))
+        self.assertTrue(documented)
+        self.assertEqual(set(judge.CORE_SOURCES), documented)
 
     def test_coded_box_lines_from_every_source_are_not_the_agents_words(self):
         other = ["strands-box: note[B0201]: [agent] runs /bin/bash with no policy decision over these paths:",

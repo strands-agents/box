@@ -213,8 +213,11 @@ def changes(before, after, limit=DIFF_LIMIT):
 
 # ---------------------------------------------------------------- the run's record
 
-# The sources Box writes its own lines under (docs/user/message-codes.md), the Shell, and `box`.
-BOX_SOURCES = r"(strands-box|strands-box-sock-alias|strands-box-contain-trampoline|strands-shell|policy|telemetry|box)"
+# The sources Box Core writes its messages under, as docs/user/message-codes.md lists them.
+CORE_SOURCES = ("strands-box", "policy", "telemetry", "strands-box-sock-alias",
+                "strands-box-contain-trampoline")
+# A line Box wrote: Box Core's, the Shell's, or `box`'s own.
+BOX_SOURCES = "(" + "|".join(map(re.escape, CORE_SOURCES + ("strands-shell", "box"))) + ")"
 BOX_LINE = re.compile(rf"^{BOX_SOURCES}:")
 
 

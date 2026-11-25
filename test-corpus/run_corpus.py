@@ -248,11 +248,15 @@ def journal_path(log):
     m = re.search(r"\(records: (.+?)\)\s*$", log, re.M)
     return Path(m.group(1)) if m else None
 
-# The sources whose lines can report a sandbox refusal: the box, the alias every program in the box
-# runs, the trampoline that applies a sandbox, and the Shell.
-SANDBOX_SOURCES = r"(strands-shell|strands-box|strands-box-sock-alias|strands-box-contain-trampoline)"
-# A line where `box` or Box Core stops: `<source>: error:` or a coded `<source>: error[B0103]:`.
-STARTUP_ERROR = re.compile(r"(strands-)?box[\w-]*: error(\[[A-Z][0-9]{4}\])?:")
+# The sources whose lines can report a sandbox refusal: Box Core's, apart from the policy engine and
+# telemetry, and the Shell's.
+SANDBOX_SOURCES = "(" + "|".join(map(re.escape, [s for s in judge.CORE_SOURCES
+                                                if s not in ("policy", "telemetry")]
+                                                + ["strands-shell"])) + ")"
+# A line where `box` or Box Core stops before the run starts: `<source>: error:`, or a coded
+# `strands-box: error[B0103]:`. An alias or trampoline error is about one request in a run that
+# went ahead, so it does not count.
+STARTUP_ERROR = re.compile(r"(strands-box|box): error(\[B[0-9]{4}\])?:")
 
 def startup_error(log):
     """The first line where `box` or Box Core reports an error, or ''."""
