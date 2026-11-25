@@ -18,8 +18,6 @@ pub(super) struct Log {
     tail: String,
     truncated: bool,
     unshown: usize,
-    /// The code of the last coded error shown, which `box explain` explains.
-    explain: Option<diagnostics::Code>,
 }
 
 impl Log {
@@ -55,7 +53,6 @@ impl Log {
             tail: String::new(),
             truncated: false,
             unshown: 0,
-            explain: None,
         }
     }
 
@@ -94,15 +91,10 @@ impl Log {
         let line = self.line.strip_suffix(b"\n").unwrap_or(&self.line);
         let text = String::from_utf8_lossy(line).into_owned();
         self.line.clear();
-        let core_error = match diagnostics::parse(&text) {
-            diagnostics::Line::Message(message)
-                if message.severity == diagnostics::Severity::Error =>
-            {
-                self.explain = message.code.or(self.explain);
-                true
-            }
-            _ => false,
-        };
+        let core_error = matches!(
+            diagnostics::parse(&text),
+            diagnostics::Line::Message(message) if message.severity == diagnostics::Severity::Error
+        );
         if core_error
             || text
                 .split_once(": ")
@@ -146,11 +138,27 @@ impl Log {
         preview
     }
 
-    /// What `box` prints on exit. A run that `box` removes gets only the preview.
+    /// The code of the last coded error that the preview shows, which `box explain` explains.
+    fn explain(&self) -> Option<diagnostics::Code> {
+        self.tail
+            .lines()
+            .rev()
+            .find_map(|line| match diagnostics::parse(line) {
+                diagnostics::Line::Message(message)
+                    if message.severity == diagnostics::Severity::Error =>
+                {
+                    message.code
+                }
+                _ => None,
+            })
+    }
+
+    /// What `box` prints on exit. A run that `box` removes gets only the preview and the hint.
     pub(super) fn report(mut self, launch: &Launch, kept: bool) -> String {
         let preview = self.preview();
+        let explain = self.explain();
         if !kept {
-            return match self.explain {
+            return match explain {
                 Some(code) => format!("{preview}box: to see what to do, run: box explain {code}\n"),
                 None => preview,
             };
@@ -177,7 +185,7 @@ impl Log {
             },
             launch.history_command(false),
             launch.reuse_command(),
-            self.explain
+            explain
                 .map(|code| format!("  explain  box explain {code}\n"))
                 .unwrap_or_default(),
         )
@@ -278,7 +286,12 @@ mod tests {
             "{kept}"
         );
 
+        let mut pushed_out = b"strands-box: error[B0102]: first\n".to_vec();
+        for number in 0..PREVIEW_LINES {
+            pushed_out.extend_from_slice(format!("box: error: later {number}\n").as_bytes());
+        }
         for lines in [
+            &pushed_out[..],
             &b"strands-box: error: internal\nbox: error: x\n"[..],
             b"policy: warning[P0201]: x\n",
             b"strands-box: error[X0101]: not a code\n",
