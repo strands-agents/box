@@ -547,8 +547,9 @@ impl Vault {
 
     /// Report a non-fatal operator-facing condition.
     pub(crate) fn warn(&self, message: &str) {
-        eprintln!(
-            "strands-box credentials [{tenant}]: {message}",
+        diagnostics::diag!(
+            B0602,
+            "credentials [{tenant}]: {message}",
             tenant = self.tenant
         );
         #[cfg(test)]
@@ -557,13 +558,13 @@ impl Vault {
 
     /// Report, once for this process, a condition that holds for every request this vault serves.
     fn warn_at_open(&self, message: &str) {
-        let line = format!("strands-box: warning: {message}");
-        if !first_warning(&line) {
+        if !first_warning(message) {
             return;
         }
-        eprintln!("{line}");
+        let line = diagnostics::diag!(text B0602, "{message}");
+        let _ = std::io::Write::write_all(&mut diagnostics::stderr().lock(), line.as_bytes());
         #[cfg(test)]
-        CAPTURED_WARNINGS.with(|warnings| warnings.borrow_mut().push(line));
+        CAPTURED_WARNINGS.with(|warnings| warnings.borrow_mut().push(line.trim_end().to_string()));
     }
 
     /// What must be edited on `req` before it goes upstream, or `None` when this vault governs no

@@ -9,6 +9,9 @@
 
 #![warn(missing_docs, unreachable_pub)]
 
+/// The voice of this crate's stderr messages, which `diagnostics::diag!` reads.
+const DIAGNOSTIC_SOURCE: diagnostics::Source = diagnostics::Source::StrandsBox;
+
 mod effect;
 mod fallback;
 mod floor;

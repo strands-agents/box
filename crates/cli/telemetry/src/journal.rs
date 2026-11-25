@@ -16,7 +16,6 @@ const ATTRIBUTE_LIMIT: usize = 1024;
 /// One observed Core lifecycle record or policy decision.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Record {
-    BoxStarted,
     WorkloadStarted(Option<SystemTime>),
     BoxStopped(CoreOutcome),
     Decision(Decision),
@@ -200,10 +199,7 @@ impl Journal {
             if byte == b'\n' {
                 let result = parse_line(&self.pending, &mut |record| {
                     if count_decisions
-                        || matches!(
-                            record,
-                            Record::BoxStarted | Record::WorkloadStarted(_) | Record::BoxStopped(_)
-                        )
+                        || matches!(record, Record::WorkloadStarted(_) | Record::BoxStopped(_))
                     {
                         visit(record);
                     }
@@ -281,17 +277,13 @@ fn parse_record(
     let attributes = &record["attributes"];
     if scope == Some("strands-box.control") {
         let operation = attribute(attributes, "strands.box.control.operation")?;
-        if !matches!(
-            operation,
-            Some("box_started" | "workload_started" | "box_stopped")
-        ) {
+        if !matches!(operation, Some("workload_started" | "box_stopped")) {
             return Ok(());
         }
         match (
             operation,
             attribute(attributes, "strands.box.control.outcome")?,
         ) {
-            (Some("box_started"), Some("ok")) => visit(Record::BoxStarted),
             (Some("workload_started"), Some("ok")) => {
                 visit(Record::WorkloadStarted(timestamp(record)));
             }

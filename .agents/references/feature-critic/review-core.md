@@ -124,8 +124,9 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
 
    **Test deletion is the tell, and check for it explicitly.** A deleted, renamed, or newly
    `#[ignore]`d test in `tests/box_*.rs`, `containment`'s conformance suite,
-   `shell/tests/kernel_effect_interception.rs`, or any test named in a crate's `AGENTS.md` ("must
-   not be deleted") is a BLOCKER unless the diff says why the property it pinned no longer exists.
+   `shell/tests/kernel_effect_interception.rs`, or any test enforcing a frozen surface or
+   foundational safety premise is a BLOCKER unless the diff says why the property it pinned no
+   longer exists. Removing a test's name from guidance does not remove this protection.
 
    **Check only the diff from the fork point.** A diff against `main` itself on a long-lived branch
    returns hundreds of hits, almost all of them tests that moved between files, and a reviewer who
@@ -231,26 +232,12 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
 
    These are DESIGN-tier findings (they do not change behavior): report them, but never let them
    outrank a correctness or security issue.
-9. **Doc-comment length: the rationale belongs in `AGENTS.md`, not above the signature.** The
-   crate's inline docs were cut from ~3,800 lines to ~900 on 2026-08-09 (see the "Inline docs are
-   short" section of [`crates/box/AGENTS.md`](../../../crates/box/AGENTS.md)), and a diff that
-   re-grows them is a regression even when every sentence is true. The split:
-   - `///` on an item: **one paragraph**: what it is, plus any refusal a caller must expect.
-   - `//!` at a module head: **one sentence**, plus a table when the module has parts worth
-     listing.
-   - the crate's `AGENTS.md`: why a boundary exists, what breaking it cost, what was measured.
-   - `docs/design/decisions.md`: one entry per decision: the answer, the alternative that lost,
-     and the cost.
-
-   Flag as findings: a `///` block running to multiple paragraphs of *why*; a measured-finding
-   narrative or a "this already regressed once" story inline instead of in `AGENTS.md`; a "what this
-   does NOT do" essay above a signature; a `///` restating what the name already says
-   (`version: u32` documented as "the format's version").
-
-   A one-line `//` beside the line it explains is **not** a finding: that is explicitly kept. The
-   test is whether the note needs a second paragraph; if it does, it belongs in `AGENTS.md`. When a
-   diff adds real rationale, check it landed in `AGENTS.md` rather than assuming it was dropped: the
-   failure mode is losing the reasoning, not moving it.
+9. **Keep comments and agent guidance focused.** Follow the root
+   [placement rules](../../../AGENTS.md#design-and-implementation): short item and module docs,
+   change rationale in the commit, durable reasoning in design docs, and current non-obvious traps
+   in crate guidance. Flag comments that restate names or bury a signature in rationale. A short
+   comment explaining a tricky line is useful. Do not require histories of resolved defects,
+   measurement narratives, or API inventories in `AGENTS.md`.
 
 ## Gates
 

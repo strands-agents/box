@@ -33,11 +33,13 @@ pub(crate) fn preflight_credsd(
     // A `credsd://` route with no `secret.type` signs as AWS, as it did before the key existed. A
     // later release requires the key, so each such route warns once per run.
     for (table, reference) in untyped_credsd_routes(egress, remote_mcp) {
-        eprintln!(
-            "strands-box: warning: {table} reads {reference} with no secret.type, so the box \
-             signs it with AWS credentials; set secret.type = \"aws\", or \"token\" for a token. \
-             A later release requires secret.type."
+        let line = ::diagnostics::diag!(
+            text B0214,
+            "{table} reads {reference} with no secret.type, so the box signs it with AWS \
+             credentials; set secret.type = \"aws\", or \"token\" for a token. A later release \
+             requires secret.type."
         );
+        let _ = std::io::Write::write_all(&mut ::diagnostics::stderr().lock(), line.as_bytes());
     }
     let mut names = credsd_credentials(egress, remote_mcp);
     for name in crate::record::config::telemetry::credsd_credentials(telemetry) {

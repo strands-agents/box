@@ -239,7 +239,7 @@ Because a bare `aws://` signs with whatever identity the host carries, the box p
 the startup disclosure, once for each destination that signs this way:
 
 ```
-strands-box: warning: aws:// for bedrock-runtime.us-west-2.amazonaws.com signs with this machine's AWS identity
+strands-box: warning[B0602]: aws:// for bedrock-runtime.us-west-2.amazonaws.com signs with this machine's AWS identity
 ```
 
 The line names the destination as the route writes it, so a box with two such destinations prints
@@ -317,7 +317,7 @@ root that your machine already trusts works in the box with no setting.
 The gateway reads the roots once, when the box starts, and stderr says how many it added:
 
 ```text
-strands-box: the egress gateway also trusts 136 root certificates from this host's trust store for upstream servers (0 ignored)
+strands-box: note[B0204]: the egress gateway also trusts 136 root certificates from this host's trust store for upstream servers (0 ignored)
 ```
 
 A trusted root can vouch for any server, and the network that re-signs the traffic reads every
@@ -442,7 +442,7 @@ A request the gateway doesn't refuse but can't complete gets an HTTP 502 with th
 Except for `effect interceptor unavailable`, policy permitted the request, so it may have reached
 the server. The box also prints the reason on stderr, naming the backend when the destination
 re-routes to one:
-`strands-box: warning: egress request to <host>:<port> failed: <reason>`.
+`strands-box: warning[B0501]: egress request to <host>:<port> failed: <reason>`.
 
 A 502 with no `x-strands-box-egress` header answers a `CONNECT`, or a plain `http://` request, that
 the gateway couldn't resolve or connect to. Any other 502 without the header comes from the server.

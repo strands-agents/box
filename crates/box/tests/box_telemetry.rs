@@ -997,7 +997,7 @@ fn an_unreachable_target_reports_the_lost_records_once() {
         .collect();
     assert_eq!(lines.len(), 1, "exactly one loss line: {stderr}");
     assert!(
-        lines[0].starts_with("strands-box: warning: telemetry records were lost: "),
+        lines[0].starts_with("telemetry: warning[T0101]: telemetry records were lost: "),
         "{stderr}"
     );
     assert!(
@@ -2162,7 +2162,7 @@ fn the_debug_variable_prints_a_failed_export_and_its_cause() {
         );
         // The per-failure line and the endpoint's answer are the variable's own output. The drain's
         // one summary line is not, so it prints with or without the variable.
-        let reported = stderr.contains("strands-box: telemetry export failed:")
+        let reported = stderr.contains("telemetry: warning[T0102]: telemetry export failed:")
             && stderr.contains("the stand-in refused this batch");
         assert_eq!(
             reported, debug,
@@ -2170,7 +2170,7 @@ fn the_debug_variable_prints_a_failed_export_and_its_cause() {
         );
         assert_eq!(
             stderr
-                .matches("strands-box: warning: telemetry records were lost:")
+                .matches("telemetry: warning[T0101]: telemetry records were lost:")
                 .count(),
             1,
             "the drain reports the loss once, with or without the variable: {stderr}"

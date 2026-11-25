@@ -1,14 +1,7 @@
 //! The read-write root SET, rendered — and this file is **deliberately not macOS-gated**.
 //!
-//! `containment/AGENTS.md` says the conformance suite "runs it on every platform, so a rule added
-//! to `seatbelt-agent.sb` fails CI wherever CI runs". **That was not true when this file was
-//! written**: `profile_conformance.rs`, `backend_seatbelt.rs`, and `contains_exec_target.rs` all
-//! carry `#![cfg(target_os = "macos")]`, so every Seatbelt profile assertion was skipped on
-//! Linux — silently, as a pass.
-//!
 //! The renderer is pure string work over a checked-in profile and needs no macOS kernel, so this
-//! file runs everywhere and closes that gap for the rules it covers. A change to the read-write
-//! blocks now fails on either platform.
+//! file checks the read-write blocks on both platforms.
 //!
 //! It does **not** replace the macOS-gated suites: the census, the trust-bundle content check, and
 //! every kernel-level enforcement test still only run there.
