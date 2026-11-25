@@ -1981,6 +1981,40 @@ fn reviewing_settings_prefills_detected_values_and_preserves_unrelated_answers()
 }
 
 #[test]
+fn a_terminal_still_asks_a_detected_question_with_the_detected_choice_as_its_default() {
+    let fixture = Fixture::new();
+    fixture.agent(DETECTING);
+    fixture.settings(r#"{"env": {"USE_CLOUD": "1", "REGION": "west-2"}}"#);
+    let (answered, output) = fixture
+        .answer(Call {
+            interactive: true,
+            input: "\n\n\n",
+            ..Call::default()
+        })
+        .expect("Enter keeps what was detected");
+    assert!(output.contains("Which provider?"), "{output}");
+    assert!(
+        output.contains("This machine"),
+        "every choice is listed: {output}"
+    );
+    assert!(output.contains("> [1] "), "{output}");
+    assert_eq!(answered.packs, ["@box/agent", "@box/cloud"]);
+    assert_eq!(option(&answered, "cloud.region"), Some("west-2"));
+    let (answered, lines) = fixture
+        .detected(Call {
+            interactive: true,
+            input: "2\n\n\n",
+            ..Call::default()
+        })
+        .expect("a choice that detection did not pick");
+    assert_eq!(answered.packs, ["@box/agent", "@box/local"]);
+    assert!(
+        lines.iter().all(|line| !line.starts_with("Provider")),
+        "an answer that the operator changed is not reported as detected: {lines:?}"
+    );
+}
+
+#[test]
 fn a_higher_place_wins_and_a_lower_place_fills_a_missing_key() {
     let fixture = Fixture::new();
     fixture.agent(DETECTING);

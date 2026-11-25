@@ -19,6 +19,12 @@ YAML front matter.
 
 **Belongs:** Every table and key of ~/.strands/box/config.toml and of a collection's collection.toml, and what box does without the file. How to build a starter menu or a policy menu for a team goes to starters.md, a key that one profile sets goes to profiles-reference.md, and where the file sits among the other files goes to files.md.
 
+## `credentials.md`
+
+**Reader:** Someone who gives the agent a key for a host and needs to choose where the key comes from, or to point a pack's route at another source.
+
+**Belongs:** Each credential source a route's secret.ref can name (a shell variable, AWS credentials, the credentials daemon, a plugin's scheme), what the agent gets from each, how to set one up, and what each source can't do. The secret.ref key row goes to profiles-reference.md, how to write a plugin goes to plugins.md, Box Core's signed-route rules and the credsd socket defaults go to Box Core's egress page, and a fix after an error goes to troubleshooting.md.
+
 ## `file-rules.md`
 
 **Reader:** Someone who wants the details of why a file rule in their policy doesn't stop the agent's own file tools, the tools the box starts, or MCP servers, and what the plans are for that limit.
@@ -89,7 +95,7 @@ YAML front matter.
 
 **Reader:** Someone who writes or reads a profile, knows the key or table they want, and needs what it does and which file may hold it.
 
-**Belongs:** A key or table that a profile writes, and the rules that profiles and packs share, such as placeholders, when, and the merge. A rarer task goes here too, under the key it uses. A key that only a pack writes goes to packs-reference.md, a task that most users need in their first month goes to profiles.md, and a fix after an error goes to troubleshooting.md.
+**Belongs:** A key or table that a profile writes, and the rules that profiles and packs share, such as placeholders, when, and the merge. A rarer task goes here too, under the key it uses. A key that only a pack writes goes to packs-reference.md, where a route's key comes from goes to credentials.md, a task that most users need in their first month goes to profiles.md, and a fix after an error goes to troubleshooting.md.
 
 ## `profiles.md`
 

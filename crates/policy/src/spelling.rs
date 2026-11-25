@@ -84,6 +84,17 @@ pub enum PolicyWarning {
     },
 }
 
+impl PolicyWarning {
+    /// The message code a printed warning of this kind carries.
+    pub fn code(&self) -> diagnostics::Code {
+        match self {
+            Self::HomeAfterWildcard { .. } => diagnostics::Code::P0101,
+            Self::ProgramSpelledAsPath { .. } => diagnostics::Code::P0102,
+            Self::InertTemporalPermit { .. } => diagnostics::Code::P0103,
+        }
+    }
+}
+
 impl std::fmt::Display for PolicyWarning {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -416,7 +427,8 @@ impl Scope {
             Some(Self::Filesystem)
         } else if id.starts_with("shell:") {
             Some(Self::Shell)
-        } else if id.starts_with("net:") || id.starts_with("http:") {
+        } else if id.starts_with("net:") || id.starts_with("http:") || id.starts_with("websocket:")
+        {
             Some(Self::Network)
         } else {
             None
@@ -1340,16 +1352,18 @@ mod tests {
             ("XN--Bcher-Kva.example", "xn--bcher-kva.example"),
             ("2001:DB8::1", "2001:db8::1"),
         ] {
-            let policies = parsed(&format!(
-                r#"@id("block_host")
-                forbid(principal, action == Box::Action::"net:connect", resource)
-                when {{ context.input.host == "{literal}" }};"#
-            ));
-            let error = judge(&policies, &Operator::unanchored())
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("rule @id(\"block_host\")"), "{error}");
-            assert!(error.contains(&format!("write \"{canonical}\"")), "{error}");
+            for action in ["net:connect", "websocket:connect"] {
+                let policies = parsed(&format!(
+                    r#"@id("block_host")
+                    forbid(principal, action == Box::Action::"{action}", resource)
+                    when {{ context.input.host == "{literal}" }};"#
+                ));
+                let error = judge(&policies, &Operator::unanchored())
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("rule @id(\"block_host\")"), "{error}");
+                assert!(error.contains(&format!("write \"{canonical}\"")), "{error}");
+            }
         }
     }
 

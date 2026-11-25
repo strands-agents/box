@@ -16,7 +16,7 @@ and packs instead, read the [Box CLI guide](../cli/README.md).
 - [`tool-grammars.md`](./tool-grammars.md): experimental. Describe a program such as `git` as actions
   and effects, and write one rule for every spelling of a command.
 - [`telemetry.md`](./telemetry.md): the `[telemetry.decisions]` keys, the endpoint and vendor kinds, what each record carries, and how to read a records file.
-- [`policy.md`](./policy.md): what a policy is, when the box asks it, the ten actions, the six
+- [`policy.md`](./policy.md): what a policy is, when the box asks it, the eleven actions, the six
   common rules, and what to do when a policy fails to load. Start here for policy.
 - [`security.md`](./security.md): what `box.toml` governs, what `policy.dw` governs, the one rule
   Box always enforces, and the policy limitations.
@@ -42,6 +42,8 @@ and packs instead, read the [Box CLI guide](../cli/README.md).
   for AgentCore Runtime and Lambda MicroVM.
 - [`config.md`](./config.md): the `box.toml` reference: every key and table, its type and default,
   and what the loader refuses.
+- [`message-codes.md`](./message-codes.md): the format of the messages Box writes to stderr, and
+  what each message code means and what to do about it.
 - [`policy/actions.md`](./policy/actions.md): every action, its fields, and which part of the box
   raises it.
 

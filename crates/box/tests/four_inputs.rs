@@ -1,14 +1,6 @@
 //! The four-input rule, enforced rather than asserted in prose.
 //!
-//! `box/AGENTS.md` says `--work-dir`, `--bind`, `--read-path`, and `--home` "must keep
-//! reaching the workload as its own argv; the test asserting that is the guard on this
-//! rule, not a formality." **That test did not exist.** The crate contract named a guard
-//! nobody had written, so the rule was a convention with a citation.
-//!
-//! It was found while a design decision was claiming the rule "survived the library surface
-//! unamended, and the guard test needed no edit" — which was trivially true of a test
-//! that was never written. The claim is only worth making if the guard exists, so here
-//! it is.
+//! `--work-dir`, `--bind`, `--read-path`, and `--home` belong to the workload's argv.
 //!
 //! Reads the argv parser's source rather than invoking the binary, because the assertion
 //! is about which flags box *declares*.

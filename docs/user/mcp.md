@@ -286,6 +286,16 @@ exactly. `box run` prints each credential store a server's lists name.
 
 A grant in this table is direct access, outside every `fs:*` decision.
 
+The separate `receive_mounts` array in `[mcp.<name>.filesystem]` selects paths where this local
+server's sandbox would receive externally attached filesystems. Omitting it selects no paths.
+It does not inherit the agent's entries and grants no filesystem access. Linux requires no
+additional experimental setting, but this build still rejects nonempty arrays because forwarding
+is unavailable. Leave the array empty or omit it on Linux.
+
+On macOS, omit `receive_mounts`: even an explicit empty array rejects configuration loading.
+Both platform refusals happen before Box creates state or starts a workload.
+See [incoming mount declarations](config.md#incoming-mount-declarations) for the path checks.
+
 ### Network
 
 `[mcp.<name>.network]` holds one key, `contain_egress`.
@@ -329,7 +339,7 @@ to the server in both modes.
 |---|---|---|---|
 | `type` | string | required | `"http"`. |
 | `destinations` | string array | required | Destinations for MCP identification and optional credential routing. Entries accept a host, `host:port`, or a host with a path prefix. A `*.` wildcard entry supports credential routing only. MCP identification uses the explicit host; see [remote destination matching](#remote-destination-matching). |
-| `secret.ref` | string | none | The credential the gateway attaches to each request to the server: `env://NAME`, `aws://PROFILE`, a bare `aws://` for the AWS default credential chain, or a reference in a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table declares. |
+| `secret.ref` | string | none | The credential the gateway attaches to each request to the server: `env://NAME`, `aws://PROFILE`, a bare `aws://` for the AWS default credential chain, `credsd://NAME` for a credential in the credentials daemon ([credential sources](egress.md#credential-sources)), or a reference in a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table declares. |
 | `secret.env` | string | `NAME` for `env://NAME` | Experimental: needs `secret-sources = true` in [`[experimental-features]`](config.md#experimental-features). The variable that holds the placeholder in the workload. Required for a reference in a declared scheme. |
 | `secret.header` | string | `Authorization` | The header the credential goes in. |
 | `secret.prefix` | string | `Bearer ` on `Authorization` | The text before the credential. |

@@ -59,6 +59,7 @@ impl<'a> Upstream<'a> {
         method: &str,
         head: Zeroizing<String>,
         body: Zeroizing<Vec<u8>>,
+        websocket: bool,
     ) -> (EffectOutcome, Result<UpstreamResponse>) {
         let Self {
             socket,
@@ -75,7 +76,7 @@ impl<'a> Upstream<'a> {
             let tcp = socket
                 .into_async()
                 .map_err(|e| lost("upstream socket", e))?;
-            let request = (method, head, body);
+            let request = (method, head, body, websocket);
             match tls {
                 None => round_trip(tcp, &writes, request, &status, deadline).await,
                 Some(name) => {
@@ -113,6 +114,7 @@ impl<'a> Upstream<'a> {
 pub(crate) struct UpstreamResponse {
     pub(crate) head: ResponseHead,
     pub(crate) body: UpstreamBody,
+    pub(crate) upgraded: Option<hyper::upgrade::Upgraded>,
 }
 
 /// The connection's upstream response, retained until receipt ends even if delivery stops.
@@ -183,7 +185,7 @@ impl ResponseProgress {
 async fn round_trip<S>(
     upstream: S,
     writes: &WriteCount,
-    (method, head, body): (&str, Zeroizing<String>, Zeroizing<Vec<u8>>),
+    (method, head, body, websocket): (&str, Zeroizing<String>, Zeroizing<Vec<u8>>, bool),
     status: &Cell<Option<u16>>,
     deadline: Instant,
 ) -> std::result::Result<UpstreamResponse, NoResponse>
@@ -211,9 +213,9 @@ where
         .await
         .map_err(lost)?;
     let mut driver = ConnectionDriver(Some(Box::pin(async move {
-        let _ = connection.await;
+        let _ = connection.with_upgrades().await;
     })));
-    let response = {
+    let mut response = {
         let mut response = std::pin::pin!(sender.send_request(stand_in));
         std::future::poll_fn(|cx| {
             driver.poll(cx);
@@ -223,8 +225,21 @@ where
         .map_err(lost)?
     };
     status.set(Some(response.status().as_u16()));
-    let (head, body) =
-        http1::read_response_head(response).map_err(|error| (io::ErrorKind::InvalidData, error))?;
+    let upgrade = (response.status() == hyper::StatusCode::SWITCHING_PROTOCOLS)
+        .then(|| hyper::upgrade::on(&mut response));
+    let (head, body) = http1::read_response_head(response, websocket)
+        .map_err(|error| (io::ErrorKind::InvalidData, error))?;
+    let upgraded = match upgrade {
+        Some(mut upgrade) => Some(
+            std::future::poll_fn(|cx| {
+                driver.poll(cx);
+                Pin::new(&mut upgrade).poll(cx)
+            })
+            .await
+            .map_err(lost)?,
+        ),
+        None => None,
+    };
     let progress = ResponseProgress::new(deadline, body.is_end_stream());
     Ok(UpstreamResponse {
         head,
@@ -236,6 +251,7 @@ where
             deadline: Box::pin(tokio::time::sleep_until(deadline)),
             request: None,
         }))),
+        upgraded,
     })
 }
 
@@ -336,7 +352,7 @@ impl ResponseReader {
 impl Drop for ResponseReader {
     fn drop(&mut self) {
         if self.record_request_outcome().is_err() {
-            eprintln!("strands-box: warning: recording upstream request outcome failed");
+            diagnostics::diag!(P0301, "recording upstream request outcome failed");
         }
     }
 }
@@ -449,7 +465,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prepared<S> {
         stand_in: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        while !this.flushed {
+        if this.flushed {
+            return Pin::new(&mut this.inner).poll_write(cx, stand_in);
+        }
+        loop {
             let rest = match this.sent.checked_sub(this.head.len()) {
                 None => &this.head.as_bytes()[this.sent..],
                 Some(at) => &this.body[at..],
@@ -462,7 +481,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prepared<S> {
                 if let Some(reader) = this.reader.take() {
                     reader.wake();
                 }
-                break;
+                return Poll::Ready(Ok(stand_in.len()));
             }
             let written = ready!(Pin::new(&mut this.inner).poll_write(cx, rest))?;
             if written == 0 {
@@ -470,7 +489,6 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prepared<S> {
             }
             this.sent += written;
         }
-        Poll::Ready(Ok(stand_in.len()))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -521,6 +539,7 @@ mod tests {
                         "POST",
                         Zeroizing::new(std::str::from_utf8(HEAD).unwrap().to_string()),
                         Zeroizing::new(b"ok".to_vec()),
+                        false,
                     ),
                     &status,
                     Instant::now() + std::time::Duration::from_secs(5),

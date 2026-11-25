@@ -25,19 +25,25 @@ search = [{ env = "PATH" }]
 command = ["${{ inputs.go.path }}"]
 hosts = ["proxy.golang.org", "sum.golang.org"]
 
-# The module cache, the build cache, and GOPATH go in the project, because the box refuses a write
-# to ~/go and ~/Library/Caches/go-build. GOENV=off keeps go from reading a host env file, and
+# The module cache, the build cache, and GOPATH go in the tool's own storage, because the box
+# refuses a write to ~/go and ~/Library/Caches/go-build, and the agent cannot write the tool's
+# storage, so it cannot change a module that a later build compiles. GOENV=off keeps go from reading a host env file, and
 # GOTOOLCHAIN=local keeps it from downloading another toolchain. With CGO_ENABLED=0 go never starts
-# the C compiler, which this pack does not grant. -modcacherw leaves the module cache writable, as
-# the rest of the project is, so a plain rm -r removes the project.
+# the C compiler, which this pack does not grant. -modcacherw leaves the module cache writable, so
+# a plain rm -r removes the storage.
 [env]
-GOPATH = "${{ cache }}/path"
-GOMODCACHE = "${{ cache }}/mod"
-GOCACHE = "${{ cache }}/build"
+GOPATH = "${{ storage.cache }}/path"
+GOMODCACHE = "${{ storage.cache }}/mod"
+GOCACHE = "${{ storage.cache }}/build"
 GOENV = "off"
 GOTOOLCHAIN = "local"
 CGO_ENABLED = "0"
 GOFLAGS = "-modcacherw"
 
+# The tool's own storage: the agent gets no grant to it.
+[storage]
+directories = ["cache"]
+
 [filesystem]
-read = ["${{ root.parent }}"]
+read = ["${{ root.parent }}", "${{ storage.cache }}"]
+write = ["${{ storage.cache }}"]

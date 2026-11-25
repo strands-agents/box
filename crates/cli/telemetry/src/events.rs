@@ -128,6 +128,11 @@ impl Invocation {
         self.started
     }
 
+    /// The `User-Agent` for delivery: `box/` and the version the events report in their context.
+    pub(crate) fn user_agent(&self) -> String {
+        format!("box/{}", self.context.box_version)
+    }
+
     /// Construct the run event from an observed outcome.
     pub fn run_event(&self, outcome: LaunchOutcome) -> Event {
         let (box_launched, failure_reason, startup_latency_ms) = match outcome {

@@ -523,12 +523,14 @@ fn a_tool_whose_program_is_not_installed_is_left_out_and_the_box_starts() {
     let text = text(&output);
     assert!(output.status.success(), "{text}");
     assert!(
-        text.contains("strands-box: [tool.tsx] left out: strands_box_absent_tsx not found"),
+        text.contains(
+            "strands-box: note[B0207]: [tool.tsx] left out: strands_box_absent_tsx not found"
+        ),
         "{text}"
     );
     assert!(
         text.contains(&format!(
-            "strands-box: [tool.late] left out: {planted} not found"
+            "strands-box: note[B0207]: [tool.late] left out: {planted} not found"
         )),
         "{text}"
     );
@@ -564,7 +566,7 @@ fn a_tool_program_that_box_writes_is_left_out_on_the_first_run_alone() {
     assert!(first.status.success(), "{}", text(&first));
     assert!(
         text(&first).contains(&format!(
-            "strands-box: [tool.inside] left out: {inside} not found"
+            "strands-box: note[B0207]: [tool.inside] left out: {inside} not found"
         )),
         "{}",
         text(&first)

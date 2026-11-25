@@ -203,6 +203,10 @@ These don't work in the box yet:
 - Hooks. Kiro CLI starts each hook through `/bin/sh` and ignores `SHELL`, and a box doesn't run
   `/bin/sh`, so no hook runs: not one in an agent you bring in, and not one in the project.
 
+The agent in the box can change `.kiro/settings/mcp.json` and `.kiro/agents/` in your project, and
+Kiro CLI uses them the next time you run it there.
+For more info, check [the limitations section](../../../docs/cli/limitations.md#the-agent-can-plant-code-that-runs-outside-the-box-later).
+
 On macOS, when file times are off, as with `file-attributes = false` or when you run `box` as
 root, Kiro CLI waits about 15 seconds each time it starts. See
 [File times on macOS](../../../docs/cli/limitations.md#file-times-on-macos).
@@ -212,7 +216,7 @@ root, Kiro CLI waits about 15 seconds each time it starts. See
 ### Kiro CLI's runtime folder is missing or out of date
 
 ```text
-strands-box: error: `[agent]` filesystem entry "/Users/you/.kiro-runtime" is refused: /Users/you/.kiro-runtime is not there
+strands-box: error[B0102]: `[agent]` filesystem entry "/Users/you/.kiro-runtime" is refused: /Users/you/.kiro-runtime is not there
 ```
 
 ```text

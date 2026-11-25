@@ -91,9 +91,14 @@ impl Log {
         let line = self.line.strip_suffix(b"\n").unwrap_or(&self.line);
         let text = String::from_utf8_lossy(line).into_owned();
         self.line.clear();
-        if text
-            .split_once(": ")
-            .is_some_and(|(_, message)| message.starts_with("error:"))
+        let core_error = matches!(
+            diagnostics::parse(&text),
+            diagnostics::Line::Message(message) if message.severity == diagnostics::Severity::Error
+        );
+        if core_error
+            || text
+                .split_once(": ")
+                .is_some_and(|(_, message)| message.starts_with("error:"))
         {
             self.show(&text);
         } else {
@@ -154,11 +159,12 @@ impl Log {
         let id = launch.name();
         format!(
             "\n{preview}box: run {id} ended\n  startup disclosure \u{b7} {}\n  log      {log}\n  \
-             history  box runs history {id}\n  reuse    {}\n\n",
+             history  {}\n  reuse    {}\n\n",
             match self.unshown {
                 1 => "1 more message".to_owned(),
                 count => format!("{count} more messages"),
             },
+            launch.history_command(false),
             launch.reuse_command(),
         )
     }
@@ -173,7 +179,9 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut log = Log::new(File::open("/dev/null").unwrap(), file.reopen());
         let mut bytes = b"loader: error: first failure\n".to_vec();
-        bytes.extend_from_slice(&b"policy: warn: error while evaluating policy\n".repeat(2000));
+        bytes.extend_from_slice(
+            &b"policy: warning[P0201]: dogwood evaluation failed: x; denying\n".repeat(2000),
+        );
         bytes.extend_from_slice(b"box: error: final failure with \x1b[2J\x00input");
         for part in bytes.chunks(7) {
             log.push(part);
@@ -189,10 +197,16 @@ mod tests {
             ),
         );
 
-        log.push(format!("strands-box: warning: {}", "x".repeat(PREVIEW_BYTES * 2)).as_bytes());
+        log.push(
+            format!(
+                "strands-box: warning[B0501]: {}",
+                "x".repeat(PREVIEW_BYTES * 2)
+            )
+            .as_bytes(),
+        );
         assert!(log.line.len() <= PREVIEW_BYTES + 1);
         log.message("box: policy update failed: invalid edit\n");
-        log.push(b"strands-box: error: still part of the warning\n");
+        log.push(b"strands-box: error[B0105]: still part of the warning\n");
         assert_eq!(
             log.preview(),
             format!("{preview}  box: policy update failed: invalid edit\n")
@@ -280,9 +294,9 @@ mod tests {
             Log::open(&launch, File::open("/dev/null").unwrap()),
             Log::new(File::open("/dev/null").unwrap(), File::open(&target)),
         ] {
-            log.push(b"strands-box: error: important failure\n");
+            log.push(b"strands-box: error[B0105]: important failure\n");
             let console = log.report(&launch, true);
-            assert!(console.contains("  strands-box: error: important failure\n"));
+            assert!(console.contains("  strands-box: error[B0105]: important failure\n"));
             assert!(
                 console.contains("\n  log      could not write "),
                 "{console}"
@@ -291,10 +305,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
 
         let mut log = Log::new(File::open("/dev/null").unwrap(), tempfile::tempfile());
-        log.push(b"strands-box: error: refused\nbox: running profile\n");
+        log.push(b"strands-box: error[B0105]: refused\nbox: running profile\n");
         assert_eq!(
             log.report(&launch, false),
-            "box: recent log output\n  strands-box: error: refused\n",
+            "box: recent log output\n  strands-box: error[B0105]: refused\n",
         );
 
         for argument in [

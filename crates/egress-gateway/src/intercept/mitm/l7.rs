@@ -21,12 +21,14 @@ use crate::error::{ProxyError, Result};
 use crate::mcp::{
     McpTarget, McpTargetIdentity, canonicalize_mcp_frame, mcp_denial_response, normalize_path,
 };
+use crate::proxy::websocket::{Handshake, accepts};
 
 /// Check the CONNECT binding of a request read in a TLS tunnel, then run [`run_l7_legs`].
 ///
 /// When `backend` re-routes the destination, the upstream leg presents the backend host (SNI,
 /// certificate, and `Host`); the client leg's binding is still checked against the original CONNECT
 /// authority, so a workload cannot pivot.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_tls(
     mut parsed: http1::ParsedRequest,
     upstream: TcpStream,
@@ -35,6 +37,7 @@ pub(crate) async fn forward_tls(
     state: &SharedState,
     correlation: RequestId,
     completion: &ResponseCompletion,
+    handshake: Handshake,
 ) -> Result<WorkloadResponse> {
     // The upstream leg presents the backend host when a backend re-routes, else the original
     // destination. A TLS backend terminates a fresh handshake to the backend's own certificate; a
@@ -71,6 +74,7 @@ pub(crate) async fn forward_tls(
         true,
         state,
         correlation,
+        handshake,
         |method, target, headers| validate_request_binding(connect, method, target, headers),
     )
     .await
@@ -123,10 +127,12 @@ async fn run_l7_legs(
     intercepted: bool,
     state: &SharedState,
     correlation: RequestId,
+    handshake: Handshake,
     revalidate: impl FnOnce(&str, &str, &HeaderMap) -> Result<()>,
 ) -> Result<WorkloadResponse> {
     let correlation = correlation.with_headers(&req.headers);
-    let correlation = if state.mcp_server_for(&connect.host).is_some() {
+    let mcp = state.mcp_server_for(&connect.host).is_some();
+    let correlation = if mcp {
         correlation.with_mcp(&req.body)
     } else {
         correlation
@@ -167,6 +173,22 @@ async fn run_l7_legs(
             correlation.clone(),
             refusal,
         )
+    };
+
+    let websocket = match handshake {
+        Handshake::None => false,
+        Handshake::Malformed(why) => {
+            let refusal = WorkloadResponse::refusal(400, b"malformed WebSocket handshake");
+            return Ok(refuse(why, refusal));
+        }
+        Handshake::WebSocket if mcp => {
+            let refusal = WorkloadResponse::refusal(403, b"WebSocket refused for an MCP server");
+            return Ok(refuse(
+                "websocket: handshake to a remote MCP server",
+                refusal,
+            ));
+        }
+        Handshake::WebSocket => true,
     };
 
     // A secret rides only TLS: refuse on the same canonical target the credential match below sees.
@@ -302,8 +324,13 @@ async fn run_l7_legs(
             }
         }
     }
-    let prepared_request =
-        http1::write_request(&method, &fwd_target, &req.headers, forwarded_body.len())?;
+    let prepared_request = http1::write_request(
+        &method,
+        &fwd_target,
+        &req.headers,
+        forwarded_body.len(),
+        websocket,
+    )?;
     let request_attempt = EffectAttempt::HttpRequest {
         host: &connect.host,
         port: connect.port,
@@ -311,6 +338,7 @@ async fn run_l7_legs(
         path: &workload_path,
         body_bytes: forwarded_body.len(),
         intercepted,
+        websocket,
         mcp: mcp_target.as_ref().map(|(server, target)| {
             let server = *server;
             match &target.identity {
@@ -378,8 +406,16 @@ async fn run_l7_legs(
             &method,
             prepared_request,
             Zeroizing::new(forwarded_body),
+            websocket,
         )
         .await;
+    let key = req.headers.get("sec-websocket-key").unwrap_or_default();
+    let response = response.and_then(|response| match response.upgraded {
+        Some(_) if !accepts(key, &response.head.headers) => Err(ProxyError::Intercept(
+            "a 101 reply to a WebSocket handshake has the wrong Sec-WebSocket-Accept".to_string(),
+        )),
+        _ => Ok(response),
+    });
     let response = match response {
         Ok(response) => response,
         Err(error) => {
@@ -389,6 +425,7 @@ async fn run_l7_legs(
             return Err(error);
         }
     };
+    let upgraded = response.upgraded;
     let mut head = response.head;
     let mut body = response.body;
     body.track_request(request_permit, outcome)
@@ -444,8 +481,9 @@ async fn run_l7_legs(
                 body: &captured,
             },
         ) {
-            eprintln!(
-                "strands-box: warning: staging remote MCP catalog for {server:?} failed: {error}"
+            diagnostics::diag!(
+                B0401,
+                "staging remote MCP catalog for {server:?} failed: {error}"
             );
         }
         body = captured.into();
@@ -464,6 +502,10 @@ async fn run_l7_legs(
         Ok(permit) => permit,
         Err(error) => return Ok(interceptor_error(&error, None)),
     };
+    if upgraded.is_some() {
+        head.headers.set("Upgrade", "websocket");
+        head.headers.set("Connection", "Upgrade");
+    }
 
     Ok(WorkloadResponse {
         status: head.status,
@@ -473,6 +515,7 @@ async fn run_l7_legs(
         release: Some(response_permit),
         header_case: head.header_case,
         progress,
+        relay: upgraded,
     })
 }
 
@@ -516,6 +559,7 @@ pub(crate) async fn forward_plain(
         false,
         state,
         correlation,
+        Handshake::None,
         |_method, _target, _headers| Ok(()),
     )
     .await
@@ -587,6 +631,7 @@ pub(crate) struct WorkloadResponse {
     /// The upstream's header case. Without it, hyper writes header names in lowercase.
     pub(crate) header_case: hyper::http::Extensions,
     pub(crate) progress: Option<ResponseProgress>,
+    pub(crate) relay: Option<hyper::upgrade::Upgraded>,
 }
 
 impl WorkloadResponse {
@@ -626,6 +671,7 @@ impl WorkloadResponse {
             release: None,
             header_case: hyper::http::Extensions::new(),
             progress: None,
+            relay: None,
         }
     }
 
@@ -694,7 +740,7 @@ pub(crate) fn emit_decision(
 }
 
 /// Record the denial of `request` on `connect`, and return `refusal`, the response that answers it.
-fn deny(
+pub(crate) fn deny(
     state: &SharedState,
     connect: &ConnectRequest,
     request: (&str, &str),
@@ -775,6 +821,11 @@ fn list_cursor(body: &[u8]) -> Option<String> {
         .get("cursor")?
         .as_str()
         .map(str::to_string)
+}
+
+pub(crate) fn judged_path(target: &str) -> String {
+    let (path, _) = split_target(target);
+    canonicalize_request_path(&path).unwrap_or(path)
 }
 
 /// Split an origin-form request target into `(path, query)`.

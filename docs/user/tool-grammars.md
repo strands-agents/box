@@ -142,7 +142,7 @@ Start the box as you do now, for example:
 decides:
 
 ```text
-strands-box: [tool.git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
+strands-box: note[B0208]: [tool.git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
 ```
 
 Read these lines when you add a grammar to a box you already run. Every `shell:spawn` rule about

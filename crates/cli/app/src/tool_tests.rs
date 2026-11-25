@@ -197,6 +197,10 @@ fn a_dnf_install_reads_named_folders_of_usr_and_npm_runs_the_node_its_line_names
         strings(&npm["filesystem"]["read"]),
         [
             project,
+            npm["env"]["npm_config_cache"]
+                .as_str()
+                .expect("npm's cache in its storage")
+                .to_string(),
             text(&trees.path("usr/lib/nodejs20/lib/node_modules")),
             scratch("npm"),
             text(&bin),

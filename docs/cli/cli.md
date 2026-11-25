@@ -94,6 +94,12 @@ box just allowed or denied. A new denial stays highlighted for five seconds.
 Click **Config File** or **Policy File** in the banner to copy that file's path. An edit to a
 folder or a program the agent can use takes effect on the next run.
 
+The full view's table shortens long reasons and shows only the latest rows. Its bottom edge shows
+the [`box runs history`](#box-runs-history) command for this run, which lists every decision in
+full, even while the run goes on. Click the command to copy it, and run it in another terminal.
+When `BOX_HOME` moves the box home, the command starts with `BOX_HOME=<path>`, so it works in a
+terminal that doesn't set it.
+
 The banner's display doesn't pass through clipboard reads or terminal graphics, so turn it off for
 an agent that needs them: add `--no-banner` for one run, set
 [`[banner] enabled = false`](profiles-reference.md#what-a-profile-holds) in a profile for its
@@ -532,6 +538,7 @@ file there asks for them: allow it `~/.strands/box`, and the guide's folder if t
 | `BOX_HOME` | Use another folder in place of `~/.strands/box`, such as to try `box` with no profiles. It takes a full path, and an empty value counts as not set. Without it, `box` refuses a link at `~/.strands` or `~/.strands/box`. Only `installation.toml` and `packages/` stay in `~/.strands/box` ([Where Box keeps its files](files.md)). |
 | `BOX_TELEMETRY`, `DO_NOT_TRACK` | Turn usage telemetry off for one shell, with `BOX_TELEMETRY=0` or `DO_NOT_TRACK=1`. |
 | `NO_COLOR` | Turn off color in the output of `box`. |
+| `CREDSD_SOCKET` | The socket of the credentials daemon, for a `credsd://` route ([Where the box finds the daemon](credentials.md#where-the-box-finds-the-daemon)). |
 | `BOX_RESOURCES` | Use the packs, plugins, starters, policy starters, and agent guide in another folder in place of the ones that come with `box`. |
 
 The model key's variable is the one `box profile create` named. The installer reads its own
@@ -542,7 +549,7 @@ variables, listed in [Installer variables](install.md#installer-variables).
 | Status | When |
 | --- | --- |
 | `0` | The command succeeded. |
-| `1` | An error. An error from `box` starts with `box: error:`, and one that stops a box as it starts begins with `strands-box: error:`. Most name their own fix. For the rest, see [Troubleshooting](troubleshooting.md). `box runs history` also exits with `1` when it can't read a line of the run's log, after it shows the rest. |
+| `1` | An error. An error from `box` starts with `box: error:`, and one that stops a box as it starts is a Box message with the severity `error`, such as `strands-box: error[<code>]:`. Box's [message codes](../user/message-codes.md) explain each code. Most name their own fix. For the rest, see [Troubleshooting](troubleshooting.md). `box runs history` also exits with `1` when it can't read a line of the run's log, after it shows the rest. |
 | `2` | The command line is wrong, such as an unknown flag. |
 | `130` | You pressed Ctrl+C at a prompt. |
 

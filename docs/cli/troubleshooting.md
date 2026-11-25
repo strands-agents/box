@@ -81,7 +81,7 @@ the box checks that no name of the tool is in your project. On a Mac, and on Lin
 btrfs, it reads every folder to do that, and if it can't finish, the run stops:
 
 ```text
-strands-box: error: `[agent]` filesystem entry "<project>" is refused: this write grant cannot be inspected for configured command hard links: directory inspection failed: Permission denied (os error 13).
+strands-box: error[B0102]: `[agent]` filesystem entry "<project>" is refused: this write grant cannot be inspected for configured command hard links: directory inspection failed: Permission denied (os error 13).
 ```
 
 That happens when a folder in your project is one you can't read, such as a database folder
@@ -169,7 +169,7 @@ profile name does not help.
 ### A run in an earlier box stops on a clock error
 
 ```text
-strands-box: error: policy staging failed: policy staging history failure: durable timestamp 1795305600000000000 is 3600000000000 ns ahead of the current clock 1795302000000000000, exceeding the maximum allowed future skew of 300000000000 ns; refusing the operation rather than issuing future-dated timestamps
+strands-box: error[B0103]: policy staging failed: policy staging history failure: durable timestamp 1795305600000000000 is 3600000000000 ns ahead of the current clock 1795302000000000000, exceeding the maximum allowed future skew of 300000000000 ns; refusing the operation rather than issuing future-dated timestamps
 ```
 
 The box's history is stamped more than five minutes ahead of the clock. This happens after the
@@ -391,7 +391,7 @@ box profile create claude-api --with claude,anthropic --option claude.host=anthr
 ### The credential variable isn't set
 
 ```text
-strands-box: error: credential setup failed: credential variable AWS_BEARER_TOKEN_BEDROCK is not set, or holds only whitespace
+strands-box: error[B0104]: credential setup failed: credential variable AWS_BEARER_TOKEN_BEDROCK is not set, or holds only whitespace
 ```
 
 The box reads the model key from the variable the message names, in the shell you ran `box run`
@@ -409,13 +409,36 @@ A route with `aws://` found no AWS credentials, or the AWS profile signs in with
 which the box doesn't read. Export the profile's temporary keys in the shell where you run
 `box run`. A route that names an AWS profile, such as `aws://your-profile`, also needs its
 `secret.ref` set to `aws://` with no profile name
-([`aws://` credentials](profiles-reference.md#aws-credentials)):
+([`aws://` credentials](credentials.md#aws-credentials)):
 
 ```sh
 eval "$(aws configure export-credentials --profile your-profile --format env)"
 ```
 
-The keys expire with the SSO session, so a later run needs a fresh export.
+The keys expire with the SSO session, so a later run needs a fresh export. To sign in with SSO
+without an export, keep the sign-in in
+[the credentials daemon](credentials.md#the-credentials-daemon).
+
+### The credentials daemon refuses the run
+
+Before the agent starts, the box checks that the
+[credentials daemon](credentials.md#the-credentials-daemon) answers and lists each credential that a
+`credsd://` route names. If it doesn't, the run stops, and the message says why:
+
+| The message says | What to do |
+| --- | --- |
+| `cannot reach the credsd socket /run/credsd/credsd.sock` | The daemon isn't running, or it listens on another socket. Run `credsd status`. If the daemon is running, set `CREDSD_SOCKET` to its socket in the shell where you run `box run` ([Where the box finds the daemon](credentials.md#where-the-box-finds-the-daemon)). |
+| `credsd has no credential "work", or this box is not authorized for it` | The route names a credential that the daemon doesn't list for you. Run `creds list` to see your credentials, then fix the name in `secret.ref`, or create the credential with `creds bootstrap --credential work`. |
+| `credsd speaks protocol version 2, but this box requires version 1` | The daemon and `box` don't speak the same version. Upgrade the older one. |
+
+After the run starts, the box asks the daemon for the credential on each request. A request it
+can't get one for fails with a 403. You can fix the cause while the run goes on, and the next
+request works:
+
+| The message says | What to do |
+| --- | --- |
+| `credsd needs re-authentication for credential "work"; run creds login --credential work` | The sign-in behind the credential has ended. Run the `creds login` command the message names. |
+| `credsd rejected the request for credential "work" (protocol code -32602)` | The daemon is older than 0.2.0, which names credentials another way. Upgrade credsd. |
 
 ### The agent can't reach a file or a host
 
