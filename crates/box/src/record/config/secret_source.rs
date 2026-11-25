@@ -223,8 +223,6 @@ pub(crate) fn protected_paths(entries: &BTreeMap<String, SecretSourceEntry>) -> 
 #[derive(Debug, Default)]
 pub(crate) struct DeclaredSources {
     declarations: BTreeMap<String, SecretSourceCommand>,
-    /// Whether `[experimental-features] secret-sources` is on.
-    enabled: bool,
 }
 
 impl DeclaredSources {
@@ -253,15 +251,7 @@ impl DeclaredSources {
             }
             declarations.insert(scheme.clone(), entry.declaration(scheme)?);
         }
-        Ok(Self {
-            declarations,
-            enabled,
-        })
-    }
-
-    /// Whether `[experimental-features] secret-sources` is on.
-    pub(crate) fn enabled(&self) -> bool {
-        self.enabled
+        Ok(Self { declarations })
     }
 
     /// Whether a `[secret-source.<scheme>]` table declares `scheme`.
@@ -379,15 +369,8 @@ pub(crate) mod tests {
             ["op", "aws-secretsmanager", "aws", "vault"].map(|scheme| sources.declares(scheme)),
             [true, true, false, false]
         );
-        assert!(sources.enabled());
         assert!(!DeclaredSources::none().declares("op"));
-        assert!(!DeclaredSources::none().enabled());
-        assert!(switched_on().enabled());
-        assert!(
-            !DeclaredSources::check(&BTreeMap::new(), false)
-                .expect("no table needs no switch")
-                .enabled()
-        );
+        DeclaredSources::check(&BTreeMap::new(), false).expect("no table needs no switch");
     }
 
     #[test]

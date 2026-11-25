@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
-use crate::sources::{CredsdClient, resolve_credsd_socket};
+use crate::sources::{
+    ACCESS_TOKEN_TYPE, CredsdClient, SESSION_CREDENTIALS_TYPE, resolve_credsd_socket,
+};
 use crate::{CredentialError, Result};
 
 /// The credsd wire protocol this box speaks.
@@ -11,13 +13,14 @@ const REQUIRED_PROTOCOL_VERSION: u32 = 1;
 
 /// Validate every declared `credsd` credential before the workload starts.
 ///
-/// With no credentials this is a no-op and never contacts the daemon. Otherwise it sends one
-/// `system/health` and one `credential/list`, and confirms each named credential is listed. It
-/// reads no session state. The socket resolves exactly as the per-request fetch resolves it. Every
-/// failure is hard, and the message names the credential, the list request, or the socket, and
-/// never any material.
-pub fn credsd_preflight(socket: Option<&Path>, credentials: &[&str]) -> Result<()> {
-    if credentials.is_empty() {
+/// `signed` names each credential a signed AWS route reads, and `tokens` each credential a token
+/// route reads. With neither, this is a no-op and never contacts the daemon. Otherwise it sends one
+/// `system/health` and one `credential/list`, and confirms each named credential exists and has the
+/// kind its routes read. It reads no session state. The socket resolves exactly as the per-request
+/// fetch resolves it. Every failure is hard, and the message names the credential or the socket and
+/// never any credential material.
+pub fn credsd_preflight(socket: Option<&Path>, signed: &[&str], tokens: &[&str]) -> Result<()> {
+    if signed.is_empty() && tokens.is_empty() {
         return Ok(());
     }
 
@@ -33,12 +36,43 @@ pub fn credsd_preflight(socket: Option<&Path>, credentials: &[&str]) -> Result<(
     }
 
     let listed = client.list()?;
-    for &credential in credentials {
-        if !listed.iter().any(|name| name == credential) {
-            return Err(CredentialError::Credential(format!(
-                "credsd has no credential {credential:?}, or this box is not authorized for it"
-            )));
-        }
+    let uses = signed
+        .iter()
+        .map(|credential| (*credential, SESSION_CREDENTIALS_TYPE))
+        .chain(
+            tokens
+                .iter()
+                .map(|credential| (*credential, ACCESS_TOKEN_TYPE)),
+        );
+    for (credential, expected) in uses {
+        check_credential(&listed, credential, expected)?;
+    }
+    Ok(())
+}
+
+/// Confirm that `listed` holds `credential` with the `expected` kind.
+///
+/// It reads no session state: `credsd` serves valid cached credentials while the login session
+/// reads spent, so a session check would refuse a run whose per-request `credential/get` would in
+/// fact succeed.
+fn check_credential(listed: &[(String, String)], credential: &str, expected: &str) -> Result<()> {
+    let Some((_, kind)) = listed.iter().find(|(name, _)| name == credential) else {
+        return Err(CredentialError::Credential(format!(
+            "credsd has no credential {credential:?}, or this box is not authorized for it"
+        )));
+    };
+    if kind != expected {
+        let fix = if expected == SESSION_CREDENTIALS_TYPE {
+            "set secret.type = \"token\" on an egress or MCP route that reads it, or give a \
+             telemetry target, which always signs with AWS credentials, a session_credentials \
+             credential"
+        } else {
+            "set secret.type = \"aws\" on a route that signs with AWS credentials"
+        };
+        return Err(CredentialError::Credential(format!(
+            "credsd credential {credential:?} is {kind:?}, but a route that reads it expects \
+             {expected:?}; {fix}"
+        )));
     }
     Ok(())
 }
@@ -144,14 +178,14 @@ mod tests {
     #[test]
     fn no_credentials_never_contacts_the_daemon() {
         let unbound = socket_path();
-        credsd_preflight(Some(&unbound), &[]).expect("no credentials is a no-op");
+        credsd_preflight(Some(&unbound), &[], &[]).expect("no credentials is a no-op");
     }
 
     /// An unreachable daemon fails, and the message names the socket path.
     #[test]
     fn an_unreachable_daemon_fails_naming_the_socket() {
         let unbound = socket_path();
-        let error = credsd_preflight(Some(&unbound), &["dev"])
+        let error = credsd_preflight(Some(&unbound), &["dev"], &[])
             .expect_err("nothing is listening on the socket");
         assert!(matches!(error, CredentialError::KeystoreAccess(_)));
         assert!(
@@ -168,7 +202,8 @@ mod tests {
             "system/health" => health_reply(2),
             _ => list_reply(),
         });
-        let error = credsd_preflight(Some(&path), &["dev"]).expect_err("version 2 is incompatible");
+        let error =
+            credsd_preflight(Some(&path), &["dev"], &[]).expect_err("version 2 is incompatible");
         assert!(matches!(error, CredentialError::KeystoreAccess(_)));
         let message = error.to_string();
         assert!(
@@ -186,7 +221,7 @@ mod tests {
             "system/health" => health_reply(1),
             _ => list_reply(),
         });
-        let error = credsd_preflight(Some(&path), &["dev", "prod-inference"])
+        let error = credsd_preflight(Some(&path), &["dev", "prod-inference"], &[])
             .expect_err("prod-inference is not listed");
         assert!(matches!(error, CredentialError::Credential(_)));
         assert!(error.to_string().contains("prod-inference"), "{error}");
@@ -201,7 +236,8 @@ mod tests {
             "system/health" => health_reply(1),
             _ => not_found_reply(),
         });
-        let error = credsd_preflight(Some(&path), &["dev"]).expect_err("the caller is refused");
+        let error =
+            credsd_preflight(Some(&path), &["dev"], &[]).expect_err("the caller is refused");
         assert!(matches!(error, CredentialError::Credential(_)));
         assert!(
             error
@@ -217,7 +253,7 @@ mod tests {
     fn the_list_request_is_one_and_unfiltered() {
         let path = socket_path();
         let requests = spawn_recording_daemon(path.as_path());
-        credsd_preflight(Some(&path), &["dev", "staging", "dev"]).expect("both are listed");
+        credsd_preflight(Some(&path), &["dev", "staging", "dev"], &[]).expect("both are listed");
         let params = requests.try_recv().expect("one list request");
         assert_eq!(params, serde_json::json!({}));
         assert!(requests.try_recv().is_err(), "the list is sent once");
@@ -232,8 +268,8 @@ mod tests {
             "system/health" => health_reply(1),
             _ => empty_list_reply(),
         });
-        let error =
-            credsd_preflight(Some(&path), &["dev"]).expect_err("an empty set is not available");
+        let error = credsd_preflight(Some(&path), &["dev"], &[])
+            .expect_err("an empty set is not available");
         assert!(matches!(error, CredentialError::Credential(_)));
         assert!(error.to_string().contains("dev"), "{error}");
         let _ = std::fs::remove_file(&path);
@@ -249,7 +285,74 @@ mod tests {
             "system/health" => health_reply(1),
             _ => list_reply(),
         });
-        credsd_preflight(Some(&path), &["dev", "dev"]).expect("a listed credential passes");
+        credsd_preflight(Some(&path), &["dev", "dev"], &[]).expect("a listed credential passes");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A `credential/list` reply whose one credential is an access token.
+    fn token_list_reply() -> String {
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"credentials\":[{\"credential\":\"github\",\"kind\":\"access_token\",\"source\":\"static_secret\",\"status\":\"active\",\"tags\":{}}]}}\n".to_string()
+    }
+
+    /// A token route's credential passes when the daemon lists it as an access token.
+    #[test]
+    fn a_token_credential_that_is_a_token_passes() {
+        let path = socket_path();
+        let lists = std::sync::Arc::new(AtomicU32::new(0));
+        let counted = lists.clone();
+        spawn_daemon(path.as_path(), move |method| match method {
+            "system/health" => health_reply(1),
+            _ => {
+                counted.fetch_add(1, Ordering::SeqCst);
+                token_list_reply()
+            }
+        });
+        credsd_preflight(Some(&path), &[], &["github"]).expect("the kinds agree");
+        assert_eq!(
+            lists.load(Ordering::SeqCst),
+            1,
+            "a token credential alone is still listed and checked"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A token route's credential that is AWS credentials stops the run, naming the credential,
+    /// both kinds, and the key to fix.
+    #[test]
+    fn a_token_credential_that_is_aws_credentials_fails() {
+        let path = socket_path();
+        spawn_daemon(path.as_path(), |method| match method {
+            "system/health" => health_reply(1),
+            _ => list_reply(),
+        });
+        let error = credsd_preflight(Some(&path), &[], &["dev"]).expect_err("the kinds disagree");
+        let message = error.to_string();
+        assert!(matches!(error, CredentialError::Credential(_)));
+        assert!(
+            message.contains("\"dev\"")
+                && message.contains("session_credentials")
+                && message.contains("access_token")
+                && message.contains("secret.type = \"aws\""),
+            "{message}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A signed route's credential that is a token stops the run and names `secret.type =
+    /// "token"`, which is what an operator who left the key out needs.
+    #[test]
+    fn a_signed_credential_that_is_a_token_names_the_token_type() {
+        let path = socket_path();
+        spawn_daemon(path.as_path(), |method| match method {
+            "system/health" => health_reply(1),
+            _ => token_list_reply(),
+        });
+        let error =
+            credsd_preflight(Some(&path), &["github"], &[]).expect_err("the kinds disagree");
+        assert!(
+            error.to_string().contains("secret.type = \"token\""),
+            "{error}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -1258,6 +1258,21 @@ mod tests {
         );
     }
 
+    /// **A telemetry target takes no `secret.type`**: a `credsd://` telemetry secret always signs
+    /// with AWS credentials, so a token type is refused as an unknown key.
+    #[test]
+    fn a_telemetry_target_takes_no_secret_type() {
+        let error = toml::from_str::<TelemetryEntry>(
+            "kind = \"cloudwatch_traces\"\nregion = \"us-west-2\"\n\
+             secret.ref = \"credsd://box-e2e\"\nsecret.type = \"token\"\n",
+        )
+        .expect_err("a telemetry secret has no type key");
+        assert!(
+            error.to_string().contains("unknown field `type`"),
+            "{error}"
+        );
+    }
+
     /// **A telemetry target takes a reference in a declared scheme and no placeholder variable**:
     /// Box attaches that secret itself, so the target has no `secret.env` key.
     #[test]

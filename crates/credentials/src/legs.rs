@@ -217,7 +217,7 @@ impl Vault {
 }
 
 /// The credential a `credsd://<credential>` locator names.
-fn credsd_credential(config: &Locator) -> Result<&str> {
+pub(crate) fn credsd_credential(config: &Locator) -> Result<&str> {
     match config {
         Locator::Uri(uri) => {
             let (scheme, credential) = uri.split_once("://").ok_or_else(|| {

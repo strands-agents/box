@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use policy::{event_schema_source, generate_mcp_schema};
 
 use crate::error::{BoxError, McpSchemaError};
+use crate::record::config::CREDSD_SCHEME;
 use crate::record::config::egress::EgressSecret;
 use crate::record::config::{
     read_mcp_servers, read_remote_mcp_servers, read_secret_sources, read_tool_grammars,
@@ -120,8 +121,20 @@ fn with_secret<T>(
         reason: source.to_string(),
     };
     let locator = credentials::Locator::parse_uri(&secret.reference).map_err(refused)?;
+    refuse_credsd(server, &locator)?;
     let token = secrets.backend().resolve(&locator).map_err(refused)?;
     Ok(used(token.as_str()))
+}
+
+/// Refuse a credsd secret of `server`: the schema backend has no credsd source, so this names the
+/// limit rather than a missing scheme.
+fn refuse_credsd(server: &str, locator: &credentials::Locator) -> Result<(), McpSchemaError> {
+    if locator.scheme() == CREDSD_SCHEME {
+        return Err(McpSchemaError::CredsdSecret {
+            server: server.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Refuse a secret of `server` whose placement is not a header, which is the one placement that
@@ -189,6 +202,24 @@ mod tests {
     use std::os::unix::fs::MetadataExt as _;
 
     use super::*;
+
+    /// A credsd secret on a remote MCP server is refused by name: schema discovery has no credsd
+    /// source, so the refusal states the limit, not a missing scheme.
+    #[test]
+    fn a_credsd_secret_is_refused_by_name() {
+        let credsd = credentials::Locator::parse_uri("credsd://github").expect("a locator");
+        let error = refuse_credsd("gh", &credsd).expect_err("no credsd source");
+        assert!(
+            matches!(error, McpSchemaError::CredsdSecret { .. }),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("reads its secret from credsd"),
+            "{error}"
+        );
+        let env = credentials::Locator::parse_uri("env://GH_TOKEN").expect("a locator");
+        refuse_credsd("gh", &env).expect("an env:// secret is read");
+    }
 
     #[test]
     fn writing_a_schema_replaces_its_inode() {

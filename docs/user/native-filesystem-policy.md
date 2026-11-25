@@ -258,6 +258,7 @@ Record version 42 preserves each process's
 when any such array is nonempty; empty or omitted arrays do not require it. Record-format support
 does not enable mount forwarding. This build rejects nonempty arrays in Linux run configurations
 and any `receive_mounts` key in macOS run configurations before creating Box state.
+A `secret.type` key on a route or a remote MCP server requires record version 43.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 

@@ -5,7 +5,8 @@
 //! request carrying only the `credential` field and returns the tagged [`CredentialResult`];
 //! [`CredsdClient::health`] and [`CredsdClient::list`] send `system/health` and `credential/list`
 //! over the same request path. The client calls no bootstrap and no login method, and it reads no
-//! AWS field — the AWS delivery adapter in [`super::aws`] is the one component that does.
+//! material field: the AWS delivery adapter in [`super::aws`] and [`credsd_access_token`] are the two
+//! components that do.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{CredentialError, Result};
+use crate::{CredentialError, Result, Secret};
 
 /// The per-request credential fetch.
 const GET_METHOD: &str = "credential/get";
@@ -47,6 +48,12 @@ pub(crate) const CREDSD_SCHEME: &str = "credsd";
 
 /// The material tag an AWS credential carries.
 pub(crate) const SESSION_CREDENTIALS_TYPE: &str = "session_credentials";
+
+/// The material tag a bearer token for a non-AWS API carries.
+pub(crate) const ACCESS_TOKEN_TYPE: &str = "access_token";
+
+/// The one `token_type` the box can attach, compared without case (RFC 6749 section 5.1).
+const BEARER_TOKEN_TYPE: &str = "Bearer";
 
 /// The per-user tail beneath `HOME` for the macOS user-scoped install's socket (signed `.pkg` or
 /// `credsd install --user`).
@@ -157,7 +164,7 @@ impl CredsdClient {
     }
 
     /// The name of each credential this caller holds, with one unfiltered `credential/list`.
-    pub(crate) fn list(&self) -> Result<Vec<String>> {
+    pub(crate) fn list(&self) -> Result<Vec<(String, String)>> {
         let request = build_request(LIST_METHOD, serde_json::json!({}));
         let stream = self.send(&request, LIST_METHOD)?;
         let line = read_response(&stream, LIST_METHOD)?;
@@ -165,7 +172,7 @@ impl CredsdClient {
         Ok(result
             .credentials
             .into_iter()
-            .map(|entry| entry.credential)
+            .map(|entry| (entry.credential, entry.kind))
             .collect())
     }
 
@@ -410,20 +417,77 @@ fn map_error(error: &RpcError, subject: Subject<'_>) -> CredentialError {
     }
 }
 
-/// One `credential/get` result. Only the material is read here; `credential`, `expires_at`, and
+/// One `credential/get` result. The material and its expiry are read here; `credential` and
 /// `provenance` are audit-only and ignored.
 #[derive(Deserialize)]
 pub(crate) struct CredentialResult {
     /// The credential material, tagged on `type`.
     pub(crate) material: Material,
+    /// When the material stops working, as the daemon wrote it, or `None` for one that never expires.
+    #[serde(default)]
+    pub(crate) expires_at: Option<String>,
 }
 
 impl std::fmt::Debug for CredentialResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CredentialResult")
             .field("material", &self.material)
+            .field("expires_at", &self.expires_at)
             .finish()
     }
+}
+
+/// A credsd access token, read once for an opaque route.
+pub(crate) struct AccessToken {
+    /// The token, validated as an attachable secret.
+    pub(crate) token: Secret,
+    /// When the token stops working, as the daemon wrote it, or `None` for one that never expires.
+    pub(crate) expires_at: Option<String>,
+}
+
+impl std::fmt::Debug for AccessToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccessToken")
+            .field("token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// Fetch the access token of one `credsd` credential for an opaque route.
+///
+/// The token delivery adapter, beside the AWS one in [`super::aws`]. A material tag other than
+/// `access_token`, a `token_type` other than `Bearer` in any case, or an empty or unusable token is a hard
+/// credential failure that names the credential and never the material.
+pub(crate) fn credsd_access_token(client: &CredsdClient, credential: &str) -> Result<AccessToken> {
+    access_token_from(client.get(credential)?, credential)
+}
+
+/// Map a `credsd` result onto an [`AccessToken`], asserting the material tag and the token type.
+fn access_token_from(result: CredentialResult, credential: &str) -> Result<AccessToken> {
+    let CredentialResult {
+        mut material,
+        expires_at,
+    } = result;
+    if material.kind != ACCESS_TOKEN_TYPE {
+        return Err(CredentialError::Credential(format!(
+            "credsd credential {credential:?} returned {kind:?} material, but a token route \
+             needs {ACCESS_TOKEN_TYPE}",
+            kind = material.kind
+        )));
+    }
+    // A DPoP-bound token needs a proof the box cannot make, so attaching it as a bearer token would
+    // send a request the API refuses.
+    if !material.token_type.eq_ignore_ascii_case(BEARER_TOKEN_TYPE) {
+        return Err(CredentialError::Credential(format!(
+            "credsd credential {credential:?} returned a {token_type:?} token, and the box \
+             attaches only {BEARER_TOKEN_TYPE} tokens",
+            token_type = material.token_type
+        )));
+    }
+    let raw = Zeroizing::new(std::mem::take(&mut material.token.0));
+    let token = Secret::new(raw, &format!("{CREDSD_SCHEME}://{credential}"))?;
+    Ok(AccessToken { token, expires_at })
 }
 
 /// The tagged credential material. The AWS delivery adapter branches on [`kind`](Self::kind),
@@ -443,14 +507,41 @@ pub(crate) struct Material {
     /// AWS session token, present for `session_credentials`.
     #[serde(default)]
     pub(crate) session_token: String,
+    /// The bearer token, present for `access_token`. Wiped on drop by its own type, so a result
+    /// whose later fields fail to parse leaves no unwiped copy.
+    #[serde(default)]
+    pub(crate) token: WipedString,
+    /// The OAuth2 token type, such as `Bearer`, present for `access_token`. Not secret.
+    #[serde(default)]
+    pub(crate) token_type: String,
 }
 
 impl zeroize::Zeroize for Material {
     fn zeroize(&mut self) {
-        // The tag is non-secret routing data; every credential field is wiped.
+        // The tag and the token type are non-secret routing data; every credential field is wiped.
         self.access_key_id.zeroize();
         self.secret_access_key.zeroize();
         self.session_token.zeroize();
+        self.token.0.zeroize();
+    }
+}
+
+/// A deserialized secret field that is wiped on drop, also when the object around it fails to
+/// parse before the object exists.
+#[derive(Default)]
+pub(crate) struct WipedString(pub(crate) String);
+
+impl<'de> Deserialize<'de> for WipedString {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self)
+    }
+}
+
+impl Drop for WipedString {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 
@@ -468,6 +559,8 @@ impl std::fmt::Debug for Material {
             .field("access_key_id", &"[REDACTED]")
             .field("secret_access_key", &"[REDACTED]")
             .field("session_token", &"[REDACTED]")
+            .field("token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
             .finish()
     }
 }
@@ -490,7 +583,7 @@ struct HealthResult {
     protocol: u32,
 }
 
-/// The `credential/list` result. Only each entry's name is read; kind, source, status, and tags
+/// The `credential/list` result. Each entry's name and kind are read; source, status, and tags
 /// are ignored.
 #[derive(Debug, Deserialize)]
 struct ListResult {
@@ -498,10 +591,13 @@ struct ListResult {
     credentials: Vec<ListEntry>,
 }
 
-/// One `credential/list` entry.
+/// One `credential/list` entry, read for its name and kind.
 #[derive(Debug, Deserialize)]
 struct ListEntry {
     credential: String,
+    /// The credential's kind, such as `session_credentials` or `access_token`.
+    #[serde(default)]
+    kind: String,
 }
 
 /// A JSON-RPC error object.
@@ -584,6 +680,97 @@ mod tests {
         assert_eq!(result.material.access_key_id.as_str(), "ASIAEXAMPLE");
         assert_eq!(result.material.secret_access_key.as_str(), "secretkey");
         assert_eq!(result.material.session_token.as_str(), "token");
+    }
+
+    /// A `credential/get` result carrying `access_token` material of `token_type`.
+    fn token_result(token: &str, token_type: &str, expires_at: &str) -> CredentialResult {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"result":{{"credential":"gh","material":{{"type":"access_token","token":"{token}","token_type":"{token_type}"}},"expires_at":{expires_at}}}}}"#
+        );
+        parse_response::<CredentialResult>(line.as_bytes(), Subject::Credential("github"))
+            .expect("the result parses")
+    }
+
+    /// An `access_token` result maps to its token, and keeps the expiry the daemon wrote.
+    #[test]
+    fn an_access_token_result_maps_to_its_token_and_expiry() {
+        let token = access_token_from(
+            token_result("ghp_example", "Bearer", r#""2027-01-01T00:00:00Z""#),
+            "github",
+        )
+        .expect("a bearer access token maps");
+        assert_eq!(token.token.as_str(), "ghp_example");
+        assert_eq!(token.expires_at.as_deref(), Some("2027-01-01T00:00:00Z"));
+
+        let never = access_token_from(token_result("ghp_example", "Bearer", "null"), "github")
+            .expect("a token with no expiry maps");
+        assert_eq!(never.expires_at, None, "null means the token never expires");
+    }
+
+    /// Neither the parsed material nor the token the adapter returns prints the token in `Debug`.
+    #[test]
+    fn token_material_prints_no_token() {
+        let result = token_result("ghp_debug_example", "Bearer", "null");
+        let printed = format!("{result:?}");
+        assert!(!printed.contains("ghp_debug_example"), "{printed}");
+        assert!(
+            printed.contains("Bearer"),
+            "the token type is not secret: {printed}"
+        );
+        let token = access_token_from(result, "github").expect("a bearer token maps");
+        let printed = format!("{token:?}");
+        assert!(!printed.contains("ghp_debug_example"), "{printed}");
+    }
+
+    /// The token adapter refuses AWS material, naming the environment and both kinds.
+    #[test]
+    fn the_token_adapter_refuses_session_credentials() {
+        let result =
+            parse_response::<CredentialResult>(&ok_response(), Subject::Credential("github"))
+                .unwrap();
+        let error = access_token_from(result, "github").expect_err("AWS material is no token");
+        let message = error.to_string();
+        assert!(matches!(error, CredentialError::Credential(_)));
+        assert!(
+            message.contains("\"github\"")
+                && message.contains("session_credentials")
+                && message.contains("access_token"),
+            "{message}"
+        );
+        assert!(!message.contains("secretkey"), "no material: {message}");
+    }
+
+    /// A `token_type` of `Bearer` in any case maps, because RFC 6749 makes the value
+    /// case-insensitive and credsd passes an issuer's spelling through.
+    #[test]
+    fn a_bearer_token_type_matches_in_any_case() {
+        for token_type in ["bearer", "BEARER", "bEaReR"] {
+            let token =
+                access_token_from(token_result("ghp_example", token_type, "null"), "github")
+                    .unwrap_or_else(|error| panic!("{token_type:?} is a bearer token: {error}"));
+            assert_eq!(token.token.as_str(), "ghp_example");
+        }
+    }
+
+    /// A token that is not a plain bearer token, such as a DPoP-bound one, is refused: the box makes
+    /// no per-request proof.
+    #[test]
+    fn a_token_that_is_not_bearer_is_refused() {
+        let error = access_token_from(token_result("ghp_example", "DPoP", "null"), "github")
+            .expect_err("a DPoP token cannot be attached");
+        let message = error.to_string();
+        assert!(
+            message.contains("DPoP") && message.contains("Bearer"),
+            "{message}"
+        );
+        assert!(!message.contains("ghp_example"), "no material: {message}");
+    }
+
+    /// An empty token is refused as unusable rather than attached.
+    #[test]
+    fn an_empty_access_token_is_refused() {
+        access_token_from(token_result("", "Bearer", "null"), "github")
+            .expect_err("an empty token is unusable");
     }
 
     /// Bytes after the first newline (a second framed line, or padding) are ignored: only the first
@@ -983,10 +1170,10 @@ mod tests {
 
     // --- credential/list -----------------------------------------------------
 
-    /// `list` sends one `credential/list` with empty params and returns each entry's name, in the
-    /// daemon's real entry shape, ignoring kind, source, status, and tags.
+    /// `list` sends one `credential/list` with empty params and returns each entry's name and kind,
+    /// in the daemon's real entry shape, ignoring source, status, and tags.
     #[test]
-    fn list_sends_no_filter_and_returns_the_names() {
+    fn list_sends_no_filter_and_returns_the_names_and_kinds() {
         let path = socket_path();
         let (rx, handle) = fake_daemon(
             path.as_path(),
@@ -995,10 +1182,16 @@ mod tests {
             .to_vec(),
         );
 
-        let names = CredsdClient::new(path.clone())
+        let listed = CredsdClient::new(path.clone())
             .list()
             .expect("the fake daemon answers credential/list");
-        assert_eq!(names, ["dev", "prod"]);
+        assert_eq!(
+            listed,
+            [
+                ("dev".to_string(), "session_credentials".to_string()),
+                ("prod".to_string(), "access_token".to_string()),
+            ]
+        );
 
         let request = rx.recv().expect("the daemon recorded the request");
         let value: serde_json::Value =
