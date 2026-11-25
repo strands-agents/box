@@ -1030,6 +1030,7 @@ impl NewProfile {
             box_dir: &box_dir,
             storage: &storage,
             os: self.settings.host.os,
+            arch: self.settings.host.arch,
             packs: lookup.vendored.as_deref(),
         };
         let layers = profile.layers(None, &lookup)?;
@@ -1336,6 +1337,7 @@ mod tests {
             box_home: PathBuf::from("/home/you/.strands/box"),
             search_path: "/usr/bin:/bin".into(),
             os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
             variables,
             answers: Vec::new(),
             root: false,

@@ -242,14 +242,20 @@ pub const DECLARATION_KEYS: &[&str] = &[
     "values",
     "program",
     "search",
+    "installation",
     "warning",
 ];
+
+/// The words of a search refusal that list the candidates the search passed over.
+pub const PASSED_OVER: &str = "; passed over ";
 
 /// Where a `program` input finds its program: the file name, and the folders it lies in.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Search {
     program: String,
     folders: Vec<Folder>,
+    /// The layouts that can resolve a candidate to the program it runs.
+    installation: Vec<crate::install_layout::Layout>,
 }
 
 /// One entry of an input's `search`.
@@ -2735,11 +2741,59 @@ fn search_of(table: &toml::Table, owner: &str) -> Result<Option<Search>, String>
             .collect::<Result<_, _>>()?,
         Some(_) => return Err(not_folders()),
     };
+    let installation = installation_of(table, owner)?;
     match program {
-        Some(program) => Ok(Some(Search { program, folders })),
+        Some(program) => Ok(Some(Search {
+            program,
+            folders,
+            installation,
+        })),
         None if table.contains_key("search") => Err(format!("`{owner} search` needs `program`")),
+        None if table.contains_key("installation") => {
+            Err(format!("`{owner} installation` needs `program`"))
+        }
         None => Ok(None),
     }
+}
+
+/// The `installation` of a program input: the layouts that resolve which file is the program.
+fn installation_of(
+    table: &toml::Table,
+    owner: &str,
+) -> Result<Vec<crate::install_layout::Layout>, String> {
+    let names: Vec<&str> = crate::install_layout::PROGRAM_LAYOUTS
+        .iter()
+        .map(|layout| layout.name())
+        .collect();
+    let refusal = || {
+        format!(
+            "`{owner} installation` is a list of the layouts that resolve a program: {}",
+            names.join(", ")
+        )
+    };
+    let Some(value) = table.get("installation") else {
+        return Ok(Vec::new());
+    };
+    let items = value
+        .as_array()
+        .filter(|items| !items.is_empty())
+        .ok_or_else(refusal)?;
+    let mut layouts = Vec::new();
+    for item in items {
+        let layout = item
+            .as_str()
+            .and_then(crate::install_layout::Layout::named)
+            .filter(|layout| crate::install_layout::PROGRAM_LAYOUTS.contains(layout))
+            .ok_or_else(refusal)?;
+        if layouts.contains(&layout) {
+            return Err(format!(
+                "`{owner} installation` names {:?} twice",
+                layout.name()
+            ));
+        }
+        layouts.push(layout);
+    }
+    Ok(layouts)
 }
 
 /// Whether a pack is a tool pack: its `[pack] kind` is `"tool"`.
@@ -3841,6 +3895,8 @@ pub struct Inputs<'a> {
     pub box_dir: &'a Path,
     pub storage: &'a Path,
     pub os: &'a str,
+    /// The CPU architecture, as `std::env::consts::ARCH` names it.
+    pub arch: &'a str,
     pub tool_cache: Option<&'a Path>,
     /// The folder of box's own packs.
     pub packs: Option<&'a Path>,
@@ -4009,6 +4065,8 @@ struct Resolver<'a, S> {
     active: Vec<String>,
     read: Vec<Input>,
     programs: Vec<HostProgram>,
+    /// The files that chose a program input's program, such as an npm `package.json`.
+    program_sources: Vec<HostProgram>,
     absent: bool,
     routing: bool,
     /// The URL field that the value being filled reaches, whose input needs a bound.
@@ -4130,6 +4188,7 @@ pub(crate) fn expand(
         active: Vec::new(),
         read: Vec::new(),
         programs: Vec::new(),
+        program_sources: Vec::new(),
         absent: false,
         routing: false,
         url_reach: None,
@@ -4591,6 +4650,20 @@ impl<S: Sources> Resolver<'_, S> {
                      profile's `[options]` to a program outside it",
                     program.name,
                     program.value,
+                    grant.display()
+                ));
+            }
+        }
+        for source in &self.program_sources {
+            if let Some(grant) = grants
+                .iter()
+                .find(|grant| lies_under(Path::new(&source.value), grant))
+            {
+                return Err(format!(
+                    "`{}` is chosen through {}, which lies under the write grant {}, so the \
+                     workload could change which program runs. Remove the grant",
+                    source.name,
+                    source.value,
                     grant.display()
                 ));
             }
@@ -6229,7 +6302,7 @@ impl<S: Sources> Resolver<'_, S> {
                 if marker.is_empty() {
                     candidate.is_dir()
                 } else {
-                    self.candidate(&candidate.join(marker)).is_ok()
+                    self.candidate(&candidate.join(marker), None).is_ok()
                 }
             })
             .and_then(|candidate| canonical(&candidate));
@@ -6392,9 +6465,11 @@ impl<S: Sources> Resolver<'_, S> {
         )?;
         if declaration.kind == "program" {
             self.check_program(name, &value)?;
-            if !declaration.searches.is_empty() && source != "search" {
+            if let Some((_, search)) = declaration.searches.first()
+                && source != "search"
+            {
                 value = self
-                    .candidate(Path::new(&value))
+                    .candidate(Path::new(&value), Some((name, search)))
                     .map_err(|why| format!("`inputs.{name}` = {value:?} is {why}"))?;
             }
             for path in std::iter::once(&value).chain((written != value).then_some(&written)) {
@@ -6500,10 +6575,14 @@ impl<S: Sources> Resolver<'_, S> {
     fn find(&mut self, name: &str, search: &Search) -> Result<(String, String), String> {
         let at = format!("[inputs.{name}] search");
         let mut passed = Vec::new();
+        let mut tried = std::collections::BTreeSet::new();
         for folder in &search.folders {
             let folders = self.folders(folder, &at)?;
             for candidate in crate::program::candidates(folders, &search.program) {
-                match self.candidate(&candidate) {
+                if !tried.insert(candidate.clone()) {
+                    continue;
+                }
+                match self.candidate(&candidate, Some((name, search))) {
                     Ok(real) => {
                         let written = utf8(&candidate).map_err(|error| error.to_string())?;
                         return Ok((real, written));
@@ -6518,7 +6597,7 @@ impl<S: Sources> Resolver<'_, S> {
             search.program
         );
         if !passed.is_empty() {
-            reason.push_str(&format!("; passed over {}", passed.join(", ")));
+            reason.push_str(&format!("{PASSED_OVER}{}", passed.join(", ")));
         }
         reason.push_str(&format!(
             ". Install it, or set `{name}` in your profile's `[options]`"
@@ -6561,17 +6640,67 @@ impl<S: Sources> Resolver<'_, S> {
     }
 
     /// The real file of `candidate`, or why the box cannot run it.
-    fn candidate(&self, candidate: &Path) -> Result<String, String> {
+    fn candidate(
+        &mut self,
+        candidate: &Path,
+        resolving: Option<(&str, &Search)>,
+    ) -> Result<String, String> {
         use crate::program::{self, Refused};
-        let checked =
-            program::check(candidate, &self.writable()).map_err(|refused| match refused {
-                Refused::Planted { what, .. } => format!("in {what}, which a box can write"),
-                Refused::Dangling => "a link to nothing".to_string(),
-                Refused::NotExecutable => "not an executable file".to_string(),
-            })?;
+        let refusal = |refused| match refused {
+            Refused::Planted { what, .. } => format!("in {what}, which a box can write"),
+            Refused::Dangling => "a link to nothing".to_string(),
+            Refused::NotExecutable => "not an executable file".to_string(),
+        };
+        let checked = program::check(candidate, &self.writable()).map_err(refusal)?;
+        if let Some((input, search)) = resolving
+            && search
+                .installation
+                .contains(&crate::install_layout::Layout::Npm)
+        {
+            if let Some(manager) = crate::install_layout::unsupported_launcher(&checked.real) {
+                return Err(format!(
+                    "a launcher of {manager}, which box does not resolve to its program"
+                ));
+            }
+            if program::runs_node(&checked.real) {
+                let platform =
+                    crate::install_layout::Platform::host(self.inputs.os, self.inputs.arch);
+                if let Some(resolved) = crate::install_layout::resolve_program(
+                    candidate,
+                    &checked.real,
+                    &search.program,
+                    &platform,
+                )? {
+                    return self.resolved(input, resolved);
+                }
+            }
+        }
         if program::runs_node(&checked.real) {
             return Err("a node script, which the box cannot start".into());
         }
+        utf8(&checked.real).map_err(|error| error.to_string())
+    }
+
+    /// The program an npm launcher resolved to, after the same checks as a found program, and
+    /// with each file that chose it recorded for the run's write-grant check.
+    fn resolved(
+        &mut self,
+        input: &str,
+        resolved: crate::install_layout::Resolved,
+    ) -> Result<String, String> {
+        let writable = self.writable();
+        let checked = crate::program::check(&resolved.program, &writable).map_err(|_| {
+            format!(
+                "resolved to {}, which the box cannot run",
+                resolved.program.display()
+            )
+        })?;
+        crate::install_layout::still_chosen(&checked.real, &resolved)?;
+        self.program_sources
+            .extend(resolved.sources.iter().map(|source| HostProgram {
+                name: format!("inputs.{input}"),
+                value: source.display().to_string(),
+            }));
         utf8(&checked.real).map_err(|error| error.to_string())
     }
 

@@ -389,6 +389,9 @@ A `search` entry is one of these:
 2. `box` follows each link to the real file.
 3. `box` passes over a candidate that is not an executable file, that is a script whose `#!` line
    runs node, or that lies in the workspace, the run's storage, or `~/.strands/box`, as written or real.
+   With `installation = ["npm"]`, a node script that an npm global installation holds is replaced by
+   the program it starts ([A layout that resolves the program](#a-layout-that-resolves-the-program)),
+   and a launcher of another package manager is passed over with its manager's name.
 4. The first candidate that remains is the value, as its real path.
 
 An `[options]` or `from` value of an input with `program` passes the same checks, and its value
@@ -732,6 +735,39 @@ A layout that does not match adds nothing, so `["node", "homebrew"]` serves Node
 Node from Homebrew. The npm layout takes the first `node_modules` folder in the physical path;
 the other named folder matches take the last occurrence. Every match needs at least one folder
 before it. A path component is literal: a `*` in a host path matches only a folder of that name.
+
+#### A layout that resolves the program
+
+A `program` input can name `installation = ["npm"]` beside `program` and `search`. `npm` is the
+only layout that resolves a program; another value, a duplicate, or an empty list stops the load,
+and `installation` without `program` stops it too. It grants nothing by itself, and the agent gets
+no `node_modules` tree from it. When a candidate of the search, or an `[options]` or `from` value,
+is a node script, `install_layout::resolve_program` reads which native program it starts:
+
+1. The launcher's real file lies in `<prefix>/lib/node_modules/<package>/`, and the package's
+   `package.json` `bin`, normalized as npm does, maps the program name to that file.
+2. Each key of `optionalDependencies` is looked up from the package folder up to
+   `<prefix>/lib/node_modules`, in Node's ancestor order. The nearest existing folder shadows the
+   others.
+3. A platform package fits the host when npm's `checkList` accepts its `os`, `cpu`, and `libc`
+   for the host in npm's names. The host's libc comes from the text of `/usr/bin/ldd`, as npm reads
+   it, and a declared `libc` with no known host libc does not fit. On macOS on arm64 an `x64`
+   package fits too, because macOS runs it; an `arm64` package that fits comes first. Two that fit
+   stop the search.
+4. The program is the platform package's own `bin` entry for the name, else the `entrypoint` of a
+   `vendor/<target>/codex-package.json` with `layoutVersion` 1 and a `target` that names its
+   folder. No other file is the program.
+
+Each folder and file is opened by descriptor below the installation, and a link, a special file,
+a file over 1 MiB, or a folder of over 1024 entries stops the resolution with the reason. The
+launcher, each `package.json`, the manifest, each folder that the lookup tried, and the program
+are checked like a program: none may lie in the workspace, the run's storage, `~/.strands/box`, or
+under a write grant of the agent, a tool, or an MCP server. The resolver runs no program. A host
+process that replaces a file after the check and before the box starts is not detected.
+
+These launchers are not resolved, and the search names each one's manager: a pnpm `#!/bin/sh`
+wrapper or a path in a pnpm store, a Volta shim, a Yarn Classic global, and a Bun global. A Yarn
+Plug'n'Play launcher is a node script outside `node_modules`, and the search passes over it.
 
 A Homebrew receipt stays below the keg's physical root. Each dependency name consists of safe path
 components, and its last component names the formula. `<prefix>/opt/<formula>` must resolve below

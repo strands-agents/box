@@ -169,6 +169,8 @@ program = "codex"
 search = [
     { env = "PATH" },
 ]
+# `npm i -g @openai/codex` puts a node launcher on PATH; the box runs the program it starts.
+installation = ["npm"]
 
 # Select the host source folder; Codex itself keeps its private home in storage.
 [inputs.codex.home]

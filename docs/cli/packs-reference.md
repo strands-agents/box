@@ -94,6 +94,7 @@ starts. A pack declares it as `[inputs.<name>]` under its full name, such as
 | `type` | `string` (the default), `bool`, or `program`. |
 | `program` | For a `program` input: the file name to look for, such as `team-agent`. One name, with no `/`. |
 | `search` | For a `program` input with `program`: the folders to look in, in order. A folder can hold placeholders and a `*`, which matches every version folder, newest first. `{ env = "PATH" }` stands for the folders on your `PATH`. Without it, `box` looks on your `PATH` only. |
+| `installation` | For a `program` input with `program`: `["npm"]`, so that an npm global install's launcher on your `PATH` runs the native program of its platform package. It grants nothing by itself. See [A layout that resolves the program](../design/cli/profile-language.md#a-layout-that-resolves-the-program). |
 | `from` | `env:<NAME>`: a variable in the shell where you run `box`. |
 | `key` | With `from`: one key of a variable that holds a list of `key=value` items separated by commas. The value is that key's value, with spaces at either end removed and each `%XX` escape decoded. A list that names the key twice is an error, and so is a value with a bad `%XX` escape, a value that isn't UTF-8 once decoded, or a value that decodes to a NUL. |
 | `default` | The value when neither your profile nor `from` gives one. A string, or `true` or `false`. It can hold placeholders. A `program` input with `program` has no `default`. |

@@ -161,6 +161,7 @@ impl Scene {
                 box_dir: &instance.box_directory,
                 storage: &storage,
                 os: context.os,
+                arch: "aarch64",
                 packs: Some(packs),
             },
         )
@@ -14019,6 +14020,30 @@ mod search {
             (
                 "type = \"program\"\nprogram = \"mine\"\nsearch = [1]",
                 "is a list of folders",
+            ),
+            (
+                "type = \"program\"\ninstallation = [\"npm\"]",
+                "`[inputs.mine.path] installation` needs `program`",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\ninstallation = \"npm\"",
+                "installation` is a list of the layouts that resolve a program: npm",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\ninstallation = []",
+                "installation` is a list of the layouts that resolve a program: npm",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\ninstallation = [\"homebrew\"]",
+                "installation` is a list of the layouts that resolve a program: npm",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\ninstallation = [\"yarn\"]",
+                "installation` is a list of the layouts that resolve a program: npm",
+            ),
+            (
+                "type = \"program\"\nprogram = \"mine\"\ninstallation = [\"npm\", \"npm\"]",
+                "names \"npm\" twice",
             ),
         ] {
             scene.share(

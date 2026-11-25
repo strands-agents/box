@@ -325,10 +325,15 @@ impl CreatedProfile {
         let _ = writeln!(out, "\n{}", paint.section("Policy"));
         let _ = writeln!(out, "  {}", paint.wrap(self.policy_summary().trim(), 2));
         let mut notes = Vec::new();
-        if let Some((program, _)) = self.missing() {
-            notes.push(format!(
-                "{program} is not on this host. Install it before running."
-            ));
+        if let Some((program, missing)) = self.missing() {
+            notes.push(if missing.contains(crate::lang::PASSED_OVER) {
+                format!(
+                    "{program} is not on this host as a program the box can run: {}.",
+                    shown_text(&self.home, missing)
+                )
+            } else {
+                format!("{program} is not on this host. Install it before running.")
+            });
         }
         if !self.discovery.tools.skipped.is_empty() {
             notes.push(format!(

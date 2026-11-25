@@ -31,6 +31,8 @@ pub struct Host {
     pub box_home: PathBuf,
     /// The OS that a `when` tests.
     pub os: &'static str,
+    /// The CPU architecture, as `std::env::consts::ARCH` names it.
+    pub arch: &'static str,
     /// The variables a run reads in place of the environment of `box`.
     pub variables: Option<Vec<(String, String)>>,
     /// Command outputs that stand in for running the command.
@@ -54,6 +56,7 @@ impl Host {
             home,
             box_home,
             os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
             variables: None,
             answers: Vec::new(),
             root: nix::unistd::geteuid().is_root(),

@@ -316,6 +316,13 @@ mod trial {
             self
         }
 
+        /// Resolve as a host with the CPU architecture `arch`, as `std::env::consts::ARCH`
+        /// names it.
+        pub fn arch(mut self, arch: &'static str) -> Self {
+            self.settings.host.arch = arch;
+            self
+        }
+
         /// Treat `folder` as the folder of Apple's `xcode-select` stubs.
         pub fn apple_stubs(mut self, folder: impl Into<PathBuf>) -> Self {
             self.settings.host.apple_stubs = folder.into();

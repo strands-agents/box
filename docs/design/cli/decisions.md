@@ -491,18 +491,23 @@ fix then needs two changes.
 child-execution boundary.
 
 <a id="an-installation-pack-names-a-layout"></a>
-### Installation layouts are host discovery in code, and a tool names the ones that apply
+### Installation layouts are host discovery in code, and a tool or a program input names the ones that apply
 
 `install_layout::Layout` discovers Homebrew kegs and receipts, Python environments, and npm
 trees. Discovery is code, not pack data. Tools name layouts with `installation`; detected MCP
 servers get every layout. The npm read boundary includes the containing `node_modules` tree so
-dependencies beside the package are readable.
+dependencies beside the package are readable. A layout can also resolve which file is the
+program: a `program` input's `installation = ["npm"]` replaces an npm launcher with the native
+program of its platform package, from npm's own metadata and the package's entry point, and adds
+no read.
 
 **Rejected.** Installation packs: matching rules add fields and patterns that can overgrant,
 while a pack that only names a layout repeats its name. Per-package grants from manifests:
 narrower reads require more dependency resolution logic.
 
-**Cost.** A new layout needs a `box` change, and a reviewer audits its grants in Rust. An npm
+**Cost.** A new layout needs a `box` change, and a reviewer audits its grants in Rust. A native
+npm package resolves only when its platform package has a `bin` entry or a Codex package manifest;
+other package managers' launchers are refused by name. An npm
 read grant includes unrelated packages in that tree. An unmatched server reads its program's
 whole folder through `directory`, and a profile cannot narrow a server's layouts.
 

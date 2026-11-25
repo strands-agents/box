@@ -397,6 +397,7 @@ mod installation_grants {
                     box_dir: &box_dir,
                     storage: &storage,
                     os: "macos",
+                    arch: "aarch64",
                     tool_cache: None,
                     packs: None,
                 },
