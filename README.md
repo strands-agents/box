@@ -36,6 +36,12 @@ preview, and it works on Apple silicon Macs with macOS 15 or later and on Linux 
 ## Install
 
 ```sh
+brew install --cask strands-agents/tap/box
+```
+
+Or with the installer:
+
+```sh
 curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/install.sh | sh
 ```
 

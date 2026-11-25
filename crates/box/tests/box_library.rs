@@ -12,7 +12,11 @@ mod fixture;
 
 #[cfg(unix)]
 fn main() {
-    if reload_tests::dispatch() || decision_tests::dispatch() || terminal_tests::dispatch() {
+    if reload_tests::dispatch()
+        || decision_tests::dispatch()
+        || terminal_tests::dispatch()
+        || event_tests::dispatch()
+    {
         return;
     }
     #[cfg(target_os = "macos")]
@@ -210,6 +214,7 @@ fn main() {
     reload_tests::suite(true);
     decision_tests::suite();
     terminal_tests::core_lines_reach_a_piped_stderr_while_a_library_terminal_runs();
+    event_tests::suite();
 }
 
 /// **A caller-supplied box ID names a new box, its record, and its telemetry, and a configured box
@@ -1280,5 +1285,167 @@ mod terminal_tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+}
+
+/// **A caller's run event channel receives the kind of the box's own failure, once, from every
+/// exit point, and nothing when the run succeeds.**
+#[cfg(unix)]
+mod event_tests {
+    use super::{bounded_output, fixture};
+    use diagnostics::Code;
+    use std::path::Path;
+    use std::process::{Command, ExitCode};
+    use std::sync::mpsc::TryRecvError;
+    use strands_box::{RunEvent, RunOptions};
+
+    pub(super) fn dispatch() -> bool {
+        let arguments: Vec<_> = std::env::args().collect();
+        match arguments.get(1).map(String::as_str) {
+            Some("--events-workload") => {}
+            Some("--events-early") => early(),
+            Some("--events-callback") => callback(),
+            Some("--events-run") => live(Path::new(&arguments[2]), &arguments[3]),
+            _ => return false,
+        }
+        true
+    }
+
+    pub(super) fn suite() {
+        for mode in ["--events-early", "--events-callback"] {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.arg(mode);
+            let output = probe(command);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{mode} failed:\n{stderr}");
+        }
+        if !fixture::namespace_launcher_is_usable() {
+            eprintln!("skipping: live run events require a usable containment backend");
+            return;
+        }
+        let executable = tempfile::Builder::new()
+            .prefix("box-events-probe-")
+            .tempfile_in(fixture::box_binary().parent().unwrap())
+            .unwrap()
+            .into_temp_path();
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        for (name, program, expected) in [
+            (
+                "library-events-missing",
+                "box-events-agent-not-installed",
+                "B0114",
+            ),
+            (
+                "library-events-absolute",
+                "/nonexistent-box-events/bin/claude",
+                "B0114",
+            ),
+            ("library-events-unexp", "${{ inputs.claude.path }}", "B0101"),
+            (
+                "library-events-success",
+                executable.to_str().unwrap(),
+                "none",
+            ),
+        ] {
+            let configured =
+                fixture::Request::with_config(name, "permit(principal, action, resource);", "")
+                    .expect();
+            configured.write_command(program);
+            let mut command = Command::new(&executable);
+            command
+                .arg("--events-run")
+                .arg(configured.config())
+                .arg(expected)
+                .env("HOME", configured.operator_home());
+            let output = probe(command);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{name} failed:\n{stderr}");
+        }
+    }
+
+    fn probe(mut command: Command) -> std::process::Output {
+        command
+            .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+            .env_remove("EXPERIMENTAL_X86_SUPPORT");
+        bounded_output::bounded_output(command)
+    }
+
+    /// Run once with a fresh channel and return the events it queued, which must end in a
+    /// disconnect once the run returns.
+    fn attempt(config: &Path, options: RunOptions<'_>) -> (ExitCode, Vec<RunEvent>) {
+        let (sender, receiver) = strands_box::run_events();
+        let code = strands_box::run(
+            config.into(),
+            vec!["--events-workload".into()],
+            RunOptions {
+                events: Some(sender),
+                ..options
+            },
+        );
+        let mut events = Vec::new();
+        loop {
+            match receiver.try_recv() {
+                Ok(event) => events.push(event),
+                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => panic!("the channel stayed open after the run ended"),
+            }
+        }
+        (code, events)
+    }
+
+    fn refused(code: Code) -> (ExitCode, Vec<RunEvent>) {
+        (
+            ExitCode::FAILURE,
+            vec![RunEvent::Refused { code: code.into() }],
+        )
+    }
+
+    fn early() {
+        let missing = Path::new("/missing-events-config.toml");
+        // A malformed ID is refused before the run uses the process's one attempt.
+        assert_eq!(
+            attempt(
+                missing,
+                RunOptions {
+                    box_id: Some("not a box id".into()),
+                    ..Default::default()
+                }
+            ),
+            refused(Code::B0101)
+        );
+        assert_eq!(
+            attempt(missing, RunOptions::default()),
+            refused(Code::B0102)
+        );
+        assert_eq!(
+            attempt(missing, RunOptions::default()),
+            refused(Code::B0106)
+        );
+    }
+
+    fn callback() {
+        assert_eq!(
+            attempt(
+                Path::new("/missing-events-callback.toml"),
+                RunOptions {
+                    on_ready: Some(Box::new(|| Err(std::io::Error::other("refused")))),
+                    ..Default::default()
+                }
+            ),
+            refused(Code::B0112)
+        );
+    }
+
+    fn live(config: &Path, expected: &str) {
+        let (code, events) = attempt(config, RunOptions::default());
+        if expected == "none" {
+            assert_eq!((code, events), (ExitCode::SUCCESS, Vec::new()));
+            return;
+        }
+        let wanted = *Code::ALL
+            .iter()
+            .find(|code| code.as_str() == expected)
+            .unwrap();
+        assert_eq!((code, events), refused(wanted));
     }
 }

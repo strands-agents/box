@@ -1,0 +1,10 @@
+{
+  "bindings": [
+    {
+      "context": "Chat",
+      "bindings": {
+        "ctrl+k": "feature-probe-keybinding"
+      }
+    }
+  ]
+}

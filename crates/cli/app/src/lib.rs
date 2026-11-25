@@ -8,6 +8,7 @@ mod create;
 mod credential;
 mod detect;
 use strands_box_cli_profile::error;
+mod explain;
 use strands_box_cli_profile::files;
 #[cfg(any(test, feature = "test-support"))]
 use strands_box_cli_profile::fixtures;
@@ -45,6 +46,7 @@ pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use create::{CreatedProfile, NewProfile, Resolution};
 pub use error::{Error, PolicyFinding};
+pub use explain::explain;
 pub use host::check_box_home;
 pub use output::{OutputFormat, json_line};
 pub use profile::{Listed, Profile, Profiles, Project, ProjectAccess, validate_name};

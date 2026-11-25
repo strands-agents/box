@@ -1,0 +1,704 @@
+name: Workloads
+
+# The workload suite: it runs a real coding agent (Claude Code) on each customer workload, modelled
+# as a prompt, inside a box on a GitHub hosted runner, and reports two things per cell:
+#   - the BOX verdict: did the box refuse anything on the way (GREEN/RED/ERROR)?
+#   - the TASK grade: did the agent actually do the workload (PASS/FAIL/UNGRADED)? Whenever the agent
+#     finishes, even after refusals, a cell with a `check` command is graded by re-running it over
+#     the workspace the agent left (test-corpus/run_corpus.py). Every other cell is graded by the
+#     judge (test-corpus/judge.py): a second model reads each tool call Claude Code made with its
+#     real output, the files it changed, and what the box refused, and decides whether the cell's
+#     `pass_check` held. A PASS must quote that proof; Claude's own words never count. On a cell
+#     with a check the judge runs too, and the table shows whether the two agree.
+#     So RED + PASS means the box refused some things, and the agent still did the task.
+#
+# The prompts and the agent runner already exist: every cell in test-corpus/corpus.toml has a
+# `prompt`, and `run_corpus.py --layer agent --profile claude` runs Claude Code on it. This workflow
+# runs that layer on the GitHub macOS pool.
+#
+# Non-blocking by construction: no `pull_request` trigger, so it reports no check on a PR and cannot
+# block a merge. It runs on dispatch and nightly.
+#
+# COST: each cell is a full agent session on a frontier model, so a run spends real money. The
+# nightly runs every cell, twice: Claude Code at 09:41 UTC and Kiro CLI at 10:11 UTC (two cron entries;
+# the concurrency group holds the Kiro run until the Claude Code run ends). A Kiro run with no
+# KIRO_API_KEY secret reports every cell SKIP with that reason, and then fails. A dispatch runs the
+# default set, or the ids, gate, or `all` it names.
+#
+# A plan job splits the cells into groups of 4 (test-corpus/bench.py plan --agent), each group runs
+# in its own macOS job and installs only the toolchains its cells need, and a report job puts every
+# cell in one table. A cell this runner cannot run (a lived-in machine, a fixture not built yet) is
+# SKIP with its reason, so `all` still lists every cell.
+#
+# The `guide` job is separate from the cells above: it runs the profile guide's prompt tests
+# (test-corpus/run_guide.py), where Claude Code works on the runner itself and edits a profile.
+#
+# CREDENTIAL: the in-box agent and the judge call Bedrock with a short-term Bedrock API key (a bearer
+# token). Each macOS job makes its own key: it runs in the `workloads` environment, assumes
+# the workloads role (secrets.WORKLOADS_ROLE_ARN) through GitHub OIDC for 2 hours, and mints the key
+# from that session with test-corpus/bedrock_key.py. The role can call only the models below, and the
+# key stops working when the session ends. The role's own credentials go to the mint step only, never
+# to the job's environment. The `workloads` environment lets a run from any branch in, so a branch
+# can test this workflow by dispatch. See test-corpus/workloads-notes.md.
+#
+# A features job runs beside the cells: `run_corpus.py --layer features` runs the checks in
+# test-corpus/features.toml, one for each row of the per-agent feature checklist, for Claude Code,
+# Codex, and Kiro CLI. Claude Code's and Codex's model checks use a key the job makes as a macOS job
+# does. Kiro CLI's model checks use the KIRO_API_KEY secret. The others call no model.
+
+on:
+  workflow_dispatch:
+    inputs:
+      agent:
+        description: "The agent that does each cell. kiro needs the KIRO_API_KEY secret in the workloads environment."
+        required: false
+        type: choice
+        options: [claude, kiro]
+        default: claude
+      guide:
+        description: "Also run the profile guide's prompt tests (9 Claude Code sessions on the runner)."
+        required: false
+        type: boolean
+        default: false
+      all:
+        description: "Run every cell in corpus.toml (about 16 jobs; costs real money). Wins over ids and gate."
+        required: false
+        type: boolean
+        default: false
+      ids:
+        description: "Cell ids, space-separated. Empty runs the default set."
+        required: false
+        type: string
+        default: ""
+      gate:
+        description: "Run a whole gate instead of ids (launch / first-update / follows)."
+        required: false
+        type: string
+        default: ""
+  # The second entry runs Kiro CLI. Its string also appears in `AGENT` below and in the `features`
+  # job's `if`, so change all three together.
+  schedule:
+    - cron: "41 9 * * *"
+    - cron: "11 10 * * *"
+
+concurrency:
+  group: workloads-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C debuginfo=0"
+  # Corpus runs send no telemetry.
+  BOX_TELEMETRY: "0"
+  AWS_REGION: us-west-2
+  # The US route of Claude Opus 5.5. On 2026-11-13 the global route answered ServiceUnavailable
+  # for an hour while this one served every call.
+  ANTHROPIC_MODEL: us.anthropic.claude-opus-5-5
+  # Claude Code picks other models for side work (a session title, a summary). Unpinned, it called
+  # us.anthropic.claude-sonnet-4-5-20250929-v1:0 and us.anthropic.claude-haiku-4-5-20251001-v1:0
+  # once per cell. With these pins, Claude Code calls only Opus 5.5, so every call goes to a model
+  # the workloads role allows.
+  # The claude pack passes these three into the box with ANTHROPIC_MODEL.
+  ANTHROPIC_DEFAULT_OPUS_MODEL: us.anthropic.claude-opus-5-5
+  ANTHROPIC_DEFAULT_SONNET_MODEL: us.anthropic.claude-sonnet-5-5
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: us.anthropic.claude-haiku-5-5
+  # The judge's model, on the same key. It reads the record of a run, so it needs no frontier model.
+  BOX_JUDGE_MODEL: us.anthropic.claude-sonnet-5-5
+  CLAUDE_CODE_VERSION: "2.1.316"
+  CLAUDE_CODE_SHA256: 64c327e92b2c5e0f78c0a980c5a518121e1f0d140ca771ca5dd4488d1a2dcb3f
+  # The features job runs Codex, pinned as cli-test.yml pins it, and Kiro CLI.
+  CODEX_VERSION: "0.166.0"
+  CODEX_SHA256: c48824462fc57681eafb0925d97b11b589010475613904f570b42fea53e240d5
+  # Kiro's installer checks the package against the SHA-256 in Kiro's own release index, and the
+  # job checks the installer against this SHA-256. A new installer script fails the check until
+  # this changes.
+  KIRO_CLI_VERSION: "3.4.0"
+  KIRO_INSTALL_SHA256: a8bce4c6b740deb61009e3ad10995ec3027a51e6345025f1a2e5048ffdbf4b84
+  # A dispatch names its agent. The 10:11 cron runs Kiro CLI and the 09:41 cron runs Claude Code.
+  AGENT: ${{ inputs.agent || (github.event.schedule == '11 10 * * *' && 'kiro') || 'claude' }}
+  # The default dispatch set (the nightly runs every cell): a few launch-gate cells that run on a
+  # hosted runner. TS-04, TS-11 and TS-01 also carry a `check`, so they are graded PASS/FAIL.
+  DEFAULT_IDS: "TS-04 TS-11 TS-01 PY-03"
+
+jobs:
+  # Kiro CLI needs the KIRO_API_KEY secret of the workloads environment. Without it the macOS jobs
+  # do not start, the report lists every planned cell as SKIP with the reason, and the run fails.
+  kiro-key:
+    name: Kiro key
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: workloads
+    outputs:
+      ready: ${{ steps.key.outputs.ready }}
+    steps:
+      - name: Check the Kiro key
+        id: key
+        env:
+          KIRO_API_KEY: ${{ env.AGENT == 'kiro' && secrets.KIRO_API_KEY || '' }}
+        run: |
+          if [ "$AGENT" != kiro ] || [ -n "$KIRO_API_KEY" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::the KIRO_API_KEY secret of the workloads environment is empty or missing, so every Kiro CLI cell is SKIP"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # bench.py refuses an unknown id or gate, so the ids reach the macOS jobs checked.
+      - name: Plan the jobs
+        id: plan
+        env:
+          # The nightly runs every cell; a dispatch keeps its own choice.
+          ALL: ${{ inputs.all || github.event_name == 'schedule' }}
+          IDS: ${{ inputs.ids }}
+          GATE: ${{ inputs.gate }}
+        run: |
+          args=(plan --agent --chunk 4)
+          if [ "$ALL" = true ]; then
+            :
+          elif [ -n "$GATE" ]; then
+            args+=(--gate "$GATE")
+          else
+            args+=(--ids "${IDS:-$DEFAULT_IDS}")
+          fi
+          matrix="$(python3 test-corpus/bench.py "${args[@]}")"
+          echo "matrix: $matrix"
+          if [ "$matrix" = "[]" ]; then
+            echo "::error::no cell matches all='$ALL' ids='$IDS' gate='$GATE'"
+            exit 1
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: Workloads ${{ matrix.entry.name }} (${{ matrix.entry.ids }})
+    needs: [plan, kiro-key]
+    if: ${{ needs.kiro-key.outputs.ready == 'true' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        entry: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: macos-latest
+    # 4 cells at up to 15 minutes each, their checks, and the setup.
+    timeout-minutes: 90
+    # The workloads role trusts this environment and nothing else.
+    environment: workloads
+    permissions:
+      contents: read
+      # The GitHub cells read the repository's pull requests and runs with the job's token.
+      pull-requests: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # The credential steps come first, before the Rust build and the toolchains, so a missing role
+      # or a refused model costs about a minute instead of the whole setup.
+      # Kiro CLI calls Kiro's service with a Kiro API key, not Bedrock. The judge still uses Bedrock.
+      - name: Check the Kiro key
+        if: env.AGENT == 'kiro'
+        env:
+          KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
+        run: |
+          if [ -z "$KIRO_API_KEY" ]; then
+            echo "the KIRO_API_KEY secret of the workloads environment is empty or missing" >&2
+            exit 1
+          fi
+
+      # The role's ARN is a repository secret, not a variable, because it names the AWS account: a
+      # secret stays out of the repository's settings page and is masked in every log.
+      # Kiro CLI needs no Bedrock key, so a kiro run without the role runs with no judge: a cell
+      # with a `check` is still graded, and the others are UNGRADED.
+      - name: Check the role secret
+        env:
+          WORKLOADS_ROLE_ARN: ${{ secrets.WORKLOADS_ROLE_ARN }}
+        run: |
+          if [ -n "$WORKLOADS_ROLE_ARN" ]; then
+            echo "JUDGE=--judge" >> "$GITHUB_ENV"
+          elif [ "$AGENT" = kiro ]; then
+            echo "::warning::the WORKLOADS_ROLE_ARN repository secret is empty or missing, so the judge does not run"
+          else
+            echo "the WORKLOADS_ROLE_ARN repository secret is empty or missing" >&2
+            exit 1
+          fi
+
+      # 2 hours, the role's limit, so the key minted from this session outlasts the 90-minute job.
+      # output-env-credentials: false keeps the role's credentials out of the job's environment;
+      # only the mint step below gets them, from this step's (masked) outputs.
+      - name: Assume the workloads role
+        if: env.JUDGE == '--judge'
+        id: role
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
+        with:
+          role-to-assume: ${{ secrets.WORKLOADS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: workloads-${{ github.run_id }}-${{ matrix.entry.name }}
+          role-duration-seconds: 7200
+          output-env-credentials: false
+          output-credentials: true
+
+      # bedrock_key.py runs on aws-bedrock-token-generator, which needs Python 3.10 or later.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      # The key goes to a file outside the folder the cells run in, and run_corpus.py reads it
+      # through BOX_BEDROCK_KEY_FILE. bedrock_key.py masks the key in the log.
+      - name: Mint the Bedrock key
+        if: env.JUDGE == '--judge'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.role.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.role.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.role.outputs.aws-session-token }}
+        run: |
+          key="$RUNNER_TEMP/bedrock-key/key"
+          mkdir -p "$(dirname "$key")"
+          venv="$RUNNER_TEMP/bedrock-key/venv"
+          python3 -m venv "$venv"
+          "$venv/bin/pip" install --quiet --require-hashes --no-deps --only-binary :all: \
+            -r test-corpus/bedrock-key-requirements.txt
+          "$venv/bin/python" test-corpus/bedrock_key.py --region "$AWS_REGION" --expires 7200 --out "$key"
+          echo "BOX_BEDROCK_KEY_FILE=$key" >> "$GITHUB_ENV"
+
+      # A one-token call to each model the run uses, with the key alone. A refusal here means the
+      # role doesn't allow that model (or Bedrock is down), and it fails now instead of turning
+      # every cell into ERROR under a green job. The runner ships the AWS CLI.
+      - name: Check the Bedrock key
+        if: env.JUDGE == '--judge'
+        env:
+          # Bedrock sometimes answers ServiceUnavailable for a few seconds; retry through it rather
+          # than lose the job's 4 cells to one busy moment.
+          AWS_RETRY_MODE: standard
+          AWS_MAX_ATTEMPTS: "8"
+        run: |
+          AWS_BEARER_TOKEN_BEDROCK="$(cat "$BOX_BEDROCK_KEY_FILE")"
+          export AWS_BEARER_TOKEN_BEDROCK
+          for model in $(printf '%s\n' "$ANTHROPIC_MODEL" "$ANTHROPIC_DEFAULT_OPUS_MODEL" \
+              "$ANTHROPIC_DEFAULT_SONNET_MODEL" "$ANTHROPIC_DEFAULT_HAIKU_MODEL" "$BOX_JUDGE_MODEL" | sort -u); do
+            printf '%s: ' "$model"
+            aws bedrock-runtime converse --region "$AWS_REGION" --model-id "$model" \
+              --messages '[{"role":"user","content":[{"text":"ok"}]}]' \
+              --inference-config '{"maxTokens":1}' --query 'stopReason' --output text \
+              || { echo "the minted key's call to $model failed: the workloads role doesn't allow it, or Bedrock is unavailable (the error above says which)" >&2; exit 1; }
+          done
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Build Box and helpers
+        run: cargo build --locked -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.22.2"
+          package-manager-cache: false
+
+      # The same toolchain steps as corpus.yml: each job installs only what its cells' `needs` name.
+      - name: Set up Go
+        if: contains(matrix.entry.needs, 'go')
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: false
+
+      - name: Set up uv
+        if: contains(matrix.entry.needs, 'uv')
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.7"
+          enable-cache: false
+
+      - name: Set up PHP and Composer
+        if: contains(matrix.entry.needs, 'php') || contains(matrix.entry.needs, 'composer')
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.4"
+          tools: composer:v2
+          coverage: none
+
+      - name: Install the other toolchains
+        env:
+          NEEDS: ${{ join(matrix.entry.needs, ' ') }}
+        run: bash test-corpus/bench-toolchains.sh
+
+      - name: Install rustup's proxies
+        run: |
+          if [[ ! -x $HOME/.cargo/bin/cargo ]]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+              sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+          fi
+
+      - name: Install Claude Code
+        if: env.AGENT == 'claude'
+        run: |
+          bin="$HOME/.local/bin"
+          mkdir -p "$bin" "$HOME/.local/share/claude/versions"
+          claude="$HOME/.local/share/claude/versions/$CLAUDE_CODE_VERSION"
+          curl -fsSL -o "$claude" "https://downloads.claude.ai/claude-code-releases/$CLAUDE_CODE_VERSION/darwin-arm64/claude"
+          echo "$CLAUDE_CODE_SHA256  $claude" | shasum -a 256 -c -
+          chmod 755 "$claude"
+          ln -sf "$claude" "$bin/claude"
+
+      # The box runs Kiro's runtime only from a folder it cannot write (resources/packs/kiro/README.md).
+      - name: Install Kiro CLI
+        if: env.AGENT == 'kiro'
+        # Kiro CLI refuses to start a chat, even to list sessions, until it has a login or a key.
+        # Listing sessions makes no model call, so a stand-in key is enough.
+        env:
+          KIRO_API_KEY: ksk_placeholder-no-model-call
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/kiro-install.sh" https://cli.kiro.dev/install
+          echo "$KIRO_INSTALL_SHA256  $RUNNER_TEMP/kiro-install.sh" | shasum -a 256 -c -
+          bash "$RUNNER_TEMP/kiro-install.sh" --version "$KIRO_CLI_VERSION" --force --no-modify-path
+          KIRO_RUNTIME_DIR="$HOME/.kiro-runtime" "$HOME/.local/bin/kiro-cli" --v3 chat --list-sessions
+
+      # run_corpus.py --install-profiles makes the claude profile: claude and bedrock plus every
+      # pack of test-corpus/profiles/corpus/profile.toml, so it has the scripted layer's toolchains.
+      # run_corpus.py reads the key from BOX_BEDROCK_KEY_FILE, set by the mint step.
+      - name: Run the workloads
+        env:
+          IDS: ${{ matrix.entry.ids }}
+          KIRO_API_KEY: ${{ env.AGENT == 'kiro' && secrets.KIRO_API_KEY || '' }}
+          # The GitHub cells read the repository with the job's own read-only token, as corpus.yml's
+          # do. The box puts it on each request, and the agent holds a stand-in.
+          GH_TOKEN: ${{ github.token }}
+          GIT_GITHUB: x-access-token:${{ github.token }}
+        run: |
+          # id-token: write gives every step these two, which can ask GitHub for an OIDC token, and so
+          # for the role. The agent never gets the job's environment, but the cells don't need them.
+          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+          # rustup's proxies first, as corpus.yml does: the runner's first `cargo` is a bash script,
+          # which @box/cargo does not take.
+          export PATH="$PWD/target/debug:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+          echo "cargo for the cells: $(command -v cargo)"
+          # IDS is the plan's checked, space-separated list, split here on purpose.
+          python3 test-corpus/run_corpus.py --layer agent --profile "$AGENT" --grade $JUDGE --install-profiles \
+            --timeout 900 --fail-on none --out "$RUNNER_TEMP/workloads-out" --ids $IDS
+
+      # Results and logs only, as corpus.yml uploads: the agents' workspaces (node_modules, build
+      # folders) were 124 MB for 4 cells. Each judged cell adds the record the judge read
+      # (<id>.evidence.txt) and its answer (<id>.judge.json).
+      - name: Upload the results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: workloads-macos-${{ env.AGENT }}-${{ github.run_id }}-${{ matrix.entry.name }}
+          path: |
+            ${{ runner.temp }}/workloads-out/results.*
+            ${{ runner.temp }}/workloads-out/*.log
+            ${{ runner.temp }}/workloads-out/*.evidence.txt
+            ${{ runner.temp }}/workloads-out/*.judge.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  # The feature checks do not depend on the plan: they are the same set on every run.
+  features:
+    name: Feature checks
+    if: ${{ inputs.agent != 'kiro' && github.event.schedule != '11 10 * * *' }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    # The workloads role trusts this environment and nothing else.
+    environment: workloads
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # Only the model checks need a key. With no role, Claude Code's and Codex's are SKIP
+      # `no-credentials`, and with no Kiro key, Kiro CLI's are. Every other check runs.
+      - name: Check the Kiro key
+        env:
+          KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
+        run: |
+          if [ -z "$KIRO_API_KEY" ]; then
+            echo "::warning::the KIRO_API_KEY secret of the workloads environment is empty or missing, so the Kiro CLI model checks are SKIP"
+          fi
+
+      - name: Check the role secret
+        env:
+          WORKLOADS_ROLE_ARN: ${{ secrets.WORKLOADS_ROLE_ARN }}
+        run: |
+          if [ -n "$WORKLOADS_ROLE_ARN" ]; then
+            echo "MODEL=true" >> "$GITHUB_ENV"
+          else
+            echo "::warning::the WORKLOADS_ROLE_ARN repository secret is empty or missing, so the Claude Code and Codex model checks are SKIP"
+          fi
+
+      # The same role, session, and key as a macOS job of this workflow.
+      - name: Assume the workloads role
+        if: env.MODEL == 'true'
+        id: role
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
+        with:
+          role-to-assume: ${{ secrets.WORKLOADS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: workloads-${{ github.run_id }}-features
+          role-duration-seconds: 7200
+          output-env-credentials: false
+          output-credentials: true
+
+      # bedrock_key.py runs on aws-bedrock-token-generator, which needs Python 3.10 or later.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Mint the Bedrock key
+        if: env.MODEL == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.role.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.role.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.role.outputs.aws-session-token }}
+        run: |
+          key="$RUNNER_TEMP/bedrock-key/key"
+          mkdir -p "$(dirname "$key")"
+          venv="$RUNNER_TEMP/bedrock-key/venv"
+          python3 -m venv "$venv"
+          "$venv/bin/pip" install --quiet --require-hashes --no-deps --only-binary :all: \
+            -r test-corpus/bedrock-key-requirements.txt
+          "$venv/bin/python" test-corpus/bedrock_key.py --region "$AWS_REGION" --expires 7200 --out "$key"
+          echo "BOX_BEDROCK_KEY_FILE=$key" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Build Box and helpers
+        run: cargo build --locked -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline
+
+      - name: Install Claude Code and Codex
+        run: |
+          bin="$HOME/.local/bin"
+          mkdir -p "$bin" "$HOME/.local/share/claude/versions"
+          claude="$HOME/.local/share/claude/versions/$CLAUDE_CODE_VERSION"
+          curl -fsSL -o "$claude" "https://downloads.claude.ai/claude-code-releases/$CLAUDE_CODE_VERSION/darwin-arm64/claude"
+          echo "$CLAUDE_CODE_SHA256  $claude" | shasum -a 256 -c -
+          chmod 755 "$claude"
+          ln -sf "$claude" "$bin/claude"
+          curl -fsSL -o "$RUNNER_TEMP/codex.tar.gz" "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/codex-aarch64-apple-darwin.tar.gz"
+          echo "$CODEX_SHA256  $RUNNER_TEMP/codex.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/codex.tar.gz" -C "$RUNNER_TEMP"
+          install -m 755 "$RUNNER_TEMP/codex-aarch64-apple-darwin" "$bin/codex"
+
+      # The box runs Kiro's runtime only from a folder it cannot write (resources/packs/kiro/README.md).
+      - name: Install Kiro CLI
+        # Kiro CLI refuses to start a chat, even to list sessions, until it has a login or a key.
+        # Listing sessions makes no model call, so a stand-in key is enough.
+        env:
+          KIRO_API_KEY: ksk_placeholder-no-model-call
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/kiro-install.sh" https://cli.kiro.dev/install
+          echo "$KIRO_INSTALL_SHA256  $RUNNER_TEMP/kiro-install.sh" | shasum -a 256 -c -
+          bash "$RUNNER_TEMP/kiro-install.sh" --version "$KIRO_CLI_VERSION" --force --no-modify-path
+          KIRO_RUNTIME_DIR="$HOME/.kiro-runtime" "$HOME/.local/bin/kiro-cli" --v3 chat --list-sessions
+
+      # Each check runs in a HOME of its own under the output folder, so no check reads this
+      # runner's settings. BOX_FEATURES_SYSTEM lets the runner write a check's system file with
+      # sudo, and it removes each one. The run fails when a check's result differs from its expect
+      # in test-corpus/features.toml, or when an agent's program is absent.
+      - name: Run the feature checks
+        env:
+          BOX_FEATURES_SYSTEM: "1"
+          KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
+        run: |
+          # id-token: write gives every step these two, which can ask GitHub for an OIDC token, and so
+          # for the role. The agent never gets the job's environment, but the checks don't need them.
+          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+          export PATH="$PWD/target/debug:$HOME/.local/bin:$PATH"
+          claude --version
+          codex --version
+          kiro-cli --version
+          export KIRO_RUNTIME_DIR="$HOME/.kiro-runtime"
+          python3 test-corpus/run_corpus.py --layer features --no-skip --timeout 180 \
+            --out "$RUNNER_TEMP/workloads-out"
+
+      # features.json and features.tsv, beside the cells' results.json in the run's artifacts.
+      - name: Upload the results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: workloads-macos-${{ env.AGENT }}-${{ github.run_id }}-features
+          path: |
+            ${{ runner.temp }}/workloads-out/features.*
+            ${{ runner.temp }}/workloads-out/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  # The profile guide's prompt tests (test-corpus/run_guide.py): Claude Code runs on the runner, not
+  # in a box, runs `box help agent`, reads the shipped guide file whose path the topic prints, and
+  # does one profile task per cell.
+  # A cell passes when `box profile show --full` accepts the result, prints what the cell names, and
+  # nothing changed outside the profile's folder, or in the files that ship with
+  # box. No model grades
+  # a cell. Without the role variable there is no model key, so every cell is SKIP with that reason
+  # and the job passes.
+  guide:
+    name: Profile guide
+    # Nightly, and on a dispatch that asks for it, so a dispatch for a few workload cells does not
+    # also spend nine agent sessions.
+    if: ${{ github.event_name == 'schedule' || inputs.guide }}
+    runs-on: macos-latest
+    # 9 cells at up to 7 minutes each, and the setup.
+    timeout-minutes: 90
+    # The workloads role trusts this environment and nothing else.
+    environment: workloads
+    env:
+      # The cells edit a few files, so they need no frontier model.
+      ANTHROPIC_MODEL: us.anthropic.claude-sonnet-5-5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Check the role variable
+        env:
+          WORKLOADS_ROLE_ARN: ${{ secrets.WORKLOADS_ROLE_ARN }}
+        run: |
+          if [ -n "$WORKLOADS_ROLE_ARN" ]; then
+            echo "GUIDE_KEY=yes" >> "$GITHUB_ENV"
+          else
+            echo "::warning::the WORKLOADS_ROLE_ARN repository secret is empty or missing, so the profile guide cells are SKIP (no-model-credential)"
+          fi
+
+      - name: Assume the workloads role
+        if: env.GUIDE_KEY == 'yes'
+        id: role
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
+        with:
+          role-to-assume: ${{ secrets.WORKLOADS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: workloads-${{ github.run_id }}-guide
+          role-duration-seconds: 7200
+          output-env-credentials: false
+          output-credentials: true
+
+      # bedrock_key.py runs on aws-bedrock-token-generator, which needs Python 3.10 or later.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Mint the Bedrock key
+        if: env.GUIDE_KEY == 'yes'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.role.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.role.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.role.outputs.aws-session-token }}
+        run: |
+          key="$RUNNER_TEMP/bedrock-key/key"
+          mkdir -p "$(dirname "$key")"
+          venv="$RUNNER_TEMP/bedrock-key/venv"
+          python3 -m venv "$venv"
+          "$venv/bin/pip" install --quiet --require-hashes --no-deps --only-binary :all: \
+            -r test-corpus/bedrock-key-requirements.txt
+          "$venv/bin/python" test-corpus/bedrock_key.py --region "$AWS_REGION" --expires 7200 --out "$key"
+          echo "BOX_BEDROCK_KEY_FILE=$key" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        if: env.GUIDE_KEY == 'yes'
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Build Box
+        if: env.GUIDE_KEY == 'yes'
+        run: cargo build --locked -p strands-box-cli --bin box
+
+      - name: Install Claude Code
+        if: env.GUIDE_KEY == 'yes'
+        run: |
+          bin="$HOME/.local/bin"
+          mkdir -p "$bin" "$HOME/.local/share/claude/versions"
+          claude="$HOME/.local/share/claude/versions/$CLAUDE_CODE_VERSION"
+          curl -fsSL -o "$claude" "https://downloads.claude.ai/claude-code-releases/$CLAUDE_CODE_VERSION/darwin-arm64/claude"
+          echo "$CLAUDE_CODE_SHA256  $claude" | shasum -a 256 -c -
+          chmod 755 "$claude"
+          ln -sf "$claude" "$bin/claude"
+          echo "$bin" >> "$GITHUB_PATH"
+
+      # Without a key the runner starts no agent and no box: it writes one SKIP row per cell. With
+      # a key, a cell that cannot start fails the job instead.
+      - name: Run the profile guide cells
+        run: |
+          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+          python3 test-corpus/run_guide.py --out "$RUNNER_TEMP/guide-out" ${GUIDE_KEY:+--no-skip}
+
+      - name: Upload the results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: profile-guide-${{ github.run_id }}
+          path: ${{ runner.temp }}/guide-out
+          if-no-files-found: warn
+          retention-days: 14
+
+  report:
+    name: Report
+    needs: [plan, kiro-key, macos]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Download the results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: workloads-macos-${{ env.AGENT }}-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/workloads
+
+      # With no Kiro key no macOS job ran: record every planned cell as SKIP, with the reason.
+      - name: Record the cells as SKIP
+        if: ${{ needs.kiro-key.outputs.ready == 'false' }}
+        env:
+          MATRIX: ${{ needs.plan.outputs.matrix }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/workloads/no-kiro-key"
+          python3 -c 'import json, os, sys
+          ids = [i for e in json.loads(os.environ["MATRIX"]) for i in e["ids"].split()]
+          why = "the KIRO_API_KEY secret of the workloads environment is empty or missing"
+          json.dump([{"id": i, "verdict": "SKIP", "reason": why} for i in ids], open(sys.argv[1], "w"), indent=1)' \
+            "$RUNNER_TEMP/workloads/no-kiro-key/results.json"
+
+      - name: Upload the SKIP rows
+        if: ${{ needs.kiro-key.outputs.ready == 'false' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: workloads-macos-${{ env.AGENT }}-${{ github.run_id }}-no-kiro-key
+          path: ${{ runner.temp }}/workloads/no-kiro-key/results.json
+          retention-days: 14
+
+      # One table for every planned cell; a cell whose job ended early is named, not dropped.
+      - name: Summarise the workloads
+        env:
+          MATRIX: ${{ needs.plan.outputs.matrix }}
+        run: python3 test-corpus/bench.py workloads-report "$RUNNER_TEMP/workloads" --agent "$AGENT" --matrix "$MATRIX" >> "$GITHUB_STEP_SUMMARY"
+
+      # A missing secret must not report green SKIP rows every night (docs/design/cli/corpus.md).
+      - name: Fail on a missing Kiro key
+        if: ${{ needs.kiro-key.outputs.ready == 'false' }}
+        run: |
+          echo "::error::the KIRO_API_KEY secret of the workloads environment is empty or missing"
+          exit 1
