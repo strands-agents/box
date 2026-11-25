@@ -1,0 +1,35 @@
+name: Probe Homebrew reach on macOS
+
+on:
+  push:
+    branches: [feature/probe-brew-reach]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: macos-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install box from the tap
+        run: |
+          brew install --cask strands-agents/tap/box
+          echo "BREW_PREFIX=$(brew --prefix)" >> "$GITHUB_ENV"
+          ls -l "$(brew --prefix)/bin/box"
+      - name: Install Rust
+        run: rustup toolchain install --profile minimal
+      - name: Build Box and helpers
+        timeout-minutes: 40
+        run: cargo build --locked -p strands-box-cli -p strands-box -p strands-box-containment --bin box --bin strands-box --bin strands-box-sock-alias --bin strands-box-contain-trampoline
+      - name: Run the probe
+        timeout-minutes: 20
+        run: cargo test --locked -p strands-box-cli --all-features --test brew_probe -- --nocapture --test-threads 1 2>&1 | tee probe-brew.log
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: probe-brew
+          path: probe-brew.log
