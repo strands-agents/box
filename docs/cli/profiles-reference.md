@@ -540,8 +540,8 @@ pack.
 ## Experimental native filesystem policy
 
 With native filesystem policy, your policy also decides the file operations that the agent, its
-tools, and its local MCP servers make directly, on top of their filesystem grants. It needs a
-`box` built with the `native-filesystem-policy` Cargo feature, and:
+tools, and its local MCP servers make directly, on top of their filesystem grants. Released ARM64
+packages include this support, but your profile must enable it. Before enabling it, check these platform requirements:
 
 - On macOS: the [native policy requirements](../user/native-filesystem-policy.md#macos-requirements).
 - On Linux: an ARM64 machine with the required kernel support, and the `CAP_BPF` and
@@ -549,8 +549,8 @@ tools, and its local MCP servers make directly, on top of their filesystem grant
   refuses selection.
 
 See the
-[prerequisites in Box's own guide](../user/native-filesystem-policy.md)
-and the [build instructions](../dev/manual-testing.md#build-the-native-filesystem-policy-experiment).
+[prerequisites in Box's own guide](../user/native-filesystem-policy.md). For a custom build, follow
+the [native build instructions](../dev/manual-testing.md#build-the-native-filesystem-policy-experiment).
 
 These prerequisites apply only when you enable this feature. With it disabled, the
 [standard installation requirements](install.md#requirements) apply.

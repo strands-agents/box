@@ -35,9 +35,9 @@ on:
         default: false
         type: boolean
       native_filesystem_policy:
-        description: 'Compile native policy into the ARM64 packages (experimental dry run)'
+        description: 'Include native policy support in ARM64 packages; profiles opt in'
         required: false
-        default: false
+        default: true
         type: boolean
       sign:
         description: 'Sign, notarize, and check the macOS package'
@@ -434,11 +434,19 @@ jobs:
           retention-days: 7
 
   verify-macos:
-    name: Check the signed macOS package
+    name: Check the signed macOS package (${{ matrix.runner }})
     needs: sign-macos
     if: github.repository_owner == 'strands-agents' && github.ref == 'refs/heads/main'
     cache-mode: none
-    runs-on: ${{ inputs.native_filesystem_policy && 'xcode-27' || 'macos-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ${{ inputs.native_filesystem_policy && 'xcode-27' || 'macos-latest' }}
+            native_checks: true
+          - runner: macos-15
+            native_checks: false
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
       contents: read
@@ -453,7 +461,7 @@ jobs:
           persist-credentials: false
 
       - name: Check the native macOS host
-        if: inputs.native_filesystem_policy == true
+        if: inputs.native_filesystem_policy == true && matrix.native_checks
         run: |
           set -euo pipefail
           os_version=$(sw_vers -productVersion)
@@ -486,7 +494,7 @@ jobs:
           path: native-receipt
 
       - name: Download the unsigned native macOS control
-        if: inputs.native_filesystem_policy == true
+        if: inputs.native_filesystem_policy == true && matrix.native_checks
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cli-${{ inputs.tag }}-aarch64-apple-darwin
@@ -528,8 +536,44 @@ jobs:
             "$package/box" run probe -- -c 'echo signed > proof.txt' < /dev/null
           test "$(cat proof.txt)" = signed
 
+      - name: Check native selection on the macOS baseline
+        if: inputs.native_filesystem_policy == true && !matrix.native_checks
+        run: |
+          set -euo pipefail
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 15
+          baseline_profile="$RUNNER_TEMP/home/.strands/box/profiles/probe/profile.toml"
+          baseline_project="$RUNNER_TEMP/home/baseline"
+          mkdir "$baseline_project"
+          printf '\n[experimental-features]\nnative-filesystem-policy = false\n' >> "$baseline_profile"
+          cd "$baseline_project"
+          env -i HOME="$RUNNER_TEMP/home" PATH=/usr/bin:/bin \
+            "$RUNNER_TEMP/box-package/box" run probe -- -c 'echo baseline-off > proof.txt' < /dev/null
+          test "$(cat proof.txt)" = baseline-off
+          python3 - "$baseline_profile" <<'PYTHON'
+          from pathlib import Path
+          import sys
+          profile = Path(sys.argv[1])
+          source = profile.read_text()
+          assert source.count("native-filesystem-policy = false") == 1
+          profile.write_text(source.replace("native-filesystem-policy = false", "native-filesystem-policy = true"))
+          PYTHON
+          baseline_log="$RUNNER_TEMP/package-verification/baseline-native-on.log"
+          if env -i HOME="$RUNNER_TEMP/home" PATH=/usr/bin:/bin \
+            "$RUNNER_TEMP/box-package/box" run probe -- -c 'echo unexpected > native-started.txt' \
+            < /dev/null > "$baseline_log" 2>&1; then
+            echo "::error::native policy unexpectedly started on macOS 15"
+            exit 1
+          fi
+          test ! -e native-started.txt
+          python3 - "$baseline_log" <<'PYTHON'
+          from pathlib import Path
+          import sys
+          message = " ".join(Path(sys.argv[1]).read_text().split())
+          assert "native filesystem policy requires macOS 27 or later" in message, message
+          PYTHON
+
       - name: Check native filesystem policy in the signed package
-        if: inputs.native_filesystem_policy == true
+        if: inputs.native_filesystem_policy == true && matrix.native_checks
         env:
           NEW_TAG: ${{ inputs.tag }}
           SOURCE_SHA: ${{ inputs.sha }}
@@ -551,7 +595,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: cli-macos-package-verification
+          name: cli-macos-package-verification-${{ matrix.runner }}
           path: ${{ runner.temp }}/package-verification/
           if-no-files-found: warn
 

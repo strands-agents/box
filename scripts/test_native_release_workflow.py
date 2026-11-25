@@ -203,5 +203,99 @@ if sys.argv[1] == "scripts/install-native-macos-package.py":
         self.assertNotIn("install-native-macos-package.py", verification)
 
 
+class NativeBaselineWorkflow(unittest.TestCase):
+    def run_probe(self, behavior):
+        temporary = tempfile.TemporaryDirectory(prefix="native-baseline-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        tools = root / "tools"
+        tools.mkdir()
+        runner = root / "runner"
+        profile = runner / "home/.strands/box/profiles/probe/profile.toml"
+        profile.parent.mkdir(parents=True)
+        profile.write_text('[agent]\ncommand = ["/bin/bash", "--noprofile", "--norc"]\n')
+        (runner / "package-verification").mkdir()
+        binary = runner / "box-package/box"
+        binary.parent.mkdir()
+        calls = root / "calls.jsonl"
+        distribution.executable(tools / "python3", f'#!/bin/sh\nexec {sys.executable} "$@"\n')
+        distribution.executable(tools / "sw_vers", '#!/bin/sh\nprintf "15.7\\n"\n')
+        distribution.executable(binary, f"""#!{sys.executable}
+import json, os, pathlib, subprocess, sys, tomllib
+profile = pathlib.Path(os.environ["HOME"]) / ".strands/box/profiles/probe/profile.toml"
+selected = tomllib.loads(profile.read_text()).get("experimental-features", {{}}).get("native-filesystem-policy")
+with pathlib.Path({str(calls)!r}).open("a") as output:
+    print(json.dumps({{"selection": selected, "argv": sys.argv, "cwd": os.getcwd()}}), file=output)
+behavior = {behavior!r}
+if selected is True:
+    if behavior == "native-success":
+        print("native filesystem policy requires macOS 27 or later", file=sys.stderr)
+        sys.exit(0)
+    if behavior == "native-workload":
+        pathlib.Path("native-started.txt").write_text("unexpected")
+    message = ("unrelated startup error" if behavior == "wrong-refusal" else
+               "native filesystem policy requires macOS 27 or later")
+    print(message, file=sys.stderr)
+    sys.exit(1)
+if behavior == "missing-off-operation":
+    sys.exit(0)
+sys.exit(subprocess.run(["/bin/bash", *sys.argv[4:]], check=False).returncode)
+""")
+        environment = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", RUNNER_TEMP=str(runner))
+        command = release_source.workflow_command("Check native selection on the macOS baseline")
+        result = subprocess.run(["bash", "-c", command], cwd=root, env=environment,
+                                capture_output=True, text=True, timeout=20)
+        observed = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+        return result, observed, runner
+
+    def test_baseline_runs_explicit_off_then_refuses_native_before_the_workload(self):
+        result, calls, runner = self.run_probe("correct")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call["selection"] for call in calls], [False, True])
+        self.assertTrue(all(call["argv"][0] == str(runner / "box-package/box") for call in calls))
+        self.assertEqual((runner / "home/baseline/proof.txt").read_text(), "baseline-off\n")
+        self.assertFalse((runner / "home/baseline/native-started.txt").exists())
+
+    def test_baseline_rejects_missing_operations_and_incorrect_native_refusals(self):
+        for behavior in ("missing-off-operation", "native-success", "native-workload", "wrong-refusal"):
+            with self.subTest(behavior=behavior):
+                result, calls, runner = self.run_probe(behavior)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                expected = [False] if behavior == "missing-off-operation" else [False, True]
+                self.assertEqual([call["selection"] for call in calls], expected)
+                if behavior == "native-workload":
+                    self.assertTrue((runner / "home/baseline/native-started.txt").exists())
+                else:
+                    reason = {"missing-off-operation": "proof.txt", "native-success": "unexpectedly started",
+                              "wrong-refusal": "unrelated startup error"}[behavior]
+                    self.assertIn(reason, result.stdout + result.stderr)
+
+    def test_both_macos_hosts_verify_the_same_signed_package_before_bundling(self):
+        workflow = release_source.CLI_WORKFLOW.read_text()
+        job = workflow.split("\n  verify-macos:\n", 1)[1].split("\n  bundle:\n", 1)[0]
+        self.assertIn("    needs: sign-macos\n", job)
+        self.assertIn("      fail-fast: false\n", job)
+        self.assertIn("          - runner: macos-15\n            native_checks: false\n", job)
+        self.assertIn("          - runner: ${{ inputs.native_filesystem_policy && 'xcode-27' || 'macos-latest' }}\n"
+                      "            native_checks: true\n", job)
+        self.assertIn("    runs-on: ${{ matrix.runner }}\n", job)
+        self.assertEqual(experimental.step_mapping("Download the signed package", "with")["name"],
+                         "cli-macos-signed-package")
+        for step in ("Check the native macOS host", "Download the unsigned native macOS control",
+                     "Check native filesystem policy in the signed package"):
+            self.assertIn("        if: inputs.native_filesystem_policy == true && matrix.native_checks",
+                          experimental.workflow_step(step))
+        self.assertIn("        if: inputs.native_filesystem_policy == true && !matrix.native_checks",
+                      experimental.workflow_step("Check native selection on the macOS baseline"))
+        self.assertEqual(experimental.step_mapping("Retain package verification", "with")["name"],
+                         "cli-macos-package-verification-${{ matrix.runner }}")
+        shared = experimental.workflow_step("Verify the package and run a box with it")
+        self.assertFalse(any(line.startswith("        if:") for line in shared),
+                         "both hosts must verify and execute the signed package")
+        bundle = workflow.split("\n  bundle:\n", 1)[1]
+        bundle_condition = bundle.split("    if: >-\n", 1)[1].split("    runs-on:", 1)[0]
+        self.assertIn("needs.verify-macos.result == 'success'", bundle_condition)
+
+
 if __name__ == "__main__":
     unittest.main()

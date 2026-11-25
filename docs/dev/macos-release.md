@@ -71,8 +71,8 @@ It does not enable the runtime experiment or replace native enforcement tests.
 Unsigned dry runs do not need these signing variables.
 
 The CLI's signing job runs in the same `macos-signing` environment and reads the same variables.
-Its experimental native-policy dry run uses the same `CD_SIGNER_PROFILE_NAME` for the shared `com.amazon.strands.box` identity.
-Its ordinary package signs the programs without embedding a profile.
+Its default native-policy package uses the same `CD_SIGNER_PROFILE_NAME` for the shared `com.amazon.strands.box` identity.
+With `native_filesystem_policy=false`, the CLI signs the programs without embedding a profile.
 The [CLI macOS release guide](macos-release-cli.md#the-macos-signing-variables) describes native CLI signing and verification.
 Account-specific values and access requests belong in the team's internal runbook.
 

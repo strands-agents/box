@@ -118,7 +118,8 @@ with (root / "cargo-sdkroots.jsonl").open("a") as output:
     step = "Build Box (release)" if target == TARGETS[0] else "Build Linux against glibc 2.34"
     environment = workflow_environment(step, {
         "matrix.target.triple": target,
-        "inputs.native_filesystem_policy": native if native is not None else "false",
+        "inputs.native_filesystem_policy": native if native is not None else caller_source.workflow_input_default(
+            "native_filesystem_policy", release_source.CLI_WORKFLOW),
     })
     environment.pop("SDKROOT", None)
     if explicit_old:
@@ -146,7 +147,8 @@ class ReleaseModeTests(unittest.TestCase):
         output = self.fixture.root / "output"
         output.write_text("")
         environment = workflow_environment("Resolve SHA, find previous tag, validate version", {
-            "inputs.native_filesystem_policy": native if native is not None else "false",
+            "inputs.native_filesystem_policy": native if native is not None else caller_source.workflow_input_default(
+                "native_filesystem_policy"),
             "inputs.dry_run": dry_run, "inputs.version": version,
             "inputs.publish_linux_x86": "true",
             "inputs.sha": "", "github.sha": self.fixture.candidate,
@@ -156,21 +158,21 @@ class ReleaseModeTests(unittest.TestCase):
                                 capture_output=True, text=True, timeout=20)
         return result, output.read_text()
 
-    def test_native_selection_refuses_every_published_channel(self):
+    def test_native_selection_accepts_every_published_channel(self):
         for version in ("0.1.1", "0.1.1-preview.1", "0.1.1-linux-preview.1"):
-            with self.subTest(version=version):
-                result, output = self.scan_source("true", "false", version=version)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("native_filesystem_policy requires dry_run=true", result.stdout)
-                self.assertEqual(output, "")
+            for native in (None, "true", "false"):
+                with self.subTest(version=version, native=native):
+                    result, output = self.scan_source(native, "false", version=version)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(f"release_sha={self.fixture.main}\n", output)
+                    self.assertIn(f"new_tag=v{version}\n", output)
 
-    def test_default_false_and_native_dry_run_preserve_source_selection(self):
-        for native, dry_run in ((None, "false"), ("false", "false"), ("true", "true")):
-            with self.subTest(native=native, dry_run=dry_run):
-                result, output = self.scan_source(native, dry_run)
+    def test_native_selection_preserves_dry_run_source_selection(self):
+        for native in (None, "false", "true"):
+            with self.subTest(native=native):
+                result, output = self.scan_source(native, "true")
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                expected = self.fixture.candidate if dry_run == "true" else self.fixture.main
-                self.assertIn(f"release_sha={expected}\n", output)
+                self.assertIn(f"release_sha={self.fixture.candidate}\n", output)
 
     def test_unknown_native_selection_is_rejected(self):
         result, output = self.scan_source("TRUE", "true")
@@ -178,15 +180,13 @@ class ReleaseModeTests(unittest.TestCase):
         self.assertIn("native_filesystem_policy must be true or false", result.stdout)
         self.assertEqual(output, "")
 
-    def test_workflow_input_is_explicit_and_default_off(self):
+    def test_workflow_input_defaults_to_compiled_support(self):
         for path in (release_source.WORKFLOW, release_source.CLI_WORKFLOW):
             with self.subTest(workflow=path.name):
                 workflow = path.read_text()
                 self.assertIn("      native_filesystem_policy:\n", workflow)
-                field = workflow.split("      native_filesystem_policy:\n", 1)[1].split("\n      #", 1)[0]
-                field = field.split("\n      sign", 1)[0]
-                self.assertIn("        default: false\n", field)
-                self.assertIn("        type: boolean", field.splitlines())
+                self.assertEqual(caller_source.workflow_input_default("native_filesystem_policy", path), "true")
+                self.assertRegex(workflow, r"(?m)^      native_filesystem_policy:\n(?:        .*\n)*        type: boolean\n")
                 self.assertIn("          NATIVE_FILESYSTEM_POLICY: ${{ inputs.native_filesystem_policy }}", workflow)
         caller = release_source.WORKFLOW.read_text()
         self.assertIn("      native_filesystem_policy: ${{ inputs.native_filesystem_policy }}\n", caller)
@@ -204,7 +204,7 @@ class BuildFeatureTests(unittest.TestCase):
                     self.assertEqual(len(commands), 1)
                     args = commands[0]
                     self.assertNotIn("--all-features", args)
-                    expected = native == "true" and target != TARGETS[2]
+                    expected = native != "false" and target != TARGETS[2]
                     self.assertEqual("--features" in args, expected, args)
                     self.assertEqual(FEATURE in args, expected, args)
                     if expected:

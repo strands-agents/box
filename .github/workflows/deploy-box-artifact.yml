@@ -70,10 +70,10 @@ on:
         default: false
         type: boolean
       native_filesystem_policy:
-        # Compile native policy into the CLI's ARM64 packages. Dry run only.
-        description: 'Experimental native filesystem policy (dry run only; ARM64)'
+        # Compile support into ARM64 packages; profiles still opt into enforcement.
+        description: 'Include experimental native filesystem policy support (ARM64)'
         required: false
-        default: false
+        default: true
         type: boolean
       skip_tests:
         # Fork testing only: skip the test and lint job so the release pipeline
@@ -129,10 +129,6 @@ jobs:
             true|false) ;;
             *) echo "::error::native_filesystem_policy must be true or false"; exit 1 ;;
           esac
-          if [ "${NATIVE_FILESYSTEM_POLICY:-false}" = true ] && [ "$DRY_RUN" != true ]; then
-            echo "::error::native_filesystem_policy requires dry_run=true"
-            exit 1
-          fi
 
           # 1. Derive the release channel from a strict version format. A pre-release
           #    (-preview.N) and a Linux preview (-linux-preview.N) publish as GitHub

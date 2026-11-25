@@ -5,9 +5,10 @@ same release as Box Core. It calls the reusable `CLI release` workflow
 (`.github/workflows/cli-release.yml`), which builds the CLI archives for Apple Silicon macOS,
 ARM64 Linux, and x86_64 Linux. Each archive contains `box`, both Box Core helpers, shipped
 resources, and `release.json`. The `sign-macos` job of `CLI release` signs with the configured Apple
-team's Developer ID through the signing service, and notarizes the package with Apple. Ordinary
-packages contain three signed programs. Experimental native-policy packages contain a signed app
-bundle that requests permission to authorize file operations. A real release always signs. A dry
+team's Developer ID through the signing service, and notarizes the package with Apple. Default
+packages contain native filesystem policy support in a signed app bundle that requests permission
+to authorize file operations. Packages built with `native_filesystem_policy=false` contain three
+signed programs. Profiles still opt into native enforcement. A real release always signs. A dry
 run signs only when you set `sign_macos=true`.
 
 `CLI release` takes the version, the tag, the commit, `native_filesystem_policy`, `sign`, and
@@ -32,11 +33,10 @@ A dry run that does not sign inspects the unsigned archive.
 
 ## Build experimental native filesystem policy packages
 
-Set `native_filesystem_policy=true` in `Release Box` with `dry_run=true` to compile native
-filesystem policy into the Apple Silicon macOS and ARM64 Linux packages. The option defaults to
-`false`. The workflow rejects it when `dry_run=false`, including prereleases, before building or
-publishing. The x86_64 Linux job keeps its baseline build, so this path does not produce a
-native-enabled x86_64 package.
+`Release Box` and `CLI release` default `native_filesystem_policy` to `true`. Dry runs,
+prereleases, and stable releases compile native filesystem policy support into the Apple Silicon
+macOS and ARM64 Linux packages. Set the build input to `false` to produce packages without that
+support. The x86_64 Linux job keeps its baseline build and does not include native policy support.
 
 The native macOS build uses the `xcode-27` runner. Both the workflow and the local package script
 require macOS software development kit (SDK) version 27 or later before they build. They resolve
@@ -51,11 +51,14 @@ not enable policy enforcement for every run. Each `profile.toml` must still sele
 [`native-filesystem-policy`](../cli/profiles-reference.md#experimental-native-filesystem-policy),
 and its resolved Core version and execution environment must support that selection. Package
 inspection and the Linux container smoke check validate baseline packaging, not native policy
-enforcement. The signed native macOS dry run also checks actual file operations, policy records,
+enforcement. Every signed native macOS build also checks actual file operations, policy records,
 and an unsigned control. These checks fail if the host cannot use Endpoint Security, Apple's API
-for authorizing file operations. Signing and notarization alone do not establish that permission.
+for authorizing file operations. Signing and notarization alone do not establish that permission. The same signed archive also runs
+on macOS 15 before it can enter the release bundle. That check runs the CLI with native policy
+absent and explicitly disabled, then verifies that enabling it refuses startup before the workload
+runs. Both macOS verification jobs must pass; the minimum for ordinary Box use stays unchanged.
 
-Each opted-in build uploads `cli-native-filesystem-policy-<target>`. Its
+Each build with native support uploads `cli-native-filesystem-policy-<target>`. Its
 `native-filesystem-policy.json` records the explicit Cargo feature flags, source revisions, target,
 and SHA-256 hash of the unsigned build archive. The macOS record also includes
 `macos_sdk_version`, the SDK version checked and selected for the build. The x86_64 record has an
@@ -129,7 +132,7 @@ that `curl` downloads does not get the quarantine attribute, so macOS does not c
 
 ### Signed experimental native package
 
-A signed native-policy dry run uses this layout:
+A signed native-policy package uses this layout:
 
 ```text
 box                                      # Launcher
@@ -214,7 +217,7 @@ shares Box Core's identity.
 
 `sign-macos` and `verify-macos` do not read or write the Actions cache.
 
-### Additional checks for a native macOS dry run
+### Additional checks for a native macOS package
 
 Before calling the signing service, `sign-macos` checks the unsigned archive against its build
 record: source, version, target, native Cargo feature, and SHA-256 hash must agree. It signs the
@@ -223,7 +226,7 @@ entitlement. It verifies the profile and signatures, notarizes and staples the a
 the fixed launcher and aliases with it. The receipt binds both archive hashes, source revisions,
 features, and package contents to that run.
 
-For a native dry run, `verify-macos` uses `xcode-27` and requires macOS and SDK version 27 or later.
+For a native package, `verify-macos` uses `xcode-27` and requires macOS and SDK version 27 or later.
 It starts the package directly as the runner user, matching the Core native verification path.
 `verify-macos` receives the signed archive and receipt separately. It compares them with the
 workflow's selected source and checks that the extracted files and links match the archive.
@@ -290,23 +293,26 @@ telemetry without failing the package check.
 The CLI's `sign-macos` job uses the shared environment described in
 [Configure access](macos-release.md#configure-access).
 
-The signing script reads `CD_SIGNER_PROFILE_NAME` for an experimental native-policy dry run.
+The signing script reads `CD_SIGNER_PROFILE_NAME` for a native-policy package.
 The workflow passes the selected value to verification through its `cli_profile_name` output.
-Ordinary CLI packages do not embed a provisioning profile.
+CLI packages built with `native_filesystem_policy=false` do not embed a provisioning profile.
 
 For manual native signing or verification, replace `CD_SIGNER_CLI_PROFILE_NAME` with
 `CD_SIGNER_PROFILE_NAME` in the process environment. The script no longer reads the legacy variable.
 
 ## Keep the evidence
 
-Each signed run keeps two artifacts:
+Each signed run keeps signing evidence and separate verification evidence for both macOS hosts:
 
 - `cli-macos-signing-evidence`: the signing request and result, the submission to Apple and its log,
   and `receipt.json`, which records the source commit, the package hash, and the submission ID.
-- `cli-macos-package-verification`: the signature and ticket checks of the unpacked package, plus
-  native runtime commands, records, and results for a selected native dry run.
+- `cli-macos-package-verification-macos-15`: signature and ticket checks, plus the native-on startup
+  refusal log when the package includes native support.
+- `cli-macos-package-verification-xcode-27`: signature and ticket checks, native operation commands,
+  records, and results for a package with native support. Builds without native support use
+  `cli-macos-package-verification-macos-latest` instead.
 
-A native run also transfers `cli-macos-native-receipt` to the verification job. That job checks the
+A native run also transfers `cli-macos-native-receipt` to both verification jobs. Each checks the
 receipt against the signed archive and the expected source before running the package.
 
 ## Run the script on a Mac

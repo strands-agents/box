@@ -144,9 +144,9 @@ binary. `box` does not download Box Core. For development, `just build` builds t
 pack names through `${{ pack }}`. The agent packs (`claude` and `codex`), the model providers,
 and `base` are there. `box` finds `resources/` at
 `$BOX_RESOURCES`, else from its installed package, else, in a debug build, from the source tree.
-An ordinary package puts `resources/` beside the binary. A signed experimental native macOS
-package puts it in `Box.app/Contents/Resources`, outside the executable directory that Apple
-checks for nested code. `resources::root` recognizes that app layout. The helpers remain beside
+Linux packages and macOS builds without native support put `resources/` beside the binary. The
+default signed macOS package puts it in `Box.app/Contents/Resources`, outside the executable
+directory that Apple checks for nested code. `resources::root` recognizes that app layout. The helpers remain beside
 the real binary in `Contents/MacOS`.
 
 **Rejected.** Embed them in the binary: an operator then cannot read one, and an agent cannot load
