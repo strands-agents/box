@@ -1588,8 +1588,8 @@ agent keeps between runs, such as its configuration directory and its temporary 
 the workspace: tried first, and each directory that a run started in got new folders.
 `<workspace>/.claude-config` and `<workspace>/.tmp` failed the same way.
 
-**Cost.** A tool pack's `CARGO_HOME`, `CARGO_TARGET_DIR`, or `npm_config_cache` are paths in
-the workspace, so that tool writes there. A tool's `TMPDIR`, which `box` sets, is its own
+**Cost.** A tool pack's cache or build output, such as `CARGO_TARGET_DIR` or `@box/node`'s
+`npm_config_cache`, can be a path in the workspace, so that tool writes there. A tool's `TMPDIR`, which `box` sets, is its own
 folder `tool-tmp/<tool>` in the run's directory, beside the box folder, emptied when the run
 starts. So it adds nothing to the workspace, and neither the agent, another tool, nor another run
 can read or change a tool's temporary files. The agent and the tools still share the workspace.

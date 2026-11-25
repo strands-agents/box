@@ -125,8 +125,7 @@ requested scope. It must compare meaning as well as style.
 
 ### Step 10: Link the page
 
-Add one row for a new page to the `README.md` of its guide. Remove the page from the "still to
-come" list in `docs/design/README.md` if it's there.
+Add one row for a new page to the `README.md` of its guide.
 
 ## Output
 

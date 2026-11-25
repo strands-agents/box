@@ -14,7 +14,7 @@ async-trait = "0.1"
 bytes = "1"
 libc = "0.2"
 strands-shell = { git = "https://github.com/strands-agents/shell", rev = "754a534e49f54c9a02e76331280a10fd545fa2c3", default-features = false }
-tokio = { version = "1", features = ["io-util", "rt", "sync"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync"] }
 # The parsed host the SSRF floor reads, as an HTTP client parses it.
 url = "2"
 

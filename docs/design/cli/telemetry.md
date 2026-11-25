@@ -123,20 +123,23 @@ reverse the launch result. An error during Core's initial preparation can leave 
 records.
 A nonzero Core exit does not establish a preparation failure.
 
-`startup_latency_ms` measures from launch preparation to the source `timeUnixNano` of that
-record. Its wall-clock origin follows optional profile creation on every run, before guide
+`startup_latency_ms` measures from launch preparation to the source `timeUnixNano` of the
+current invocation's `workload_started` control record with outcome `ok`. Core writes that record
+once it has installed the policy and built the sandbox, and the workload's `exec` succeeded inside
+it. Its wall-clock origin follows optional profile creation on every run, before guide
 refresh and run preparation. It excludes profile creation and its prompts, and includes
-resolution, compilation, storage preparation, and Core startup. It ends at Core's startup
-milestone, before the agent is ready. Export and reader delays do not affect it. It rounds down to
-milliseconds and saturates at the schema's maximum integer. A missing, invalid, or pre-start
-timestamp gives `null` without reversing confirmed launch evidence. Wall-clock changes can
-affect this measurement.
+resolution, compilation, storage preparation, and all of Core's setup. It ends when the workload
+launches, before the agent's own startup. Export and reader delays do not affect it. It rounds
+down to milliseconds and saturates at the schema's maximum integer. A run whose workload never
+starts gives `null`, and so does a missing, invalid, or pre-start timestamp. Neither reverses
+confirmed launch evidence. Wall-clock changes can affect this measurement.
 
 After command and Box-home validation, the executable captures the monotonic start at entry
 to `box run` and the wall-clock startup origin after optional profile creation. After
 preparation, it creates a `Session` with one invocation and the collected
 context. A preparation failure's run event goes out with shutdown, without waiting for launch
-evidence. Successful preparation waits for that evidence.
+evidence. Successful preparation waits for `workload_started` before it sends the run event. A
+run whose workload never starts sends it with shutdown.
 If observation ends without that evidence, the session emits `null` for all three run fields.
 Preparation failures also give `startup_latency_ms: null`. Every field is required; unavailable
 values serialize as `null`.
@@ -156,7 +159,8 @@ new record. The reader retains partial lines appended after the boundary until t
 
 Lifecycle observation accepts only `strands-box.control` logs with the Core service and source
 attributes.
-It reads `box_started` with outcome `ok` and `box_stopped` with outcome `ok` or `refused`.
+It reads `box_started` and `workload_started` with outcome `ok`, and `box_stopped` with outcome
+`ok` or `refused`.
 Old records and relayed agent records cannot supply evidence for this invocation. Missing or
 unreadable records leave the corresponding observations unknown.
 

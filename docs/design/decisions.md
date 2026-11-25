@@ -681,8 +681,8 @@ reaches stderr, and `run` exits 0, so the operator sees no failure. Granting `pr
 `/bin/sh` would make it work, but the commands the hook issues would then raise no decision, so an
 authored `forbid` would never see them. Once rewritten, each hook command reaches the mediated Shell
 and raises `shell:exec`, and each file it touches raises its own `fs:*`. The alias forwards a hook's finite stdin to the Shell, so a hook reads its payload with a Shell
-command such as `cat` or `jq`. A program that the Shell starts in its own sandbox still reads no
-stdin. Plugin hooks remain broken because most of them exec a script.
+command such as `cat` or `jq`, or with a program that the Shell starts in its own sandbox. Plugin
+hooks remain broken because most of them exec a script.
 
 ## Policy
 
@@ -719,12 +719,17 @@ caller would have to handle.
 `would_deny` before treating it as a permit the policy gave.
 
 <a id="no-connection-is-opaque-to-the-boundary"></a>
-### The gateway terminates every connection, so no tunnel is opaque
+### The gateway terminates every connection, and copies bytes only for a decided WebSocket
 
 An interceptor must see each request and each response effect, so the gateway always terminates TLS.
-Box no longer supports opaque tunnelling, splicing, or raw byte copying. A connection whose
-plaintext the boundary cannot read cannot raise `http:request` and would bypass that authorization.
-The box cannot reach a plaintext or non-HTTP upstream over `CONNECT`.
+Box does not support opaque tunnelling or splicing. A connection whose plaintext the boundary cannot
+read cannot raise `http:request` and would bypass that authorization. The one stream that the gateway
+copies as raw bytes is a WebSocket, after `websocket:connect` permits its handshake and the server
+answers `101`. Policy decides nothing after the `101`, and the gateway reads no frame, so it redacts
+no credential in a message. A decision for each message lost, because it cost policy time on every
+message and no customer asked for a rule on single messages. The cost is
+that a permit on a handshake admits the whole WebSocket, so the box can reach a non-HTTP stream
+inside one. Over `CONNECT`, the box cannot reach a plaintext or non-HTTP upstream in any other way.
 
 <a id="the-ssrf-and-metadata-floor-is-compiled-beneath-policy"></a>
 ### Cloud-metadata protection is policy, and the gateway holds no destination list
@@ -2830,14 +2835,16 @@ prints the count once, on one stderr line, when the run ends. Each failed export
 line, with its cause, only when `STRANDS_BOX_TELEMETRY_DEBUG` is set, because a vendor that is down
 would print a line on each export interval. A relayed agent span does not take part in the shutdown
 drain, so a shutdown can lose one in flight; a refusal cannot be lost that way. A record that the SDK's own
-queue refuses is not counted. Every exit runs the same drain. A box that fails before its workload
+queue refuses is counted and reported, but not kept. Every exit runs the same drain. A box that fails before its workload
 starts therefore still records its stop.
 
 <a id="the-effective-decision-is-the-canonical-record"></a>
 ### The effective decision from the enforcement point is the canonical record
 
 The enforcement point submits one record after all policy gates and deny-only floors finish. It
-records a permit before starting the effect, or a denial before returning the refusal. The box does
+records a permit before starting the effect, or a denial before returning the refusal; in
+[log-only mode](#log-only-mode-turns-only-a-recorded-policy-denial-into-an-allow) a policy denial
+it let through is recorded as a denial, marked unenforced, before the effect starts. The box does
 not record the raw engine verdict, because a floor can refuse what policy permitted and a bootstrap
 pass can permit what policy denied. The record names every policy that determined it, in
 `strands.box.policy.determining.ids`, and a cause in `strands.box.policy.cause`, one of `permitted`,

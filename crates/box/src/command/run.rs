@@ -206,6 +206,25 @@ fn write_left_out_tools(
     Ok(())
 }
 
+/// Disclose that a log-only box lets its policy's denials through, and what that exposes.
+fn write_log_only_disclosure(
+    enforcement: crate::record::config::Enforcement,
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    if enforcement.is_log_only() {
+        writeln!(
+            output,
+            "strands-box: the policy runs in log-only mode: each denial is recorded with \
+             enforced = false and the action goes ahead. The policy protects nothing in this run: \
+             the Shell and Monty can read the operator's home, credential files, and cloud \
+             metadata, and the gateway attaches each bound credential to a request the policy \
+             would deny. The sandbox, the reachable-paths floor, and credential isolation still \
+             apply. Trial a policy only where that is acceptable."
+        )?;
+    }
+    Ok(())
+}
+
 /// Disclose each telemetry target that receives MCP tool-call values in clear text.
 fn write_tool_call_disclosures(
     record: &Record,
@@ -369,16 +388,25 @@ async fn hosted(
     let sources: Vec<Policy> = locked.policy.into_iter().collect();
     let subject = telemetry::policy_subject(&sources);
     let operator = crate::record::config::policy_operator()?;
-    let policy = match HostedBox::prepare_policy(&locked.root, &operator, sources, locked.grammars)
-    {
+    let enforcement = locked.record.enforcement;
+    let policy = match HostedBox::prepare_policy(
+        &locked.root,
+        &operator,
+        sources,
+        locked.grammars,
+        enforcement,
+    ) {
         Ok(engine) => {
             for warning in engine.warnings() {
                 eprintln!("strands-box: warning: {warning}");
             }
-            collector.control(telemetry::ControlRecord::completed(
-                telemetry::ControlOperation::PolicyInstalled,
-                &subject,
-            ));
+            collector.control(
+                telemetry::ControlRecord::completed(
+                    telemetry::ControlOperation::PolicyInstalled,
+                    &subject,
+                )
+                .enforcing(enforcement.as_str()),
+            );
             engine
         }
         Err(refusal) => {
@@ -447,7 +475,10 @@ async fn hosted(
 
     write_tool_call_disclosures(&locked.record, std::io::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;
+    write_log_only_disclosure(enforcement, std::io::stderr().lock())
+        .map_err(|source| ConfigError::Disclosure { source })?;
     eprintln!("strands-box: starting workload");
+    let control = Arc::clone(&collector);
     let hosted = HostedBox::open(
         &locked.root,
         &locked.record,
@@ -521,7 +552,23 @@ async fn hosted(
         &site,
     )?;
     eprintln!("{}", boundary.disclosure());
-    let contained = Contained::spawn(boundary, &locked.root, hosted, terminal, signals).await?;
+    // The record waits for the trampoline's `exec` to succeed, so a containment or `exec` failure
+    // after the spawn writes none.
+    let name = locked.root.name().to_string();
+    let contained = Contained::spawn(
+        boundary,
+        &locked.root,
+        hosted,
+        terminal,
+        signals,
+        move || {
+            control.control(telemetry::ControlRecord::completed(
+                telemetry::ControlOperation::WorkloadStarted,
+                &name,
+            ));
+        },
+    )
+    .await?;
     contained.wait().await
 }
 
@@ -681,6 +728,7 @@ mod tests {
 
     fn record_with(agent: Option<ProcessSpec>, tools: BTreeMap<String, ProcessSpec>) -> Record {
         Record {
+            enforcement: Default::default(),
             version: RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
@@ -739,6 +787,26 @@ mod tests {
             "strands-box: [tool.aws-suite]: exposes ~/.aws (read)\n\
              strands-box: [tool.aws-suite]: exposes ~/.aws/sso/cache (write)\n"
         );
+    }
+
+    /// Only a log-only box is disclosed, and the line names what the trial exposes.
+    #[test]
+    fn startup_discloses_log_only_mode_and_what_it_exposes() {
+        use crate::record::config::Enforcement;
+        let mut enforcing = Vec::new();
+        write_log_only_disclosure(Enforcement::Enforce, &mut enforcing).expect("writes");
+        assert!(enforcing.is_empty());
+        let mut trial = Vec::new();
+        write_log_only_disclosure(Enforcement::LogOnly, &mut trial).expect("writes");
+        let text = String::from_utf8(trial).expect("UTF-8");
+        for named in [
+            "log-only mode",
+            "credential",
+            "Shell and Monty",
+            "goes ahead",
+        ] {
+            assert!(text.contains(named), "{named}: {text}");
+        }
     }
 
     /// Only a target that names `mcp_tool_calls` is disclosed, because only it receives the values.

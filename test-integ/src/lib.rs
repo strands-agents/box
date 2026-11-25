@@ -1757,6 +1757,9 @@ mod tests {
             reason: String::new(),
             determining_ids: Vec::new(),
             at_unix_nano: 0,
+            enforced: true,
+            first_flip: false,
+            would_deny: Vec::new(),
         }
     }
 

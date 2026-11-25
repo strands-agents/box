@@ -1227,12 +1227,12 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
   metadata grant already accepted.
   `an_ungranted_path_outside_the_operator_home_still_answers_existence` is what stops it being
   described as closed.
-- **`cargo test --workspace` stops at the first failing binary, and `scripts/test-all.sh` passes no
-  `--no-fail-fast`.** So a pre-existing failure in `strands-box` hides every later crate, containment
-  included. Always add the flag. Three failures are pre-existing, each confirmed by reverting this
-  crate to its base commit: `box_shell.rs::the_shims_shell_has_no_network_path` (also flaky),
-  `mcp_schema_generation.rs::non_utf8_home_and_workspace_paths_keep_their_approved_identity`, and
-  `python_handler_e2e.rs::a_typescript_handler_is_not_refused_for_its_extension`, which needs Node 22.
+- **`cargo test --workspace` stops at the first failing binary unless it gets `--no-fail-fast`, which
+  `scripts/test-all.sh` passes.** Without the flag, a pre-existing failure in `strands-box` hides every
+  later crate, containment included. Always add the flag. Two failures are pre-existing, each
+  confirmed by reverting this crate to its base commit:
+  `box_shell.rs::the_shims_shell_has_no_network_path` (also flaky) and
+  `mcp_schema_generation.rs::non_utf8_home_and_workspace_paths_keep_their_approved_identity`.
 - **Write-xor-exec's third clause is not met on macOS, and the reason is the workload's own
   program.** The rule counts three things as executing: running a file, loading it as a library, and
   *running it through a permitted interpreter*. The first two are closed and measured — the exec

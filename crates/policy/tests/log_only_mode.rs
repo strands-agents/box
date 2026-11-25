@@ -345,3 +345,42 @@ fn a_reload_to_no_policy_stops_letting_denials_through() {
     let (after, _) = engine.decide(&governed, &Principal::agent(), &connect);
     assert!(!after.is_allow(), "{after:?}");
 }
+
+/// An enforcing engine reopened on a trial's history inherits it: what the trial let through really
+/// happened, so a later rule over the past counts it. A fresh history is the paired control.
+#[test]
+fn an_enforcing_run_inherits_the_history_a_trial_recorded() {
+    const GATED: &str = r#"
+@id("no-verify")
+forbid(principal, action == desk::Action::"verify_identity", resource);
+@id("reset-after-verify")
+forbid(principal, action == desk::Action::"reset_password", resource)
+unless temporal { formerly within 1h ( desk::Action::"verify_identity"::response{
+  output.reply: "result" } ) };
+"#;
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+    let trial = desk(GATED, &history, true);
+    let verify = call(&trial, "verify_identity", json!({ "user_name": "u" }));
+    assert_eq!(
+        verify.would_deny(),
+        Some(&DenyReason::Forbidden),
+        "{verify:?}"
+    );
+    drop(trial);
+
+    let enforcing = desk(GATED, &history, false);
+    let reset = call(&enforcing, "reset_password", json!({ "user_name": "u" }));
+    assert!(
+        reset.is_allow() && reset.would_deny().is_none(),
+        "the trial's verification counts for the enforcing run: {reset:?}"
+    );
+
+    let fresh = tempfile::tempdir().expect("a fresh history");
+    let control = desk(GATED, &fresh.path().join("dogwood.redb"), false);
+    let reset = call(&control, "reset_password", json!({ "user_name": "u" }));
+    assert!(
+        !reset.is_allow(),
+        "with no trial behind it, the reset is denied: {reset:?}"
+    );
+}

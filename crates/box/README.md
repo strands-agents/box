@@ -15,8 +15,8 @@ state, and one selects the workload:
 
 | Input | Kind | Spelled | What it decides |
 |---|---|---|---|
-| Policy | authority | `policy` in the config file | Which effects this box may cause, decided per request. Scoped to this box |
-| Credentials | authority | `[egress.<name>]` in the config file | Which secret is attached once a request is permitted |
+| Policy | authority | `policy` in the config file | Which effects this box may cause, decided per request. Scoped to this box. In log-only mode a denial is recorded and the effect goes ahead |
+| Credentials | authority | `[egress.<name>]` in the config file | Which secret is attached once a request is permitted, which in log-only mode includes a request the policy would deny |
 | Identity and state | state | `name` in the config file, and `RunOptions::box_id` for a library caller | Which box this is, and where it keeps its persistent state |
 | Workload | selection | `[agent] command` in the config file, and `run`'s trailing argv | Which process runs |
 
@@ -250,7 +250,7 @@ reply's `output.status`, so a temporal rule can count server errors; a rule cann
 reply's size.
 
 **Four** enforcement points read the same authority, and each sees the actions it can enforce. The
-egress gateway decides `net:connect` and `http:request`. The Strands Shell decides `shell:exec`,
+egress gateway decides `net:connect`, `http:request`, and `websocket:connect`. The Strands Shell decides `shell:exec`,
 `shell:spawn`, and `fs:*`. The Python interpreter decides `fs:*`. The local MCP broker decides
 `mcp:call` and generated tool refinements. All four are adapters over the one `PolicyEngine` the
 trusted `run` process holds for that box, so they share one decision history.
