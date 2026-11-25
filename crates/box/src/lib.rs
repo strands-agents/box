@@ -25,10 +25,14 @@ use command::cli::{Cli, Command, PolicyCommand};
 
 pub use policy::{Finding, Location, Policy, PolicyCheck, RuleRef};
 pub use run::decisions::{
-    PolicyDecision, PolicyDecisionReceiver, PolicyDecisionSender, policy_decisions,
+    DecisionEnforcement, PolicyDecision, PolicyDecisionReceiver, PolicyDecisionSender,
+    policy_decisions,
 };
 
 static STARTED: AtomicBool = AtomicBool::new(false);
+
+/// The voice of every message this crate writes with `diagnostics::diag!`.
+const DIAGNOSTIC_SOURCE: ::diagnostics::Source = ::diagnostics::Source::StrandsBox;
 
 /// Optional terminal attachment and host initialization for one run.
 #[derive(Default)]
@@ -53,11 +57,14 @@ pub fn run(config: PathBuf, workload: Vec<OsString>, options: RunOptions<'_>) ->
         let error = error::ConfigError::SuppliedIdentity {
             found: found.to_string(),
         };
-        eprintln!("strands-box: error: {error}");
+        ::diagnostics::diag!({ error.code() }, "{error}");
         return ExitCode::FAILURE;
     }
     if STARTED.swap(true, Ordering::SeqCst) {
-        eprintln!("strands-box: refusing to run: this process already attempted to run a box");
+        ::diagnostics::diag!(
+            B0106,
+            "refusing to run: this process already attempted to run a box"
+        );
         return ExitCode::FAILURE;
     }
 

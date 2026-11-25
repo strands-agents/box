@@ -33,9 +33,9 @@ scheme determines how Box reads and uses the secret.
 | The secret comes from | The variable `NAME` in the environment of `box run` | The AWS profile `PROFILE`, resolved through the SDK (static keys, `credential_process`, assume-role, or web identity) | The AWS SDK default credential provider chain (the host's ambient identity) |
 | Box reads it | Once, at startup | On each request | On each request |
 | A process in the box gets | A placeholder in `NAME` | Placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` | The same placeholder AWS keys |
-| The gateway | Swaps the placeholder for the secret | Signs the request with SigV4 | Signs with SigV4, and warns that it used the ambient identity |
+| The gateway | Swaps the placeholder for the secret | Signs the request with SigV4 | Signs with SigV4, with a [warning](../user/egress.md#credential-sources) that it uses the ambient identity |
 | Where the secret goes | A header, HTTP basic auth, or a query parameter | The SigV4 headers | The SigV4 headers |
-| The response | Every copy of the secret is redacted | Not scanned | Not scanned |
+| The response | Every copy of the secret in an HTTP reply, and in a WebSocket's `101`, is redacted | Not scanned | Not scanned |
 | The usual failure | A request without the placeholder gets a 403 | The host names no AWS service and region | The chain resolves no credentials |
 
 An HTTP MCP server, `[mcp.<name>] type = "http"`, takes the same `secret` keys. Its credential uses
@@ -290,7 +290,9 @@ reads that profile's static keys, `credential_process`, assume-role, or web iden
 ambient `AWS_*` keys or instance metadata, and a missing profile is refused rather than falling
 through to the ambient identity. The worker owns a current-thread runtime and a refresh
 cache keyed by profile: it serves a cached credential while valid, resolves again near expiry, and
-on a failed refresh serves a still-valid cached one rather than dropping it. Each resolve is bounded
+on a failed refresh serves a still-valid cached one rather than dropping it. When the host was
+restored from a snapshot or cloned since a resolve, the cache drops that credential and resolves
+again, because the old one belongs to the identity of the machine that took the snapshot. Each resolve is bounded
 by a timeout, so a stuck `credential_process` helper cannot wedge the worker. The identity each form
 signs with, the SSO exclusion, and the writable-`~/.aws` cost are stated in
 [the decision](./decisions.md#a-bare-aws-resolves-the-default-credential-chain); the operator view is
@@ -344,7 +346,7 @@ instead. With `always`, a plain `git ls-remote` works.
 | No process in a box can read a real `env://` or `aws://` secret | A secret an operator writes into an `env` table |
 | A secret goes only to its route's destinations | A credential file a filesystem grant exposes, such as `~/.aws/credentials`. See [containment](./containment.md) |
 | A secret goes only over TLS, except to `host.box.internal` | Keeping one route from one process in the box. Every process gets every route. |
-| A copy of an `env://` secret in a response is redacted | A server that returns the secret in a form the scrub can't match, for example re-encoded |
+| A copy of an `env://` secret in a response is redacted | A server that returns the secret in a form the scrub can't match, for example re-encoded, or inside a [WebSocket](./egress.md#websocket) message after its `101` |
 | A request goes out only if policy permits it | What a permitted request does with the credential at the server |
 
 ## Failures

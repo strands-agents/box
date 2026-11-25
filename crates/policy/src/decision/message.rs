@@ -18,6 +18,11 @@ impl fmt::Display for Decision {
 
 fn describe(decision: &Decision, message: &mut String) -> Option<()> {
     let (verb, resource) = match decision {
+        Decision::Allow {
+            resource,
+            would_deny: Some(_),
+            ..
+        } => ("would have denied", resource),
         Decision::Allow { resource, .. } => ("permitted", resource),
         Decision::Deny { resource, .. } => ("denied", resource),
     };

@@ -648,6 +648,7 @@ mod tests {
 
     fn record(path: &Path) -> Record {
         Record {
+            enforcement: Default::default(),
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
@@ -1982,6 +1983,7 @@ mod left_out_tests {
 
     fn with_tools(tools: Vec<(&str, ProcessSpec)>) -> Record {
         Record {
+            enforcement: Default::default(),
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,

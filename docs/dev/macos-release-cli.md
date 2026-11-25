@@ -53,7 +53,10 @@ and its resolved Core version and execution environment must support that select
 inspection and the Linux container smoke check validate baseline packaging, not native policy
 enforcement. Every signed native macOS build also checks actual file operations, policy records,
 and an unsigned control. These checks fail if the host cannot use Endpoint Security, Apple's API
-for authorizing file operations. Signing and notarization alone do not establish that permission.
+for authorizing file operations. Signing and notarization alone do not establish that permission. The same signed archive also runs
+on macOS 15 before it can enter the release bundle. That check runs the CLI with native policy
+absent and explicitly disabled, then verifies that enabling it refuses startup before the workload
+runs. Both macOS verification jobs must pass; the minimum for ordinary Box use stays unchanged.
 
 Each build with native support uploads `cli-native-filesystem-policy-<target>`. Its
 `native-filesystem-policy.json` records the explicit Cargo feature flags, source revisions, target,
@@ -299,14 +302,17 @@ For manual native signing or verification, replace `CD_SIGNER_CLI_PROFILE_NAME` 
 
 ## Keep the evidence
 
-Each signed run keeps two artifacts:
+Each signed run keeps signing evidence and separate verification evidence for both macOS hosts:
 
 - `cli-macos-signing-evidence`: the signing request and result, the submission to Apple and its log,
   and `receipt.json`, which records the source commit, the package hash, and the submission ID.
-- `cli-macos-package-verification`: the signature and ticket checks of the unpacked package, plus
-  native runtime commands, records, and results for a signed native package.
+- `cli-macos-package-verification-macos-15`: signature and ticket checks, plus the native-on startup
+  refusal log when the package includes native support.
+- `cli-macos-package-verification-xcode-27`: signature and ticket checks, native operation commands,
+  records, and results for a package with native support. Builds without native support use
+  `cli-macos-package-verification-macos-latest` instead.
 
-A native run also transfers `cli-macos-native-receipt` to the verification job. That job checks the
+A native run also transfers `cli-macos-native-receipt` to both verification jobs. Each checks the
 receipt against the signed archive and the expected source before running the package.
 
 ## Run the script on a Mac

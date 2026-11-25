@@ -157,6 +157,8 @@ pub struct Request {
     agent: AgentTable,
     /// Whether the fixture declares an agent home at all.
     with_agent_home: bool,
+    /// Whether the policy's verdicts apply in log-only mode.
+    log_only: bool,
 }
 
 /// A host path as a rule reads it: `~/<relative>` when it is under `home`.
@@ -264,6 +266,7 @@ impl Request {
             environment: Vec::new(),
             agent: AgentTable::default(),
             with_agent_home: true,
+            log_only: false,
         }
     }
 
@@ -335,6 +338,12 @@ impl Request {
         self.operator_home.join("workspace")
     }
 
+    /// Apply the policy in log-only mode, through the `policy` key's table form.
+    pub fn log_only(mut self) -> Self {
+        self.log_only = true;
+        self
+    }
+
     /// Set a variable in the environment the creating run runs with.
     pub fn env(mut self, name: &str, value: &str) -> Self {
         self.environment.push((name.to_string(), value.to_string()));
@@ -350,7 +359,11 @@ impl Request {
             quoted(&root.display().to_string())
         );
         if !self.policy.as_os_str().is_empty() {
-            toml.push_str("policy = \"policy.dw\"\n");
+            if self.log_only {
+                toml.push_str("policy = { source = \"policy.dw\", enforcement = \"log_only\" }\n");
+            } else {
+                toml.push_str("policy = \"policy.dw\"\n");
+            }
         }
         for line in &self.top_level {
             toml.push_str(line);

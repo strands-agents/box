@@ -16,8 +16,9 @@ box profile create codex-mantle --with codex,bedrock-mantle
 box profile create codex-openai --with codex,openai
 ```
 
-If you run `box profile create codex` without naming a provider, Box uses the provider in
-your Codex folder's `config.toml` when it recognizes it. Otherwise, Mantle is the default. To choose a
+If you run `box profile create codex` without naming a provider, Box asks which one to use, with
+the provider in your Codex folder's `config.toml` selected when it recognizes it. Otherwise, Mantle
+is the default. Without a terminal, Box uses that provider or the default. To choose a
 region, pass `--option bedrock.region=us-west-2`. Without it, the starter checks the selected
 provider's `aws.region` in that file, then `AWS_REGION`.
 The starter also asks how the box signs in to Bedrock ([Sign in](../bedrock/README.md#sign-in)),
@@ -219,6 +220,9 @@ Codex's default shell tool does not kill a command at a timeout. After 10 second
   an `mcp_tool` hook. [Your hooks](#your-hooks) says which hooks do.
 - `box` doesn't read `[features] hooks = false` in your `~/.codex/config.toml`. To run Codex in the
   box without your hooks, leave `codex.import-hooks` off.
+- The agent in the box can change `.codex/config.toml`, `.codex/hooks.json`, and `.codex/rules/` in
+  your project, and Codex uses them the next time you run it there.
+  For more info, check [the limitations section](../../../docs/cli/limitations.md#the-agent-can-plant-code-that-runs-outside-the-box-later).
 
 ## Troubleshooting
 

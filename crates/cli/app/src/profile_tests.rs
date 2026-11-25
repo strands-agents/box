@@ -10340,10 +10340,57 @@ fn a_storage_files_row_takes_only_its_keys_and_an_absolute_source() {
             "source = \"/a.md\"\nsync = true\nkind = \"json\"\nkeep = [[\"a\"]]",
             "`storage.files[0] sync = true` works only on a row without `kind`",
         ),
+        (
+            "source = \"/a.md\"\nexclude = [\"mcp.json\"]",
+            "`storage.files[0] exclude` works only on a row with `sync = true`",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = \"mcp.json\"",
+            "`storage.files[0] exclude` is a list of one or more file names",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = []",
+            "`storage.files[0] exclude` is a list of one or more file names",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = [1]",
+            "`storage.files[0] exclude` is a list of one or more file names",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = [\"a/mcp.json\"]",
+            "`storage.files[0] exclude[0]` = \"a/mcp.json\" is not one file name",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = [\"..\"]",
+            "`storage.files[0] exclude[0]` = \"..\" is not one file name",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = [\"\"]",
+            "is not one file name",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = [\"*.pem\"]",
+            "`storage.files[0] exclude[0]` = \"*.pem\" is a pattern",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = [\".env[0-9]\"]",
+            "is a pattern",
+        ),
+        (
+            "source = \"/a.md\"\nexclude = [\"mcp.json\"]\nkind = \"json\"\nkeep = [[\"a\"]]",
+            "`storage.files[0] exclude` works only on a whole copy of a folder, not on a row \
+             with `kind`",
+        ),
     ] {
         let reason = scene.refusal(&format!("{base}{row}"));
         assert!(reason.contains(expected), "{row}: {reason}");
     }
+    let resolved = scene
+        .resolve(&profile(&format!(
+            "{base}source = \"/a.md\"\nsync = true\nexclude = [\"mcp.json\", \".env\"]"
+        )))
+        .expect("`exclude` beside `sync`");
+    assert_eq!(resolved.storage.files[0].exclude, ["mcp.json", ".env"]);
     let copy = scene
         .resolve(&profile(&format!(
             "{base}source = \"/a.md\"\noptional = true\nmode = \"copy\""
@@ -14673,14 +14720,24 @@ fn the_shipped_node_pack_reads_the_hosts_file() {
 
 #[test]
 fn the_shipped_launchers_that_run_node_as_a_helper_read_the_hosts_file() {
-    for pack in [
-        include_str!("../../../../resources/packs/bunx/pack.toml"),
-        include_str!("../../../../resources/packs/pnpx/pack.toml"),
+    // Each pack also reads the interpreter that a package's bin names on its #! line.
+    for (pack, shebang) in [
+        (
+            include_str!("../../../../resources/packs/bunx/pack.toml"),
+            "/usr/bin/env",
+        ),
+        (
+            include_str!("../../../../resources/packs/pnpx/pack.toml"),
+            "/bin/sh",
+        ),
     ] {
         let table: toml::Table = pack.parse().expect("TOML");
         let read_file = table["filesystem"]["read_file"].as_array().expect("a list");
+        let plain: Vec<&str> = read_file.iter().filter_map(toml::Value::as_str).collect();
+        assert_eq!(plain, [shebang]);
         let paths: Vec<(&str, &str)> = read_file
             .iter()
+            .filter(|entry| entry.is_table())
             .map(|entry| {
                 (
                     entry["path"].as_str().expect("a path"),

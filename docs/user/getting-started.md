@@ -1,6 +1,6 @@
-# Getting started with Box
+# Run an agent with box.toml
 
-Box runs an agent on Linux or macOS under a policy.
+Box Core runs an agent on Linux or macOS under a policy.
 The agent can reach only the files, programs, and network destinations you allow. You describe a box in two files:
 `box.toml` says what to run and what it can reach, and `policy.dw` decides each request it makes.
 
@@ -9,6 +9,9 @@ in a box on macOS. You'll give it one tool, a shell, so your policy decides ever
 file its shell reads or writes, and you'll watch the box refuse a write, then change the policy to
 allow it. The finished files are in
 [`examples/strands-cli`](../../examples/strands-cli/).
+
+To run a coding agent such as Claude Code with a profile instead, install the Box CLI and follow
+[Get started with Box](../cli/getting-started.md).
 
 ## Set up with your coding agent
 
@@ -328,9 +331,9 @@ The box prints what the agent can touch, then the CLI opens a chat. The start of
 looks like this:
 
 ```text
-strands-box: box box-4a4cdb2b114ab6ce created · config my-box/box.toml
-strands-box: starting workload
-strands-box: [agent] runs /opt/homebrew/Cellar/node/26.5.0/bin/node with no policy decision over these paths:
+strands-box: note[B0301]: box box-4a4cdb2b114ab6ce created · config my-box/box.toml
+strands-box: note[B0302]: starting workload
+strands-box: note[B0201]: [agent] runs /opt/homebrew/Cellar/node/26.5.0/bin/node with no policy decision over these paths:
   read        /opt/homebrew/lib/node_modules/@strands-agents/cli
   read        /Users/you/box-tutorial/strands-home
   write       /Users/you/box-tutorial/strands-home

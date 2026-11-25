@@ -7,7 +7,7 @@ this route unless the operator enables the network exception described below.
 
 | The gateway | What it does |
 |---|---|
-| Requests policy decisions | `net:connect` for each destination before DNS and again for each address it connects to; `http:request` for each request; `mcp:call` for MCP requests whose host matches a configured HTTP MCP server, except the protocol methods that pass without an MCP decision. |
+| Requests policy decisions | `net:connect` for each destination before DNS and again for each address it connects to; `http:request` for each request, or `websocket:connect` for a WebSocket handshake; `mcp:call` for MCP requests whose host matches a configured HTTP MCP server, except the protocol methods that pass without an MCP decision. |
 | Adds | The secret an `[egress.<name>]` route binds to the destination. |
 | Removes | A copy of that secret from the response, before the process sees it. |
 
@@ -143,7 +143,8 @@ Once a pinned address answers, the gateway acknowledges the `CONNECT` and comple
 handshake with a certificate for that host, signed by the box's certificate authority. Every
 `CONNECT` is intercepted, and the request inside must name the same host as the `CONNECT`.
 
-Policy decides `http:request` for every request. It sees the host, the port, the method, the path,
+Policy decides `http:request` for every request except a WebSocket handshake, which
+[WebSocket](#websocket) describes. It sees the host, the port, the method, the path,
 the body size, and whether the request came inside a `CONNECT`. The gateway puts the path in one
 canonical form first. It decodes percent-escapes only for unreserved characters, leaving `%2F`
 encoded. It removes `.` and `..` segments and omits the query from the policy path.
@@ -179,6 +180,24 @@ request inside a `CONNECT` that the gateway can't read gets a 400 with the same 
 A request the gateway doesn't refuse but can't complete gets a 502 with the header
 `x-strands-box-egress: failed`, and a body that says why. The header says that the gateway wrote
 the response. It doesn't say whether the request reached the server.
+
+### WebSocket
+
+A WebSocket handshake inside a `CONNECT` is one `websocket:connect`, in place of `http:request`. The
+gateway answers 400 to a handshake that isn't an HTTP/1.1 `GET` with `Connection: upgrade`,
+`Sec-WebSocket-Version: 13`, one `Sec-WebSocket-Key`, and no body. It answers 403 to a plain HTTP handshake, before any
+decision, and to a handshake to an HTTP MCP server. It adds the credential to
+the handshake and redacts the credential in the `101`, as for any request. It answers 502 to a
+`101` that doesn't name `websocket` as its `Upgrade` or doesn't carry the `Sec-WebSocket-Accept`
+for the handshake's key. It also answers 502 to a reply to a handshake that has no body framing,
+because the upstream connection stays open after a handshake.
+
+After the `101`, the gateway copies bytes both ways, unchanged, on every host, and asks policy
+nothing more. It doesn't read WebSocket frames, so it doesn't redact a credential in a message. A
+server refuses a key in its handshake reply. The gateway assumes that a server that has accepted the
+key doesn't send it back, and a server that copies request headers into a message breaks that. When
+one side closes, the gateway closes its write to the other side. After 300 seconds with no byte on
+either leg, it ends both connections.
 
 ### Cloud instance metadata
 
@@ -293,7 +312,7 @@ forward each request. The route specifies which credential to add and grants no 
 |---|---|---|
 | An environment variable | `env://NAME` | Reads `NAME` from the environment of `box run` once, at startup, and swaps it in for a placeholder |
 | An AWS profile | `aws://PROFILE` | Signs each request with SigV4, resolving the named profile through the AWS SDK |
-| The AWS default chain | `aws://` (no profile) | Signs each request with SigV4, from the AWS SDK default credential provider chain (the host's ambient identity), and warns on every signed request |
+| The AWS default chain | `aws://` (no profile) | Signs each request with SigV4, from the AWS SDK default credential provider chain (the host's ambient identity), with a [warning](../user/egress.md#credential-sources) |
 
 ### The placeholder swap
 
@@ -323,7 +342,8 @@ flowchart LR
    the process sent it, and the request goes out only if `http:request` permits it.
 5. On the response, the gateway replaces each copy of the real secret in the headers and the body
    with `[REDACTED]`. On a credentialed request, it asks the server for an uncompressed response and
-   refuses a compressed one, so that every copy of the secret can be found.
+   refuses a compressed one, so that every copy of the secret can be found. A WebSocket's messages
+   after its `101` pass unchanged, as [WebSocket](#websocket) describes.
 
 A placeholder sent anywhere else authenticates nothing. The gateway forwards it unchanged to a
 destination with no route. The random value reveals no real credential to the receiving server.
@@ -349,7 +369,7 @@ request, and the gateway replaces the signature.
 
 Both forms resolve through the AWS SDK: `aws://PROFILE` resolves only the named profile (never the
 ambient env keys or instance metadata, and a missing profile is refused), and a bare `aws://`
-resolves the default chain, the host's ambient identity, which the box warns about on every request.
+resolves the default chain, the host's ambient identity, with a [warning](../user/egress.md#credential-sources).
 The decision
 [Both aws:// forms resolve through the AWS SDK and share one risk](decisions.md#a-bare-aws-resolves-the-default-credential-chain)
 states both forms and the writable-`~/.aws` cost.

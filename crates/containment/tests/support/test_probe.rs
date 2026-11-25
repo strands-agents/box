@@ -105,8 +105,7 @@
 //!
 //! The last three reach the privilege check before the profile, so as an ordinary user they
 //! measure `euid` rather than the rule. `measure-i3-as-root.sh` beside this file drives the
-//! `chroot` leg, on the pattern `chflags-sf` already follows. `containment/AGENTS.md` states why
-//! `mount` and `unmount` have no root probe.
+//! `chroot` leg, on the pattern `chflags-sf` already follows.
 //!
 //! The two path-identity verbs above pair with the fixed profile's denies on the home
 //! literal: a `(subpath X)` grant covers `X` itself, so they are what distinguishes
@@ -118,8 +117,7 @@
 //! all three operations are owner-or-root and DAC would answer before the profile did.
 //!
 //! The two `chflags` verbs pair with the write cells' flags deny, one per flag class, and
-//! `measure-sf-flags-as-root.sh` beside this file drives the root half. `containment/AGENTS.md`
-//! states what each measures and which outcomes are inconclusive.
+//! `measure-sf-flags-as-root.sh` beside this file drives the root half.
 //!
 //! The write-xor-exec verbs below measure whether a file the contained process **wrote** into a
 //! granted write root is then executable, or mappable as code. Each one writes its destination from
@@ -169,6 +167,9 @@
 //! Builds on Windows/other targets emit a stub `main` that prints and exits with
 //! code 2, preserving the binary target's build on any host without an
 //! enforcement backend.
+
+// A test probe: its stderr lines are harness output that the tests read, not box messages.
+#![allow(clippy::print_stderr)]
 
 use std::process::ExitCode;
 
@@ -1208,7 +1209,7 @@ fn run_probe(spec: &str) -> Result<bool, String> {
         // Existence, over the two operations that answer it. One verb per operation, because
         // they answer differently and a combined verb could not say which one leaked: denying
         // by default leaves `access` permitted, and `stat` distinguishes a refusal from an
-        // absence by errno alone. `containment/AGENTS.md` holds the measurement.
+        // absence by errno alone.
         "exists-access" => exists_access_probe(target)?,
         "exists-stat" => exists_stat_probe(target)?,
         // Setting a set-user-ID bit inside a granted write root. Unlike the super-user flag
@@ -1542,7 +1543,7 @@ fn exists_stat_probe(target: &str) -> Result<bool, String> {
 /// Set the BSD file flag `flag` on `target`, and report whether it stuck.
 ///
 /// Every inconclusive outcome is an `Err`, and the restore puts back the flag set the target
-/// arrived with. `containment/AGENTS.md` holds the rest.
+/// arrived with.
 #[cfg(target_os = "macos")]
 fn chflags_probe(target: &str, flag: libc::c_uint) -> Result<bool, String> {
     use std::os::macos::fs::MetadataExt as _;
@@ -2087,7 +2088,7 @@ fn privileged_outcome(call: &str, target: &str, result: i32) -> Result<bool, Str
 /// Set the mode bit `bit` on `target`, and report whether it stuck.
 ///
 /// The verdict is the stored bit rather than the return code, and every inconclusive outcome is an
-/// `Err`. `containment/AGENTS.md` holds the rest.
+/// `Err`.
 #[cfg(target_os = "macos")]
 fn chmod_bit_probe(target: &str, bit: libc::mode_t) -> Result<bool, String> {
     use std::os::unix::fs::MetadataExt as _;
@@ -2134,7 +2135,7 @@ fn chmod_bit_probe(target: &str, bit: libc::mode_t) -> Result<bool, String> {
 /// Change `target`'s group to one this process already belongs to, and report whether it stuck.
 ///
 /// The group moves and the owner does not, because that is the one ownership change DAC grants an
-/// ordinary caller. Every inconclusive outcome is an `Err`. `containment/AGENTS.md` holds the rest.
+/// ordinary caller. Every inconclusive outcome is an `Err`.
 #[cfg(target_os = "macos")]
 fn chown_probe(target: &str) -> Result<bool, String> {
     use std::os::unix::fs::MetadataExt as _;
@@ -2511,7 +2512,7 @@ const DENY_WRITE_ACL: &str =
 /// Put a deny-write access-control list on `target`, and report whether it stuck.
 ///
 /// The verdict is the stored list, on [`chmod_bit_probe`]'s reasoning, and every inconclusive
-/// outcome is an `Err`. `containment/AGENTS.md` holds the rest.
+/// outcome is an `Err`.
 #[cfg(target_os = "macos")]
 fn acl_probe(target: &str) -> Result<bool, String> {
     require_owned(target, "acl_set_file")?;

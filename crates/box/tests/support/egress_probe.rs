@@ -38,6 +38,9 @@
 //! `status=<code>`, `read=ok` or `read=failed`, then `status_after=<code>`. A control and its
 //! measurement in one run, which is why the first status is printed rather than assumed.
 
+// A test probe's stderr is the probe's own output to its test, not a Box Core message.
+#![allow(clippy::print_stderr)]
+
 use std::env;
 use std::io::{Read, Write};
 use std::net::TcpStream;

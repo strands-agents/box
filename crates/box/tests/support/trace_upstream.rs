@@ -1,5 +1,8 @@
 //! An HTTP MCP origin that records requests and serves a two-tool catalog.
 
+// Lines a test helper writes to stderr are test output, not Box Core messages.
+#![allow(clippy::print_stderr)]
+
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};

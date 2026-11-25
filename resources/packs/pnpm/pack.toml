@@ -38,8 +38,9 @@ XDG_RUNTIME_DIR = "${{ cache }}"
 # parent is ~/Library or ~/.local/share.
 read = ["${{ root.parent }}/dist"]
 # node resolves `localhost` from the hosts file. A native pnpm runs node as a helper, so node gets
-# this tool's grants.
+# this tool's grants. A package's .bin shim starts with #!/bin/sh.
 read_file = [
+    "/bin/sh",
     "${{ root }}/pnpm",
     "${{ root }}/pnpm.cjs",
     "${{ root }}/pnpm.mjs",

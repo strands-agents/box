@@ -1343,9 +1343,24 @@ class WorkflowGateTests(unittest.TestCase):
                 self.assertNotRegex(job, r"macos-signing(?![-\w])")
                 for text in ("id-token", "configure-aws-credentials", "CD_SIGNER_CALLER_ROLE",
                              "NOTARY_CREDENTIAL_SECRET"):
-                    if name == "cli" and text == "id-token":
+                    if name in ("cli", "attest") and text == "id-token":
                         continue
                     self.assertNotIn(text, job)
+
+    def test_the_attest_job_gets_an_oidc_token_but_cannot_write_the_repository(self):
+        job = workflow_job("attest")
+        self.assertIn("    permissions:\n      contents: read\n      id-token: write\n"
+                      "      attestations: write\n    steps:\n", job)
+        self.assertIn("          subject-path: release/*\n", job)
+        self.assertIn("      inputs.dry_run != true &&\n", job)
+        self.assertNotIn("environment:", job)
+        self.assertIn("      needs.attest.result == 'success'", workflow_job("release"))
+        # The published check names this workflow and ref; --repo alone accepts any workflow.
+        self.assertIn(
+            "          gh attestation verify <asset> --repo ${GITHUB_REPOSITORY} \\\\\n"
+            "            --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/deploy-box-artifact.yml \\\\\n"
+            "            --source-ref refs/heads/main\n",
+            workflow_job("release"))
 
     def test_the_build_and_signing_jobs_do_not_read_or_write_the_actions_cache(self):
         for name in ("build", "sign-macos", "verify-macos"):
@@ -1463,7 +1478,7 @@ class WorkflowGateTests(unittest.TestCase):
                             "-fsSL",
                             "https://raw.githubusercontent.com/strands-agents/box/main/install.sh"])
                         self.assertEqual((root / "install-options").read_text().splitlines(),
-                                         ["strands-agents/box", version, "0"])
+                                         ["", version, "0"])
 
 if __name__ == "__main__":
     unittest.main()

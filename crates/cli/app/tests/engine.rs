@@ -292,7 +292,19 @@ fn a_helper_python_outside_homebrew_passes_core_validation() {
         filesystem["read"].as_array().unwrap().contains(&python),
         "{filesystem}"
     );
-    assert!(filesystem.get("read_file").is_none(), "{filesystem}");
+    // The helper's Python keeps only its `read`. The one `read_file` is the pack's own `/bin/sh`,
+    // which uv's tool scripts start with, shown at its real file.
+    let shell = std::path::Path::new("/bin")
+        .canonicalize()
+        .unwrap()
+        .join("sh");
+    assert_eq!(
+        filesystem.get("read_file"),
+        Some(&toml::Value::Array(vec![toml::Value::from(
+            shell.display().to_string()
+        )])),
+        "{filesystem}"
+    );
 }
 
 fn wait_for_output(mut child: Child) -> Output {
@@ -566,13 +578,8 @@ done"#,
     assert!(!text.contains("planted"), "{text}");
 }
 
-/// Run `box run probe <flags> -- -c <script>` at a 40x200 pseudo-terminal with the banner on. Wait
-/// for each of `needles` in order on the screen, then send a line so the script can finish. Return
-/// the screen as it was when the last needle appeared.
-fn banner_run(scene: &Scene, flags: &[&str], script: &str, needles: &[&str]) -> String {
-    use std::io::{Read as _, Write as _};
+fn spawn_at_terminal(mut command: Command) -> (Child, std::fs::File) {
     use std::os::unix::process::CommandExt as _;
-    use std::sync::mpsc;
 
     let size = nix::pty::Winsize {
         ws_row: 40,
@@ -581,10 +588,7 @@ fn banner_run(scene: &Scene, flags: &[&str], script: &str, needles: &[&str]) -> 
         ws_ypixel: 0,
     };
     let pair = nix::pty::openpty(Some(&size), None).unwrap();
-    let mut input = std::fs::File::from(pair.master);
-    let mut output = input.try_clone().unwrap();
     let slave = std::fs::File::from(pair.slave);
-    let mut command = scene.command_with(&scene.workspace(), "probe", flags, &["-c", script]);
     command
         .env("TERM", "xterm-256color")
         .stdin(slave.try_clone().unwrap())
@@ -599,8 +603,19 @@ fn banner_run(scene: &Scene, flags: &[&str], script: &str, needles: &[&str]) -> 
             Ok(())
         });
     }
-    let child = command.spawn().unwrap();
-    drop(command);
+    (command.spawn().unwrap(), std::fs::File::from(pair.master))
+}
+
+/// Run `box run probe <flags> -- -c <script>` at a 40x200 pseudo-terminal with the banner on. Wait
+/// for each of `needles` in order on the screen, then send a line so the script can finish. Return
+/// the screen as it was when the last needle appeared.
+fn banner_run(scene: &Scene, flags: &[&str], script: &str, needles: &[&str]) -> String {
+    use std::io::{Read as _, Write as _};
+    use std::sync::mpsc;
+
+    let command = scene.command_with(&scene.workspace(), "probe", flags, &["-c", script]);
+    let (child, mut input) = spawn_at_terminal(command);
+    let mut output = input.try_clone().unwrap();
     let (send, received) = mpsc::channel();
     std::thread::spawn(move || {
         let mut bytes = [0; 8192];
@@ -873,7 +888,10 @@ fn a_profile_that_turns_file_attributes_off_cannot_set_file_times_on_macos() {
     if cfg!(target_os = "macos") {
         let text = stderr(&output);
         assert!(!output.status.success(), "{text}");
-        assert!(text.contains("strands-box: starting workload"), "{text}");
+        assert!(
+            text.contains("strands-box: note[B0302]: starting workload"),
+            "{text}"
+        );
         assert!(
             text.contains("stamped.txt: Operation not permitted"),
             "{text}"
@@ -3730,7 +3748,7 @@ fn a_run_prints_the_box_id_that_brings_it_back() {
         "Box Core stores the box ID that box prints"
     );
     assert!(
-        stderr(&output).contains(&format!("strands-box: box {id} created")),
+        stderr(&output).contains(&format!("strands-box: note[B0301]: box {id} created")),
         "{}",
         stderr(&output)
     );
@@ -3740,6 +3758,76 @@ fn a_run_prints_the_box_id_that_brings_it_back() {
             "{{\"key\":\"strands.box.name\",\"value\":{{\"stringValue\":\"{id}\"}}}}"
         )),
         "Box Core labels its records with the box ID\n{records}"
+    );
+}
+
+/// **A run with redirected output still prints the startup disclosure on stderr**, before the
+/// workload's own output, because no `fs:*` decision covers a grant.
+#[test]
+fn a_redirected_run_prints_the_startup_disclosure_on_stderr() {
+    let scene = Scene::new();
+    let output = scene.probe(&scene.workspace(), "echo WORKLOAD_RAN >&2");
+    succeeded(&output);
+    let text = stderr(&output);
+    let workload = text.find("WORKLOAD_RAN").expect("the workload ran");
+    for heading in [
+        "strands-box: note[B0201]: [agent] runs ",
+        "strands-box: note[B0201]: [agent] runtime minimum, added by Core:",
+        "\n  exec        /bin/bash",
+        "strands-box: note[B0201]: [agent] HOME=",
+    ] {
+        let at = text
+            .find(heading)
+            .unwrap_or_else(|| panic!("{heading:?}\n{text}"));
+        assert!(at < workload, "{heading:?} after the workload\n{text}");
+    }
+}
+
+/// **A terminal run ends with the short exit block**, while the full startup disclosure goes to the
+/// run's log and not to the screen.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_terminal_run_ends_with_the_exit_block_and_logs_the_disclosure() {
+    use std::io::Read as _;
+
+    let scene = Scene::new();
+    let command = scene.command_with(
+        &scene.workspace(),
+        "probe",
+        &["--no-banner"],
+        &["-c", "true"],
+    );
+    let (child, mut output) = spawn_at_terminal(command);
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = Vec::new();
+        // A closed PTY can finish with EIO.
+        let _ = output.read_to_end(&mut text);
+        let _ = sent.send(text);
+    });
+    let result = wait_for_output(child);
+    let text = received.recv_timeout(Duration::from_secs(5)).unwrap();
+    let text = String::from_utf8_lossy(&text).replace('\r', "");
+    assert_eq!(result.status.code(), Some(0), "{text}");
+    let run = new_run(&[], &scene.runs());
+    let id = box_id(&run);
+    let block = text
+        .split_once(&format!("box: run {id} ended\n  "))
+        .unwrap_or_else(|| panic!("no exit block\n{text}"))
+        .1;
+    assert!(block.starts_with("startup disclosure \u{b7} "), "{text}");
+    for line in [
+        format!("\n  log      {}\n", run.join("box.log").display()),
+        format!("\n  history  box runs history {id}\n"),
+        format!("\n  reuse    box run probe --box-id {id}\n"),
+    ] {
+        assert!(block.contains(&line), "{line:?}\n{text}");
+    }
+    assert!(!text.contains("runtime minimum, added by Core"), "{text}");
+    let log = std::fs::read_to_string(run.join("box.log")).expect("the run log");
+    assert!(
+        log.contains("strands-box: note[B0201]: [agent] runtime minimum, added by Core:"),
+        "{log}"
     );
 }
 
@@ -3821,6 +3909,60 @@ fn long_box_home(scene: &Scene, length: usize) -> PathBuf {
     }
     assert_eq!(long.as_os_str().len(), length);
     long
+}
+
+#[test]
+fn the_history_command_names_a_moved_box_home_so_another_shell_can_run_it() {
+    let scene = Scene::new();
+    let moved = scene.root.join("moved home");
+    let folder = moved.join("profiles/probe");
+    std::fs::create_dir_all(&folder).expect("a profile folder");
+    for file in ["profile.toml", "policy.dw"] {
+        std::fs::copy(
+            scene.home().join(".strands/box/profiles/probe").join(file),
+            folder.join(file),
+        )
+        .expect("a copy of the probe profile");
+    }
+    let output = scene
+        .command(&scene.workspace(), "probe", &["-c", "true"])
+        .env("BOX_HOME", &moved)
+        .output()
+        .expect("box runs");
+    succeeded(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let command = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("box: policy history: "))
+        .unwrap_or_else(|| panic!("no history line\n{stderr}"));
+    let id = std::fs::read_dir(moved.join("r"))
+        .expect("the runs folder")
+        .next()
+        .expect("a run")
+        .expect("a run")
+        .file_name();
+    let id = id.to_str().expect("a UTF-8 box ID");
+    assert_eq!(
+        command,
+        format!("BOX_HOME='{}' box runs history {id}", moved.display())
+    );
+    // A shell with no BOX_HOME runs the command as printed, and finds the run only through it.
+    let program = format!(" '{}' runs history ", env!("CARGO_BIN_EXE_box"));
+    let shell = |command: &str| {
+        scene
+            .process(Path::new("/bin/sh"))
+            .arg("-c")
+            .arg(command.replacen(" box runs history ", &program, 1))
+            .current_dir(scene.workspace())
+            .output()
+            .expect("the shell runs")
+    };
+    succeeded(&shell(command));
+    assert!(
+        !shell(&format!("exec box runs history {id}"))
+            .status
+            .success()
+    );
 }
 
 #[test]
@@ -3918,6 +4060,46 @@ fn a_new_run_refused_for_path_length_leaves_no_run_folder() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn a_startup_failure_at_a_terminal_shows_the_error_and_leaves_no_run_folder() {
+    use std::io::Read as _;
+
+    let scene = Scene::new();
+    let long = long_box_home(&scene, 66);
+    let mut command = scene.command_with(
+        &scene.workspace(),
+        "probe",
+        &["--no-banner"],
+        &["-c", "true"],
+    );
+    command.env("BOX_HOME", &long);
+    let (child, mut output) = spawn_at_terminal(command);
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = Vec::new();
+        // A closed PTY can finish with EIO.
+        let _ = output.read_to_end(&mut text);
+        let _ = sent.send(text);
+    });
+    let result = wait_for_output(child);
+    let text = received.recv_timeout(Duration::from_secs(5)).unwrap();
+    let text = String::from_utf8_lossy(&text).replace('\r', "");
+    assert_eq!(result.status.code(), Some(1));
+    assert!(
+        text.contains("box: recent log output\n  strands-box: error[")
+            && text.contains("its broker socket path exceeds the platform limit"),
+        "{text}"
+    );
+    assert!(!text.contains("to reuse this box run"), "{text}");
+    assert!(!text.contains(" ended\n  "), "{text}");
+    let leftovers: Vec<PathBuf> = std::fs::read_dir(long.join("r"))
+        .expect("the runs folder")
+        .map(|entry| entry.expect("a run").path())
+        .collect();
+    assert!(leftovers.is_empty(), "leftover run folders: {leftovers:?}");
+}
+
+#[test]
 fn a_folder_too_deep_for_any_profile_name_is_left_to_box_core() {
     let scene = Scene::new();
     let long = long_box_home(&scene, 100);
@@ -3927,11 +4109,16 @@ fn a_folder_too_deep_for_any_profile_name_is_left_to_box_core() {
         .output()
         .expect("box runs");
     assert!(!output.status.success(), "{}", stderr(&output));
+    // The history line names the moved box home so another shell can run it; it is not advice.
+    let text = stderr(&output);
+    let others: Vec<_> = text
+        .lines()
+        .filter(|line| !line.starts_with("box: policy history: "))
+        .collect();
     for advice in ["BOX_HOME", "profile name", "cannot start"] {
         assert!(
-            !stderr(&output).contains(advice),
-            "box gives no advice when no profile name would help: {}",
-            stderr(&output)
+            !others.iter().any(|line| line.contains(advice)),
+            "box gives no advice when no profile name would help: {text}"
         );
     }
 }

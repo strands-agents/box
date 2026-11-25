@@ -1,8 +1,3 @@
----
-reader: Someone who makes a profile with box profile create, or who writes a starter or a policy starter so a team gets one standard setup.
-belongs: A section belongs here only if most readers need it to make a profile, to pick the policy it starts from, or to write their first starter or policy starter. Every key of starter.toml and policy.toml goes to starters-reference.md, the keys of [starters] and [policy-starters] go to config.md, writing a profile's rules goes to policies.md, a fix after an error goes to troubleshooting.md, and what one agent's starter asks goes to that agent's README.
----
-
 # Starters
 
 A starter is the set of questions `box profile create` asks to make a profile, such as which model
@@ -21,7 +16,7 @@ profile never refers to the starter again. You edit it like any other profile, a
 to the starter doesn't reach it.
 
 A starter can also read answers from the agent's own settings, so if Claude Code on your machine
-already uses Bedrock, `box` doesn't ask again.
+already uses Bedrock, `box` selects Bedrock for you and still lists every provider.
 
 ## Where starters are defined
 
@@ -77,6 +72,12 @@ detect = { source = "use-bedrock", equals = ["1", "true", "yes", "on"] }
 id = "anthropic"
 label = "The Anthropic API"
 packs = ["@box/anthropic"]
+options = { "claude.host" = "anthropic" }
+
+[[question.choice]]
+id = "subscription"
+label = "A Claude subscription"
+packs = ["@box/claude-subscription"]
 options = { "claude.host" = "anthropic" }
 ```
 
@@ -372,6 +373,8 @@ uses. `box` asks one question at a time, under three tabs:
 
     [2] The Anthropic API
 
+    [3] A Claude subscription
+
   ↑↓ choose  ←→ questions  Tab sections  Enter  Esc exit  Ctrl+C exit
 ```
 
@@ -386,10 +389,13 @@ as in `box profile create claude-east --with claude`. Each agent's README in
 [Packs](README.md#packs) says what its starter asks, and any step the agent needs on your machine
 first.
 
-### Skip questions the agent's settings already answer
+### Start from the agent's settings
 
-Before it asks anything, the starter reads the agent's settings and answers each question they
-decide. Review shows each detected answer and where it came from:
+Before it asks anything, the starter reads the agent's settings. At a terminal, it still asks each
+question that they decide, such as the provider, with the found choice selected, so Enter keeps it
+and every other choice stays in view. It fills an input that they decide, such as the region,
+without asking. Without a terminal, a found choice is the answer. Review shows each detected answer
+and where it came from:
 
 ```text
 DETECTED OPTIONS
@@ -451,8 +457,9 @@ still needs an answer, it stops and names the flag to add:
 
 ```text
 box: error: box profile create claude needs an answer to "Which model provider should Claude Code use?"
-  --with bedrock     Amazon Bedrock
-  --with anthropic   The Anthropic API
+  --with bedrock               Amazon Bedrock
+  --with anthropic             The Anthropic API
+  --with claude-subscription   A Claude subscription
 ```
 
 The policy question has no default without a terminal, so a script gives `--policy`, unless the

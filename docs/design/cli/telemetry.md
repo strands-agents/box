@@ -17,8 +17,9 @@ context construction and identity persistence.
 ## Delivery
 
 `Session::delivering` connects event capture to `Delivery`. Each event is one compact JSON
-`POST` to `https://telemetry.strandsagents.com/box/ping`, with
-`Content-Type: application/json`. The request has no authentication header or cookies.
+`POST`, sent by default to `https://telemetry.strandsagents.com/box/ping`, with
+`Content-Type: application/json` and `User-Agent: box/<version>`, where `<version>` is the
+`context.box_version` the events carry. The request has no authentication header or cookies.
 The service accepts the existing envelope and returns 204. It does not deduplicate requests,
 so delivery makes one attempt per event, with no retries or redirects.
 
@@ -50,11 +51,15 @@ progress can finish later. The worker retains a clone of the instance lock until
 ends, even if the caller returns first. A request already in progress when the run ends can
 use the whole budget. There is no disk queue, and a crash or process exit can lose events.
 
-The `test-transport` feature replaces the service destination with
-`BOX_TEST_TELEMETRY_ENDPOINT`. It accepts only HTTP URLs with a literal loopback address
-and no credentials, and bypasses HTTP proxies. A missing or invalid value disables delivery.
-Production builds ignore the variable. The CLI dev dependency enables this feature during
-Cargo tests. CI checks, the corpus, and the nightly agent workloads build with the production
+`Delivery` reads `BOX_TEST_TELEMETRY_ENDPOINT` before choosing the destination. A present value
+must pass the [local capture URL checks](../../cli/cli.md#environment-variables); otherwise,
+delivery is disabled with no fallback to the service. Reading the raw environment value keeps
+an empty or non-UTF-8 override distinct from an absent variable. Local HTTP delivery bypasses
+proxies.
+
+When the variable is absent, ordinary builds use the service endpoint. The `test-transport`
+feature disables that default. The CLI dev dependency enables this feature during Cargo tests.
+CI checks, the corpus, and the nightly agent workloads build with the production
 transport and set `BOX_TELEMETRY=0`; downloadable trial builds send events, and so does a
 package that `Release Box` builds. Local package smoke checks use the
 [caller's installation identity](decisions.md#smoke-telemetry-follows-the-callers-identity).
@@ -73,7 +78,7 @@ session. `save_telemetry_choice` writes the key under the same lock and atomic r
 creation, and keeps every other key, including the ID. Like the ID, the choice lives in
 `~/.strands/box` whatever `BOX_HOME` names.
 
-On a first install, `install.sh` reads `telemetry status` from the installed launcher.
+On an install or update (not a rerun of the installed version), `install.sh` reads `telemetry status` from the installed launcher.
 It prints the usage notice only when the command succeeds and reports that telemetry is on.
 A failed or unrecognized status leaves the notice out and installation succeeds.
 
@@ -115,28 +120,32 @@ diagnostic text. `ProfileMissing`, and a `ProfilePath` whose file is not found, 
 map to `unknown`.
 `NotOnHost` does not distinguish the agent from another missing host input.
 
-The current invocation's `box_started` control record with outcome `ok` confirms that the Core
-box run started. It gives `box_launched: true` and `failure_reason: null`. Core emits this
-record after its initial preparation and before workload spawn. Later workload failures do not
-reverse the launch result. An error during Core's initial preparation can leave no lifecycle
+The current invocation's `workload_started` control record with outcome `ok` confirms the
+launch. It gives `box_launched: true` and `failure_reason: null`.
+[Core's control-plane records](../../user/telemetry.md#a-control-plane-record) say when Core
+writes it. Later workload failures do not reverse the launch result. An error during Core's initial preparation can leave no lifecycle
 records.
 A nonzero Core exit does not establish a preparation failure.
 
-`startup_latency_ms` measures from launch preparation to the source `timeUnixNano` of that
-record. Its wall-clock origin follows optional profile creation on every run, before guide
+`startup_latency_ms` measures from launch preparation to the source `timeUnixNano` of the
+current invocation's `workload_started` control record with outcome `ok`. Core writes that record
+once it has installed the policy and built the sandbox, and the workload's `exec` succeeded inside
+it. Its wall-clock origin follows optional profile creation on every run, before guide
 refresh and run preparation. It excludes profile creation and its prompts, and includes
-resolution, compilation, storage preparation, and Core startup. It ends at Core's startup
-milestone, before the agent is ready. Export and reader delays do not affect it. It rounds down to
-milliseconds and saturates at the schema's maximum integer. A missing, invalid, or pre-start
-timestamp gives `null` without reversing confirmed launch evidence. Wall-clock changes can
-affect this measurement.
+resolution, compilation, storage preparation, and all of Core's setup. It ends when the workload
+launches, before the agent's own startup. Export and reader delays do not affect it. It rounds
+down to milliseconds and saturates at the schema's maximum integer. A run whose workload never
+starts gives `null`, and so does a missing, invalid, or pre-start timestamp. Neither reverses
+confirmed launch evidence. Wall-clock changes can affect this measurement.
 
 After command and Box-home validation, the executable captures the monotonic start at entry
 to `box run` and the wall-clock startup origin after optional profile creation. After
 preparation, it creates a `Session` with one invocation and the collected
 context. A preparation failure's run event goes out with shutdown, without waiting for launch
-evidence. Successful preparation waits for that evidence.
-If observation ends without that evidence, the session emits `null` for all three run fields.
+evidence. Successful preparation waits for `workload_started` before it sends the run event. A
+run whose workload never starts sends it with shutdown.
+If observation ends without that evidence, the session emits `null` for all three run fields,
+including when Core refused the run after `box_started`.
 Preparation failures also give `startup_latency_ms: null`. Every field is required; unavailable
 values serialize as `null`.
 Missing records alone do not establish that no box started.
@@ -155,7 +164,8 @@ new record. The reader retains partial lines appended after the boundary until t
 
 Lifecycle observation accepts only `strands-box.control` logs with the Core service and source
 attributes.
-It reads `box_started` with outcome `ok` and `box_stopped` with outcome `ok` or `refused`.
+It reads `workload_started` with outcome `ok`, and `box_stopped` with outcome
+`ok` or `refused`.
 Old records and relayed agent records cannot supply evidence for this invocation. Missing or
 unreadable records leave the corresponding observations unknown.
 
