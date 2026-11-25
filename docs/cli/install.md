@@ -230,33 +230,6 @@ which -a box
 
 If `box --version` shows an older release, another `box` comes first on your `PATH`.
 
-### Check a Homebrew install
-
-Homebrew checks each download against the checksum in the cask, and the tap's tests check that
-checksum against the release's `SHA256SUMS.txt` and its build attestation. Each release archive has
-a build attestation from Box's release workflow. To check the archive Homebrew installed, fetch it
-again in case `brew cleanup` removed it, and check the copy in Homebrew's cache:
-
-```sh
-brew fetch --cask strands-agents/tap/box
-gh attestation verify "$(brew --cache --cask strands-agents/tap/box)" --repo strands-agents/box \
-  --signer-workflow strands-agents/box/.github/workflows/deploy-box-artifact.yml \
-  --source-ref refs/heads/main
-```
-
-On macOS, the cask keeps the release's Developer ID signature and Apple notarization. Check `box`
-and the two helpers it runs, without running any of them first:
-
-```sh
-room="$(brew --caskroom)/box/$(brew list --cask --versions box | cut -d' ' -f2)"
-for program in box strands-box-sock-alias strands-box-contain-trampoline; do
-  codesign --verify --strict --verbose=2 "$room/$program"
-done
-spctl --assess --type install --verbose "$room/box"
-```
-
-`spctl` prints `source=Notarized Developer ID`.
-
 ## Build from source
 
 To run your own build, you need [Rust](https://rustup.rs/) and
