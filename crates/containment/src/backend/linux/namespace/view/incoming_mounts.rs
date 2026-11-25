@@ -217,11 +217,8 @@ pub(super) fn restrict_existing(
 }
 
 fn mount_id(file: &File) -> Result<u64, ContainmentError> {
-    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", file.as_raw_fd()))
-        .map_err(|error| refusal(format!("reading incoming mount identity: {error}")))?;
-    info.lines()
-        .find_map(|line| line.strip_prefix("mnt_id:")?.trim().parse::<u64>().ok())
-        .ok_or_else(|| refusal("incoming mount has no mount identity".into()))
+    mountinfo::mount_id(file)
+        .map_err(|error| refusal(format!("reading incoming mount identity: {error}")))
 }
 
 fn require_current_source(connection: &IncomingMount) -> Result<(), ContainmentError> {
@@ -249,31 +246,22 @@ fn require_current_source(connection: &IncomingMount) -> Result<(), ContainmentE
 
 fn require_connection(file: &File, receiver: bool, exact: &Path) -> Result<(), ContainmentError> {
     let id = mount_id(file)?;
-    let table = std::fs::read_to_string("/proc/self/mountinfo")
+    let table = mountinfo::read()
         .map_err(|error| refusal(format!("reading incoming mount connections: {error}")))?;
-    let line = table
-        .lines()
-        .find(|line| {
-            line.split_whitespace()
-                .next()
-                .and_then(|id| id.parse::<u64>().ok())
-                == Some(id)
-        })
+    let mounts =
+        mountinfo::parse(&table).ok_or_else(|| refusal("malformed incoming mount table".into()))?;
+    let mount = mounts
+        .iter()
+        .find(|mount| mount.identity == id)
         .ok_or_else(|| refusal("incoming mount is absent from the mount table".into()))?;
-    let point = line.split_whitespace().nth(4).map(unescape_mount_field);
-    if point.as_deref().map(Path::new) != Some(exact) {
+    if mount.point != exact {
         return Err(refusal(format!(
             "incoming mount '{}' must be the currently reachable dedicated mount point; a directory beneath a connected ancestor is not sufficient",
             exact.display()
         )));
     }
-    let optional = line
-        .split_whitespace()
-        .skip(6)
-        .take_while(|field| *field != "-")
-        .collect::<Vec<_>>();
-    let shared = optional.iter().any(|field| field.starts_with("shared:"));
-    let slave = optional.iter().any(|field| field.starts_with("master:"));
+    let shared = mount.propagation.shared.is_some();
+    let slave = mount.propagation.master.is_some();
     if (!shared && !slave) || (receiver && (!slave || shared)) {
         return Err(refusal("incoming mount has no connected one-way upstream; the publisher must provide a shared mount".into()));
     }
@@ -284,30 +272,16 @@ fn require_connection(file: &File, receiver: bool, exact: &Path) -> Result<(), C
 // mount or an ordinary bind in the new view must not stand in for the selected source.
 fn mount_subtree(root: &File, path: &Path) -> Result<BTreeMap<PathBuf, usize>, ContainmentError> {
     let root_id = mount_id(root)?;
-    let table = std::fs::read_to_string("/proc/self/mountinfo")
+    let table = mountinfo::read()
         .map_err(|error| refusal(format!("reading incoming child mounts: {error}")))?;
     let mut rows = BTreeMap::new();
     let mut children: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-    for line in table.lines() {
-        let fields: Vec<_> = line.split_whitespace().collect();
-        let number = |index| {
-            fields
-                .get(index)
-                .and_then(|field: &&str| field.parse::<u64>().ok())
-                .ok_or_else(|| refusal("incomplete incoming mount table".into()))
-        };
-        let id = number(0)?;
-        let parent = number(1)?;
-        let point = fields
-            .get(4)
-            .ok_or_else(|| refusal("incomplete incoming mount table".into()))?;
-        let point = PathBuf::from(unescape_mount_field(point));
-        let unbindable = fields
-            .iter()
-            .skip(6)
-            .take_while(|field| **field != "-")
-            .any(|field| *field == "unbindable");
-        rows.insert(id, (point, unbindable));
+    let mounts = mountinfo::parse(&table)
+        .ok_or_else(|| refusal("malformed incoming child mount table".into()))?;
+    for mount in mounts {
+        let id = mount.identity;
+        let parent = mount.parent;
+        rows.insert(id, (mount.point, mount.propagation.unbindable));
         if parent != id {
             children.entry(parent).or_default().push(id);
         }
@@ -352,21 +326,14 @@ pub(super) fn verify_final(paths: &[PathBuf]) -> Result<(), ContainmentError> {
             .map_err(|error| failure("checking final", path, error))?;
         require_connection(&source, true, path)?;
     }
-    let table = std::fs::read_to_string("/proc/self/mountinfo")
+    let table = mountinfo::read()
         .map_err(|error| refusal(format!("checking final incoming mount isolation: {error}")))?;
-    for line in table.lines() {
-        let fields: Vec<_> = line.split_whitespace().collect();
-        let point = fields
-            .get(4)
-            .ok_or_else(|| refusal("incomplete final mount table".into()))?;
-        let point = PathBuf::from(unescape_mount_field(point));
-        let optional = fields.iter().skip(6).take_while(|field| **field != "-");
-        let mut shared = false;
-        let mut receiving = false;
-        for field in optional {
-            shared |= field.starts_with("shared:");
-            receiving |= field.starts_with("master:");
-        }
+    let mounts =
+        mountinfo::parse(&table).ok_or_else(|| refusal("malformed final mount table".into()))?;
+    for mount in mounts {
+        let point = mount.point;
+        let shared = mount.propagation.shared.is_some();
+        let receiving = mount.propagation.master.is_some();
         if shared || (receiving && !paths.iter().any(|path| point.starts_with(path))) {
             return Err(refusal(format!(
                 "final mount '{}' has propagation outside the selected one-way subtrees",

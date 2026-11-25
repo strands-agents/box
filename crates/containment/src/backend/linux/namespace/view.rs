@@ -18,6 +18,7 @@ use crate::backend::dependencies::{
 
 mod dependency_permissions;
 mod incoming_mounts;
+mod mountinfo;
 mod targets;
 
 /// What provides an entry's bytes.
@@ -1060,7 +1061,7 @@ impl MountView {
                 if self
                     .incoming_mounts
                     .iter()
-                    .any(|path| path.starts_with(&entry.target) || entry.target.starts_with(path))
+                    .any(|path| entry.target.starts_with(path))
                 {
                     let (writable, executable) = incoming_mounts::restrict_existing(
                         &mounted,
@@ -1068,6 +1069,33 @@ impl MountView {
                         entry.executable,
                     )?;
                     require_mount_flags(&mounted, writable, executable, false)?;
+                } else if self
+                    .incoming_mounts
+                    .iter()
+                    .any(|path| path.starts_with(&entry.target))
+                {
+                    // Preserve the ordinary grant outside incoming subtrees. The selected
+                    // subtrees are replaced by their incoming source binds during install.
+                    let exclusions = self
+                        .incoming_mounts
+                        .iter()
+                        .filter_map(|path| path.strip_prefix(&entry.target).ok())
+                        .map(|relative| mountpoint.join(relative))
+                        .collect::<Vec<_>>();
+                    let flags = libc::MS_REMOUNT
+                        | libc::MS_BIND
+                        | libc::MS_NOSUID
+                        | libc::MS_NODEV
+                        | if entry.writable { 0 } else { libc::MS_RDONLY }
+                        | if entry.executable { 0 } else { libc::MS_NOEXEC };
+                    remount_recursive_excluding(
+                        &mounted_path,
+                        mountpoint,
+                        flags,
+                        "with the requested permissions",
+                        &exclusions,
+                    )?;
+                    require_mount_flags(&mounted, entry.writable, entry.executable, false)?;
                 } else {
                     match (entry.writable, entry.executable) {
                         // An exec grant, its loader, or a library: read-only, and runnable.
@@ -1369,11 +1397,20 @@ fn remount_recursive(
     flags: libc::c_ulong,
     what: &str,
 ) -> Result<(), ContainmentError> {
+    remount_recursive_excluding(target, subtree, flags, what, &[])
+}
+
+fn remount_recursive_excluding(
+    target: &Path,
+    subtree: &Path,
+    flags: libc::c_ulong,
+    what: &str,
+    exclusions: &[PathBuf],
+) -> Result<(), ContainmentError> {
     let mut points = Vec::new();
 
-    // `/proc/self/mounts` is the view's own table here -- the mount namespace is already unshared,
-    // so this cannot see host-only mounts.
-    let table = std::fs::read_to_string("/proc/self/mounts").map_err(|source| {
+    // This is the view's own table: its mount namespace is already unshared.
+    let table = mountinfo::read().map_err(|source| {
         refusal(format!(
             "reading the mount table to remount '{}' {what} recursively: {source}; \
              refusing rather than leave a submount wider than its grant",
@@ -1381,13 +1418,16 @@ fn remount_recursive(
         ))
     })?;
 
-    for line in table.lines() {
-        // Field 2 is the mount point, with octal escapes for space/tab/newline.
-        let Some(raw) = line.split_whitespace().nth(1) else {
-            continue;
-        };
-        let point = PathBuf::from(unescape_mount_field(raw));
-        if point != subtree && point.starts_with(subtree) {
+    let mounts = mountinfo::parse(&table)
+        .ok_or_else(|| refusal("malformed mount table while remounting a grant".into()))?;
+    for mount in mounts {
+        let point = mount.point;
+        if point != subtree
+            && point.starts_with(subtree)
+            && !exclusions
+                .iter()
+                .any(|excluded| point.starts_with(excluded))
+        {
             points.push(point);
         }
     }
@@ -1448,19 +1488,19 @@ fn require_mount_flags(
 
 /// The mount that covers `point`, if one shadows it inside `target`.
 fn shadowing_mount(point: &Path, target: &Path) -> Result<Option<PathBuf>, ContainmentError> {
-    let table = std::fs::read_to_string("/proc/self/mounts").map_err(|source| {
+    let table = mountinfo::read().map_err(|source| {
         refusal(format!(
             "re-reading the mount table to classify '{}': {source}",
             point.display()
         ))
     })?;
 
+    let mounts = mountinfo::parse(&table).ok_or_else(|| {
+        refusal("malformed mount table while classifying a shadowed mount".into())
+    })?;
     let mut seen_point = false;
-    for line in table.lines() {
-        let Some(raw) = line.split_whitespace().nth(1) else {
-            continue;
-        };
-        let candidate = PathBuf::from(unescape_mount_field(raw));
+    for mount in mounts {
+        let candidate = mount.point;
         if candidate == point {
             seen_point = true;
             continue;
@@ -1478,7 +1518,7 @@ fn shadowing_mount(point: &Path, target: &Path) -> Result<Option<PathBuf>, Conta
     Ok(None)
 }
 
-/// Undo the octal escapes `/proc/self/mounts` uses for space, tab, newline, and backslash.
+/// Undo the mount table escapes for space, tab, newline, and backslash.
 fn unescape_mount_field(field: &str) -> String {
     let chars: Vec<char> = field.chars().collect();
     let mut out = String::with_capacity(field.len());

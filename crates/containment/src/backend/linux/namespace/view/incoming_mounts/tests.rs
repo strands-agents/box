@@ -1284,3 +1284,186 @@ fn child_mount_case(case: ChildMountCase, separate_user: bool) {
         "child copy {case:?}, separate_user={separate_user}: receiver status {status}"
     );
 }
+
+#[test]
+fn ordinary_grants_outside_selected_subtrees_keep_requested_permissions() {
+    for restriction in [0, libc::MS_RDONLY, libc::MS_NOEXEC] {
+        for sibling in [false, true] {
+            for selected in [false, true] {
+                isolated(|| {
+                    let mut fixture = Fixture::new();
+                    fixture.grant_parent = true;
+                    let ordinary = if sibling {
+                        mount_syscall(
+                            Some(&fixture.sibling),
+                            &fixture.sibling,
+                            None,
+                            libc::MS_BIND,
+                            None,
+                        )
+                        .unwrap();
+                        fixture.sibling.clone()
+                    } else {
+                        fixture.directory.path().join("source")
+                    };
+                    std::fs::copy("/bin/true", ordinary.join("program")).unwrap();
+                    mount_syscall(
+                        None,
+                        &ordinary,
+                        None,
+                        libc::MS_REMOUNT
+                            | libc::MS_BIND
+                            | restriction
+                            | libc::MS_NOSUID
+                            | libc::MS_NODEV,
+                        None,
+                    )
+                    .unwrap();
+                    // The new user namespace locks the publisher's mount restrictions,
+                    // so an incompatible ordinary grant must refuse setup.
+                    let supervisor = unsafe { libc::fork() };
+                    assert!(supervisor >= 0);
+                    if supervisor == 0 {
+                        assert_eq!(
+                            unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) },
+                            0
+                        );
+                        user_namespace();
+                        assert_eq!(
+                            unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWPID) },
+                            0
+                        );
+                        mount_syscall(
+                            Some(Path::new("tmpfs")),
+                            Path::new("/tmp"),
+                            Some("tmpfs"),
+                            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                            Some("size=8m"),
+                        )
+                        .unwrap();
+                        let paths = if selected {
+                            vec![fixture.selected.clone()]
+                        } else {
+                            vec![]
+                        };
+                        let view =
+                            MountView::plan_receiving_mounts(&fixture.config(), &paths).unwrap();
+                        let workload = unsafe { libc::fork() };
+                        assert!(workload >= 0);
+                        if workload == 0 {
+                            assert_eq!(
+                                unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) },
+                                0
+                            );
+                            let result = view.materialize();
+                            if restriction == 0 {
+                                result.unwrap();
+                                std::fs::write(ordinary.join("probe"), b"writable").unwrap();
+                                let program = File::open(ordinary.join("program")).unwrap();
+                                // SAFETY: map the fixture without executing its contents.
+                                let mapped = unsafe {
+                                    libc::mmap(
+                                        std::ptr::null_mut(),
+                                        4096,
+                                        libc::PROT_READ | libc::PROT_EXEC,
+                                        libc::MAP_PRIVATE,
+                                        program.as_raw_fd(),
+                                        0,
+                                    )
+                                };
+                                assert_ne!(
+                                    mapped,
+                                    libc::MAP_FAILED,
+                                    "{}",
+                                    std::io::Error::last_os_error()
+                                );
+                                assert_eq!(unsafe { libc::munmap(mapped, 4096) }, 0);
+                                eprintln!(
+                                    "ordinary grant sibling={sibling} selected={selected}: write and executable mapping succeed"
+                                );
+                            } else {
+                                let error = result.expect_err(
+                                    "an ordinary grant silently lost requested permissions",
+                                );
+                                assert!(error.to_string().contains("remounting"), "{error}");
+                                assert!(
+                                    error.to_string().contains("Operation not permitted"),
+                                    "{error}"
+                                );
+                                eprintln!(
+                                    "ordinary grant restriction={restriction} sibling={sibling} selected={selected}: startup refused: {error}"
+                                );
+                            }
+                            unsafe { libc::_exit(0) };
+                        }
+                        let mut status = 0;
+                        assert_eq!(unsafe { libc::waitpid(workload, &mut status, 0) }, workload);
+                        unsafe {
+                            libc::_exit(i32::from(
+                                !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0,
+                            ))
+                        };
+                    }
+                    let mut status = 0;
+                    assert_eq!(
+                        unsafe { libc::waitpid(supervisor, &mut status, 0) },
+                        supervisor
+                    );
+                    assert!(
+                        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+                        "ordinary grant restriction={restriction} sibling={sibling} selected={selected}: status={status}"
+                    );
+                });
+            }
+        }
+    }
+}
+
+#[test]
+fn kernel_mounts_with_empty_sources_and_unicode_paths_remain_usable() {
+    isolated(|| {
+        let directory = tempfile::tempdir_in("/var/tmp").unwrap();
+        let point = directory.path().join("café\u{a0}data two words");
+        std::fs::create_dir(&point).unwrap();
+        mount_syscall(Some(Path::new("")), &point, Some("tmpfs"), 0, None).unwrap();
+        mount_syscall(None, &point, None, libc::MS_SHARED, None).unwrap();
+        let mounted = File::open(&point).unwrap();
+        let identity = mountinfo::mount_id(&mounted).unwrap();
+        let table = mountinfo::read().unwrap();
+        assert!(
+            table.lines().any(|line| {
+                line.starts_with(&format!("{identity} ")) && line.contains(" - tmpfs  ")
+            }),
+            "the kernel did not produce an empty source column"
+        );
+        let rows = mountinfo::parse(&table).unwrap();
+        assert!(
+            rows.iter()
+                .any(|row| row.identity == identity && row.point == point)
+        );
+        assert!(targets::mount_ids().unwrap().contains(&identity));
+        require_connection(&mounted, false, &point).unwrap();
+        std::fs::write(point.join("value"), b"writable").unwrap();
+        remount_recursive(
+            &targets::descriptor_path(&mounted),
+            &point,
+            libc::MS_REMOUNT
+                | libc::MS_BIND
+                | libc::MS_RDONLY
+                | libc::MS_NOEXEC
+                | libc::MS_NOSUID
+                | libc::MS_NODEV,
+            "for the empty-source regression",
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::write(point.join("value"), b"blocked")
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EROFS)
+        );
+        eprintln!(
+            "kernel empty source and Unicode mountpoint: identity, propagation, target inventory and read-only remount succeeded"
+        );
+    });
+}

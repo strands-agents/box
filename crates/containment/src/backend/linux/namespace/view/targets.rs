@@ -145,13 +145,12 @@ impl MountTarget {
         };
         let id = mount_id(&mounted)?;
         let table = mount_table()?;
-        let landed = table.lines().any(|line| {
-            let mut fields = line.split_whitespace();
-            fields.next().and_then(|value| value.parse::<u64>().ok()) == Some(id)
-                && fields
-                    .nth(3)
-                    .is_some_and(|raw| Path::new(&unescape_mount_field(raw)) == self.location)
-        });
+        let mounts = mountinfo::parse(&table).ok_or_else(|| {
+            refusal("malformed mount table while verifying target placement".into())
+        })?;
+        let landed = mounts
+            .iter()
+            .any(|mount| mount.identity == id && mount.point == self.location);
         if previous.contains(&id) || !landed {
             return Err(refusal(format!(
                 "mount for '{}' did not land at its own mountpoint",
@@ -179,11 +178,8 @@ impl MountTarget {
 }
 
 fn mount_id(mounted: &File) -> Result<u64, ContainmentError> {
-    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", mounted.as_raw_fd()))
-        .map_err(|error| refusal(format!("reading the mounted target identity: {error}")))?;
-    info.lines()
-        .find_map(|line| line.strip_prefix("mnt_id:")?.trim().parse::<u64>().ok())
-        .ok_or_else(|| refusal("the mounted target has no mount identity".into()))
+    mountinfo::compatible_mount_id(mounted)
+        .map_err(|error| refusal(format!("reading the mounted target identity: {error}")))
 }
 
 fn walk(
@@ -396,7 +392,7 @@ pub(super) fn descriptor_path(file: &File) -> PathBuf {
 }
 
 fn mount_table() -> Result<String, ContainmentError> {
-    std::fs::read_to_string("/proc/self/mountinfo").map_err(|error| {
+    mountinfo::read().map_err(|error| {
         refusal(format!(
             "reading the mount table to verify target placement: {error}"
         ))
@@ -404,10 +400,11 @@ fn mount_table() -> Result<String, ContainmentError> {
 }
 
 pub(super) fn mount_ids() -> Result<BTreeSet<u64>, ContainmentError> {
-    Ok(mount_table()?
-        .lines()
-        .filter_map(|line| line.split_whitespace().next()?.parse().ok())
-        .collect())
+    let table = mount_table()?;
+    let mounts = mountinfo::parse(&table).ok_or_else(|| {
+        refusal("malformed mount table while collecting target identities".into())
+    })?;
+    Ok(mounts.into_iter().map(|mount| mount.identity).collect())
 }
 
 #[cfg(test)]

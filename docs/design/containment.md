@@ -346,7 +346,9 @@ elsewhere after startup. Box Core rejects nonempty `filesystem.receive_mounts` s
 
 The Linux backend also has an internal `MountView::plan_receiving_mounts` path for selected
 storage directories. Each directory must already be a dedicated mount point with an upstream
-connection. A shared parent directory alone is insufficient. The internal planner requires
+connection. This implementation pins and verifies each selected mount by its own mount ID.
+A shared parent alone cannot satisfy that check. This is a planner requirement, not a Linux
+limitation on receiving mounts beneath an ordinary directory. The internal planner requires
 covering writable and executable grants and rejects intersecting protected paths; these checks
 do not replace the complete per-process permission checks needed before public activation.
 
@@ -357,7 +359,12 @@ or an incomplete bind. An unbindable child, which Linux omits from recursive bin
 startup refusal. A source that changes during setup can require a startup retry. Checks after
 the root switch verify that each selected directory remains connected and unrelated paths do not.
 
-Setup preserves existing source restrictions. Future mounts retain the trusted publisher's
+Setup preserves existing source restrictions within selected storage. Ordinary parent and
+sibling grants must still provide their requested permissions; Box refuses startup if they
+cannot. Shared mount-table parsing and descriptor-based mount identity checks support both
+ordinary grants and selected storage.
+
+Future mounts retain the trusted publisher's
 options and contents: Box does not add read-only, `noexec`, `nosuid`, or `nodev` restrictions to
 those arrivals. These options respectively block writes, executable file mappings, privilege
 gains through executable file attributes, and device-node use. Complete per-process permission
