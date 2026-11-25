@@ -293,6 +293,17 @@
       }
     },
     {
+      "id": "message-codes",
+      "source": "docs/user/message-codes.md",
+      "slug": "reference/message-codes",
+      "title": "Message codes",
+      "description": "Read the message format Box writes to stderr, and what each message code means and asks you to do.",
+      "nav": {
+        "group": "Reference",
+        "order": 15
+      }
+    },
+    {
       "id": "core-quickstart",
       "source": "docs/user/getting-started.md",
       "slug": "core/quickstart",

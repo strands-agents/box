@@ -30,11 +30,6 @@ hosts = ["registry.npmjs.org"]
 [env]
 npm_config_cache = "${{ cache }}"
 npm_config_update_notifier = "false"
-# npm's script shell, by its full path. npm keeps its package PATH, and the shell does not depend on
-# a search through ancestor folders that the box cannot read.
-npm_config_script_shell = "/bin/sh"
 
 [filesystem]
 read = ["${{ root.parent }}"]
-# npm runs a package's bin through npm_config_script_shell, so npx needs that shell.
-read_file = ["/bin/sh"]

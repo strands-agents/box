@@ -5,7 +5,7 @@
 //! | `command` | the executable and its fixed leading arguments |
 //! | `workspace` | the initial working directory; grants nothing |
 //! | `env` | the literal environment, with no host inheritance |
-//! | `filesystem` | the eight path lists the process's own syscalls reach |
+//! | `filesystem` | the permission lists and incoming mount declarations |
 //! | `grammar` | the tool grammar a `[tool.<name>]` carries, behind `tool-grammars` |
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -78,10 +78,12 @@ pub(crate) fn uses_native_filesystem<'a>(
         .any(|spec| spec.native_filesystem_policy.unwrap_or(default))
 }
 
-/// The nine path lists. A directory entry is recursive, and a file entry is exact.
+/// The nine permission lists and the separately declared incoming mount paths.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Filesystem {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) receive_mounts: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) read: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -153,7 +155,7 @@ impl Grant {
 
 impl Filesystem {
     pub(crate) fn is_empty(&self) -> bool {
-        Grant::ALL.iter().all(|kind| self.list(*kind).is_empty())
+        self.receive_mounts.is_empty() && Grant::ALL.iter().all(|kind| self.list(*kind).is_empty())
     }
 
     /// One list, by kind.
@@ -357,6 +359,7 @@ impl ProcessSpec {
                 return Err(refuse(refusal_reason(kind, name, value)));
             }
         }
+        super::mounts::validate_paths(&self.filesystem.receive_mounts, table)?;
         for kind in Grant::ALL {
             let mut seen = BTreeSet::new();
             for entry in self.filesystem.list(kind) {
@@ -410,8 +413,11 @@ impl ProcessSpec {
 
 /// Refuse a spelling no list may carry: empty, patterned, relative, or naming a box's own authority.
 fn validate_spelling(kind: Grant, entry: &Path) -> Result<(), String> {
+    validate_path_spelling(kind.key(), entry)
+}
+
+pub(super) fn validate_path_spelling(key: &str, entry: &Path) -> Result<(), String> {
     let spelling = entry.display().to_string();
-    let key = kind.key();
     if spelling.is_empty()
         || spelling.chars().any(char::is_control)
         || spelling

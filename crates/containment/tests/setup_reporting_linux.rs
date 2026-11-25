@@ -188,6 +188,8 @@ fn finish(run: &mut Run) -> (std::process::ExitStatus, String, String) {
     (exit, stdout, stderr)
 }
 
+// Prints the fault's outcome for the test log, not a box message.
+#[allow(clippy::print_stderr)]
 fn check_failure(fault: Fault, expected: u8) {
     check_success();
     let mut run = start(fault, "printf WORKLOAD_RAN", None);
@@ -367,6 +369,8 @@ fn check_success() {
     assert_eq!(stdout, "CONTROL_OK");
 }
 
+// A `skipping:` line is test-harness output.
+#[allow(clippy::print_stderr)]
 fn the_host_can_build_a_view() -> bool {
     // SAFETY: the child uses syscalls only and calls `_exit`.
     let child = unsafe { libc::fork() };

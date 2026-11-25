@@ -321,7 +321,7 @@ pub(crate) struct Boundary {
     working_directory: PathBuf,
 
     /// What the caller prints before the process starts.
-    disclosure: String,
+    disclosure: Vec<DisclosureMessage>,
 
     /// Every localhost port the containment config grants, in grant order, for the Linux relay.
     #[cfg(target_os = "linux")]
@@ -973,9 +973,22 @@ impl Boundary {
         &self.working_directory
     }
 
-    /// What the caller prints on stderr before the process starts.
-    pub(crate) fn disclosure(&self) -> &str {
-        &self.disclosure
+    /// Write what the caller states before the process starts to stderr, one message per part.
+    pub(crate) fn disclose(&self) {
+        for (kind, text) in &self.disclosure {
+            ::diagnostics::diag!({ *kind }, "{text}");
+        }
+    }
+
+    /// The disclosure as stderr shows it.
+    #[cfg(test)]
+    pub(crate) fn disclosure(&self) -> String {
+        let mut output = Vec::new();
+        for (kind, text) in &self.disclosure {
+            ::diagnostics::diag!(into output, { *kind }, "{text}")
+                .expect("a Vec takes every write");
+        }
+        String::from_utf8(output).expect("each message is UTF-8")
     }
 
     /// Where the box listens for the agent, and the agent's own port, one pair per entry.
@@ -1011,11 +1024,11 @@ struct DisclosureInputs<'a> {
     native_filesystem_policy: bool,
 }
 
-/// The line a box prints for a `table` that selects file watching, at startup and again
-/// when the process starts.
+/// The message a box prints for a `table` that selects file watching, at startup and again
+/// when the process starts; `B0206`.
 pub(crate) fn file_watching_disclosure(table: &str) -> String {
     format!(
-        "strands-box: {table} file watching: macOS FSEvents may disclose denied names \
+        "{table} file watching: macOS FSEvents may disclose denied names \
          and event metadata, including outside the workspace and from past events, as well \
          as the host-wide event count and each volume's history identifier; file-content and \
          write restrictions still apply, except that a root process can delete any volume's \
@@ -1023,17 +1036,23 @@ pub(crate) fn file_watching_disclosure(table: &str) -> String {
     )
 }
 
-/// The text a box prints for one spec: its grants, selected policy checks, Core's own additions,
-/// and the effective `HOME` and `PATH`.
-fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
+/// One startup message of a spec's disclosure: its code, and its text without the source.
+type DisclosureMessage = (::diagnostics::Kind, String);
+
+/// The messages a box prints for one spec: its grants, selected policy checks, Core's own
+/// additions, and the effective `HOME` and `PATH`.
+fn disclosure(inputs: &DisclosureInputs<'_>) -> Vec<DisclosureMessage> {
+    use ::diagnostics::{Code, Kind};
+    let grant = Kind::Coded(Code::B0201);
     let table = inputs.table;
     let coverage = if inputs.native_filesystem_policy {
         "with experimental native policy checks for open, create, unlink, rename, and truncate over these paths"
     } else {
         "with no policy decision over these paths"
     };
+    let mut messages = Vec::new();
     let mut lines = vec![format!(
-        "strands-box: {table} runs {} {coverage}:",
+        "{table} runs {} {coverage}:",
         inputs.program.display()
     )];
     if inputs.grants.is_empty() {
@@ -1052,10 +1071,11 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
             inputs.program.display()
         ));
     }
+    messages.push((grant, lines.join("\n")));
     if !inputs.interpreter_aliases.is_empty() {
-        lines.push(format!(
-            "strands-box: {table} interpreter aliases for configured access:"
-        ));
+        let mut lines = vec![format!(
+            "{table} interpreter aliases for configured access:"
+        )];
         for (spelled, resolved) in inputs.interpreter_aliases {
             lines.push(format!(
                 "  alias       {} -> {}  (interpreter spelling)",
@@ -1063,10 +1083,9 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
                 resolved.display()
             ));
         }
+        messages.push((grant, lines.join("\n")));
     }
-    lines.push(format!(
-        "strands-box: {table} runtime minimum, added by Core:"
-    ));
+    let mut lines = vec![format!("{table} runtime minimum, added by Core:")];
     lines.extend(inputs.minimum.iter().map(MinimumCell::disclosure));
     for interpreter in inputs.interpreters {
         lines.push(format!(
@@ -1080,20 +1099,27 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
             workspace.display()
         ));
     }
+    messages.push((grant, lines.join("\n")));
     if inputs.broad_exec {
-        lines.push(format!(
-            "strands-box: {table} broad exec: may run any reachable binary, and \
-             load code it writes into its writable grants above"
+        messages.push((
+            grant,
+            format!(
+                "{table} broad exec: may run any reachable binary, and \
+                 load code it writes into its writable grants above"
+            ),
         ));
     }
     if inputs.file_attributes {
-        lines.push(format!(
-            "strands-box: {table} file attributes: may set file times, set-user-ID and set-group-ID \
-             bits, the group, the owner, and access control lists on files in its writable grants"
+        messages.push((
+            grant,
+            format!(
+                "{table} file attributes: may set file times, set-user-ID and set-group-ID \
+                 bits, the group, the owner, and access control lists on files in its writable grants"
+            ),
         ));
     }
     if inputs.file_watching {
-        lines.push(file_watching_disclosure(table));
+        messages.push((Kind::Coded(Code::B0206), file_watching_disclosure(table)));
     }
     if inputs.native_egress {
         let arguments = if table.starts_with("[tool.") {
@@ -1101,24 +1127,33 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
         } else {
             ""
         };
-        lines.push(format!(
-            "strands-box: {table} native egress: connects to the network directly{arguments} with \
-             no egress gateway, no net:connect or http:request decision, and no credential injection"
+        messages.push((
+            Kind::Coded(Code::B0210),
+            format!(
+                "{table} native egress: connects to the network directly{arguments} with \
+                 no egress gateway, no net:connect or http:request decision, and no credential injection"
+            ),
         ));
-        lines.push(format!(
-            "strands-box: {table} native trust: no proxy and no CA variable from Box, so its \
-             client uses its own defaults or its table's `env`{services}",
-            services = if cfg!(target_os = "macos") {
-                "; the trustd and SecurityServer services for the system's certificate checks"
-            } else {
-                ""
-            }
+        messages.push((
+            Kind::Coded(Code::B0211),
+            format!(
+                "{table} native trust: no proxy and no CA variable from Box, so its \
+                 client uses its own defaults or its table's `env`{services}",
+                services = if cfg!(target_os = "macos") {
+                    "; the trustd and SecurityServer services for the system's certificate checks"
+                } else {
+                    ""
+                }
+            ),
         ));
     }
-    lines.push(format!(
-        "strands-box: {table} HOME={} PATH={}",
-        inputs.home.display(),
-        inputs.path
+    messages.push((
+        grant,
+        format!(
+            "{table} HOME={} PATH={}",
+            inputs.home.display(),
+            inputs.path
+        ),
     ));
     for (identity, grant) in inputs.writable {
         let role = if identity == inputs.program {
@@ -1126,14 +1161,17 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
         } else {
             "interpreter"
         };
-        lines.push(format!(
-            "strands-box: warning: {table} {role} {} lies inside the writable grant {}, so the \
-             process can replace the program it runs",
-            identity.display(),
-            grant.display()
+        messages.push((
+            Kind::Coded(Code::B0212),
+            format!(
+                "{table} {role} {} lies inside the writable grant {}, so the \
+                 process can replace the program it runs",
+                identity.display(),
+                grant.display()
+            ),
         ));
     }
-    lines.join("\n")
+    messages
 }
 
 /// Whether one of `cells` grants a read of `file`, compared by identity.
@@ -2941,7 +2979,7 @@ mod tests {
         );
         assert!(
             native.disclosure().contains(
-                "strands-box: [tool.sso-cli] native egress: connects to the network directly, with \
+                "strands-box: note[B0210]: [tool.sso-cli] native egress: connects to the network directly, with \
                  the arguments the agent passes,"
             ),
             "{}",
@@ -2958,7 +2996,7 @@ mod tests {
             "{}",
             gateway.disclosure()
         );
-        let trust = "strands-box: [tool.sso-cli] native trust: no proxy and no CA variable from \
+        let trust = "strands-box: note[B0211]: [tool.sso-cli] native trust: no proxy and no CA variable from \
                      Box, so its client uses its own defaults or its table's `env`";
         assert!(
             native.disclosure().contains(trust),
@@ -4151,7 +4189,7 @@ mod tests {
         let disclosure = boundary.disclosure();
 
         for needle in [
-            "strands-box: [agent] runs",
+            "strands-box: note[B0201]: [agent] runs",
             &format!("read        {}", fixture.path("vendor").display()),
             &format!("write       {}", fixture.path("scratch").display()),
             &format!("exec        {}", fixture.path("tools").display()),
@@ -4159,7 +4197,7 @@ mod tests {
                 "exec        {}  (command, implicit)",
                 Path::new("/bin/sh").canonicalize().expect("sh").display()
             ),
-            "strands-box: [agent] runtime minimum, added by Core:",
+            "strands-box: note[B0201]: [agent] runtime minimum, added by Core:",
             "/dev/null",
             &format!(
                 "enter       {}  (workspace, entry only)",
@@ -4199,7 +4237,9 @@ mod tests {
         let boundary = fixture.translate(&spec, "[agent]", &[]);
 
         assert!(
-            boundary.disclosure().contains("warning: [agent] command")
+            boundary
+                .disclosure()
+                .contains("strands-box: warning[B0212]: [agent] command")
                 && boundary
                     .disclosure()
                     .contains("can replace the program it runs"),
@@ -4227,7 +4267,7 @@ mod tests {
         let disclosure = boundary.disclosure();
 
         assert!(
-            disclosure.contains("warning: [agent] interpreter")
+            disclosure.contains("strands-box: warning[B0212]: [agent] interpreter")
                 && disclosure.contains(&interpreter.display().to_string()),
             "{disclosure}"
         );
@@ -4253,7 +4293,7 @@ mod tests {
         let disclosure = boundary.disclosure();
 
         assert!(
-            disclosure.contains("warning: [agent] interpreter")
+            disclosure.contains("strands-box: warning[B0212]: [agent] interpreter")
                 && disclosure.contains(&interpreter.display().to_string()),
             "{disclosure}"
         );

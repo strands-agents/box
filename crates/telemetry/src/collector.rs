@@ -74,9 +74,7 @@ fn drain_warning(unexported_records: u64, failed_exports: u64, finished: bool) -
         [only] => only.clone(),
         [first @ .., last] => format!("{}, and {last}", first.join(", ")),
     };
-    Some(format!(
-        "strands-box: warning: telemetry records were lost: {cause}"
-    ))
+    Some(format!("telemetry records were lost: {cause}"))
 }
 
 /// Shut `logs` down on a thread no runtime joins, and answer what the outcome arrives on.
@@ -588,7 +586,7 @@ impl Collector {
             self.dropped.load(Ordering::Relaxed),
             finished,
         ) {
-            eprintln!("{warning}");
+            diagnostics::diag!(T0101, "{warning}");
         }
     }
 
@@ -1390,7 +1388,7 @@ mod tests {
 
     /// **A flood of relayed payloads costs no decision**, which is the audit-suppression property.
     ///
-    /// The relay slot admits one payload at a time and drops the rest without waiting, so a workload
+    /// The relay slot admits one payload at a time and refuses the rest without waiting, so a workload
     /// posting without pause cannot hold the box's own export worker behind it. One queue carrying both
     /// kinds would break this: the workload would fill it and the box's refusals would be dropped to
     /// make room.
@@ -1514,7 +1512,7 @@ mod tests {
         ] {
             let warning = drain_warning(0, failed, finished).expect("a loss is reported");
             assert!(
-                warning.starts_with("strands-box: warning: telemetry records were lost: "),
+                warning.starts_with("telemetry records were lost: "),
                 "{warning}"
             );
             assert!(warning.contains(cause), "{warning}");

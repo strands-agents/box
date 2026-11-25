@@ -2844,3 +2844,18 @@ fn a_remove_that_an_earlier_layer_already_made_changes_nothing() {
         "{error}"
     );
 }
+
+#[test]
+fn the_region_list_puts_an_unlisted_saved_region_first_so_enter_keeps_it() {
+    let listed = suggestions("bedrock.region", &[], Some("us-west-9"));
+    assert_eq!(listed[0], "us-west-9");
+    assert_eq!(listed.len(), crate::prompt::BEDROCK_REGIONS.len() + 1);
+    let listed = suggestions("bedrock.region", &[], Some("us-east-1"));
+    assert_eq!(
+        listed,
+        crate::prompt::BEDROCK_REGIONS,
+        "a listed region is not repeated"
+    );
+    assert!(suggestions("cloud.region", &[], Some("us-east-1")).is_empty());
+    assert!(suggestions("bedrock.region", &["us-east-1".to_string()], None).is_empty());
+}

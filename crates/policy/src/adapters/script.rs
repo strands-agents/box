@@ -11,7 +11,6 @@
 //!
 //! [`Mediated`]: https://docs.rs/strands-shell
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use monty_types::{ExcType, FileMode, MontyException, OsFunctionCall};
@@ -480,10 +479,7 @@ impl Drop for ScriptPermit<'_> {
     /// Record an admitted effect whose outcome was never reported.
     fn drop(&mut self) {
         if !self.reported && self.submit(FsResult::Indeterminate).is_err() {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "strands-box: warning: policy outcome recording was not confirmed"
-            );
+            diagnostics::diag!(P0301, "policy outcome recording was not confirmed");
         }
     }
 }
@@ -530,7 +526,7 @@ mod tests {
     use crate::Policy;
     use crate::rerun;
 
-    const WARNING: &str = "strands-box: warning: policy outcome recording was not confirmed";
+    const WARNING: &str = "policy: warning[P0301]: policy outcome recording was not confirmed";
 
     struct ReleaseOnDrop(Arc<FaultInjector>);
 
@@ -732,7 +728,8 @@ mod tests {
         ));
         let warnings: Vec<&str> = stderr
             .lines()
-            .filter(|line| line.contains("strands-box: warning"))
+            // The adapters' only warning; every other policy line is the engine's own.
+            .filter(|line| line.contains("policy outcome recording was not confirmed"))
             .collect();
         assert_eq!(warnings, vec![WARNING], "{stderr}");
         assert!(

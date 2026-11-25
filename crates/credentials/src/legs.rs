@@ -170,7 +170,7 @@ impl Vault {
     ///
     /// A `credsd://` locator routes to the credsd client and the AWS delivery adapter; every other
     /// signed locator is the ambient/scoped AWS source. The audit reference names the credsd
-    /// environment; a structured aws route has no such non-secret label, so it keeps the
+    /// credential; a structured aws route has no such non-secret label, so it keeps the
     /// `scheme://structured` form.
     pub(crate) fn audit_aws_resolve(&self, config: &Locator) -> Result<AwsResolution> {
         let request_id = RequestId::new(SIGN_CORRELATION);
@@ -196,33 +196,33 @@ impl Vault {
         AwsSource::with_provider(self.aws_provider(), self.ambient_policy()).resolve(config)
     }
 
-    /// Resolve a `credsd://<environment>` locator to AWS session credentials.
+    /// Resolve a `credsd://<credential>` locator to AWS session credentials.
     ///
-    /// A `credsd` route always names an environment, so there is no unscoped case and no ambient
+    /// A `credsd` route always names a credential, so there is no unscoped case and no ambient
     /// fallback — the acquisition carries no warning.
     fn resolve_credsd(&self, config: &Locator) -> Result<AwsResolution> {
-        let environment = credsd_environment(config)?;
+        let credential = credsd_credential(config)?;
         let socket = self.credsd_socket().ok_or_else(|| {
             CredentialError::KeystoreAccess(format!(
-                "no credsd socket was resolved for environment {environment:?}"
+                "no credsd socket was resolved for credential {credential:?}"
             ))
         })?;
         let client = CredsdClient::new(socket.to_path_buf());
-        let credentials = credsd_session_credentials(&client, environment)?;
+        let credentials = credsd_session_credentials(&client, credential)?;
         Ok(AwsResolution {
             credentials: zeroize::Zeroizing::new(credentials),
-            acquisition: AwsAcquisition::Credsd(environment.to_string()),
+            acquisition: AwsAcquisition::Credsd(credential.to_string()),
         })
     }
 }
 
-/// The environment a `credsd://<environment>` locator names.
-fn credsd_environment(config: &Locator) -> Result<&str> {
+/// The credential a `credsd://<credential>` locator names.
+fn credsd_credential(config: &Locator) -> Result<&str> {
     match config {
         Locator::Uri(uri) => {
-            let (scheme, environment) = uri.split_once("://").ok_or_else(|| {
+            let (scheme, credential) = uri.split_once("://").ok_or_else(|| {
                 CredentialError::Credential(format!(
-                    "malformed credsd credential reference {uri:?} (expected `credsd://<environment>`)"
+                    "malformed credsd credential reference {uri:?} (expected `credsd://<credential>`)"
                 ))
             })?;
             if scheme != CREDSD_SCHEME {
@@ -230,12 +230,12 @@ fn credsd_environment(config: &Locator) -> Result<&str> {
                     "a credsd route needs a credsd:// reference, not {scheme:?}"
                 )));
             }
-            if environment.is_empty() {
+            if credential.is_empty() {
                 return Err(CredentialError::Credential(
-                    "a credsd:// reference names no environment".to_string(),
+                    "a credsd:// reference names no credential".to_string(),
                 ));
             }
-            Ok(environment)
+            Ok(credential)
         }
         Locator::Structured(_) => Err(CredentialError::Credential(
             "a credsd route needs a credsd:// reference, not a structured block".to_string(),
@@ -496,8 +496,9 @@ mod tests {
             "a bare route warns once at open: {at_open:?}"
         );
         assert!(
-            at_open[0]
-                .starts_with("strands-box: warning: aws:// for s3.us-west-2.amazonaws.com:443 "),
+            at_open[0].starts_with(
+                "strands-box: warning[B0602]: aws:// for s3.us-west-2.amazonaws.com:443 "
+            ),
             "the warning keeps its prefix and names its destination: {}",
             at_open[0]
         );

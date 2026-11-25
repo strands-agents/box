@@ -142,6 +142,10 @@ const PROFILE: &str = if cfg!(debug_assertions) {
 
 /// Write a measurement straight to stderr, past the harness capture, so a CI log shows it.
 fn report(line: String) {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a test measurement, not a box message"
+    )]
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "{line}");
 }

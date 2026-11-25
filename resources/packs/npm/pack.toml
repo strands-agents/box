@@ -25,7 +25,6 @@ npm_config_cache = "${{ storage.cache }}"
 npm_config_update_notifier = "false"
 npm_config_audit = "false"
 npm_config_fund = "false"
-npm_config_script_shell = "/bin/bash"
 
 # The tool's own storage: the agent gets no grant to it.
 [storage]

@@ -45,8 +45,9 @@ impl Ingress {
                     Ok(caller) => caller,
                     Err(error) => {
                         drop(permit);
-                        eprintln!(
-                            "strands-box: [ingress] accepting a caller failed: {error}; retrying in {} s",
+                        diagnostics::diag!(
+                            B0702,
+                            "[ingress] accepting a caller failed: {error}; retrying in {} s",
                             ACCEPT_BACKOFF.as_secs()
                         );
                         tokio::select! {
@@ -68,8 +69,9 @@ impl Ingress {
                         }
                         Err(error) => {
                             if !refusing.swap(true, Ordering::Relaxed) {
-                                eprintln!(
-                                    "strands-box: [ingress] {}",
+                                diagnostics::diag!(
+                                    B0703,
+                                    "[ingress] {}",
                                     refusal(&error, workload.port())
                                 );
                             }

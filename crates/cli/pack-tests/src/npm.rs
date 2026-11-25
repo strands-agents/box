@@ -136,3 +136,91 @@ fn npms_cache_is_in_its_own_storage_outside_the_project() {
     let cache = npm["env"]["npm_config_cache"].as_str().expect("a cache");
     assert_in_tool_storage(&generated, &host, cache, "/tool/npm/cache");
 }
+
+#[test]
+fn npm_runs_its_scripts_with_sh_and_reads_it() {
+    let host = FakeHost::new();
+    let generated = host
+        .trial()
+        .with("claude")
+        .with("bedrock")
+        .tools(["npm"])
+        .generate()
+        .expect("a configuration");
+    let npm = tool(&generated, "npm");
+    assert_eq!(
+        npm["env"]["npm_config_script_shell"].as_str(),
+        Some("/bin/sh")
+    );
+    assert!(
+        strings(&npm["filesystem"]["read_file"]).contains(&script_shell()),
+        "{npm}"
+    );
+}
+
+#[test]
+/// Each pack that extends `@box/node` gets its script shell and the grant to read it, once.
+fn every_node_pack_runs_scripts_with_sh_as_a_tool_and_npx_as_an_mcp_launcher() {
+    let host = FakeHost::new();
+    let trees = Trees::new();
+    let bin = trees.folder("launchers/bin");
+    binary(&bin.join("node"));
+    for program in ["npx", "pnpx", "bunx", "yarn", "pnpm"] {
+        script_with(&bin.join(program), "#!/usr/bin/env node\n");
+    }
+    write(
+        &host.home().join(".claude.json"),
+        r#"{"mcpServers":{"memory":{"command":"npx"}}}"#,
+    );
+    let search = format!("{}:{}", bin.display(), host.search_path());
+    host.profile()
+        .with("claude")
+        .with("bedrock")
+        .with("npx")
+        .with("pnpx")
+        .with("bunx")
+        .with("yarn")
+        .with("pnpm")
+        .with("npm")
+        .option("claude.import-mcp", "true")
+        .tools(Vec::<String>::new())
+        .search_path(&search)
+        .create()
+        .expect("a profile")
+        .write(false)
+        .expect("a profile on disk");
+    let launch = host
+        .launcher()
+        .search_path(&search)
+        .prepare("claude", &host.project(), None)
+        .expect("a prepared run");
+    let config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(launch.config()).expect("config")).expect("TOML");
+    let mut processes: Vec<(String, &toml::Value)> = ["npm", "npx", "pnpx", "bunx", "yarn", "pnpm"]
+        .iter()
+        .map(|name| (format!("the {name} tool"), &config["tool"][*name]))
+        .collect();
+    processes.push(("the npx server".to_string(), &config["mcp"]["memory"]));
+    for (label, process) in processes {
+        assert_eq!(
+            process["env"]["npm_config_script_shell"].as_str(),
+            Some("/bin/sh"),
+            "{label}: {process}"
+        );
+        let read_file = strings(&process["filesystem"]["read_file"]);
+        assert_eq!(
+            read_file
+                .iter()
+                .filter(|path| **path == script_shell())
+                .count(),
+            1,
+            "{label} reads /bin/sh once: {read_file:?}"
+        );
+    }
+}
+
+/// `/bin/sh` as `box` grants it, with the folders above it resolved.
+fn script_shell() -> String {
+    let folder = std::fs::canonicalize("/bin").expect("the /bin folder");
+    text(&folder.join("sh"))
+}

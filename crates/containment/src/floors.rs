@@ -60,6 +60,15 @@ pub enum ContainmentWarning {
     },
 }
 
+impl ContainmentWarning {
+    /// The message code a printed warning of this kind carries.
+    pub fn code(&self) -> diagnostics::Code {
+        match self {
+            Self::WritableAndExecutable { .. } => diagnostics::Code::H0402,
+        }
+    }
+}
+
 impl std::fmt::Display for ContainmentWarning {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

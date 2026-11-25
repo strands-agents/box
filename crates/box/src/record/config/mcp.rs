@@ -58,6 +58,7 @@ pub(crate) enum McpEntry {
     /// operator-controlled backend (at most one, an empty list means no re-route).
     Http {
         /// The egress destinations that name this server's host(s).
+        #[serde(deserialize_with = "super::egress::destinations_without_trailing_dot")]
         destinations: Vec<String>,
         /// The credential to attach, if the entry names one.
         #[serde(default)]

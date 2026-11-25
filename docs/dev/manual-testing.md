@@ -26,7 +26,7 @@ and prints where it is:
 
 ```text
 try-build: downloading the build for PR 142 at 93d3646f9b
-try-build: box is /var/folders/.../T/box-try/93d3646f9b.../bin/box (PR 142 at 93d3646f9b), with BOX_HOME /var/folders/.../T/box-try/93d3646f9b.../home.
+try-build: box is /var/folders/.../T/box-try/93d3646f9b.../bin/box (PR 142 at 93d3646f9b), with BOX_HOME /Users/you/.box-try/93d3646f9b.
 ```
 
 Go on from step 3 below, and skip the `alias`. Open a new terminal to go back to your usual `box`.
@@ -39,8 +39,10 @@ scripts/try-build.sh 142 -- box profile show claude
 Without `--env` or `--`, the script starts your shell with the build first on `PATH`. Your shell's
 startup file can put another `box` first again, so `--env` is the reliable form.
 
-- The build starts with no profiles. `BOX_HOME` is a folder for that build alone, so a pull
-  request cannot leave profiles that your usual `box` cannot read. Create a profile first:
+- The build starts with no profiles. `BOX_HOME` is `~/.box-try/<commit>`, a folder for that
+  build alone, so a pull request cannot leave profiles that your usual `box` cannot read. It is in
+  your home folder and not in `$TMPDIR`, because a box home in `$TMPDIR` on macOS makes the socket
+  path [too long](../cli/troubleshooting.md#the-box-folder-path-is-too-long). Create a profile first:
   `box profile create claude`. A new commit gets a new, empty folder, also when you run `--env`
   again in the same shell.
 - To try the build on your own profiles, set `BOX_HOME=~/.strands/box` before you run the script.
@@ -48,7 +50,7 @@ startup file can put another `box` first again, so `--env` is the reliable form.
 - The script keeps each build in `$TMPDIR/box-try`, so it downloads a commit once. macOS removes
   old files there by itself. When a file of a build is gone, the script downloads the build
   again. It stops when `TMPDIR` is not set.
-  `scripts/try-build.sh --clean` removes every build and its profiles.
+  `scripts/try-build.sh --clean` removes every build, and `~/.box-try` with its profiles.
 - A pull request's build is the pull request merged into `main` as it was when CI ran. The
   script takes the build from the newest CI run for the commit.
 - `BOX_TRY` names the build, for example `142@93d3646f9b`.
@@ -325,66 +327,67 @@ The `missing` directory must remain absent, and neither command may create `~/.s
 
 ## Check telemetry delivery
 
-Return to the checkout from step 2 and build with `test-transport` to inspect events through
-a local receiver. If you used a CI build, first set `repo` to a source checkout:
+Use [`scripts/capture_telemetry.py`](../../scripts/capture_telemetry.py) when inspecting or changing
+CLI telemetry. It saves HTTP payloads while you build and run Box separately. It uses only the
+Python standard library.
+
+Use the Box build you want to inspect and keep its matching sandbox helpers beside it.
+The [endpoint override](../cli/cli.md#environment-variables) works in ordinary builds.
+
+In one terminal, start the receiver from your source checkout. Choose an output directory that
+does not exist:
 
 ```sh
-cd "$repo"
-CARGO_TARGET_DIR=target just build
-CARGO_TARGET_DIR=target cargo build -p strands-box-cli --features test-transport
-box_telemetry_binary="$PWD/target/debug/box"
+python3 scripts/capture_telemetry.py --output /tmp/box-telemetry-capture --port 8765
 ```
 
-This build sends no events unless `BOX_TEST_TELEMETRY_ENDPOINT` names an HTTP URL with a
-literal loopback address and no credentials. Use `127.0.0.1` or `[::1]`; hostnames, including
-`localhost`, are refused. Test delivery bypasses HTTP proxies. A build without the feature
-ignores this variable and uses the service endpoint on the [Usage telemetry](../../CLI_TELEMETRY.md) page.
-
-In a separate terminal, start a receiver:
-
-```sh
-python3 -u - <<'PYTHON'
-import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
-class Receiver(BaseHTTPRequestHandler):
-    def do_POST(self):
-        body = self.rfile.read(int(self.headers["Content-Length"]))
-        print(json.dumps(json.loads(body), indent=2), flush=True)
-        self.send_response(204)
-        self.end_headers()
-
-    def log_message(self, *args):
-        pass
-
-HTTPServer(("127.0.0.1", 8765), Receiver).serve_forever()
-PYTHON
+```text
+http://127.0.0.1:8765/box/ping
 ```
 
-Use the shell and scratch workspace from the steps above:
+The URL appears when the receiver is ready. Omit `--port` to choose an available port and use
+the printed URL.
+
+In another terminal, use the shell, profile, and credentials from the steps above. Point
+`box_telemetry_binary` at the build you want to inspect, then run from the scratch workspace:
 
 ```sh
+box_telemetry_binary="$repo/target/debug/box"
 cd ~/scratch/box-try
-BOX_TEST_TELEMETRY_ENDPOINT=http://127.0.0.1:8765/box/ping "$box_telemetry_binary" run claude
+BOX_RESOURCES="$repo/resources" BOX_TELEMETRY=1 \
+  BOX_TEST_TELEMETRY_ENDPOINT=http://127.0.0.1:8765/box/ping \
+  "$box_telemetry_binary" run claude --no-banner
 ```
 
-The receiver prints `run/1` when launch is observed. Keep the agent running for more than
+CLI telemetry goes to the local receiver, which does not forward it. Agent and Box Core telemetry
+targets remain as configured.
+
+Each `request-0001.json`, `request-0002.json`, and subsequent file holds one pretty-printed HTTP
+payload, which can be an event or an array of events. The matching `.body` file holds the original
+request bytes. The helper captures the payloads without checking their telemetry schema or meaning.
+
+Expect `run/1` when launch is observed. Keep the agent running for more than
 60 seconds to see a `polling/1` interval. Exit normally to see the final partial interval and
 `shutdown/1`. Incomplete journal intervals are omitted. Events from one invocation share
 `installation_id`, `run_id`, and `context`. A preparation failure gives `run/1` and `shutdown/1`
-without polling. If Ctrl+C ends the agent, check for the same completion event. Stop the
-receiver with Ctrl+C.
+without polling. If Ctrl+C ends the agent, check for the same completion event. After the run,
+stop the receiver with Ctrl+C or SIGTERM; it finishes accepted requests before exiting.
 
-Run the executable tests from the checkout. They use temporary profiles, a local receiver,
-and no model credential:
+After Box exits, optionally copy its [`records.jsonl`](../cli/files.md#profile-storage-and-runs)
+into the capture directory. For the terminal run above, find it beside the `box.log` file named in
+the exit summary. This lets you compare Core's `workload_started` record with the outgoing `run/1`
+payload. A reused box's journal also contains earlier invocations.
+
+Run the CLI telemetry end-to-end tests from the checkout. They launch Box with temporary profiles,
+a local receiver, and no model credential:
 
 ```sh
 cd "$repo"
-cargo test -p strands-box-cli --test telemetry -- --nocapture
+cargo test -p strands-box-cli --all-features --test telemetry -- --nocapture
 ```
 
 The CLI dev dependency enables the test transport for Cargo tests, including tests without
-`--all-features`. Rebuild without the feature to restore production delivery.
+`--all-features`.
 
 ## When the run fails
 

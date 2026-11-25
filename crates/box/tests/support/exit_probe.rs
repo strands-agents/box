@@ -1,5 +1,8 @@
 //! Test-only host binary that exits with a given code or ends by a given signal.
 
+// A test probe's stderr is the probe's own output to its test, not a Box Core message.
+#![allow(clippy::print_stderr)]
+
 #[cfg(unix)]
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();

@@ -2,7 +2,7 @@
 //! plus the two read methods the startup preflight needs.
 //!
 //! `credsd` speaks line-delimited JSON-RPC 2.0. [`CredsdClient::get`] sends one `credential/get`
-//! request carrying only the `environment` field and returns the tagged [`CredentialResult`];
+//! request carrying only the `credential` field and returns the tagged [`CredentialResult`];
 //! [`CredsdClient::health`] and [`CredsdClient::list`] send `system/health` and `credential/list`
 //! over the same request path. The client calls no bootstrap and no login method, and it reads no
 //! AWS field — the AWS delivery adapter in [`super::aws`] is the one component that does.
@@ -23,7 +23,7 @@ const GET_METHOD: &str = "credential/get";
 /// The liveness and protocol-version probe the preflight sends first.
 const HEALTH_METHOD: &str = "system/health";
 
-/// The environment-availability probe the preflight sends per declared environment.
+/// The credential-name listing the preflight sends once.
 const LIST_METHOD: &str = "credential/list";
 
 /// The fixed JSON-RPC request id; a result whose id differs is refused.
@@ -42,7 +42,7 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// request hot path across many under-timeout reads.
 const RESPONSE_DEADLINE: Duration = Duration::from_secs(10);
 
-/// The URI scheme a `credsd://<environment>` reference carries.
+/// The URI scheme a `credsd://<credential>` reference carries.
 pub(crate) const CREDSD_SCHEME: &str = "credsd";
 
 /// The material tag an AWS credential carries.
@@ -134,19 +134,16 @@ impl CredsdClient {
         Self { socket }
     }
 
-    /// Fetch the credential for `environment` with one `credential/get`, returning the tagged result.
+    /// Fetch `credential` with one `credential/get`, returning the tagged result.
     ///
-    /// Sends only the `environment` field — no `profile`, `scope`, or `claim`. Every
-    /// error names the environment and never the returned material.
-    pub(crate) fn get(&self, environment: &str) -> Result<CredentialResult> {
-        let context = environment_context(environment);
-        let request = build_request(
-            GET_METHOD,
-            serde_json::json!({ "environment": environment }),
-        );
+    /// Sends only the `credential` field. Every error names the credential and never the material.
+    pub(crate) fn get(&self, credential: &str) -> Result<CredentialResult> {
+        let subject = Subject::Credential(credential);
+        let context = subject.to_string();
+        let request = build_credential_request(GET_METHOD, credential);
         let stream = self.send(&request, &context)?;
         let line = read_response(&stream, &context)?;
-        parse_response(&line, environment)
+        parse_response(&line, subject)
     }
 
     /// Send `system/health` and return the daemon's protocol version.
@@ -159,22 +156,17 @@ impl CredsdClient {
         parse_health(&line)
     }
 
-    /// Count the credentials of one `environment` with one `credential/list`.
-    ///
-    /// Sends only the `environment` field and returns how many credentials the environment holds; the
-    /// preflight uses this to confirm the environment is configured, and reads no session state. An
-    /// absent environment is `ENVIRONMENT_NOT_FOUND`, which [`map_error`] classifies as a credential
-    /// failure naming the environment.
-    pub(crate) fn list(&self, environment: &str) -> Result<usize> {
-        let context = environment_context(environment);
-        let request = build_request(
-            LIST_METHOD,
-            serde_json::json!({ "environment": environment }),
-        );
-        let stream = self.send(&request, &context)?;
-        let line = read_response(&stream, &context)?;
-        let result: ListResult = parse_response(&line, environment)?;
-        Ok(result.credentials.len())
+    /// The name of each credential this caller holds, with one unfiltered `credential/list`.
+    pub(crate) fn list(&self) -> Result<Vec<String>> {
+        let request = build_request(LIST_METHOD, serde_json::json!({}));
+        let stream = self.send(&request, LIST_METHOD)?;
+        let line = read_response(&stream, LIST_METHOD)?;
+        let result: ListResult = parse_response(&line, Subject::List)?;
+        Ok(result
+            .credentials
+            .into_iter()
+            .map(|entry| entry.credential)
+            .collect())
     }
 
     /// Connect, set the read and write timeouts, and write one request line, returning the open
@@ -208,9 +200,27 @@ impl CredsdClient {
     }
 }
 
-/// The error-message label for a request that names an environment.
-fn environment_context(environment: &str) -> String {
-    format!("environment {environment:?}")
+/// What one request addresses, which each of its error messages names.
+#[derive(Clone, Copy)]
+enum Subject<'a> {
+    /// A `credential/get` for one credential.
+    Credential(&'a str),
+    /// The unfiltered `credential/list`.
+    List,
+}
+
+impl std::fmt::Display for Subject<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Subject::Credential(name) => write!(f, "credential {name:?}"),
+            Subject::List => f.write_str(LIST_METHOD),
+        }
+    }
+}
+
+/// Build one request line for `method` that addresses `credential`.
+fn build_credential_request(method: &str, credential: &str) -> String {
+    build_request(method, serde_json::json!({ "credential": credential }))
 }
 
 /// Build one request line for `method` carrying `params`.
@@ -295,26 +305,29 @@ fn first_line(buffer: &[u8]) -> &[u8] {
 
 /// Parse one response line into a tagged result `R`, mapping every outcome to the crate error
 /// classes. The message never carries the response bytes, which may hold credential material.
-fn parse_response<R: serde::de::DeserializeOwned>(buffer: &[u8], environment: &str) -> Result<R> {
+fn parse_response<R: serde::de::DeserializeOwned>(
+    buffer: &[u8],
+    subject: Subject<'_>,
+) -> Result<R> {
     let response: RpcResponse<R> =
         serde_json::from_slice(first_line(buffer)).map_err(|_source| {
             CredentialError::Credential(format!(
-                "credsd returned a malformed response for environment {environment:?}"
+                "credsd returned a malformed response for {subject}"
             ))
         })?;
     if let Some(error) = response.error {
-        return Err(map_error(&error, environment));
+        return Err(map_error(&error, subject));
     }
     // A result carries credentials, so its id must match the request we sent. A crossed or
-    // mismatched response must never sign with another environment's material.
+    // mismatched response must never sign with another credential's material.
     if response.id != Some(REQUEST_ID) {
         return Err(CredentialError::Credential(format!(
-            "credsd returned a response with an unexpected id for environment {environment:?}"
+            "credsd returned a response with an unexpected id for {subject}"
         )));
     }
     response.result.ok_or_else(|| {
         CredentialError::Credential(format!(
-            "credsd returned neither a result nor an error for environment {environment:?}"
+            "credsd returned neither a result nor an error for {subject}"
         ))
     })
 }
@@ -343,29 +356,55 @@ fn parse_health(buffer: &[u8]) -> Result<u32> {
 }
 
 /// Map a JSON-RPC error to a keystore-access or credential failure by its `error.data.code`, naming
-/// the environment and never `error.message`.
-fn map_error(error: &RpcError, environment: &str) -> CredentialError {
-    match error.data.as_ref().and_then(|data| data.code.as_deref()) {
-        Some("ENVIRONMENT_NOT_FOUND") => CredentialError::Credential(format!(
-            "credsd has no environment {environment:?}, or this box is not authorized for it"
+/// `subject` and never `error.message`.
+fn map_error(error: &RpcError, subject: Subject<'_>) -> CredentialError {
+    let code = error.data.as_ref().and_then(|data| data.code.as_deref());
+    match (code, subject) {
+        (Some("CREDENTIAL_NOT_FOUND"), Subject::Credential(name)) => CredentialError::Credential(
+            format!("credsd has no credential {name:?}, or this box is not authorized for it"),
+        ),
+        (Some("CREDENTIAL_NOT_FOUND"), Subject::List) => CredentialError::Credential(
+            "credsd refused credential/list: this box is not authorized to list credentials"
+                .to_string(),
+        ),
+        (Some("REAUTH_REQUIRED"), Subject::Credential(name)) => {
+            CredentialError::Credential(format!(
+                "credsd needs re-authentication for credential {name:?}; run \
+                 `creds login --credential {name}`"
+            ))
+        }
+        (Some("REAUTH_REQUIRED"), Subject::List) => {
+            CredentialError::Credential(format!("credsd needs re-authentication for {subject}"))
+        }
+        (Some("WRONG_CREDENTIAL_TYPE"), _) => CredentialError::Credential(format!(
+            "the credsd material for {subject} does not project to session credentials"
         )),
-        Some("REAUTH_REQUIRED") => CredentialError::Credential(format!(
-            "credsd needs re-authentication for environment {environment:?}; run `creds login`"
+        (Some("CONFIG_DRIFTED"), _) => CredentialError::KeystoreAccess(format!(
+            "credsd refused {subject}: its configuration changed after it was sealed; read the \
+             change, then run `creds revalidate`"
         )),
-        Some("WRONG_CREDENTIAL_TYPE") => CredentialError::Credential(format!(
-            "credsd environment {environment:?} does not project to session credentials"
+        (Some("CONFIG_INVALID"), _) => CredentialError::KeystoreAccess(format!(
+            "credsd refused {subject}: its configuration does not validate; correct the file, \
+             then run `creds revalidate`"
         )),
-        Some("PROVIDER_UNAVAILABLE") => CredentialError::KeystoreAccess(format!(
-            "the credsd provider is unavailable for environment {environment:?}"
+        (Some("INTEGRITY_UNVERIFIABLE"), _) => CredentialError::KeystoreAccess(format!(
+            "credsd refused {subject}: it cannot verify its configuration; run `creds revalidate`"
         )),
-        Some("INTERNAL") => CredentialError::KeystoreAccess(format!(
-            "credsd reported an internal error for environment {environment:?}"
+        (Some("CUSTODY_BROKEN"), _) => CredentialError::KeystoreAccess(format!(
+            "credsd refused {subject}: the ownership or mode of its integrity record is wrong; \
+             an operator must repair it and restart the daemon"
         )),
-        Some(_) => CredentialError::KeystoreAccess(format!(
-            "credsd reported an unrecognised failure for environment {environment:?}"
+        (Some("PROVIDER_UNAVAILABLE"), _) => CredentialError::KeystoreAccess(format!(
+            "the credsd provider is unavailable for {subject}"
         )),
-        None => CredentialError::Credential(format!(
-            "credsd rejected the request for environment {environment:?} (protocol code {code})",
+        (Some("INTERNAL"), _) => CredentialError::KeystoreAccess(format!(
+            "credsd reported an internal error for {subject}"
+        )),
+        (Some(_), _) => CredentialError::KeystoreAccess(format!(
+            "credsd reported an unrecognised failure for {subject}"
+        )),
+        (None, _) => CredentialError::Credential(format!(
+            "credsd rejected the request for {subject} (protocol code {code})",
             code = error.code
         )),
     }
@@ -451,13 +490,18 @@ struct HealthResult {
     protocol: u32,
 }
 
-/// The `credential/list` result. The preflight reads only how many credentials the environment
-/// holds, so each entry deserializes to `IgnoredAny`: name, kind, and session status are discarded,
-/// because the environment being configured is the only thing the check needs.
+/// The `credential/list` result. Only each entry's name is read; kind, source, status, and tags
+/// are ignored.
 #[derive(Debug, Deserialize)]
 struct ListResult {
     #[serde(default)]
-    credentials: Vec<serde::de::IgnoredAny>,
+    credentials: Vec<ListEntry>,
+}
+
+/// One `credential/list` entry.
+#[derive(Debug, Deserialize)]
+struct ListEntry {
+    credential: String,
 }
 
 /// A JSON-RPC error object.
@@ -485,18 +529,18 @@ mod tests {
 
     // --- request shape -------------------------------------------------------
 
-    /// The `environment` request builder used by `get` and `list`.
-    fn build_environment_request(method: &str, environment: &str) -> String {
-        build_request(method, serde_json::json!({ "environment": environment }))
-    }
-
-    /// The request carries the environment in the `environment` field and calls `credential/get`.
+    /// The request names the credential in the `credential` field, sends no `environment`, and
+    /// calls `credential/get`.
     #[test]
-    fn the_request_names_the_environment_and_the_get_method() {
-        let request = build_environment_request(GET_METHOD, "prod-inference");
+    fn the_request_names_the_credential_and_the_get_method() {
+        let request = build_credential_request(GET_METHOD, "prod-inference");
         let value: serde_json::Value = serde_json::from_str(request.trim_end()).unwrap();
         assert_eq!(value["method"], "credential/get");
-        assert_eq!(value["params"]["environment"], "prod-inference");
+        assert_eq!(value["params"]["credential"], "prod-inference");
+        assert!(
+            value["params"].get("environment").is_none(),
+            "the request sends no environment member"
+        );
         assert_eq!(value["jsonrpc"], "2.0");
         assert!(request.ends_with('\n'), "the transport is line-delimited");
     }
@@ -504,7 +548,7 @@ mod tests {
     /// The request sends no `profile`, `scope`, or `claim`.
     #[test]
     fn the_request_omits_profile_scope_and_claim() {
-        let request = build_environment_request(GET_METHOD, "dev");
+        let request = build_credential_request(GET_METHOD, "dev");
         let value: serde_json::Value = serde_json::from_str(request.trim_end()).unwrap();
         let params = &value["params"];
         assert!(params.get("profile").is_none(), "no legacy profile field");
@@ -512,17 +556,17 @@ mod tests {
         assert!(params.get("claim").is_none(), "no claim field");
     }
 
-    /// A special-character environment is JSON-escaped rather than breaking the line.
+    /// A special-character credential name is JSON-escaped rather than breaking the line.
     #[test]
-    fn the_request_escapes_the_environment() {
-        let request = build_environment_request(GET_METHOD, "a\"b\nc");
+    fn the_request_escapes_the_credential() {
+        let request = build_credential_request(GET_METHOD, "a\"b\nc");
         assert_eq!(
             request.matches('\n').count(),
             1,
             "only the terminator is a raw newline"
         );
         let value: serde_json::Value = serde_json::from_str(request.trim_end()).unwrap();
-        assert_eq!(value["params"]["environment"], "a\"b\nc");
+        assert_eq!(value["params"]["credential"], "a\"b\nc");
     }
 
     // --- response parsing ----------------------------------------------------
@@ -534,7 +578,7 @@ mod tests {
     /// A `session_credentials` result parses to its three material fields.
     #[test]
     fn a_session_credentials_result_parses() {
-        let result = parse_response::<CredentialResult>(&ok_response(), "dev")
+        let result = parse_response::<CredentialResult>(&ok_response(), Subject::Credential("dev"))
             .expect("a well-formed result parses");
         assert_eq!(result.material.kind, "session_credentials");
         assert_eq!(result.material.access_key_id.as_str(), "ASIAEXAMPLE");
@@ -549,37 +593,40 @@ mod tests {
         let mut buffer = ok_response();
         buffer.push(b'\n');
         buffer.extend_from_slice(br#"{"jsonrpc":"2.0","id":2,"result":{}}"#);
-        let result =
-            parse_response::<CredentialResult>(&buffer, "dev").expect("the first line parses");
+        let result = parse_response::<CredentialResult>(&buffer, Subject::Credential("dev"))
+            .expect("the first line parses");
         assert_eq!(result.material.access_key_id.as_str(), "ASIAEXAMPLE");
     }
 
     /// A result whose JSON-RPC id does not match the request is refused, so a crossed response never
-    /// signs with another environment's material.
+    /// signs with another credential's material.
     #[test]
     fn a_mismatched_response_id_is_refused() {
         let line = br#"{"jsonrpc":"2.0","id":99,"result":{"material":{"type":"session_credentials","access_key_id":"AKIAOTHER","secret_access_key":"other","session_token":"tok"}}}"#;
-        let error = parse_response::<CredentialResult>(line, "prod-inference")
+        let error = parse_response::<CredentialResult>(line, Subject::Credential("prod-inference"))
             .expect_err("a mismatched id must fail");
         assert!(matches!(error, CredentialError::Credential(_)));
         assert!(
             error.to_string().contains("prod-inference"),
-            "names the environment: {error}"
+            "names the credential: {error}"
         );
     }
 
-    /// Each domain code maps to its class, and the message names the environment but no material.
+    /// Each domain code maps to its class, and the message names the credential but no material.
     #[test]
     fn domain_codes_map_to_their_classes() {
         let case = |code: &str| {
             let line = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":-32000,"message":"x","data":{{"code":"{code}"}}}}}}"#
             );
-            parse_response::<CredentialResult>(line.as_bytes(), "prod-inference")
-                .expect_err("an error result fails")
+            parse_response::<CredentialResult>(
+                line.as_bytes(),
+                Subject::Credential("prod-inference"),
+            )
+            .expect_err("an error result fails")
         };
         for code in [
-            "ENVIRONMENT_NOT_FOUND",
+            "CREDENTIAL_NOT_FOUND",
             "REAUTH_REQUIRED",
             "WRONG_CREDENTIAL_TYPE",
         ] {
@@ -590,7 +637,7 @@ mod tests {
             );
             assert!(
                 error.to_string().contains("prod-inference"),
-                "{code} names the environment"
+                "{code} names the credential"
             );
         }
         for code in ["PROVIDER_UNAVAILABLE", "INTERNAL"] {
@@ -599,6 +646,36 @@ mod tests {
                 "{code} is a keystore-access error"
             );
         }
+        for (code, remedy) in [
+            ("CONFIG_DRIFTED", "run `creds revalidate`"),
+            (
+                "CONFIG_INVALID",
+                "correct the file, then run `creds revalidate`",
+            ),
+            ("INTEGRITY_UNVERIFIABLE", "run `creds revalidate`"),
+            (
+                "CUSTODY_BROKEN",
+                "an operator must repair it and restart the daemon",
+            ),
+        ] {
+            let error = case(code);
+            assert!(
+                matches!(error, CredentialError::KeystoreAccess(_)),
+                "{code} is a keystore-access error"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("prod-inference") && message.contains(remedy),
+                "{code} names the credential and its remedy: {message}"
+            );
+            assert!(!message.contains("unrecognised"), "{code} is recognised");
+        }
+        assert!(
+            case("REAUTH_REQUIRED")
+                .to_string()
+                .contains("run `creds login --credential prod-inference`"),
+            "the login hint names the credential"
+        );
         // An unrecognised domain code is treated like INTERNAL.
         assert!(matches!(
             case("SOMETHING_NEW"),
@@ -607,21 +684,21 @@ mod tests {
     }
 
     /// An envelope error with no domain code (e.g. an older daemon rejecting the request) is a hard
-    /// credential failure that names the environment.
+    /// credential failure that names the credential.
     #[test]
     fn an_envelope_error_is_a_hard_credential_failure() {
         let line =
             br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"unknown member"}}"#;
-        let error =
-            parse_response::<CredentialResult>(line, "dev").expect_err("an envelope error fails");
+        let error = parse_response::<CredentialResult>(line, Subject::Credential("dev"))
+            .expect_err("an envelope error fails");
         assert!(matches!(error, CredentialError::Credential(_)));
         assert!(error.to_string().contains("dev"));
     }
 
-    /// Malformed JSON is a credential error naming the environment, never echoing the bytes.
+    /// Malformed JSON is a credential error naming the credential, never echoing the bytes.
     #[test]
     fn malformed_json_is_a_credential_error() {
-        let error = parse_response::<CredentialResult>(b"{not json", "dev")
+        let error = parse_response::<CredentialResult>(b"{not json", Subject::Credential("dev"))
             .expect_err("malformed json fails");
         assert!(matches!(error, CredentialError::Credential(_)));
         assert!(error.to_string().contains("dev"));
@@ -752,7 +829,7 @@ mod tests {
         (rx, handle)
     }
 
-    /// The client connects, sends `credential/get` with the environment, and returns the material.
+    /// The client connects, sends `credential/get` with the credential, and returns the material.
     #[test]
     fn a_round_trip_sends_the_request_and_returns_the_material() {
         let path = socket_path();
@@ -768,7 +845,7 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_slice(request.trim_ascii_end()).expect("the request is one JSON line");
         assert_eq!(value["method"], "credential/get");
-        assert_eq!(value["params"]["environment"], "dev");
+        assert_eq!(value["params"]["credential"], "dev");
 
         handle.join().expect("the daemon thread joins");
         let _ = std::fs::remove_file(&path);
@@ -806,7 +883,7 @@ mod tests {
         assert!(matches!(error, CredentialError::KeystoreAccess(_)));
         assert!(
             error.to_string().contains("prod-inference") && error.to_string().contains("limit"),
-            "the refusal names the environment and the cap: {error}"
+            "the refusal names the credential and the cap: {error}"
         );
 
         let _ = handle.join();
@@ -829,14 +906,14 @@ mod tests {
         assert!(
             error.to_string().contains("prod-inference")
                 && error.to_string().contains("mid-response"),
-            "the refusal names the environment and the dropped connection: {error}"
+            "the refusal names the credential and the dropped connection: {error}"
         );
 
         let _ = handle.join();
         let _ = std::fs::remove_file(&path);
     }
 
-    /// An absent socket is a keystore-access failure naming the environment.
+    /// An absent socket is a keystore-access failure naming the credential.
     #[test]
     fn an_unreachable_socket_is_a_keystore_access_error() {
         let path = socket_path(); // never bound
@@ -849,7 +926,7 @@ mod tests {
 
     // --- system/health -------------------------------------------------------
 
-    /// `health` sends `system/health` with no environment and returns the reported protocol version,
+    /// `health` sends `system/health` with no params and returns the reported protocol version,
     /// using the daemon's real response shape (`protocol` int plus a `version` software string).
     #[test]
     fn health_sends_the_probe_and_returns_the_protocol_version() {
@@ -870,9 +947,10 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_slice(request.trim_ascii_end()).expect("one JSON line");
         assert_eq!(value["method"], "system/health");
-        assert!(
-            value["params"].get("environment").is_none(),
-            "system/health names no environment"
+        assert_eq!(
+            value["params"],
+            serde_json::json!({}),
+            "system/health sends no params"
         );
 
         handle.join().expect("the daemon thread joins");
@@ -905,70 +983,60 @@ mod tests {
 
     // --- credential/list -----------------------------------------------------
 
-    /// `list` sends `credential/list` for the environment and returns the credential count, ignoring
-    /// each entry's session status (the daemon's `no_session` here does not matter).
+    /// `list` sends one `credential/list` with empty params and returns each entry's name, in the
+    /// daemon's real entry shape, ignoring kind, source, status, and tags.
     #[test]
-    fn list_sends_the_environment_and_returns_the_count() {
+    fn list_sends_no_filter_and_returns_the_names() {
         let path = socket_path();
         let (rx, handle) = fake_daemon(
             path.as_path(),
-            br#"{"jsonrpc":"2.0","id":1,"result":{"credentials":[{"environment":"dev","credential":"login","kind":"session_credentials","status":"no_session"}]}}
+            br#"{"jsonrpc":"2.0","id":1,"result":{"credentials":[{"credential":"dev","kind":"session_credentials","source":"aws_idc_sso","status":"no_session","tags":{}},{"credential":"prod","kind":"access_token","source":"oauth","status":"active","tags":{"team":"a"}}]}}
 "#
             .to_vec(),
         );
 
-        let count = CredsdClient::new(path.clone())
-            .list("dev")
+        let names = CredsdClient::new(path.clone())
+            .list()
             .expect("the fake daemon answers credential/list");
-        assert_eq!(count, 1);
+        assert_eq!(names, ["dev", "prod"]);
 
         let request = rx.recv().expect("the daemon recorded the request");
         let value: serde_json::Value =
             serde_json::from_slice(request.trim_ascii_end()).expect("one JSON line");
         assert_eq!(value["method"], "credential/list");
-        assert_eq!(value["params"]["environment"], "dev");
+        assert_eq!(value["params"], serde_json::json!({}));
 
         handle.join().expect("the daemon thread joins");
         let _ = std::fs::remove_file(&path);
     }
 
-    /// A `credential/list` request carries only the environment — no `scope`, no `claim` — the same
-    /// discipline `credential/get` keeps.
+    /// `CREDENTIAL_NOT_FOUND` on a list, which credsd sends to an unauthorized caller, is a
+    /// credential failure.
     #[test]
-    fn the_list_request_omits_scope_and_claim() {
-        let request = build_environment_request(LIST_METHOD, "dev");
-        let value: serde_json::Value = serde_json::from_str(request.trim_end()).unwrap();
-        assert_eq!(value["method"], "credential/list");
-        assert_eq!(value["params"]["environment"], "dev");
-        assert!(
-            value["params"].get("scope").is_none(),
-            "scope is reserved, not sent"
-        );
-        assert!(value["params"].get("claim").is_none(), "no claim field");
-    }
-
-    /// `ENVIRONMENT_NOT_FOUND` on a list reuses the get path's mapping: a credential failure naming
-    /// the environment, never the material.
-    #[test]
-    fn list_maps_environment_not_found_to_a_credential_error() {
-        let line = br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"x","data":{"code":"ENVIRONMENT_NOT_FOUND"}}}"#;
+    fn list_maps_credential_not_found_to_a_credential_error() {
+        let line = br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"x","data":{"code":"CREDENTIAL_NOT_FOUND"}}}"#;
         let error =
-            parse_response::<ListResult>(line, "prod-inference").expect_err("not found must fail");
+            parse_response::<ListResult>(line, Subject::List).expect_err("not found must fail");
         assert!(matches!(error, CredentialError::Credential(_)));
-        assert!(error.to_string().contains("prod-inference"));
+        assert_eq!(
+            error.to_string(),
+            CredentialError::Credential(
+                "credsd refused credential/list: this box is not authorized to list credentials"
+                    .to_string()
+            )
+            .to_string(),
+            "a list refusal names the list, not a credential"
+        );
     }
 
-    /// An environment the daemon lists with no credential counts as zero, which the preflight treats
-    /// as absent.
+    /// An empty list parses to no names.
     #[test]
-    fn an_empty_list_counts_as_zero() {
-        let count = parse_response::<ListResult>(
+    fn an_empty_list_has_no_names() {
+        let result = parse_response::<ListResult>(
             br#"{"jsonrpc":"2.0","id":1,"result":{"credentials":[]}}"#,
-            "dev",
+            Subject::List,
         )
-        .expect("an empty result parses")
-        .credentials
-        .len();
-        assert_eq!(count, 0);
+        .expect("an empty result parses");
+        assert!(result.credentials.is_empty());
     }
 }

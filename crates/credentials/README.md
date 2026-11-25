@@ -275,19 +275,18 @@ instead of `*`.
 ## Live daemon test
 
 The `credsd_e2e` tests use local socket fixtures. One optional test checks a running
-credsd daemon. Configure a test environment that permits the test process to list
-credentials, then run:
+credsd daemon. Give the test process a credential that it can list, then run:
 
 ```sh
-CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_ENVIRONMENT=test-environment \
+CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_CREDENTIAL=test-credential \
   cargo test -p strands-box-credentials --all-features --test end_to_end \
-  credsd_e2e::a_live_daemon_maps_an_unknown_environment_to_a_hard_failure -- --exact --nocapture
+  credsd_e2e::a_live_daemon_maps_an_unknown_credential_to_a_hard_failure -- --exact --nocapture
 ```
 
-The test checks daemon health and caller access to the configured environment before
-requesting an unknown environment. It requires the specific unknown-environment error.
-A connection failure cannot satisfy that assertion. The configured environment is used
+The test checks daemon health and that the daemon lists the configured credential. Then it
+requests a credential that does not exist. It requires the specific unknown-credential error.
+A connection failure cannot satisfy that assertion. The configured credential is used
 only for the credential-list check, not for credential acquisition.
 
-An explicit socket or test environment makes setup failures fatal. Without either
+An explicit socket or test credential makes setup failures fatal. Without either
 setting, the test reports a skip. A skipped test does not prove daemon compatibility.

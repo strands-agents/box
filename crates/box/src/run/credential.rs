@@ -9,7 +9,7 @@ use credentials::{Backend, Vault, VaultConfig};
 use crate::error::{BoxError, Internal};
 use crate::record::config::Record;
 use crate::record::config::egress::{
-    EgressEntry, EgressRoute, SIGNING_PLACEHOLDER_VARIABLES, credsd_environments,
+    EgressEntry, EgressRoute, SIGNING_PLACEHOLDER_VARIABLES, credsd_credentials,
 };
 use crate::record::config::telemetry::TelemetryEntry;
 use crate::run::secret_sources::RouteSecrets;
@@ -17,7 +17,7 @@ use crate::run::secret_sources::RouteSecrets;
 /// Validate every declared `credsd` credential before the workload starts.
 ///
 /// A box that names no `credsd` source contacts no daemon. Otherwise this confirms the daemon is
-/// reachable and speaks the protocol, and that each named environment holds a usable session; any
+/// reachable and speaks the protocol, and that it lists each named credential; any
 /// gap is a hard failure that stops the run before it spawns the workload.
 /// Every map is passed by construction: remote MCP is stored in its own map (`record.remote_mcp`),
 /// and telemetry in another, so a credsd source declared only on a `[mcp.<name>] type = "http"`
@@ -28,18 +28,18 @@ pub(crate) fn preflight_credsd(
     remote_mcp: &BTreeMap<String, EgressEntry>,
     telemetry: &BTreeMap<String, TelemetryEntry>,
 ) -> Result<(), BoxError> {
-    let mut environments = credsd_environments(egress, remote_mcp);
-    for environment in crate::record::config::telemetry::credsd_environments(telemetry) {
-        if !environments.contains(&environment) {
-            environments.push(environment);
+    let mut names = credsd_credentials(egress, remote_mcp);
+    for name in crate::record::config::telemetry::credsd_credentials(telemetry) {
+        if !names.contains(&name) {
+            names.push(name);
         }
     }
-    if environments.is_empty() {
+    if names.is_empty() {
         return Ok(());
     }
     // The socket resolves as the per-request fetch resolves it: no vault path is set at run
     // today, so both pass `None` and fall to `CREDSD_SOCKET`, else the platform default.
-    credentials::credsd_preflight(None, &environments)?;
+    credentials::credsd_preflight(None, &names)?;
     Ok(())
 }
 

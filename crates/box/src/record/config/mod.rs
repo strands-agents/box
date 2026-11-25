@@ -19,6 +19,7 @@
 //! | [`ingress`] | `[[agent.ingress]]`: where callers reach the agent |
 //! | [`limits`] | `[limits.shell]`: the execution timeout of one Shell submission |
 //! | `env` | which environment names a process may set, and which Core owns |
+//! | [`mounts`] | the incoming mount declarations and their platform checks |
 //! | [`mcp`] | `[mcp.<name>]`: which local MCP servers exist, and how each starts |
 //! | [`secret_source`] | `[secret-source.<scheme>]`: which host program reads a secret for a scheme |
 //! | [`telemetry`] | `[telemetry.<label>]`: where a box's decision records go |
@@ -34,6 +35,7 @@ pub(crate) mod grammar;
 pub(crate) mod ingress;
 pub(crate) mod limits;
 pub(crate) mod mcp;
+mod mounts;
 pub(crate) mod process;
 pub(crate) mod secret_source;
 pub(crate) mod telemetry;
@@ -742,8 +744,8 @@ pub(crate) struct Record {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) remote_mcp: BTreeMap<String, EgressEntry>,
 
-    /// The MCP servers this box declares, from `box.toml`'s `[mcp.<name>]` tables. See the box
-    /// contract in `box/AGENTS.md`.
+    /// The MCP servers declared by `box.toml`'s `[mcp.<name>]` tables, described in
+    /// `crates/box/README.md#the-interface`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) mcp: Vec<crate::record::config::mcp::McpServer>,
 
@@ -835,6 +837,8 @@ const TOOL_CALLS_RECORD_VERSION: u32 = 40;
 /// The record version of a record whose policy applies in log-only mode, so an older build refuses
 /// the box rather than enforcing a policy the operator asked to trial.
 const LOG_ONLY_RECORD_VERSION: u32 = 41;
+/// The record version that preserves nonempty incoming mount declarations.
+const MOUNTS_RECORD_VERSION: u32 = 42;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -903,7 +907,12 @@ fn record_version<'a>(
     enforcement: Enforcement,
 ) -> u32 {
     let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
-    if enforcement.is_log_only() {
+    if specs
+        .clone()
+        .any(|spec| !spec.filesystem.receive_mounts.is_empty())
+    {
+        MOUNTS_RECORD_VERSION
+    } else if enforcement.is_log_only() {
         LOG_ONLY_RECORD_VERSION
     } else if telemetry::names_tool_calls(targets) {
         TOOL_CALLS_RECORD_VERSION
@@ -1095,6 +1104,12 @@ const REMOVED_MCP_FILESYSTEM_EXEC: RemovedKey = RemovedKey {
                   macOS, so it states no `exec` list; only `[agent.filesystem]` takes `exec`",
 };
 
+/// The unpublished protected-view prototype does not have an active replacement.
+const REMOVED_LINUX_STORAGE_MOUNTS: RemovedKey = RemovedKey {
+    key: "[experimental-features] linux-storage-mounts",
+    replacement: "remove this key; incoming mount forwarding is not available in this build",
+};
+
 /// The filesystem lists a leaf table no longer states, per `box.toml` section.
 const REMOVED_LEAF_FILESYSTEM_LISTS: [(&str, [(&str, &RemovedKey); 2]); 2] = [
     (
@@ -1130,6 +1145,13 @@ fn refuse_removed_keys(text: &str, path: &Path) -> Result<(), ConfigError> {
         key: removed.key,
         replacement: removed.replacement,
     };
+    if table
+        .get("experimental-features")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|features| features.contains_key("linux-storage-mounts"))
+    {
+        return Err(refuse(&REMOVED_LINUX_STORAGE_MOUNTS));
+    }
     for removed in &REMOVED_TOP_LEVEL_KEYS {
         if table.contains_key(removed.key.trim_matches(['[', ']'])) {
             return Err(refuse(removed));
@@ -1233,6 +1255,7 @@ impl Record {
             SECRET_SOURCE_RECORD_VERSION,
             TOOL_CALLS_RECORD_VERSION,
             LOG_ONLY_RECORD_VERSION,
+            MOUNTS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1287,6 +1310,7 @@ impl Record {
     fn validate_processes(&self) -> Result<(), ConfigError> {
         if let Some(agent) = &self.agent {
             agent.validate("[agent]")?;
+            mounts::validate_selection(agent, "[agent]", &self.experimental_features)?;
             agent.validate_native_policy(
                 "[agent]",
                 self.experimental_features.native_filesystem_policy,
@@ -1295,6 +1319,11 @@ impl Record {
         }
         for (label, tool) in &self.tool {
             tool.validate(&format!("[tool.{label}]"))?;
+            mounts::validate_selection(
+                tool,
+                &format!("[tool.{label}]"),
+                &self.experimental_features,
+            )?;
             tool.validate_native_policy(
                 &format!("[tool.{label}]"),
                 self.experimental_features.native_filesystem_policy,
@@ -1306,6 +1335,11 @@ impl Record {
         }
         for (name, contained) in &self.contained_mcp {
             contained.spec.validate(&format!("[mcp.{name}]"))?;
+            mounts::validate_selection(
+                &contained.spec,
+                &format!("[mcp.{name}]"),
+                &self.experimental_features,
+            )?;
             contained.spec.validate_native_policy(
                 &format!("[mcp.{name}]"),
                 self.experimental_features.native_filesystem_policy,
@@ -1528,6 +1562,50 @@ pub(crate) struct BoxName(String);
 /// The longest box name, which also bounds a caller-supplied box identity.
 pub(crate) const MAXIMUM_BOX_NAME: usize = 32;
 
+/// Why `host` is not a name the egress gateway can bind, or `None` when it is one.
+pub(crate) fn unbindable_host_name(host: &str) -> Option<&'static str> {
+    let canonical = egress_gateway::normalize_host(host);
+    if canonical.is_empty() {
+        return Some("it is empty");
+    }
+    if !canonical.is_ascii() {
+        return Some(
+            "it holds a character other than a letter, a digit, '.', '-', or '_'; write a \
+             non-ASCII name in its punycode (xn--) form",
+        );
+    }
+    let named = canonical.parse::<std::net::IpAddr>().is_err()
+        && canonical
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'));
+    if named && (canonical.len() > 253 || canonical.split('.').any(|label| label.len() > 63)) {
+        return Some("it is longer than DNS allows: 63 bytes in a label, 253 in a name");
+    }
+    if named && ends_in_a_number(&canonical) {
+        return Some(
+            "it ends in a number, so a resolver reads it as an IPv4 address; write the address \
+             as four decimal numbers with no leading zero, such as 10.0.0.5",
+        );
+    }
+    if !egress_gateway::is_bindable_host(&canonical) {
+        return Some("it holds a character other than a letter, a digit, '.', '-', or '_'");
+    }
+    if canonical.split('.').any(str::is_empty) {
+        return Some("it has an empty label");
+    }
+    None
+}
+
+/// Whether the last label of the lowercase `host` is decimal digits, or `0x` and hexadecimal digits.
+fn ends_in_a_number(host: &str) -> bool {
+    let last = host.rsplit('.').next().unwrap_or(host);
+    !last.is_empty()
+        && (last.bytes().all(|byte| byte.is_ascii_digit())
+            || last
+                .strip_prefix("0x")
+                .is_some_and(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit())))
+}
+
 /// Whether one character may appear in a box name, an MCP server name, or an alias filename.
 pub(crate) fn nameable(character: char) -> bool {
     matches!(character, 'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '-')
@@ -1746,6 +1824,8 @@ impl ConfigFile {
             path: path.to_path_buf(),
             source,
         })?;
+        #[cfg(not(target_os = "linux"))]
+        mounts::refuse_unsupported_config(text, path)?;
         file.validate()?;
         Ok(file)
     }
@@ -1785,6 +1865,7 @@ impl ConfigFile {
         self.gateway.validate()?;
         if let Some(agent) = &self.agent {
             agent.validate("[agent]")?;
+            mounts::validate_selection(agent, "[agent]", &self.experimental_features)?;
             agent.validate_native_policy(
                 "[agent]",
                 self.experimental_features.native_filesystem_policy,
@@ -1794,6 +1875,11 @@ impl ConfigFile {
         for (label, tool) in &self.tool {
             validate_tool_label(label)?;
             tool.validate(&format!("[tool.{label}]"))?;
+            mounts::validate_selection(
+                tool,
+                &format!("[tool.{label}]"),
+                &self.experimental_features,
+            )?;
             tool.validate_native_policy(
                 &format!("[tool.{label}]"),
                 self.experimental_features.native_filesystem_policy,
@@ -1805,6 +1891,11 @@ impl ConfigFile {
         }
         for (name, contained) in crate::record::config::mcp::contained_specs(&self.mcp) {
             contained.spec.validate(&format!("[mcp.{name}]"))?;
+            mounts::validate_selection(
+                &contained.spec,
+                &format!("[mcp.{name}]"),
+                &self.experimental_features,
+            )?;
             contained.spec.validate_native_policy(
                 &format!("[mcp.{name}]"),
                 self.experimental_features.native_filesystem_policy,
@@ -1827,7 +1918,23 @@ impl ConfigFile {
             &BTreeMap::new(),
             agent_ingress(self.agent.as_ref()),
         )?;
-        validate_egress(&self.egress, &self.declared_sources()?)
+        validate_egress(&self.egress, &self.declared_sources()?)?;
+        let contained = mcp::contained_specs(&self.mcp);
+        if self
+            .agent
+            .iter()
+            .chain(self.tool.values())
+            .chain(contained.values().map(|server| &server.spec))
+            .any(|spec| !spec.filesystem.receive_mounts.is_empty())
+        {
+            return Err(ConfigError::Contract {
+                reason:
+                    "cannot start Box with `filesystem.receive_mounts`: incoming mount forwarding \
+                         is not available in this build"
+                        .into(),
+            });
+        }
+        Ok(())
     }
 
     /// Every declared `ProcessSpec` beside the table that declared it.
@@ -2059,6 +2166,69 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].url, "https://api.example.com/mcp");
     }
+    /// The refusal `read_remote_mcp_servers` gives for a `box.toml` with `body`.
+    fn remote_mcp_refusal(body: &str) -> String {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("box.toml");
+        std::fs::write(
+            &path,
+            format!("name = \"test\"\nbox_dir = \"/var/lib/box\"\n{body}"),
+        )
+        .unwrap();
+        match read_remote_mcp_servers(&path) {
+            Ok(_) => panic!("{body:?} loads"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_remote_mcp_server_the_gateway_cannot_recognize_is_refused() {
+        for (destination, reason) in [
+            ("bücher.example", "punycode (xn--)"),
+            ("*.example.com", "may not be a wildcard"),
+        ] {
+            let error = remote_mcp_refusal(&format!(
+                "[mcp.tools]\ntype = \"http\"\ndestinations = [{destination:?}]\n"
+            ));
+            assert!(error.contains(reason), "{destination:?}: {error}");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("box.toml");
+        std::fs::write(
+            &path,
+            "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+             [mcp.tools]\ntype = \"http\"\ndestinations = [\"xn--bcher-kva.example\"]\n\
+             [mcp.dotted]\ntype = \"http\"\ndestinations = [\"mcp.example.com.\"]\n",
+        )
+        .unwrap();
+        let servers = read_remote_mcp_servers(&path).unwrap();
+        let url = |name: &str| {
+            servers
+                .iter()
+                .find(|server| server.name == name)
+                .map(|server| server.url.clone())
+        };
+        assert_eq!(url("tools").unwrap(), "https://xn--bcher-kva.example/mcp");
+        assert_eq!(
+            url("dotted").unwrap(),
+            "https://mcp.example.com/mcp",
+            "a trailing dot is stripped at load"
+        );
+    }
+
+    #[test]
+    fn a_re_route_onto_a_remote_mcp_server_host_is_refused() {
+        let error = remote_mcp_refusal(
+            "[egress.api]\ndestinations = [\"api.github.com\"]\n\
+             [[egress.api.backends]]\nurl = \"https://gw.example.com\"\n\
+             [mcp.tools]\ntype = \"http\"\ndestinations = [\"gw.example.com\"]\n",
+        );
+        assert!(
+            error.contains("which `tools` declares as a remote MCP server"),
+            "{error}"
+        );
+    }
+
     // **The egress tests still live here.** They belong in `egress.rs` beside what they test;
     // moving them needs the `load` fixture below, which every other test also uses.
 
@@ -3533,7 +3703,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, LOG_ONLY_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, MOUNTS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -4963,7 +5133,7 @@ command = ["mcp-server-fetch"]
 
     /// Regression guard for the egress/remote-MCP field split. A remote MCP server declared ONLY in
     /// `[mcp.<name>] type = "http"` lands in `record.remote_mcp`, not `record.egress`, so EVERY
-    /// consumer of the split data must read both maps: the credsd preflight (`credsd_environments`),
+    /// consumer of the split data must read both maps: the credsd preflight (`credsd_credentials`),
     /// the gateway host set (`mcp_servers`), and the routes/credentials (`egress_routes`). Each of
     /// these was — or could regress to — a `record.egress`-only reader that silently drops remote MCP,
     /// which a review of this change found twice. If any consumer goes egress-only again, this fails.
@@ -4986,7 +5156,7 @@ command = ["mcp-server-fetch"]
 
         // credsd preflight: the credsd source is visible over the union of both maps.
         assert_eq!(
-            egress::credsd_environments(&record.egress, &record.remote_mcp),
+            egress::credsd_credentials(&record.egress, &record.remote_mcp),
             vec!["prod-inference"],
             "the preflight must see a credsd source declared only on a remote MCP server"
         );
@@ -5579,7 +5749,7 @@ command = ["mcp-server-fetch"]
             "invalid credential entry for host \"api.example.com\": secret scheme \"op\" has \
              no `[secret-source.op]` table: declare the secret source that reads it, or use \
              env://NAME for a credential the workload presents as a placeholder, aws://profile \
-             for one signed in the boundary, or credsd://<environment> for a credsd-vended \
+             for one signed in the boundary, or credsd://<credential> for a credsd-vended \
              credential"
         );
     }

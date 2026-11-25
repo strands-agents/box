@@ -684,6 +684,21 @@ and raises `shell:exec`, and each file it touches raises its own `fs:*`. The ali
 command such as `cat` or `jq`, or with a program that the Shell starts in its own sandbox. Plugin
 hooks remain broken because most of them exec a script.
 
+<a id="core-writes-stderr-only-through-diag-and-codes-each-kind"></a>
+### Box Core writes stderr only through `diag!`, and codes each kind of message but internal failures
+
+Every Box Core message reaches stderr through `diagnostics::diag!` as
+`<source>: <severity>[<code>]: <text>`, and clippy refuses any other stderr write in Core crates.
+Each kind of message, one cause the reader can act on rather than one error type, has one code;
+the registry sets its source and severity. An internal failure the reader can only report has no
+code. The format is a convention on a shared stream, not an authenticated channel.
+
+**Rejected.** Codes only for messages a reader acts on today: an uncoded kind cannot be
+explained later.
+
+**Cost.** Each new kind of message needs a code and a row on `message-codes.md`. A reader must not
+treat a coded line as proof that Box wrote it.
+
 ## Policy
 
 <a id="the-authored-policy-is-the-only-decision-authority"></a>

@@ -136,7 +136,7 @@ that the workload's log records and metrics reach every target.
 ### The credential
 
 `secret.ref` names where the box reads the key: `env://NAME` or `secret://NAME` for a variable in the
-environment of `strands-box run`, `aws://PROFILE` or `credsd://ENVIRONMENT` for a SigV4 signature, or
+environment of `strands-box run`, `aws://PROFILE` or `credsd://CREDENTIAL` for a SigV4 signature, or
 a reference in a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table
 declares. The box holds the key in a vault of its own for each target, and attaches it on each
 request. A literal key is refused, and so is a `file://` reference. An `op://` reference is refused
@@ -156,7 +156,7 @@ credential it attached from that answer, so an endpoint that echoes a refused ke
 key in your logs:
 
 ```text
-strands-box: telemetry export failed: https://cloud.langfuse.com/api/public/otel/v1/traces answered 401 Unauthorized: ...
+telemetry: warning[T0102]: telemetry export failed: https://cloud.langfuse.com/api/public/otel/v1/traces answered 401 Unauthorized: ...
 ```
 
 ## The workload's own signals
@@ -177,6 +177,9 @@ Box binds one loopback port for the workload and sets three variables in its env
 
 Box owns every name that begins with `OTEL_EXPORTER_OTLP_`, so `[agent] env` may not set one. The
 receiver answers `/v1/traces`, `/v1/logs`, and `/v1/metrics`, and answers `404` on every other route.
+It relays one payload at a time. It answers a payload that arrives during a relay with `503` and
+`Retry-After: 2`. An exporter that retries, as the OpenTelemetry Python and JavaScript OTLP/HTTP
+exporters do, sends that payload again.
 
 The exporter switches belong to the workload, so write them in `[agent] env`:
 
@@ -415,7 +418,8 @@ A telemetry error stops the run before the workload starts, so the agent never r
 the reason on stderr and exits `1`.
 
 Exit `1` alone does not prove that Box refused, because a workload is free to exit `1` as well. The
-message does: Box prefixes every line it prints with `strands-box:`.
+message does: a telemetry refusal reads `telemetry: error[T0103]: ...`. See
+[message codes](message-codes.md).
 
 | What the operator sees | Cause |
 |---|---|
@@ -447,8 +451,8 @@ Box prints one line on stderr if any of these happened:
 - The final export did not finish in time.
 
 ```text
-strands-box: warning: telemetry records were lost: 441 records were dropped before export to the configured targets
-strands-box: warning: telemetry records were lost: 2 exports to the configured targets failed
+telemetry: warning[T0101]: telemetry records were lost: 441 records were dropped before export to the configured targets
+telemetry: warning[T0101]: telemetry records were lost: 2 exports to the configured targets failed
 ```
 
 When more than one cause applies, the line names each of them. The run's exit code does not change.
