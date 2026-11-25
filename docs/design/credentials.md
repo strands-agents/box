@@ -144,7 +144,7 @@ fetches session credentials on each request, as `aws://` does. A `token` route i
 like `env://`: Box reads the access token once, when the vault opens, and holds it for the run, as
 it holds the secret of a declared source. Box does not refresh the token, so a token that expires
 stops working until the next run, and Box warns at startup when the token names an expiry. Every
-route that names one token shares one read. Before either read, the credential preflight checks
+route that names one token under one placeholder variable, or with none, shares one read. Before either read, the credential preflight checks
 that credsd lists each named credential with the kind its routes name. A route with no
 `secret.type` is an `aws` route, and Box warns that it should name the type.
 

@@ -320,9 +320,6 @@ fn validate_pairs(
     // prefix it asked for. Every route that names one variable shares one phantom, and one variable
     // holds one secret.
     let mut variables: BTreeMap<&str, (Origin, &str, &str, &str)> = BTreeMap::new();
-    // Which entry first read each credsd token, and the placeholder variable it named. The box reads
-    // one token once, so every route that names it holds its placeholder in one variable, or none.
-    let mut tokens: BTreeMap<&str, (Origin, &str, Option<&str>)> = BTreeMap::new();
     // The first signed route, which fills each signing variable with a placeholder.
     let signed = entries
         .iter()
@@ -418,32 +415,6 @@ fn validate_pairs(
             variables
                 .entry(variable)
                 .or_insert((origin, name, secret.reference.as_str(), prefix));
-        }
-        if let Some(secret) = &entry.secret
-            && matches!(secret.deliverable(), Some((SecretScheme::CredsdToken, _)))
-        {
-            let variable = secret.env.as_deref();
-            match tokens.get(secret.reference.as_str()) {
-                Some(&(earlier_origin, earlier, earlier_variable))
-                    if earlier_variable != variable =>
-                {
-                    return Err(ConfigError::Credential {
-                        host: label.to_string(),
-                        reason: format!(
-                            "`{}` and `{}` both read {} as a token with a different secret.env; \
-                             the box reads one token once and holds it behind one placeholder, so \
-                             give both the same secret.env, or leave it out of both",
-                            origin.table(name),
-                            earlier_origin.table(earlier),
-                            secret.reference,
-                        ),
-                    });
-                }
-                Some(_) => {}
-                None => {
-                    tokens.insert(secret.reference.as_str(), (origin, name, variable));
-                }
-            }
         }
         // A remote MCP server's name is its `context.input.server`, which a rule reads to gate its
         // tool calls. It must be present and nameable: empty leaves it nameless, and a control
@@ -3884,41 +3855,6 @@ mod tests {
         )
         .expect("a typed remote MCP credsd route is valid");
         assert!(holds_secret_type(&BTreeMap::new(), &typed));
-    }
-
-    /// Two routes that read one credsd token name one placeholder variable, or none, because the box
-    /// reads the token once and holds it behind one placeholder.
-    #[test]
-    fn one_credsd_token_under_two_placeholder_variables_is_refused() {
-        let route = |name: &str, host: &str, env: &str| {
-            format!(
-                "[egress.{name}]\ndestinations = [\"{host}\"]\nsecret.ref = \"credsd://github\"\n\
-                 secret.type = \"token\"\nsecret.inject = \"always\"\n{env}\n"
-            )
-        };
-        let refused = load_with(
-            &format!(
-                "{}{}",
-                route("a", "api.github.com", "secret.env = \"GH_TOKEN\""),
-                route("b", "uploads.github.com", "")
-            ),
-            &declared(),
-        )
-        .expect_err("one token, two placeholder variables")
-        .to_string();
-        assert!(
-            refused.contains("both read credsd://github as a token with a different secret.env"),
-            "{refused}"
-        );
-        load_with(
-            &format!(
-                "{}{}",
-                route("a", "api.github.com", "secret.env = \"GH_TOKEN\""),
-                route("b", "uploads.github.com", "secret.env = \"GH_TOKEN\"")
-            ),
-            &declared(),
-        )
-        .expect("one token under one variable is valid");
     }
 
     /// Only a credsd route that names no type warns, and each names its table and reference.

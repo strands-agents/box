@@ -75,7 +75,7 @@ pub(super) const BEARER_PREFIX: &str = "Bearer ";
 pub(super) const AWS_SCHEME: &str = "aws";
 
 /// The locator scheme naming a credsd credential source, whose type the daemon reports per request.
-pub(super) const CREDSD_SCHEME: &str = "credsd";
+pub(crate) const CREDSD_SCHEME: &str = "credsd";
 
 /// The locator scheme that provisions a phantom into the workload's environment.
 pub(super) const ENV_SCHEME: &str = "env://";
