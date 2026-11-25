@@ -623,9 +623,94 @@ fn a_claude_box_reads_the_managed_policy_that_this_host_has() {
         );
         exec.push("/usr/bin/plutil".to_string());
     }
-    assert_eq!(policy("read"), present(vec![folder.to_string()]));
-    assert_eq!(policy("read_file"), present(files));
+    // A file entry keeps its name in its real parent folder, and is left out when its name and its
+    // target both lie inside the granted folder.
+    let granted_folder = present(vec![folder.to_string()]);
+    let files = files
+        .iter()
+        .map(Path::new)
+        .filter(|file| file.exists())
+        .filter_map(|file| {
+            Some((
+                resolved(file.parent()?).join(file.file_name()?),
+                resolved(file),
+            ))
+        })
+        .filter(|(name, target)| {
+            !granted_folder
+                .iter()
+                .any(|real| name.starts_with(real.as_str()) && target.starts_with(real.as_str()))
+        })
+        .map(|(name, _)| name.display().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(policy("read"), granted_folder);
+    assert_eq!(policy("read_file"), files);
     assert_eq!(policy("exec"), present(exec));
+}
+
+/// Copy the folder `from` to `to`, so a test can change a shipped pack.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("a folder");
+    for entry in std::fs::read_dir(from).expect("a listing") {
+        let entry = entry.expect("an entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("a type").is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).expect("a copy");
+        }
+    }
+}
+
+#[test]
+fn a_claude_box_starts_with_an_organizations_managed_settings_folder() {
+    let host = FakeHost::new();
+    let fake = host.home().join("org-managed");
+    let managed = fake.join("ClaudeCode");
+    std::fs::create_dir_all(&managed).expect("a managed folder");
+    std::fs::write(managed.join("managed-settings.json"), "{}").expect("a regular file");
+    std::fs::write(managed.join("CLAUDE.md"), "rules").expect("a regular file");
+    let deployed = fake.join("deployed-mcp.json");
+    std::fs::write(&deployed, "{}").expect("a file outside the folder");
+    std::os::unix::fs::symlink(&deployed, managed.join("managed-mcp.json"))
+        .expect("a link out of the folder");
+    // The operator's own `claude` pack takes the place of the shipped one, so this host's copy
+    // can name the fake folder.
+    let copied = host.home().join(".strands/box/packs/claude");
+    copy_tree(&resources().join("packs/claude"), &copied);
+    let pack = copied.join("pack.toml");
+    let folder = managed.display().to_string();
+    let text = std::fs::read_to_string(&pack)
+        .expect("the claude pack")
+        .replace("/Library/Application Support/ClaudeCode", &folder)
+        .replace("/etc/claude-code", &folder)
+        .replace("name = \"@box/claude\"", "name = \"claude\"");
+    std::fs::write(&pack, text).expect("the changed pack");
+
+    let generated = host
+        .trial()
+        .with("claude")
+        .with("bedrock")
+        .generate()
+        .expect("a configuration with the managed folder");
+    let file: toml::Table = toml::from_str(generated.box_toml()).expect("TOML");
+    let filesystem = &file["agent"]["filesystem"];
+    let real = resolved(&managed).display().to_string();
+    assert!(
+        strings(&filesystem["read"]).contains(&real),
+        "{}",
+        generated.box_toml()
+    );
+    let managed_files: Vec<String> = strings(&filesystem["read_file"])
+        .into_iter()
+        .filter(|entry| entry.starts_with(&real))
+        .collect();
+    assert_eq!(
+        managed_files,
+        [format!("{real}/managed-mcp.json")],
+        "{}",
+        generated.box_toml()
+    );
 }
 
 #[test]
