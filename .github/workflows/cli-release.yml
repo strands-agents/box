@@ -305,7 +305,7 @@ jobs:
     environment: macos-signing
     outputs:
       team_id: ${{ vars.CD_SIGNER_TEAM_ID }}
-      cli_profile_name: ${{ vars.CD_SIGNER_CLI_PROFILE_NAME }}
+      cli_profile_name: ${{ vars.CD_SIGNER_PROFILE_NAME }}
       package_sha256: ${{ steps.package.outputs.sha256 }}
     permissions:
       contents: read
@@ -315,7 +315,7 @@ jobs:
       CD_SIGNER_BUCKET: ${{ vars.CD_SIGNER_BUCKET }}
       CD_SIGNER_BUCKET_ACCESS_ROLE: ${{ vars.CD_SIGNER_BUCKET_ACCESS_ROLE }}
       CD_SIGNER_TEAM_ID: ${{ vars.CD_SIGNER_TEAM_ID }}
-      CD_SIGNER_CLI_PROFILE_NAME: ${{ vars.CD_SIGNER_CLI_PROFILE_NAME }}
+      CD_SIGNER_PROFILE_NAME: ${{ vars.CD_SIGNER_PROFILE_NAME }}
       NOTARY_CREDENTIAL_SECRET: ${{ vars.NOTARY_CREDENTIAL_SECRET }}
     steps:
       # The caller checks the source too, but this workflow signs, so it refuses an unmerged
@@ -362,8 +362,8 @@ jobs:
       - name: Check native signing configuration
         if: inputs.native_filesystem_policy == true
         run: |
-          test -n "$CD_SIGNER_CLI_PROFILE_NAME" || {
-            echo "::error::Set CD_SIGNER_CLI_PROFILE_NAME to a distribution profile authorized for the CLI's native filesystem policy."
+          test -n "$CD_SIGNER_PROFILE_NAME" || {
+            echo "::error::Set CD_SIGNER_PROFILE_NAME to a distribution profile authorized for the shared Box native filesystem policy."
             exit 1
           }
 
@@ -444,7 +444,7 @@ jobs:
       contents: read
     env:
       CD_SIGNER_TEAM_ID: ${{ needs.sign-macos.outputs.team_id }}
-      CD_SIGNER_CLI_PROFILE_NAME: ${{ needs.sign-macos.outputs.cli_profile_name }}
+      CD_SIGNER_PROFILE_NAME: ${{ needs.sign-macos.outputs.cli_profile_name }}
     steps:
       - name: Checkout trusted verification source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

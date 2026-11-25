@@ -338,6 +338,32 @@ Those checks govern the requested operation, not later actions by a separate pro
 macOS also retains root file creation inside granted directories.
 Seatbelt path denials govern the sandboxed process's own access.
 
+### Linux incoming mount groundwork
+
+Normal Box launches build a private filesystem view. They do not receive filesystems mounted
+elsewhere after startup. Box Core rejects nonempty `filesystem.receive_mounts` selections, as
+[the configuration reference](../user/config.md) describes.
+
+The Linux backend also has an internal `MountView::plan_receiving_mounts` path for selected
+storage directories. Each directory must already be a dedicated mount point with an upstream
+connection. A shared parent directory alone is insufficient. The internal planner requires
+covering writable and executable grants and rejects intersecting protected paths; these checks
+do not replace the complete per-process permission checks needed before public activation.
+
+During setup, this path keeps sources attached, binds the selected subtrees into the sandbox,
+and makes unrelated mounts private. A bind makes the same filesystem visible at another path;
+it does not copy file contents. Source identity and child-mount checks reject a changed source
+or an incomplete bind. An unbindable child, which Linux omits from recursive binds, causes
+startup refusal. A source that changes during setup can require a startup retry. Checks after
+the root switch verify that each selected directory remains connected and unrelated paths do not.
+
+Setup preserves existing source restrictions. Future mounts retain the trusted publisher's
+options and contents: Box does not add read-only, `noexec`, `nosuid`, or `nodev` restrictions to
+those arrivals. These options respectively block writes, executable file mappings, privilege
+gains through executable file attributes, and device-node use. Complete per-process permission
+validation and the handoff of each approved source remain separate work. The normal planner
+passes an empty selection, so this internal path does not change normal launches.
+
 ### Linux filesystem metadata
 
 After execution, Linux workloads can use `statfs` to identify the filesystem behind an absolute path in their sandbox view.

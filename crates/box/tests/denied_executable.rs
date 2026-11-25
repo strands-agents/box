@@ -1,5 +1,7 @@
 //! Production execution refuses a denied subtree after a brokered rename.
 
+// Lines a test helper writes to stderr are test output, not Box Core messages.
+#![allow(clippy::print_stderr)]
 #![cfg(unix)]
 
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};

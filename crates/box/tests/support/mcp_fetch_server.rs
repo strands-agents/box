@@ -25,6 +25,9 @@
 //! with its `args` and returns `exec-ok:<stdout>`, `exec-failed:status=<n>:<stdout>`, or
 //! `exec-failed:errno=<n>`. `FIXTURE_FETCH_METHOD` sets the proxy-aware request method.
 
+// A test probe's stderr is the probe's own output to its test, not a Box Core message.
+#![allow(clippy::print_stderr)]
+
 use std::io::{BufRead as _, Read as _, Write as _};
 use std::net::TcpStream;
 use std::time::Duration;

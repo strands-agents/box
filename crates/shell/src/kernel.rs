@@ -59,40 +59,6 @@ impl Filesystem {
         })
     }
 
-    /// Overlay reserved incoming destinations with one retained, protected workload view.
-    #[cfg(target_os = "linux")]
-    #[doc(hidden)]
-    pub fn with_storage(mut self, storage: Arc<crate::StorageView>) -> io::Result<Self> {
-        let vfs = Arc::get_mut(&mut self.memory.vfs)
-            .ok_or_else(|| {
-                io::Error::other("storage view must be configured before sharing a filesystem")
-            })?
-            .get_mut();
-        for (path, directory) in storage.destinations() {
-            let visible = if directory {
-                path
-            } else {
-                path.parent().ok_or_else(not_found)?
-            };
-            let visible = visible.to_str().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "storage destination is not UTF-8",
-                )
-            })?;
-            if vfs.resolve(visible, true).is_err() {
-                vfs.mkdir_p(
-                    visible,
-                    0o755,
-                    strands_shell::vfs::LASH_UID,
-                    strands_shell::vfs::LASH_GID,
-                )?;
-            }
-        }
-        self.mounts = self.mounts.with_storage(storage);
-        Ok(self)
-    }
-
     /// Each `(source, visible)` host folder this filesystem serves.
     pub fn binds(&self) -> impl Iterator<Item = (&std::path::Path, &str)> {
         self.mounts.binds()
@@ -105,16 +71,6 @@ struct Resolved {
     follow: Follow,
     generation: u64,
     host: Option<host::HostIdentity>,
-}
-
-impl Resolved {
-    #[cfg(target_os = "linux")]
-    fn storage(&self) -> Option<&crate::StoragePath> {
-        match &self.host {
-            Some(host::HostIdentity::Storage(held)) => Some(held),
-            _ => None,
-        }
-    }
 }
 
 /// One Call's kernel over a [`Filesystem`], presenting each effect at one checkpoint.
@@ -220,13 +176,6 @@ impl ShellKernel {
             .canonical_spelling(&resolved, follow)
             .unwrap_or(resolved);
         let host = mounts.identity(&resolved, follow);
-        #[cfg(target_os = "linux")]
-        let resolved = match &host {
-            Some(host::HostIdentity::Storage(held)) => {
-                held.logical().to_string_lossy().into_owned()
-            }
-            _ => resolved,
-        };
         Ok(Resolved {
             path: resolved,
             follow,
@@ -241,23 +190,10 @@ impl ShellKernel {
         if !self.is_current(path, *generation) {
             return Err(host::stale_resolution());
         }
-        #[cfg(target_os = "linux")]
-        if let Some(host::HostIdentity::StorageUnavailable { kind, reason, .. }) = &path.host {
-            return Err(io::Error::new(*kind, reason.clone()));
-        }
         Ok(generation)
     }
 
     fn is_current(&self, path: &Resolved, generation: u64) -> bool {
-        #[cfg(target_os = "linux")]
-        if let Some(held) = path.storage() {
-            return path.generation == generation
-                && self
-                    .backend
-                    .mounts
-                    .identity(&held.original().to_string_lossy(), path.follow)
-                    == path.host;
-        }
         path.generation == generation
             && self.backend.mounts.identity(&path.path, path.follow) == path.host
     }
@@ -291,10 +227,6 @@ impl ShellKernel {
     }
 
     fn host_for(&self, resolved: &Resolved, follow: Follow) -> Option<(PathBuf, PathBuf)> {
-        #[cfg(target_os = "linux")]
-        if let Some(held) = resolved.storage() {
-            return Some((held.logical().to_path_buf(), PathBuf::from("/")));
-        }
         self.backend.mounts.resolve_host_for(&resolved.path, follow)
     }
 
@@ -305,13 +237,6 @@ impl ShellKernel {
         follow: Follow,
     ) -> io::Result<FileStat> {
         let _generation = self.guard(&path).await?;
-        #[cfg(target_os = "linux")]
-        if let Some(held) = path.storage() {
-            return Ok(held
-                .metadata()
-                .map(|metadata| host::metadata_stat(&metadata))
-                .unwrap_or_default());
-        }
         let mounts = &self.backend.mounts;
         let host_follow = if follow == Follow::No && mounts.is_mount_point(&path.path) {
             Follow::Yes
@@ -349,11 +274,6 @@ impl ShellKernel {
         let Ok(_generation) = self.guard(path).await else {
             return false;
         };
-        #[cfg(target_os = "linux")]
-        if let Some(held) = path.storage() {
-            return held.metadata().is_ok_and(|metadata| metadata.is_file())
-                && held.access(libc::X_OK);
-        }
         if self.backend.mounts.serves(&path.path) {
             return self
                 .backend
@@ -372,7 +292,7 @@ impl ShellKernel {
     ) -> io::Result<Fd> {
         let mut generation = self.guard(path).await?;
         let result = if self.backend.mounts.serves(&path.path) {
-            match self.host_for(path, Follow::Yes) {
+            match self.backend.mounts.resolve_host(&path.path) {
                 Some((host_path, _)) => {
                     host::open(proc, &host_path, &flags, path.host.as_ref()).await
                 }
@@ -398,17 +318,10 @@ impl ShellKernel {
             return Err(host::stale_resolution());
         }
         let mounts = &self.backend.mounts;
-        let host_from = self.host_for(from, Follow::No);
-        let host_to = self.host_for(to, Follow::No);
+        let host_from = mounts.resolve_host(&from.path);
+        let host_to = mounts.resolve_host_for(&to.path, Follow::No);
         if let Some((host_path, _)) = &host_to {
-            #[cfg(target_os = "linux")]
-            let metadata = to
-                .storage()
-                .map(|held| held.metadata())
-                .unwrap_or_else(|| host_path.symlink_metadata());
-            #[cfg(not(target_os = "linux"))]
-            let metadata = host_path.symlink_metadata();
-            match metadata {
+            match host_path.symlink_metadata() {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
@@ -494,7 +407,7 @@ impl Permit {
             Err(error) => EffectResult::Failed(error.kind()),
         };
         if let Err(error) = self.record(result).await {
-            eprintln!("strands-box: recording a metadata outcome failed: {error}");
+            diagnostics::diag!(P0301, "recording a metadata outcome failed: {error}");
         }
     }
 
@@ -506,7 +419,7 @@ impl Permit {
             EffectResult::Failed(io::ErrorKind::NotFound)
         };
         if let Err(error) = self.record(result).await {
-            eprintln!("strands-box: recording a metadata outcome failed: {error}");
+            diagnostics::diag!(P0301, "recording a metadata outcome failed: {error}");
         }
     }
 }
@@ -573,21 +486,11 @@ impl Kernel for ShellKernel {
             .await?;
         let listed = async {
             let _generation = self.guard(&resolved).await?;
-            #[cfg(target_os = "linux")]
-            if let Some(held) = resolved.storage() {
-                return held.entries().map(|entries| {
-                    entries
-                        .into_iter()
-                        .map(|(name, is_dir)| DirEntry {
-                            name: name.to_string_lossy().into_owned(),
-                            is_dir,
-                        })
-                        .collect()
-                });
-            }
             if self.backend.mounts.serves(&resolved.path) {
                 let (host_path, _) = self
-                    .host_for(&resolved, Follow::Yes)
+                    .backend
+                    .mounts
+                    .resolve_host(&resolved.path)
                     .ok_or_else(not_found)?;
                 return host::list_dir(&host_path);
             }
@@ -605,16 +508,11 @@ impl Kernel for ShellKernel {
             let _generation = self.guard(&resolved).await?;
             if self.backend.mounts.serves(&resolved.path) {
                 let (host_path, _) = self
-                    .host_for(&resolved, Follow::Yes)
+                    .backend
+                    .mounts
+                    .resolve_host(&resolved.path)
                     .ok_or_else(not_found)?;
-                #[cfg(target_os = "linux")]
-                let metadata = resolved
-                    .storage()
-                    .map(|held| held.metadata())
-                    .unwrap_or_else(|| std::fs::metadata(&host_path));
-                #[cfg(not(target_os = "linux"))]
-                let metadata = std::fs::metadata(&host_path);
-                if !metadata?.is_dir() {
+                if !std::fs::metadata(&host_path)?.is_dir() {
                     return Err(io::Error::new(
                         io::ErrorKind::NotADirectory,
                         "Not a directory",
@@ -650,10 +548,6 @@ impl Kernel for ShellKernel {
         };
         let allowed = async {
             let _generation = self.guard(&resolved).await?;
-            #[cfg(target_os = "linux")]
-            if let Some(held) = resolved.storage() {
-                return Ok(held.access(mode));
-            }
             if self.backend.mounts.serves(&resolved.path) {
                 return Ok(self
                     .backend
@@ -683,11 +577,6 @@ impl Kernel for ShellKernel {
             .await?;
         let canonical = async {
             let _generation = self.guard(&resolved).await?;
-            #[cfg(target_os = "linux")]
-            if let Some(held) = resolved.storage() {
-                held.metadata()?;
-                return Ok(held.logical().to_path_buf());
-            }
             self.backend.memory.canonicalize(proc, &resolved.path).await
         }
         .await;
@@ -877,18 +766,8 @@ impl Kernel for ShellKernel {
         let source = self.resolve(proc, from, Follow::No).await?;
         let target = self.resolve(proc, to, Follow::No).await?;
         let destination = {
-            #[cfg(target_os = "linux")]
-            let protected = target.storage().map(|held| {
-                held.metadata()
-                    .map(|metadata| host::metadata_stat(&metadata))
-                    .unwrap_or_default()
-            });
-            #[cfg(not(target_os = "linux"))]
-            let protected: Option<FileStat> = None;
             let mounts = &self.backend.mounts;
-            if let Some(protected) = protected {
-                protected
-            } else if mounts.serves(&target.path) {
+            if mounts.serves(&target.path) {
                 let follow = if mounts.is_mount_point(&target.path) {
                     Follow::Yes
                 } else {
@@ -932,25 +811,6 @@ impl Kernel for ShellKernel {
             let result = if self.backend.mounts.serves(&at.path) {
                 match self.host_for(&at, Follow::No) {
                     Some((host_link, base)) => {
-                        #[cfg(target_os = "linux")]
-                        if at.storage().is_some() {
-                            let parent = at.path.rsplit_once('/').map_or("/", |(parent, _)| parent);
-                            let named =
-                                strands_shell::vfs::normalize(&format!("{parent}/{target}"));
-                            if target.starts_with('/')
-                                || self
-                                    .backend
-                                    .mounts
-                                    .storage_path(&named, Follow::Yes)
-                                    .is_none()
-                            {
-                                return Err(io::Error::new(
-                                    io::ErrorKind::PermissionDenied,
-                                    "symlink target escapes protected storage",
-                                ));
-                            }
-                            return host::symlink(target, &host_link, at.host.as_ref());
-                        }
                         host::verify_symlink_target(target, &host_link, &base)
                             .and_then(|()| host::symlink(target, &host_link, at.host.as_ref()))
                     }
@@ -974,12 +834,6 @@ impl Kernel for ShellKernel {
             .await?;
         let read = async {
             let _generation = self.guard(&resolved).await?;
-            #[cfg(target_os = "linux")]
-            if let Some(held) = resolved.storage() {
-                return held
-                    .read_link()
-                    .map(|target| target.to_string_lossy().into_owned());
-            }
             let (parent, leaf) = host::split_leaf(&resolved.path);
             if !leaf.is_empty() && self.backend.mounts.serves(parent) {
                 let (host_parent, _) = self

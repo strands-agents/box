@@ -113,15 +113,17 @@ and the report does not print a region.
    Do not merge mutually exclusive choices.
 2. Read each source once, with the refusals in [What detection never reads](#what-detection-never-reads).
 3. After `--with`, for each question that has no answer and whose `when` holds: when exactly one
-   choice has a `detect` that holds, that choice is the answer. When none or two hold, detection
-   leaves the question unanswered.
+   choice has a `detect` that holds, that choice is the answer. At a terminal, the step still asks
+   the question with that choice as its preset, so a choice that no `detect` can see, such as an
+   API key, stays in view. When none or two hold, detection leaves the question unanswered.
 4. After the questions, merge the chosen packs as today. For each source with an `input` that the
    merge declares, and that `[starter] options`, a chosen choice, and `--option` do not set: a
    detected value that passes `check_value` is the input's value. Then the Inputs step asks for
    what is left.
 
 Order of precedence: `--with` and `--option`, then a detected answer, then the prompt. A detected
-answer is the same at a terminal and without one, so one host gives one profile from both
+choice is the answer without a terminal and the preset at one, so Enter at each prompt gives the
+same profile as a script on the same host
 ([decisions](decisions.md#box-asks-only-at-a-terminal)). A detected input value is written to
 `[options]` also when it equals the default, because it states a host fact, not a pack default.
 
@@ -256,4 +258,6 @@ sign in with ChatGPT, which the box does not bring in, so only an explicit `open
   `agent.skip-permissions` in the profile, and the report does not name the mode.
 - Without a terminal, a detected answer answers a question that would otherwise return
   `StarterUnanswered`.
+- At a terminal, a detected question is still asked with every choice listed and the detected
+  choice as its preset.
 - The report: each `Detected` line form, and a value that nothing accepts is not in the output.

@@ -1,5 +1,8 @@
 //! Process-isolated probe for descriptor cleanup paths.
 
+// A test probe's stderr is the probe's own output to its test, not a Box Core message.
+#![allow(clippy::print_stderr)]
+
 #[path = "../../src/bin/strands-box-sock-alias/close_descriptors.rs"]
 #[allow(dead_code)]
 mod close_descriptors;

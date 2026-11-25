@@ -227,8 +227,8 @@ replaces that value, and the step does not check that the two agree.
 ### Without a terminal
 
 `box` asks only when stdin and stderr are terminals
-([decisions](decisions.md#box-asks-only-at-a-terminal)). A detected answer is the same with and
-without one. Without one:
+([decisions](decisions.md#box-asks-only-at-a-terminal)). A detected answer is the answer without
+one, and the preset of its question at one. Without one:
 
 - An input with a `default` takes the default, including an input in `ask`. The step writes the
   default of an input with a `warning` to the profile.
@@ -430,7 +430,7 @@ the profiles.
   for it, and a choice and `--option` each replace a `[starter] options` value.
 - Without a terminal: a default fills an `ask` input, and each unanswered case returns
   `StarterUnanswered` with a `--with` line for each choice, or the `--option` of the input.
-- The prompts read from `&mut impl BufRead` and write to `&mut impl Write`, as the `box clean`
+- The prompts read from `&mut impl BufRead` and write to `&mut impl Write`, as the `box profile clean`
   confirmation does, so a test drives them with a byte string.
 - Shipped starters: for each entry in `resources/config.toml`, the test reads its file in
   `resources/starters/`, walks each path through its

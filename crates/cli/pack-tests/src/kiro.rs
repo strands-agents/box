@@ -42,6 +42,96 @@ fn a_kiro_run_brings_in_the_model_but_not_the_engine_and_turns_off_updates_and_t
     );
 }
 
+/// Writes a host agent whose file names a hook and an MCP server, and a `cli.json` that names it
+/// as the default agent.
+fn write_host_agent(host: &FakeHost) {
+    let kiro_home = host.home().join(".kiro");
+    std::fs::create_dir_all(kiro_home.join("agents")).expect("a folder");
+    std::fs::create_dir_all(kiro_home.join("settings")).expect("a folder");
+    std::fs::write(
+        kiro_home.join("agents/team-agent.json"),
+        serde_json::json!({
+            "name": "team-agent",
+            "allowedTools": ["fs_read"],
+            "hooks": { "agentSpawn": [{ "command": "echo hi" }] },
+            "mcpServers": { "files": { "command": "npx" } },
+        })
+        .to_string(),
+    )
+    .expect("an agent");
+    std::fs::write(
+        kiro_home.join("settings/cli.json"),
+        serde_json::json!({
+            "chat.defaultModel": "auto",
+            "chat.defaultAgent": "team-agent",
+        })
+        .to_string(),
+    )
+    .expect("settings");
+}
+
+fn kiro_agent_storage(host: &FakeHost) -> std::path::PathBuf {
+    storage_root(&host.home().join(".strands/box"), "kiro").join("agent/home/.kiro")
+}
+
+#[test]
+fn a_kiro_run_leaves_the_hosts_agents_and_default_agent_out_unless_import_agents_is_on() {
+    let host = FakeHost::new();
+    host.profile()
+        .with("kiro")
+        .create()
+        .expect("a profile")
+        .write(false)
+        .expect("a write");
+    write_host_agent(&host);
+    host.launcher()
+        .prepare("kiro", &host.project(), None)
+        .expect("a launch");
+    let storage = kiro_agent_storage(&host);
+    assert!(!storage.join("agents").exists());
+    let settings = std::fs::read_to_string(storage.join("settings/cli.json")).expect("settings");
+    assert!(!settings.contains("chat.defaultAgent"), "{settings}");
+    assert!(settings.contains("chat.defaultModel"), "{settings}");
+}
+
+#[test]
+fn a_kiro_run_with_import_agents_copies_each_agent_whole_and_keeps_the_default_agent() {
+    let host = FakeHost::new();
+    host.profile()
+        .with("kiro")
+        .option("kiro.import-agents", "true")
+        .create()
+        .expect("a profile")
+        .write(false)
+        .expect("a write");
+    write_host_agent(&host);
+    host.launcher()
+        .prepare("kiro", &host.project(), None)
+        .expect("a launch");
+    let storage = kiro_agent_storage(&host);
+    let agent: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(storage.join("agents/team-agent.json")).expect("the agent"),
+    )
+    .expect("JSON");
+    assert_eq!(agent["allowedTools"], serde_json::json!(["fs_read"]));
+    // A folder copy cannot drop keys: this is the trade-off that the input's warning states.
+    assert!(agent.get("hooks").is_some());
+    assert!(agent.get("mcpServers").is_some());
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(storage.join("settings/cli.json")).expect("settings"),
+    )
+    .expect("JSON");
+    assert_eq!(
+        settings,
+        serde_json::json!({
+            "chat.defaultModel": "auto",
+            "chat.defaultAgent": "team-agent",
+            "app.disableAutoupdates": true,
+            "chat.disableTrustAllConfirmation": true,
+        })
+    );
+}
+
 #[test]
 fn a_kiro_run_puts_the_box_guidance_beside_the_hosts_steering() {
     let host = FakeHost::new();
@@ -79,6 +169,118 @@ fn a_kiro_run_puts_the_box_guidance_beside_the_hosts_steering() {
         std::fs::read_to_string(copy.join("host/style.md")).expect("the host's steering"),
         "Use short names.\n"
     );
+}
+
+/// A host with one installed legacy power, `probe-power`, that names an MCP server.
+fn host_with_a_power() -> FakeHost {
+    let host = FakeHost::new();
+    let powers = host.home().join(".kiro/powers");
+    let power = powers.join("installed/probe-power");
+    std::fs::create_dir_all(power.join("steering")).expect("a folder");
+    std::fs::create_dir_all(powers.join("data/probe-power")).expect("a folder");
+    std::fs::create_dir_all(powers.join("registries")).expect("a folder");
+    for (path, text) in [
+        (
+            powers.join("installed.json"),
+            r#"{"installedPowers":[{"name":"probe-power"}]}"#,
+        ),
+        (
+            power.join("POWER.md"),
+            "---\nname: probe-power\ndescription: feature-probe-power\n---\n",
+        ),
+        (
+            power.join("steering/probe.md"),
+            "feature-probe-power-steering\n",
+        ),
+        (
+            power.join("mcp.json"),
+            r#"{"mcpServers":{"probe":{"command":"probe-server","env":{"KEY":"secret"}}}}"#,
+        ),
+        (powers.join("data/probe-power/state.json"), "{}"),
+        (powers.join("registries/catalog.json"), "{}"),
+    ] {
+        std::fs::write(path, text).expect("a power file");
+    }
+    host
+}
+
+#[test]
+fn import_powers_brings_in_each_powers_text_and_leaves_out_its_mcp_servers() {
+    let host = host_with_a_power();
+    host.profile()
+        .with("kiro")
+        .option("kiro.import-powers", "true")
+        .create()
+        .expect("a profile")
+        .write(false)
+        .expect("a write");
+    let preview = host
+        .launcher()
+        .preview("kiro", &host.project())
+        .expect("a preview");
+    assert_eq!(
+        preview.links,
+        [(
+            "~/.kiro/powers/installed/probe-power/mcp.json".to_string(),
+            "not copied: the row's `exclude` names it".to_string()
+        )]
+    );
+    let launch = host
+        .launcher()
+        .prepare("kiro", &host.project(), None)
+        .expect("a launch");
+    let powers =
+        storage_root(&host.home().join(".strands/box"), "kiro").join("agent/home/.kiro/powers");
+    assert_eq!(
+        std::fs::read_to_string(powers.join("installed.json")).expect("installed.json"),
+        r#"{"installedPowers":[{"name":"probe-power"}]}"#
+    );
+    let power = powers.join("installed/probe-power");
+    assert!(power.join("POWER.md").is_file());
+    assert_eq!(
+        std::fs::read_to_string(power.join("steering/probe.md")).expect("the steering"),
+        "feature-probe-power-steering\n"
+    );
+    assert!(!power.join("mcp.json").exists(), "the MCP servers stay out");
+    assert!(!powers.join("data").exists(), "a server's state stays out");
+    assert!(!powers.join("registries").exists());
+    assert_eq!(
+        launch.not_copied(),
+        [(
+            "~/.kiro/powers/installed/probe-power/mcp.json".to_string(),
+            "the row's `exclude` names it".to_string()
+        )]
+    );
+    std::fs::write(
+        host.home()
+            .join(".kiro/powers/installed/probe-power/mcp.json"),
+        r#"{"mcpServers":{}}"#,
+    )
+    .expect("a host edit");
+    host.launcher()
+        .prepare("kiro", &host.project(), None)
+        .expect("a second launch");
+    assert!(
+        !power.join("mcp.json").exists(),
+        "a sync leaves the MCP servers out too"
+    );
+}
+
+#[test]
+fn without_import_powers_no_power_comes_in() {
+    let host = host_with_a_power();
+    host.profile()
+        .with("kiro")
+        .create()
+        .expect("a profile")
+        .write(false)
+        .expect("a write");
+    host.launcher()
+        .prepare("kiro", &host.project(), None)
+        .expect("a launch");
+    let home = storage_root(&host.home().join(".strands/box"), "kiro").join("agent/home");
+    assert!(home.join(".kiro/steering/box.md").is_file(), "the copy ran");
+    assert!(!home.join(".kiro/powers").exists());
 }
 
 fn kiro(host: &FakeHost) -> Trial {
@@ -270,4 +472,189 @@ fn the_next_steps_of_a_kiro_profile_name_its_key_for_both_hosts() {
         ),
         "{steps}"
     );
+}
+
+/// Writes Kiro's shared memory database with its WAL files, and one user's memory and settings.
+fn write_host_memory(host: &FakeHost) {
+    let kiro_home = host.home().join(".kiro");
+    let user = kiro_home.join("identities/5e3a");
+    std::fs::create_dir_all(kiro_home.join("memories")).expect("a folder");
+    std::fs::create_dir_all(user.join("memories")).expect("a folder");
+    std::fs::create_dir_all(user.join("settings")).expect("a folder");
+    for (file, text) in [
+        ("memories/memories.db", "shared"),
+        ("memories/memories.db-wal", "shared wal"),
+        ("memories/memories.db-shm", "shared shm"),
+        ("identities/5e3a/memories/memories.db", "user"),
+        (
+            "identities/5e3a/settings/kiro-agent.json",
+            r#"{"migrations":["deviceMemory-v1"]}"#,
+        ),
+    ] {
+        std::fs::write(kiro_home.join(file), text).expect("a file");
+    }
+}
+
+fn kiro_profile(host: &FakeHost, import_memory: Option<&str>) {
+    let profile = host.profile().with("kiro");
+    let profile = match import_memory {
+        Some(value) => profile.option("kiro.import-memory", value),
+        None => profile,
+    };
+    profile
+        .create()
+        .expect("a profile")
+        .write(false)
+        .expect("a write");
+}
+
+#[test]
+fn a_kiro_run_leaves_the_hosts_memory_out_unless_import_memory_is_on() {
+    for import_memory in [None, Some("false")] {
+        let host = FakeHost::new();
+        kiro_profile(&host, import_memory);
+        write_host_memory(&host);
+        host.launcher()
+            .prepare("kiro", &host.project(), None)
+            .expect("a launch");
+        let storage =
+            storage_root(&host.home().join(".strands/box"), "kiro").join("agent/home/.kiro");
+        assert!(
+            storage.join("settings/cli.json").is_file(),
+            "the copies ran"
+        );
+        assert!(!storage.join("memories").exists(), "{import_memory:?}");
+        assert!(!storage.join("identities").exists(), "{import_memory:?}");
+    }
+}
+
+#[test]
+fn a_kiro_run_with_import_memory_copies_the_memory_once_and_writes_nothing_back() {
+    let host = FakeHost::new();
+    kiro_profile(&host, Some("true"));
+    write_host_memory(&host);
+    host.launcher()
+        .prepare("kiro", &host.project(), None)
+        .expect("a launch");
+    let storage = storage_root(&host.home().join(".strands/box"), "kiro").join("agent/home/.kiro");
+    for (file, text) in [
+        ("memories/memories.db", "shared"),
+        ("memories/memories.db-wal", "shared wal"),
+        ("memories/memories.db-shm", "shared shm"),
+        ("identities/5e3a/memories/memories.db", "user"),
+        (
+            "identities/5e3a/settings/kiro-agent.json",
+            r#"{"migrations":["deviceMemory-v1"]}"#,
+        ),
+    ] {
+        assert_eq!(
+            std::fs::read_to_string(storage.join(file)).expect("a copy"),
+            text,
+            "{file}"
+        );
+    }
+
+    std::fs::write(storage.join("memories/memories.db"), "saved in the box").expect("a box edit");
+    std::fs::write(
+        host.home().join(".kiro/memories/memories.db"),
+        "host, later",
+    )
+    .expect("a write");
+    host.launcher()
+        .prepare("kiro", &host.project(), None)
+        .expect("a second launch");
+    assert_eq!(
+        std::fs::read_to_string(storage.join("memories/memories.db")).expect("the copy"),
+        "saved in the box",
+        "no sync: the box keeps its memory"
+    );
+    assert_eq!(
+        std::fs::read_to_string(host.home().join(".kiro/memories/memories.db")).expect("host"),
+        "host, later",
+        "nothing goes back to the host"
+    );
+}
+
+#[test]
+fn mcp_import_declares_the_hosts_kiro_servers_and_keeps_their_keys_out_of_the_boxs_mcp_json() {
+    let host = FakeHost::new();
+    brew_program(&host, "mcp-local");
+    let source = host.home().join(".kiro/settings/mcp.json");
+    std::fs::create_dir_all(source.parent().expect("a parent")).expect("a folder");
+    std::fs::write(
+        &source,
+        r#"{"mcpServers": {
+            "local": {"command": "mcp-local", "args": ["--quiet"], "env": {"TOKEN": "${LOCAL_TOKEN}"}, "autoApprove": ["probe"], "timeout": 120000},
+            "resting": {"command": "mcp-local", "disabled": true},
+            "docs": {"url": "https://docs.example.com/mcp", "headers": {"Authorization": "Bearer ${DOCS_TOKEN}"}}}}"#,
+    )
+    .expect("the host's servers");
+    host.profile()
+        .with("kiro")
+        .option("kiro.import-mcp", "true")
+        .create()
+        .expect("a profile")
+        .write(false)
+        .expect("a write");
+    let launch = host
+        .launcher()
+        .environment(&[
+            ("LOCAL_TOKEN", "local-secret"),
+            ("DOCS_TOKEN", "docs-secret"),
+        ])
+        .prepare("kiro", &host.project(), None)
+        .expect("a launch");
+    let compiled: toml::Table =
+        toml::from_str(&std::fs::read_to_string(launch.config()).expect("box.toml")).expect("TOML");
+    let docs: toml::Value = toml::from_str(
+        r#"
+type = "http"
+destinations = ["docs.example.com"]
+[secret]
+ref = "env://DOCS_TOKEN"
+header = "Authorization"
+prefix = "Bearer "
+"#,
+    )
+    .expect("expected");
+    assert_eq!(compiled["mcp"]["docs"], docs);
+    let local = compiled["mcp"]["local"].as_table().expect("local");
+    assert_eq!(local["env"]["TOKEN"].as_str(), Some("local-secret"));
+    assert!(
+        compiled["mcp"].get("resting").is_none(),
+        "a server turned off with disabled = true gets no program, host, or key: {:?}",
+        compiled["mcp"].get("resting")
+    );
+
+    let target = storage_root(&host.home().join(".strands/box"), "kiro")
+        .join("agent/home/.kiro/settings/mcp.json");
+    let text = std::fs::read_to_string(&target).expect("the box's mcp.json");
+    for secret in ["local-secret", "docs-secret"] {
+        assert!(!text.contains(secret), "{text}");
+    }
+    let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+    assert_eq!(
+        saved["mcpServers"]["local"]["autoApprove"],
+        serde_json::json!(["probe"])
+    );
+    assert_eq!(
+        saved["mcpServers"]["resting"]["disabled"],
+        serde_json::json!(true)
+    );
+
+    host.profile()
+        .with("kiro")
+        .create()
+        .expect("a profile")
+        .write(true)
+        .expect("a write");
+    std::fs::remove_file(&target).expect("remove the import");
+    let off = host
+        .launcher()
+        .prepare("kiro", &host.project(), None)
+        .expect("a launch");
+    let compiled: toml::Table =
+        toml::from_str(&std::fs::read_to_string(off.config()).expect("box.toml")).expect("TOML");
+    assert!(compiled.get("mcp").is_none(), "off by default");
+    assert!(!target.exists(), "off by default writes no mcp.json");
 }

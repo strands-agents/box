@@ -141,7 +141,7 @@ runs in <new>`. A new run writes the full profile name to `profile-name` in its 
 `0600`. The profile check reads the `profile-name` record, which must be a file that names this profile
 exactly. Every run then holds an exclusive lock on its run directory until it ends, opened without
 following a link, and `box` refuses a run directory that another `box run` holds, or that a
-`box clean` holds while it removes it.
+`box profile clean` holds while it removes it.
 
 ### Load the packs
 
@@ -457,13 +457,13 @@ work in this order:
    `env` holds the operator's value of a variable that a `pass-secret-env` entry covers, or sets
    such a variable, and it loses `args` when an argument, as written, holds that value, even when a declaration matches, so the agent starts no declared server with it. A profile table with a `type`
    that replaces an entry that keeps environment fields and does not match it adds that to the skip line.
-2. **Check each server.** `box` reads `type`, `command`, `args`, `env`, `url`, `enabled`, and
-   each field the row's `env-var-locations` gives a role. Every other field passes through: it
-   stays in the agent's configuration, `box.toml` never holds it, and it keeps no server out
-   ([decisions.md](decisions.md#a-pack-names-where-its-agents-mcp-servers-are)). An explicit
-   `type` of `stdio` or `http` wins, else `command` means stdio and `url` means http. A server
-   with `enabled = false`, or with a field of the other transport (`url` on stdio, `command`,
-   `args`, or `env` on http), is skipped. A field with a local role on a remote server also
+2. **Check each server.** `box` reads `type`, `command`, `args`, `env`, `url`, `enabled`,
+   `disabled`, and each field the row's `env-var-locations` gives a role. Every other field passes
+   through: it stays in the agent's configuration, `box.toml` never holds it, and it keeps no
+   server out ([decisions.md](decisions.md#a-pack-names-where-its-agents-mcp-servers-are)). An
+   explicit `type` of `stdio` or `http` wins, else `command` means stdio and `url` means http. A
+   server with `enabled = false` or `disabled = true`, or with a field of the other transport
+   (`url` on stdio, `command`, `args`, or `env` on http), is skipped. A field with a local role on a remote server also
    skips it. `Role::is_local` identifies local roles. A field with a remote role on a stdio
    server skips it when `mcp::keys` reads a variable in that field or cannot read it. A field
    with a remote role and no variable passes through
@@ -550,10 +550,11 @@ work in this order:
    `header-references` value with no variable is left to the agent, which sends it as on the
    host ([decisions.md](decisions.md#a-detected-server-carries-no-credential)). Its header name
    is not checked because it never becomes `secret.header`. Header names that carry a variable
-   must contain only letters, digits, and `-`, and must not be empty. A
+   must be RFC 7230 tokens, the rule Core checks `secret.header` by: letters, digits, and
+   `` !#$%&'*+-.^_`|~ ``, and not empty. A
    `header-references` value with a variable must end in one variable written in the
    row's `env-var-syntax`
-   (`${NAME}` for `@box/claude`, `${NAME}` or `$NAME` for `@box/pi`), and the text before it becomes
+   (`${NAME}` for `@box/claude` and `@box/kiro`, `${NAME}` or `$NAME` for `@box/pi`), and the text before it becomes
    `secret.prefix`. A reference can
    include a literal `:-default`, except in a form with no closing text, such as `$NAME`. If the variable is unset, the reference creates no credential
    binding; the harness uses the fallback in its own configuration. A variable that a route or a
@@ -654,8 +655,7 @@ history and each `when temporal` rule that the compiled policy has not changed k
 `policy.dw`. Two runs of
 one profile in one workspace share its storage, so the run that starts last writes each
 `[[storage.files.set]]` value into the shared copy. Run directories stay after the run stops, about
-2 MB each. `box clean <BOX_ID>` removes one run directory, and `box clean --all` removes every run
-directory whose box is not running. It asks `[y/N]` first, and `--no-ask` removes without asking.
+2 MB each. [`box profile clean`](../../cli/cli.md#box-profile-clean) removes them.
 
 ## What `box run` refuses
 
@@ -726,8 +726,8 @@ candidate it can run, and lists each candidate it passed over and why.
 **`--box-id`.** The value is not `b-` followed by 16 lowercase hexadecimal digits, names no run
 directory with a `box.toml` and a `box/` (none of them a link), or names a run whose `box.toml`
 names no workspace. The run's `profile-name` record is missing, is not a file, or does not name
-this profile exactly. Another `box run` holds the run directory, or a `box clean` holds it while
-it removes it.
+this profile exactly. Another `box run` holds the run directory, or a `box profile clean` holds it
+while it removes it.
 
 ## Paths and variables
 

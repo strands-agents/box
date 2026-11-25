@@ -19,7 +19,7 @@ The public API describes one complete request and applies it once:
 | `PreparedFilesystemPath` | Opaque existing path identity prepared once by containment. Callers read its canonical path and its kind, then consume it in a grant. |
 | `Operation`, `Scope` | The grant vocabulary: `Exec`/`Read`/`Write`/`Connect`/`Metadata` by `File`/`Dir`/`Root`. |
 | `Network`, and the signal, process-info, IPC and backend-override enums | Typed arguments for `ContainmentConfig` builders. |
-| `Containment::apply(&config, egress_handoff, confirm_fd, native_filesystem_handoff, storage_control_fd)` | Detect the host backend and irreversibly contain the calling process. |
+| `Containment::apply(&config, egress_handoff, confirm_fd, native_filesystem_handoff)` | Detect the host backend and irreversibly contain the calling process. |
 | `ContainmentError`, `Platform` | Matchable failure and platform values. |
 | `ForbiddenClass`, `ContainmentError::forbidden_class` | What a floor row protects, and the class of the row that refused a grant. |
 
@@ -30,14 +30,13 @@ The crate root exports **19 names**: `Containment`, `ContainmentConfig`,
 `validate_grant`, `validate_grants`, and `home_relative_path_refusal`. The last one is the deny-only floor's own predicate,
 which judges a `~/`-relative spelling at authoring time so a caller that holds no
 resolved path still gets the one refusal this crate owns.
-Three further items are not in that count:
+Two further items are not in that count:
 `pub type Result<T>`, an alias over `ContainmentError`; and `pub mod
-test_support`, which exists only behind the non-default `test-support` feature; and the
-Linux-only, documentation-hidden `storage` module, which connects Box to its storage workers.
+test_support`, which exists only behind the non-default `test-support` feature.
 Every other module is private, so this list is the whole API rather than a
 selection from it.
 
-### `apply` takes five arguments
+### `apply` takes four arguments
 
 ```rust,ignore
 use containment::{Containment, ContainmentConfig, Network, Operation, Scope};
@@ -52,7 +51,7 @@ let config = ContainmentConfig::new()
     .allow(&home, Operation::Write, Scope::Root)?;
 
 // The second argument is `Option<&std::os::unix::net::UnixStream>`.
-Containment::apply(&config, None, None, None, None)?;
+Containment::apply(&config, None, None, None)?;
 ```
 
 The second argument is the egress handoff, and it is not a second entry point.
@@ -74,14 +73,6 @@ trusted native filesystem monitor. On Linux, it transfers the notification liste
 and filesystem root, then waits for registration before the workload runs.
 Pass `None` when native filesystem checks are disabled.
 Builds without Linux native filesystem support refuse a supplied handoff.
-
-The fifth argument, `storage_control_fd`, is an optional descriptor for the Linux storage
-control channel. The private `storage::sources` transport connects one Box-owned source helper
-to separate recipient receivers. Each receiver holds workload startup until its already-arrived
-sources have completed preparation, then continues accepting protected views for later arrivals.
-`storage::send_fd` transfers the recipient's private subscription channel during initialization.
-Pass `None` when experimental storage mounts are disabled. The macOS backend refuses a supplied
-storage descriptor. The workload receives no mount capability.
 
 A successful `apply` returns `()`. Kernel enforcement remains active until the
 process exits and is inherited by child processes and across `exec`. There is no

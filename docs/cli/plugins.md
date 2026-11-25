@@ -1,9 +1,4 @@
----
-reader: Someone who wants the box to read a key from a password manager, or to write a plugin for a vault that Box doesn't ship.
-belongs: A section belongs here only if most readers need it for their first plugin. Every plugin.toml key and every rule goes to plugins-reference.md, and a fix after an error goes to troubleshooting.md.
----
-
-# Plugins
+# Box plugins
 
 A plugin lets the box read a secret, such as an API token, from your password manager when it starts. You list the plugin in your profile and name the secret on a route. The agent never sees the secret: it gets a placeholder, and the box puts the real value on each request that your policy allows.
 

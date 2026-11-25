@@ -5,7 +5,8 @@ site. A locked publication reads the manifest and its source pages from the same
 A local working-tree preview can include uncommitted content. Its repository links still refer to
 the selected commit.
 
-The Markdown files under `docs/user/` own page content and H1 headings. The manifest selects the
+The Markdown files under `docs/user/` (Box Core) and `docs/cli/` (the `box` CLI) own page content
+and H1 headings. The manifest selects the
 published pages and owns their external route suffix, summary, and navigation. The external site
 owns its repository and revision selection, route prefix, and top-level navigation label.
 
@@ -18,9 +19,14 @@ means. A consumer must reject an unsupported version and an unknown field.
 Do not increase `schemaVersion` for a normal page addition or removal, or for a metadata value
 that follows the current contract.
 
+A change that only widens a field to values that every consumer's version `1` reader already
+accepts keeps the version. Name the consumer code that proves it in the pull request.
+
 An existing page keeps its `id` and `slug`. The `id` is a producer-assigned stable identifier
 reserved to identify the same page across revisions. It does not determine the route. The `slug` is the
-stable route suffix. Do not reuse either value for a different page. A route removal or move needs
+stable route suffix. Do not reuse either value for a different page. One pair is the exception:
+the `getting-started` id and the `quickstart` slug name the product's entry page, whichever source
+holds it. A route removal or move needs
 a coordinated consumer change and a redirect before it merges.
 
 `docs/site-manifest-retirements.json` is the producer-only, append-only registry of retired page
@@ -40,17 +46,17 @@ move does not create a new page.
 | `product.id` | The stable, lowercase kebab-case product identity. |
 | `product.name` | The product name recorded in page provenance and shown in preview notices. |
 | `product.status` | `preview` or `stable`, as defined below. |
-| `pages` | One entry for every publishable Markdown file under `docs/user/`, except `README.md`. |
+| `pages` | One entry for every publishable Markdown file under `docs/user/` and `docs/cli/`, except `README.md`. |
 | `pages[].id` | A unique, producer-assigned, stable, lowercase kebab-case page identifier. It does not determine the route. |
-| `pages[].source` | A unique repository-relative Markdown path under `docs/user/`. |
+| `pages[].source` | A unique repository-relative Markdown path under `docs/user/` or `docs/cli/`. Its first line is its H1, so it has no YAML front matter. |
 | `pages[].slug` | A unique, stable, lowercase kebab-case route suffix. It can contain `/`. |
 | `pages[].title` | The exact text after `# ` on the first source line. A consumer treats it as plain text. |
 | `pages[].description` | A non-empty, one-line publication summary. |
-| `pages[].nav.group` | The external navigation group. Each group occupies one contiguous page block. |
-| `pages[].nav.order` | A positive and unique position in its group. |
+| `pages[].nav.group` | The external navigation group: a name, or a non-empty array of names for nested groups, outermost first. A name is the same as an array that holds only it. Each group, at each level, and the pages directly in a group, occupy one contiguous page block. |
+| `pages[].nav.order` | A positive position, unique in its top-level group and increasing down it, so the site's sort by order shows the pages in manifest order. |
 
 The manifest test refuses absent or extra pages, unsafe sources or slugs, duplicate identities or
-navigation positions, and unknown fields or statuses. It also requires each title to match the source H1. In pull-request CI, it also compares the base manifest and refuses a changed product ID,
+navigation positions, split groups, decreasing orders, and unknown fields or statuses. It also requires each title to match the source H1. In pull-request CI, it also compares the base manifest and refuses a changed product ID,
 a page removal or route move without the required retirement, an existing slug assigned to a
 different ID, reuse of a retired value, or removal of a retirement.
 

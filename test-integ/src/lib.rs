@@ -162,7 +162,7 @@ fn box_never_ran_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"(?m)^(error: the following required arguments|Usage: strands-box|strands-box: (error|refusing to run):|strands-box (spawn|wait) error:|workload exited before the ready marker|strands-box-contain-trampoline: (exec |cannot arm|unsupported platform)|containment setup failed)",
+            r"(?m)^(error: the following required arguments|Usage: strands-box|(strands-box|policy|telemetry): error(\[[A-Z][0-9]{4}\])?:|strands-box (spawn|wait) error:|workload exited before the ready marker|strands-box-contain-trampoline: error(\[H0401\])?:|containment setup failed)",
         )
         .expect("valid box-never-ran regex")
     })
@@ -373,8 +373,8 @@ impl RunResult {
     }
 
     /// The box never ran the workload: a clap usage failure (`error:` / `Usage:`),
-    /// the box's own load-time refusal (`strands-box: error:` /
-    /// `strands-box: refusing to run:` — config and policy validation land there),
+    /// the box's own load-time refusal (`strands-box: error[B0101]:` and the other
+    /// `strands-box: error` lines — config and policy validation land there),
     /// a failure to spawn or wait for the box process, or a containment setup
     /// failure. Each case rewrites policy.dw, so a malformed rule would otherwise
     /// exit nonzero with no denial marker and count as a deny. This is
@@ -1757,6 +1757,9 @@ mod tests {
             reason: String::new(),
             determining_ids: Vec::new(),
             at_unix_nano: 0,
+            enforced: true,
+            first_flip: false,
+            would_deny: Vec::new(),
         }
     }
 
@@ -1865,7 +1868,7 @@ mod tests {
         // `assert_allow` failed on a run that had allowed everything.
         let allowed = mediated_result(
             "DET_ENTERED\nDET_MEDIATED\nPIPE=3\nJQ=V\n\
-             strands-box: box box-01403bafc4d78ad5 updated\n",
+             strands-box: note[B0301]: box box-01403bafc4d78ad5 updated\n",
             0,
             vec![],
         );
@@ -1877,7 +1880,7 @@ mod tests {
         // The second id from that run, where the digits sit mid-string: 8d84031962f0ad6e.
         let other = mediated_result(
             "DET_ENTERED\nDET_MEDIATED\nINSIDE\nFS_OK\n\
-             strands-box: box box-8d84031962f0ad6e updated\n",
+             strands-box: note[B0301]: box box-8d84031962f0ad6e updated\n",
             0,
             vec![],
         );
@@ -1969,15 +1972,15 @@ mod tests {
     fn trampoline_warnings_and_disclosures_are_not_never_ran() {
         // Verbatim from a native Linux run (CN-F1-01, CN-W-06):
         // successful workloads whose box printed writable-and-executable warnings.
-        let real = "DET_ENTERED\nBUILD_OUTPUT_RAN from-the-agent\nstrands-box: box box-35483aa29a8624ea updated · config /root/.det-harness-boxes/det-box-RwTFah/workspace/.strands-box/box.toml\nstrands-box: starting workload\nstrands-box: [agent] runs /usr/bin/bash with no policy decision over these paths:\n  exec        /usr/bin/bash  (command, implicit)\nstrands-box: warning: [tool.cargo] command /root/.cargo/bin/rustup lies inside the writable grant /root/.cargo, so the process can replace the program it runs\nstrands-box-contain-trampoline: warning: /root/.det-harness-boxes/det-box-RwTFah/workspace/out is both writable and executable: the write grant /root/.det-harness-boxes/det-box-RwTFah/workspace reaches it, so the workload can replace a program it is authorized to run\nstrands-box-contain-trampoline: warning: /root/.det-harness-boxes/det-box-RwTFah/workspace/out/free-hello is both writable and executable: the write grant /root/.det-harness-boxes/det-box-RwTFah/workspace reaches it, so the workload can replace a program it is authorized to run\n";
+        let real = "DET_ENTERED\nBUILD_OUTPUT_RAN from-the-agent\nstrands-box: note[B0301]: box box-35483aa29a8624ea updated · config /root/.det-harness-boxes/det-box-RwTFah/workspace/.strands-box/box.toml\nstrands-box: note[B0302]: starting workload\nstrands-box: note[B0201]: [agent] runs /usr/bin/bash with no policy decision over these paths:\n  exec        /usr/bin/bash  (command, implicit)\nstrands-box: warning: [tool.cargo] command /root/.cargo/bin/rustup lies inside the writable grant /root/.cargo, so the process can replace the program it runs\nstrands-box-contain-trampoline: warning[H0402]: /root/.det-harness-boxes/det-box-RwTFah/workspace/out is both writable and executable: the write grant /root/.det-harness-boxes/det-box-RwTFah/workspace reaches it, so the workload can replace a program it is authorized to run\nstrands-box-contain-trampoline: warning[H0402]: /root/.det-harness-boxes/det-box-RwTFah/workspace/out/free-hello is both writable and executable: the write grant /root/.det-harness-boxes/det-box-RwTFah/workspace reaches it, so the workload can replace a program it is authorized to run\n";
         let r = result(real, 0, vec![]);
         assert!(panics(|| r.assert_contains("BUILD_OUTPUT_RAN from-the-agent")).is_none());
         assert!(panics(|| r.assert_allow()).is_none());
         // The trampoline's failure lines still are.
         for line in [
-            "strands-box-contain-trampoline: exec \"/usr/bin/bash\" failed: Operation not permitted (os error 1)\n",
-            "strands-box-contain-trampoline: cannot arm setup status channel: broken pipe\n",
-            "strands-box-contain-trampoline: unsupported platform — containment is macOS (Seatbelt) / Linux\n",
+            "strands-box-contain-trampoline: error[H0401]: exec \"/usr/bin/bash\" failed: Operation not permitted (os error 1)\n",
+            "strands-box-contain-trampoline: error[H0401]: cannot arm setup status channel: broken pipe\n",
+            "strands-box-contain-trampoline: error: unsupported platform — containment is macOS (Seatbelt) / Linux\n",
             "containment setup failed during Exec\n",
         ] {
             let r = result(&format!("DET_ENTERED\n{line}"), 4, vec![]);
@@ -1994,7 +1997,7 @@ mod tests {
     fn macos_run_outputs_are_read_as_ran_too() {
         // Verbatim from the native macOS run (same execution, mac leg): trampoline warnings under
         // /private/var/tmp, a probe that may signal itself but not the host, a refused bind.
-        let cn_i_07 = "DET_ENTERED\nDET_MEDIATED\nPROBE_ENTERED\nSELF_OK 2467\nSIGNAL_REFUSED 2128: Operation not permitted (os error 1)\nstrands-box-contain-trampoline: warning: /private/var/tmp/det-home/.det-harness-boxes/det-box-spUBuN/workspace/out is both writable and executable: the write grant /private/var/tmp/det-home/.det-harness-boxes/det-box-spUBuN/workspace reaches it, so the workload can replace a program it is authorized to run\n";
+        let cn_i_07 = "DET_ENTERED\nDET_MEDIATED\nPROBE_ENTERED\nSELF_OK 2467\nSIGNAL_REFUSED 2128: Operation not permitted (os error 1)\nstrands-box-contain-trampoline: warning[H0402]: /private/var/tmp/det-home/.det-harness-boxes/det-box-spUBuN/workspace/out is both writable and executable: the write grant /private/var/tmp/det-home/.det-harness-boxes/det-box-spUBuN/workspace reaches it, so the workload can replace a program it is authorized to run\n";
         let r = RunResult {
             out: cn_i_07.into(),
             rc: 0,
@@ -2008,7 +2011,7 @@ mod tests {
         assert!(panics(|| r.assert_contains("SIGNAL_REFUSED 2128: ")).is_none());
         assert!(panics(|| r.assert_contains_any(&["SELF_OK", "SELF_REFUSED"])).is_none());
         assert!(panics(|| r.assert_absent("SIGNAL_REACHED")).is_none());
-        let cn_n_03 = "DET_ENTERED\nTCP_REFUSED 127.0.0.1:8799: Operation not permitted (os error 1)\nTCP_REFUSED 0.0.0.0:8800: Operation not permitted (os error 1)\nstrands-box-contain-trampoline: warning: /private/var/tmp/det-home/.det-harness-boxes/det-box-ykl8Md/workspace/out/sockprobe is both writable and executable: the write grant /private/var/tmp/det-home/.det-harness-boxes/det-box-ykl8Md/workspace reaches it, so the workload can replace a program it is authorized to run\n";
+        let cn_n_03 = "DET_ENTERED\nTCP_REFUSED 127.0.0.1:8799: Operation not permitted (os error 1)\nTCP_REFUSED 0.0.0.0:8800: Operation not permitted (os error 1)\nstrands-box-contain-trampoline: warning[H0402]: /private/var/tmp/det-home/.det-harness-boxes/det-box-ykl8Md/workspace/out/sockprobe is both writable and executable: the write grant /private/var/tmp/det-home/.det-harness-boxes/det-box-ykl8Md/workspace reaches it, so the workload can replace a program it is authorized to run\n";
         assert!(
             panics(|| result(cn_n_03, 0, vec![]).assert_contains("TCP_REFUSED 127.0.0.1:8799"))
                 .is_none()
@@ -2081,9 +2084,9 @@ mod tests {
         for out in [
             "error: the following required arguments were not provided:\n  --config <FILE>\n",
             "Usage: strands-box run --config <FILE> [WORKLOAD]...\n",
-            "strands-box: error: executable is not an executable regular file: /x\n",
-            "strands-box: refusing to run: policy.dw: parse error\n",
-            "strands-box-contain-trampoline: exec \"bash\" failed: EPERM\n",
+            "strands-box: error[B0107]: executable is not an executable regular file: /x\n",
+            "strands-box: error[B0103]: refusing to run: policy.dw: parse error\n",
+            "strands-box-contain-trampoline: error[H0401]: exec \"bash\" failed: EPERM\n",
             "containment setup failed during Exec\n",
         ] {
             let r = RunResult::bare(out.into(), 2);
@@ -2231,7 +2234,7 @@ mod tests {
 
     #[test]
     fn a_load_refusal_is_asserted_only_when_the_box_refused_and_the_workload_did_not_run() {
-        let refused = "strands-box: error: `list` cannot be listed without its contents on Linux; has no lowering for `list`\n";
+        let refused = "strands-box: error[B0102]: `list` cannot be listed without its contents on Linux; has no lowering for `list`\n";
         assert!(
             panics(|| RunResult::bare(refused.into(), 1)
                 .assert_refused_at_load(&["has no lowering for `list`"], "RAN"))

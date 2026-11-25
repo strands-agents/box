@@ -1,0 +1,20 @@
+# rg (ripgrep), as the operator's PATH finds it: Homebrew, cargo install, or a system package.
+# Tested on macOS with Homebrew ripgrep 15.2.0. rg searches and changes no file, so the pack keeps
+# the project read-only for it and names no package host.
+[pack]
+name = "@box/rg"
+version = 1
+kind = "tool"
+
+[inputs.rg.path]
+description = "The rg program."
+type = "program"
+program = "rg"
+search = [{ env = "PATH" }]
+
+[run]
+command = ["${{ inputs.rg.path }}"]
+installation = ["homebrew"]
+
+[filesystem]
+deny_write = ["${{ workspace }}"]

@@ -32,3 +32,5 @@ UV_PYTHON_DOWNLOADS = "never"
 [filesystem]
 # root, never root.parent: a standalone uv can share its parent folder with other tools.
 read = ["${{ root }}", "${{ home }}/.local/share/uv/python"]
+# uv's tool scripts start with #!/bin/sh.
+read_file = ["/bin/sh"]

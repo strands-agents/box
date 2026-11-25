@@ -14,17 +14,19 @@ use ratatui::layout::Rect;
 use signal_hook::iterator::Signals;
 
 use super::Launch;
-use super::banner::{BANNER_ROWS, Banner, Decision, PolicyStatus};
+use super::banner::{BANNER_ROWS, Banner, Decision, HistoryCommands, PolicyStatus};
 use super::policy::PolicyControl;
 use super::startup;
 use crate::error::Error;
 use alacritty_terminal::term::{ClipboardType, TermMode};
 use emulator::Emulator;
 use input::Input;
+use log::Log;
 use mouse::Mouse;
 
 mod emulator;
 mod input;
+mod log;
 mod mouse;
 mod native;
 
@@ -34,7 +36,6 @@ const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const DECISION_CAPACITY: usize = 8 * 1024;
 /// The most policy decisions the banner takes before it draws a frame.
 const DECISIONS_PER_FRAME: usize = 8 * 1024;
-const DIAGNOSTIC_LIMIT: usize = 32 * 1024;
 
 pub(super) fn attached() -> bool {
     io::stdin().is_terminal()
@@ -86,6 +87,10 @@ pub(super) fn run(
             .display()
             .to_string(),
     );
+    banner.history = Some(HistoryCommands {
+        all: launch.history_command(false),
+        denials: launch.history_command(true),
+    });
     // Box Core has not started, and this launch holds the box's lock, so the records hold every
     // earlier run of this box and nothing of this one. The run waits for this read
     // (docs/design/cli/profiles.md#start-box-core).
@@ -97,14 +102,14 @@ pub(super) fn run(
         duplicate(2).map_err(terminal_error)?,
     ];
     let (reader, writer) = nix::unistd::pipe().map_err(|error| terminal_error(error.into()))?;
-    let mut diagnostics = File::from(reader);
+    let reader = File::from(reader);
     let writer = File::from(writer);
-    for fd in [&diagnostics, &writer] {
+    for fd in [&reader, &writer] {
         if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
             return Err(terminal_error(io::Error::last_os_error()));
         }
     }
-    let mut fallback = diagnostics.try_clone().map_err(terminal_error)?;
+    let mut fallback = reader.try_clone().map_err(terminal_error)?;
     let mut restore = None;
     let (sender, decisions) = strands_box::policy_decisions(DECISION_CAPACITY);
     let profile = launch.profile_name.clone();
@@ -121,6 +126,7 @@ pub(super) fn run(
             } else {
                 None
             };
+            let mut diagnostics = Log::open(launch, reader);
             ui = Some(
                 std::thread::Builder::new()
                     .name("box-terminal".into())
@@ -149,9 +155,12 @@ pub(super) fn run(
                                 libc::kill(libc::getpid(), libc::SIGTERM);
                             }
                             drop(master);
-                            let _ = io::copy(&mut diagnostics, &mut io::sink());
+                            if let Ok(file) = &mut diagnostics.output {
+                                let _ = io::copy(&mut diagnostics.input, file);
+                            }
+                            let _ = io::copy(&mut diagnostics.input, &mut io::sink());
                         }
-                        result
+                        result.map(|()| diagnostics)
                     })?,
             );
             restore = Some(redirect);
@@ -164,17 +173,15 @@ pub(super) fn run(
     drop(restore);
     match ui {
         Some(thread) => {
-            let (startup, diagnostics) = thread
+            let diagnostics = thread
                 .join()
                 .map_err(|_| terminal_error(io::Error::other("terminal relay panicked")))?
                 .map_err(terminal_error)?;
-            let reporting_deadline = Instant::now() + OUTPUT_DRAIN_TIMEOUT;
-            if code != ExitCode::SUCCESS
-                && write_until(&mut reporting, &startup, reporting_deadline).is_err()
-            {
-                return Ok(ExitCode::FAILURE);
-            }
-            if write_until(&mut reporting, &diagnostics, reporting_deadline).is_err() {
+            let report = diagnostics
+                .report(launch, !launch.unused(code))
+                .replace('\n', "\r\n");
+            let deadline = Instant::now() + OUTPUT_DRAIN_TIMEOUT;
+            if write_until(&mut reporting, report.as_bytes(), deadline).is_err() {
                 return Ok(ExitCode::FAILURE);
             }
         }
@@ -355,11 +362,11 @@ fn relay(
     terminal: &mut Terminal,
     master: &mut File,
     workload_terminal: File,
-    diagnostics: &mut File,
+    diagnostics: &mut Log,
     policy: Option<&PolicyControl>,
     profile: &str,
     start_banner: impl FnOnce(BannerRequest) -> io::Result<BannerWorker>,
-) -> io::Result<(Vec<u8>, Vec<u8>)> {
+) -> io::Result<()> {
     use super::history::ActivityView;
     use std::sync::mpsc::TryRecvError;
     #[derive(PartialEq)]
@@ -391,15 +398,10 @@ fn relay(
         policy: PolicyStatus::default(),
         copied: None,
     };
-    let mut delayed_diagnostics = Vec::new();
-    let mut startup_diagnostics = Vec::new();
     let mut worker = match (!native).then(|| start_banner(initial)) {
         Some(Ok(worker)) => Some(worker),
         Some(Err(error)) => {
-            append_diagnostics(
-                &mut delayed_diagnostics,
-                format!("box: banner disabled: {error}\n").as_bytes(),
-            );
+            diagnostics.message(&format!("box: banner disabled: {error}\n"));
             None
         }
         None => None,
@@ -434,18 +436,12 @@ fn relay(
                         panel = Some(next);
                     }
                     Ok(Err(error)) => {
-                        append_diagnostics(
-                            &mut delayed_diagnostics,
-                            format!("box: banner disabled: {error}\n").as_bytes(),
-                        );
+                        diagnostics.message(&format!("box: banner disabled: {error}\n"));
                         failed = true;
                         break;
                     }
                     Err(TryRecvError::Disconnected) => {
-                        append_diagnostics(
-                            &mut delayed_diagnostics,
-                            b"box: banner disabled: worker stopped\n",
-                        );
+                        diagnostics.message("box: banner disabled: worker stopped\n");
                         failed = true;
                         break;
                     }
@@ -509,9 +505,7 @@ fn relay(
             for (status, error) in policy.changes.try_iter() {
                 policy_status = status;
                 if let Some(error) = error {
-                    let text =
-                        diagnostic_text(format!("box: policy update failed: {error}\n").as_bytes());
-                    append_diagnostics(&mut delayed_diagnostics, &text);
+                    diagnostics.message(&format!("box: policy update failed: {error}\n"));
                 }
             }
         }
@@ -665,7 +659,7 @@ fn relay(
                 if finishing {
                     termios::tcsetattr(&terminal.input, SetArg::TCSANOW, &terminal.original)?;
                     terminal.active = false;
-                    return Ok((startup_diagnostics, delayed_diagnostics));
+                    return Ok(());
                 }
                 let hidden = !visible && phase != DisplayPhase::Ready && !content_ready;
                 if hidden && (native_startup.is_some() || !native) {
@@ -684,11 +678,10 @@ fn relay(
             let deadline =
                 drain_deadline.get_or_insert_with(|| Instant::now() + OUTPUT_DRAIN_TIMEOUT);
             if Instant::now() >= *deadline {
-                append_diagnostics(
-                    &mut delayed_diagnostics,
-                    b"box: terminal output stayed blocked; final screen was not fully written\n",
+                diagnostics.message(
+                    "box: terminal output stayed blocked; final screen was not fully written\n",
                 );
-                return Ok((startup_diagnostics, delayed_diagnostics));
+                return Ok(());
             }
         }
         let mut fds = [
@@ -734,7 +727,7 @@ fn relay(
                 fd: if diagnostics_closed {
                     -1
                 } else {
-                    diagnostics.as_raw_fd()
+                    diagnostics.input.as_raw_fd()
                 },
                 events: libc::POLLHUP
                     | if phase == DisplayPhase::Agent || output.len() < INPUT_LIMIT {
@@ -766,6 +759,7 @@ fn relay(
         }
         if phase == DisplayPhase::Ready && output.is_empty() && fds[2].revents == 0 {
             phase = DisplayPhase::Agent;
+            diagnostics.started();
         }
         if !master_closed
             && (diagnostics_closed
@@ -796,20 +790,13 @@ fn relay(
             }
         }
         if fds[2].revents != 0 {
-            match diagnostics.read(&mut bytes) {
+            match diagnostics.input.read(&mut bytes) {
                 Ok(0) => {
                     diagnostics_closed = true;
                     pending_input.close();
                 }
                 Ok(n) => {
-                    let text = diagnostic_text(&bytes[..n]);
-                    if phase == DisplayPhase::Agent {
-                        append_diagnostics(&mut delayed_diagnostics, &text);
-                    } else {
-                        startup_diagnostics.extend_from_slice(&text);
-                        let excess = startup_diagnostics.len().saturating_sub(DIAGNOSTIC_LIMIT);
-                        startup_diagnostics.drain(..excess);
-                    }
+                    diagnostics.push(&bytes[..n]);
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
@@ -914,25 +901,6 @@ pub(super) fn nonblocking_output(output: impl AsFd) -> io::Result<File> {
         .write(true)
         .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
         .open(nix::unistd::ttyname(output)?)
-}
-
-fn diagnostic_text(bytes: &[u8]) -> Vec<u8> {
-    let mut text = Vec::with_capacity(bytes.len());
-    for &byte in bytes {
-        if byte == b'\n' {
-            text.extend_from_slice(b"\r\n");
-        } else if byte.is_ascii_control() {
-            text.extend(std::ascii::escape_default(byte));
-        } else {
-            text.push(byte);
-        }
-    }
-    text
-}
-
-fn append_diagnostics(buffer: &mut Vec<u8>, bytes: &[u8]) {
-    let room = DIAGNOSTIC_LIMIT.saturating_sub(buffer.len());
-    buffer.extend_from_slice(&bytes[..bytes.len().min(room)]);
 }
 
 enum InputSource {
@@ -1325,7 +1293,8 @@ mod tests {
             let workload_terminal = child.try_clone().unwrap();
             nonblocking(&master);
             let (read, write) = nix::unistd::pipe().unwrap();
-            let mut diagnostics = File::from(read);
+            let saved = tempfile::tempfile().unwrap();
+            let mut diagnostics = Log::new(File::from(read), saved.try_clone());
             let producer = if slow {
                 Some(std::thread::spawn(move || {
                     for row in 0..1500 {
@@ -1396,7 +1365,8 @@ mod tests {
             }
             let error = host.read_to_end(&mut output).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-            assert_eq!(result.unwrap(), (Vec::new(), Vec::new()));
+            result.unwrap();
+            assert_eq!(saved.metadata().unwrap().len(), 0);
             assert!(!terminal.active);
             if !slow {
                 assert_eq!(
@@ -1477,7 +1447,7 @@ mod tests {
         child_rows: u16,
         banner_ready: Option<&str>,
         native: bool,
-    ) -> Vec<u8> {
+    ) -> String {
         exercise(start, child_rows, banner_ready, native, 1).0
     }
 
@@ -1489,13 +1459,14 @@ mod tests {
         banner_ready: Option<&str>,
         native: bool,
         installs: usize,
-    ) -> (Vec<u8>, Vec<String>) {
+    ) -> (String, Vec<String>) {
         let (mut terminal, mut host, mut master, mut child) = relay_terminal(native);
         let workload_terminal = child.try_clone().unwrap();
         let size = terminal.size;
         let (read, write) = nix::unistd::pipe().unwrap();
         let mut core_output = File::from(write);
-        let mut diagnostics = File::from(read);
+        let saved = tempfile::NamedTempFile::new().unwrap();
+        let mut diagnostics = Log::new(File::from(read), saved.reopen());
         let _host_lifetime = terminal.output.try_clone().unwrap();
         let (ready, readiness) = mpsc::channel();
         let (toggled, toggles) = mpsc::channel();
@@ -1594,7 +1565,7 @@ mod tests {
         let mut output = Vec::new();
         let mut child_ready = false;
         let mut bytes = [0; 8192];
-        let (startup, mut result) = loop {
+        loop {
             assert!(
                 Instant::now() < deadline,
                 "relay did not finish after child EOF"
@@ -1651,12 +1622,14 @@ mod tests {
                 Err(error) => panic!("host read: {error}"),
             }
             if relay_thread.is_finished() {
-                break relay_thread.join().unwrap().unwrap();
+                relay_thread.join().unwrap().unwrap();
+                break;
             }
             std::thread::sleep(Duration::from_millis(2));
-        };
+        }
+        let report = std::fs::read_to_string(saved.path()).unwrap();
         assert!(
-            startup.ends_with(b"CORE_START\r\n"),
+            report.contains("CORE_START\n"),
             "startup stderr was not captured"
         );
         assert!(
@@ -1671,12 +1644,14 @@ mod tests {
                 .any(|bytes| bytes == b"CORE_LIVE"),
             "Core messages reached the agent display"
         );
-        let live = diagnostic_text(&b"\nCORE_LIVE\n".repeat(16));
-        let saved = result
-            .windows(live.len())
-            .position(|bytes| bytes == live.as_slice())
-            .unwrap();
-        result.drain(saved..saved + live.len());
+        let startup = format!("{}CORE_START\n", " ".repeat(33 * 1024));
+        let live = "\nCORE_LIVE\n".repeat(16);
+        assert!(report.contains(&live), "runtime stderr was not captured");
+        let diagnostics = report.replacen(&startup, "", 1).replacen(&live, "", 1);
+        assert!(
+            !diagnostics.contains("TRANSIENT"),
+            "workload output reached the log"
+        );
         while let Ok(n) = host.read(&mut bytes) {
             if n == 0 {
                 break;
@@ -1713,7 +1688,7 @@ mod tests {
             contents.contains("DONE"),
             "synchronized output lost at EOF: {contents}"
         );
-        (result, policies)
+        (diagnostics, policies)
     }
 
     #[test]
@@ -1723,7 +1698,7 @@ mod tests {
         let size = terminal.size;
         let _host_lifetime = terminal.output.try_clone().unwrap();
         let (read, core_output) = nix::unistd::pipe().unwrap();
-        let mut diagnostics = File::from(read);
+        let mut diagnostics = Log::new(File::from(read), tempfile::tempfile());
         let scene = super::super::policy::tests::Scene::new();
         let policy = scene.start(|_| Ok(()));
         let worker = std::thread::spawn(move || {
@@ -1867,7 +1842,7 @@ mod tests {
     }
 
     #[test]
-    fn late_core_messages_wait_until_exit_without_changing_the_agent_screen() {
+    fn late_core_messages_are_logged_without_changing_the_agent_screen() {
         let diagnostics = exercise_worker(
             |initial| {
                 BannerWorker::spawn(initial, |request| {
@@ -1890,11 +1865,7 @@ mod tests {
     fn a_worker_spawn_failure_keeps_the_same_pty_and_restores_full_height() {
         let diagnostics =
             exercise_worker(|_| Err(io::Error::other("spawn refused")), 12, None, false);
-        assert!(
-            String::from_utf8(diagnostics)
-                .unwrap()
-                .contains("spawn refused")
-        );
+        assert!(diagnostics.contains("spawn refused"));
     }
 
     #[test]
@@ -1905,11 +1876,7 @@ mod tests {
             None,
             false,
         );
-        assert!(
-            String::from_utf8(diagnostics)
-                .unwrap()
-                .contains("banner draw failed")
-        );
+        assert!(diagnostics.contains("banner draw failed"));
     }
 
     /// **A banner that fails while policy is off turns policy back on**, so policy is never off
@@ -1935,11 +1902,7 @@ mod tests {
             false,
             2,
         );
-        assert!(
-            String::from_utf8(diagnostics)
-                .unwrap()
-                .contains("banner draw failed")
-        );
+        assert!(diagnostics.contains("banner draw failed"));
         assert_eq!(installed.len(), 1, "{installed:?}");
         assert!(!installed[0].contains("policy_off"), "{installed:?}");
     }
@@ -2089,15 +2052,6 @@ mod tests {
             assert!(pending.is_empty());
             assert_eq!((pending.keyboard, pending.replies), (0, 0));
         }
-    }
-
-    #[test]
-    fn diagnostic_storage_is_bounded_and_retains_the_first_error() {
-        let mut diagnostics = Vec::new();
-        append_diagnostics(&mut diagnostics, b"first error\n");
-        append_diagnostics(&mut diagnostics, &vec![b'x'; 40 * 1024]);
-        assert_eq!(diagnostics.len(), 32 * 1024);
-        assert!(diagnostics.starts_with(b"first error\n"));
     }
 
     #[test]

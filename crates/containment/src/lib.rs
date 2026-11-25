@@ -12,12 +12,9 @@ mod model;
 mod os_paths;
 mod platform;
 
-#[cfg(target_os = "linux")]
-#[doc(hidden)]
-pub mod storage;
-
 #[cfg(any(test, feature = "test-support"))]
-/// Test fixtures and doubles, gated by the `test-support` Cargo feature.
+/// Test doubles (gated by the `test-support` cargo feature). Exposes
+/// test support utilities for driving containment without kernel-level enforcement.
 pub mod test_support;
 
 // Public API surface
@@ -35,3 +32,7 @@ pub use platform::Platform;
 
 /// Containment operation result.
 pub type Result<T> = std::result::Result<T, ContainmentError>;
+
+/// The voice of the messages the containment library prints; only the Linux supervisors print.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const DIAGNOSTIC_SOURCE: diagnostics::Source = diagnostics::Source::StrandsBox;

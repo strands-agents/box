@@ -967,8 +967,12 @@ fn a_question_default_is_used_only_for_a_new_unanswered_profile() {
     assert_eq!(answered, local);
     assert!(output.ends_with("3. This machine\n> [3] "), "{output}");
 
-    let saved = crate::Profile::parse(r#"packs = ["@box/agent"]"#, Path::new("profile.toml"))
-        .expect("a saved profile without a provider pack");
+    let saved = crate::Profile::parse(
+        r#"packs = ["@box/agent"]"#,
+        Path::new("profile.toml"),
+        crate::VERSION,
+    )
+    .expect("a saved profile without a provider pack");
     let (answered, output) = fixture
         .answer(Call {
             saved: Some(&saved),
@@ -1257,7 +1261,7 @@ fn the_claude_and_codex_starters_ask_how_the_box_signs_in_to_bedrock() {
 }
 
 #[test]
-fn the_kiro_starter_asks_for_the_sign_in_and_adds_no_pack() {
+fn the_kiro_starter_asks_for_the_sign_in_and_mcp_import_and_adds_no_pack() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let lookup = Lookup {
         vendored: Some(crate::resources::source_tree().join("packs")),
@@ -1268,7 +1272,7 @@ fn the_kiro_starter_asks_for_the_sign_in_and_adds_no_pack() {
     let starter = Starter::load("@box/kiro", &lookup).expect("the Kiro starter");
     assert_eq!(starter.label, "Kiro CLI");
     assert!(starter.questions.is_empty());
-    assert_eq!(starter.ask, ["kiro.sign-in"]);
+    assert_eq!(starter.ask, ["kiro.sign-in", "kiro.import-mcp"]);
 }
 
 #[test]
@@ -1289,6 +1293,7 @@ fn each_shipped_starter_that_imports_mcp_servers_asks_for_it_off_by_default_and_
     for (pack, input) in [
         ("@box/claude", "claude.import-mcp"),
         ("@box/codex", "codex.import-mcp"),
+        ("@box/kiro", "kiro.import-mcp"),
     ] {
         let starter = Starter::load(pack, &lookup).expect("a shipped starter");
         assert!(starter.ask.iter().any(|name| name == input), "{pack}");
@@ -1976,6 +1981,40 @@ fn reviewing_settings_prefills_detected_values_and_preserves_unrelated_answers()
 }
 
 #[test]
+fn a_terminal_still_asks_a_detected_question_with_the_detected_choice_as_its_default() {
+    let fixture = Fixture::new();
+    fixture.agent(DETECTING);
+    fixture.settings(r#"{"env": {"USE_CLOUD": "1", "REGION": "west-2"}}"#);
+    let (answered, output) = fixture
+        .answer(Call {
+            interactive: true,
+            input: "\n\n\n",
+            ..Call::default()
+        })
+        .expect("Enter keeps what was detected");
+    assert!(output.contains("Which provider?"), "{output}");
+    assert!(
+        output.contains("This machine"),
+        "every choice is listed: {output}"
+    );
+    assert!(output.contains("> [1] "), "{output}");
+    assert_eq!(answered.packs, ["@box/agent", "@box/cloud"]);
+    assert_eq!(option(&answered, "cloud.region"), Some("west-2"));
+    let (answered, lines) = fixture
+        .detected(Call {
+            interactive: true,
+            input: "2\n\n\n",
+            ..Call::default()
+        })
+        .expect("a choice that detection did not pick");
+    assert_eq!(answered.packs, ["@box/agent", "@box/local"]);
+    assert!(
+        lines.iter().all(|line| !line.starts_with("Provider")),
+        "an answer that the operator changed is not reported as detected: {lines:?}"
+    );
+}
+
+#[test]
 fn a_higher_place_wins_and_a_lower_place_fills_a_missing_key() {
     let fixture = Fixture::new();
     fixture.agent(DETECTING);
@@ -2208,7 +2247,8 @@ fn a_place_that_reads_a_variable_that_a_saved_profiles_source_passes_stops_the_s
         std::fs::create_dir_all(&folder).expect("a plugin folder");
         std::fs::write(folder.join("plugin.toml"), plugin).expect("a plugin");
         fixture.agent(&DETECTING.replace("USE_CLOUD", variable));
-        let profile = crate::Profile::parse(saved, Path::new("profile.toml")).expect("a profile");
+        let profile = crate::Profile::parse(saved, Path::new("profile.toml"), crate::VERSION)
+            .expect("a profile");
         let answered = fixture.answer(Call {
             saved: Some(&profile),
             ..Call::default()
@@ -2334,6 +2374,7 @@ fn a_file_place_in_a_path_that_a_secret_source_protects_is_skipped() {
                  reads = [{reads:?}]\n"
             ),
             Path::new("profile.toml"),
+            crate::VERSION,
         )
         .expect("a profile");
         let (answered, lines) = fixture

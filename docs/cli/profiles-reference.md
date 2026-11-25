@@ -1,8 +1,3 @@
----
-reader: Someone who writes or reads a profile, knows the key or table they want, and needs what it does and which file may hold it.
-belongs: A key or table that a profile writes, and the rules that profiles and packs share, such as placeholders, when, and the merge. A rarer task goes here too, under the key it uses. A key that only a pack writes goes to packs-reference.md, a task that most users need in their first month goes to profiles.md, and a fix after an error goes to troubleshooting.md.
----
-
 # Profile reference
 
 This page lists every key that a `profile.toml` can hold, and what each one does. Packs write many
@@ -21,6 +16,7 @@ writes. `packs`, `plugins`, `policies`, `agent-args`, and `file-attributes` go a
 
 | Key | What it does |
 | --- | --- |
+| `[requires]` | What the profile needs of the `box` that runs it, such as its oldest version. See [`[requires]`](#requires). |
 | `[profile] name` | The profile's name, for a profile file that you run by its path ([Run a profile file](cli.md#run-a-profile-file)). A profile in `~/.strands/box/profiles/` can leave it out, and if it sets it, it matches the folder name. |
 | `packs` | The packs to use, as a list of names, in [merge order](#merge-order). `@box/<name>` is a pack that ships with `box`, and a plain name is a folder in `~/.strands/box/packs/`. |
 | `plugins` | The [plugins](plugins.md) to use, as a list of names, such as `plugins = ["@box/1password"]`. `@box/<name>` is a plugin that ships with `box`, and a plain name is a folder in `~/.strands/box/plugins/`. |
@@ -289,6 +285,25 @@ placeholder in `when` that gives anything other than `true` or `false` is an err
 your profile put there. A `when` on `[agent.env]` removes all of the agent's variables, for
 example.
 
+## `[requires]`
+
+`[requires]` says what a file needs of the `box` that reads it. A profile, a pack, and a plugin
+each can hold one, and `box` checks each file's own table when it reads the file, before the
+merge. When a requirement does not hold, `box` refuses the file and names it. `[requires]` only
+checks: it loads nothing, and it is not merged into the profile.
+
+```toml
+[requires]
+box = ">=0.3.0"
+```
+
+| Key | What it does |
+| --- | --- |
+| `box` | The oldest version of `box` that reads this file, as `>=X.Y.Z`. An older `box` refuses the file with `this pack needs box >=0.3.0, and this is box 0.2.3`. A preview build of `box`, such as `0.3.0-preview.1` or `0.3.0-linux-preview.1`, counts as its release, `0.3.0`. |
+
+`box` checks `box` first. So when a later `box` adds a requirement, an older `box` that reads it
+names the version to update to. A requirement that this `box` does not know is refused.
+
 ## Merge order
 
 `box` merges each name in `packs` after its own `extend`, left to right, each pack once, then each
@@ -320,7 +335,7 @@ secret.ref = "env://GITHUB_TOKEN"
 | Key | What it does |
 | --- | --- |
 | `destinations` | Required. Up to 100 hosts, each with an optional `:port`, such as `api.github.com`. Not a URL. On a route with a credential, an entry can also hold a path, such as `api.example.com/v1`, and `*.example.com` matches every host below `example.com`, but not `example.com` itself. A route with no credential takes neither, as the list below says. |
-| `secret.ref` | Where the credential comes from: `env://<NAME>` for a variable in the shell where you run `box run`, `aws://<profile>` for an AWS profile, `aws://` with no profile to sign with your default AWS identity, or a reference in a scheme that a [plugin](plugins.md) or your profile declares, such as `op://`, which that source's program reads when the box starts. An input's `from` spells a variable `env:<NAME>`, with no `//`. Without it, the route has no credential. |
+| `secret.ref` | Where the credential comes from: `env://<NAME>` for a variable in the shell where you run `box run`, `aws://<profile>` for an AWS profile, `aws://` with no profile to sign with your default AWS identity, `credsd://<credential>` for a credential in the [credentials daemon](credentials.md#the-credentials-daemon), or a reference in a scheme that a [plugin](plugins.md) or your profile declares, such as `op://`, which that source's program reads when the box starts. [Credentials](credentials.md) explains each source. An input's `from` spells a variable `env:<NAME>`, with no `//`. Without it, the route has no credential. |
 | `secret.header` | The request header that carries the credential, such as `x-api-key`. The default is `Authorization`. |
 | `secret.prefix` | The text before the credential in the header, such as `"token "` for `gh`. The default is `Bearer ` on `Authorization`, and nothing on another header. |
 | `secret.phantom_prefix` | The start of the placeholder key, such as `sk-ant-`, for an agent that checks the format of its key. The default is `strands_box_`. |
@@ -353,34 +368,6 @@ A route with any other key is a route with a credential, so a typo such as `secr
 run instead of opening the hosts. For the same reason, a route's `secret` takes no `when`: to use a
 credential on one system only, write two routes, each with its own `when`. Your profile can replace
 a pack's `destinations`, or add `secret.ref` to give a route a credential.
-
-### `aws://` credentials
-
-A provider pack's route names where its key comes from. Your profile can point it elsewhere with
-`[egress.<route>.secret] ref`, and `box profile show --full` names the routes.
-
-`aws://<PROFILE>` works only on a route that takes a signed request. It signs with the profile's
-static keys, `credential_process`, assume-role, or web identity. `aws://` with no profile name
-signs with the first credentials that the AWS SDK finds outside the box, in this order:
-
-1. The `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` variables in the shell where you run
-   `box run`.
-2. The profile in `~/.aws/config` and `~/.aws/credentials` that `AWS_PROFILE` names, or
-   `default`.
-3. Web identity, such as an EKS service account.
-4. The ECS or EKS container credentials endpoint.
-5. EC2 instance metadata.
-
-So on a cloud machine, `aws://` can sign as the machine's own role. The box prints a warning on
-each request it signs this way.
-
-Neither form signs with an AWS SSO or `aws login` profile
-([AWS credentials resolve to nothing](troubleshooting.md#aws-credentials-resolve-to-nothing)).
-
-Both `aws://` forms run any `credential_process` in your AWS configuration outside the box. The box
-can't write `~/.aws`, but if you move that configuration with `AWS_CONFIG_FILE` or
-`AWS_SHARED_CREDENTIALS_FILE`, keep the new place out of your project and every other folder the box
-can write.
 
 ## Project access
 

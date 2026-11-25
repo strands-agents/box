@@ -17,6 +17,7 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
+use axum::serve::{Listener, ListenerExt as _};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -121,7 +122,7 @@ impl Receiver {
         relays: Relays,
         dropped: Arc<AtomicU64>,
     ) {
-        let Ok(listener) = tokio::net::TcpListener::from_std(self.listener) else {
+        let Ok(listener) = self.connections() else {
             return;
         };
         let router = Router::new()
@@ -141,6 +142,18 @@ impl Receiver {
                 dropped,
             }));
         let _ = axum::serve(listener, router).await;
+    }
+
+    /// The listener that the server accepts each connection on.
+    fn connections(
+        self,
+    ) -> std::io::Result<impl Listener<Io = tokio::net::TcpStream, Addr = std::net::SocketAddr>>
+    {
+        let listener = tokio::net::TcpListener::from_std(self.listener)?;
+        // Best-effort: Nagle's algorithm off. The root `AGENTS.md` records why.
+        Ok(listener.tap_io(|connection| {
+            let _ = connection.set_nodelay(true);
+        }))
     }
 }
 
@@ -411,6 +424,22 @@ mod tests {
     /// `box` cannot pass on this attribute.
     fn agents_own(key: &str) -> KeyValue {
         text_attribute(key, "the agent's own value")
+    }
+
+    #[tokio::test]
+    async fn an_accepted_connection_has_tcp_nodelay_set() {
+        let inbound = Receiver::bind().expect("bind");
+        let port = inbound.port();
+        let mut connections = inbound.connections().expect("listener");
+        let _agent = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+
+        let (accepted, _peer) = connections.accept().await;
+        assert!(
+            accepted.nodelay().expect("nodelay"),
+            "Nagle's algorithm is off on the accepted connection"
+        );
     }
 
     /// A trace posted as protobuf is accepted and delivered.

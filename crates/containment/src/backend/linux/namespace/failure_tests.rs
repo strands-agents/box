@@ -269,10 +269,14 @@ fn failed_non_dumpable_refuses_launch() {
 
 #[test]
 fn a_reaper_that_remains_dumpable_terminates_its_namespace() {
-    in_namespace_reaper_expecting_exit(127, "process-memory access", || {
-        refuse_syscall(libc::SYS_prctl, Some((0, libc::PR_SET_DUMPABLE as u64)));
-        protect_reaper_memory(None);
-    });
+    in_namespace_reaper_expecting_exit(
+        127,
+        "strands-box-contain-trampoline: error[H0501]: namespace reaper could not refuse process-memory access",
+        || {
+            refuse_syscall(libc::SYS_prctl, Some((0, libc::PR_SET_DUMPABLE as u64)));
+            protect_reaper_memory(None);
+        },
+    );
 }
 
 #[test]
@@ -407,7 +411,7 @@ fn failed_reaper_channel_refuses_setup_before_forking() {
         let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
         refuse_syscall(libc::SYS_socketpair, None);
         refusal_names(
-            establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None, None).unwrap_err(),
+            establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None).unwrap_err(),
             "creating reaper lifetime channel",
         );
     });
@@ -419,7 +423,7 @@ fn failed_pid_namespace_refuses_setup_before_forking() {
         let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
         refuse_syscall(libc::SYS_unshare, Some((0, libc::CLONE_NEWPID as u64)));
         refusal_names(
-            establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None, None).unwrap_err(),
+            establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None).unwrap_err(),
             "creating a PID namespace",
         );
     });
@@ -621,7 +625,7 @@ fn failed_reaper_creation_refuses_launch_before_any_child_starts() {
         #[cfg(target_arch = "x86_64")]
         refuse_syscall(libc::SYS_fork, None);
         refusal_names(
-            establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None, None).unwrap_err(),
+            establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None).unwrap_err(),
             "forking the namespace reaper",
         );
     });
@@ -632,7 +636,7 @@ fn failed_reaper_handshake_terminates_the_launcher_before_materialization() {
     in_fresh_process_expecting_exit(true, Some(127), None, || {
         let view = view::MountView::plan(&ContainmentConfig::new()).unwrap();
         refuse_syscall(libc::SYS_sendto, Some((2, 1)));
-        let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None, None);
+        let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None);
         unsafe { libc::_exit(98) };
     });
 }
@@ -651,18 +655,22 @@ fn failed_native_reaper_wait_reports_setup_failure() {
 #[test]
 fn a_descriptor_that_survives_cleanup_terminates_the_namespace_reaper() {
     use std::os::fd::AsRawFd as _;
-    in_namespace_reaper_expecting_exit(127, "namespace reaper could not close descriptors", || {
-        let victim = std::fs::File::open("/dev/null").unwrap();
-        refuse_syscall(libc::SYS_close, Some((0, victim.as_raw_fd() as u64)));
-        close_reaper_descriptors(&[0, 1, 2], None);
-    });
+    in_namespace_reaper_expecting_exit(
+        127,
+        "strands-box-contain-trampoline: error[H0501]: namespace reaper could not close descriptors",
+        || {
+            let victim = std::fs::File::open("/dev/null").unwrap();
+            refuse_syscall(libc::SYS_close, Some((0, victim.as_raw_fd() as u64)));
+            close_reaper_descriptors(&[0, 1, 2], None);
+        },
+    );
 }
 
 #[test]
 fn a_reaper_that_cannot_clear_capabilities_terminates_its_namespace() {
     in_namespace_reaper_expecting_exit(
         127,
-        "namespace reaper could not drop its own authority",
+        "strands-box-contain-trampoline: error[H0501]: namespace reaper could not drop its own authority",
         || {
             refuse_syscall(libc::SYS_capset, None);
             drop_reaper_authority(None);
@@ -674,7 +682,7 @@ fn a_reaper_that_cannot_clear_capabilities_terminates_its_namespace() {
 fn a_reaper_that_cannot_lock_privileges_terminates_its_namespace() {
     in_namespace_reaper_expecting_exit(
         127,
-        "namespace reaper could not drop its own authority",
+        "strands-box-contain-trampoline: error[H0501]: namespace reaper could not drop its own authority",
         || {
             refuse_syscall(libc::SYS_prctl, Some((0, libc::PR_SET_NO_NEW_PRIVS as u64)));
             drop_reaper_authority(None);
@@ -698,7 +706,7 @@ fn a_failed_workload_fork_terminates_the_namespace_reaper() {
         // Leave room for the reaper, but not its workload, in this fresh user namespace.
         limit.rlim_cur = (threads + 1) as libc::rlim_t;
         assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &limit) }, 0);
-        let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None, None);
+        let _ = establish_pid_namespace_and_reaper(&view, &[0, 1, 2], None, None);
         unsafe { libc::_exit(98) };
     });
 }

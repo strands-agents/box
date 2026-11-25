@@ -1,8 +1,11 @@
-# Box user guide
+# Box Core guide
 
-Box runs an agent, or another command, under an operator's policy, with operating system enforcement.
+Box Core runs an agent, or another command, under an operator's policy, with operating system
+enforcement. You configure it with `box.toml` and `policy.dw`, which are Box Core's stable
+interface: programs, including the `box` CLI, build on them. To run a coding agent with profiles
+and packs instead, read the [Box CLI guide](../cli/README.md).
 
-- [`getting-started.md`](./getting-started.md): download Box, then write and run a box for an agent.
+- [`getting-started.md`](./getting-started.md): download Box Core, then write and run a box for an agent.
   Start here.
 - [`egress.md`](./egress.md): the `[egress.<name>]` table, which gives the agent a credential for a service.
 - [`mcp.md`](./mcp.md): the `[mcp.<name>]` table, for a stdio or an http MCP server.
@@ -13,7 +16,7 @@ Box runs an agent, or another command, under an operator's policy, with operatin
 - [`tool-grammars.md`](./tool-grammars.md): experimental. Describe a program such as `git` as actions
   and effects, and write one rule for every spelling of a command.
 - [`telemetry.md`](./telemetry.md): the `[telemetry.decisions]` keys, the endpoint and vendor kinds, what each record carries, and how to read a records file.
-- [`policy.md`](./policy.md): what a policy is, when the box asks it, the ten actions, the six
+- [`policy.md`](./policy.md): what a policy is, when the box asks it, the eleven actions, the six
   common rules, and what to do when a policy fails to load. Start here for policy.
 - [`security.md`](./security.md): what `box.toml` governs, what `policy.dw` governs, the one rule
   Box always enforces, and the policy limitations.
@@ -26,15 +29,6 @@ Box runs an agent, or another command, under an operator's policy, with operatin
   CLI's own traces and metrics to the records file from getting started, and read both together.
 - [`tutorials/strands-sdk-agent.md`](./tutorials/strands-sdk-agent.md): put an agent you wrote with
   the Strands Agents SDK in a box, and watch the policy permit two tasks and refuse two.
-- [`tutorials/claude-code.md`](./tutorials/claude-code.md): put Claude Code in a box with none of
-  the project's files in its own reach, and watch its Bash tool route every read, write, and delete
-  through the policy.
-- [`tutorials/codex-cli.md`](./tutorials/codex-cli.md): put Codex CLI in a box with the project out
-  of its own reach, so its shell tool is its only way to a project file, and watch the policy permit
-  three tasks and refuse two.
-- [`tutorials/pi.md`](./tutorials/pi.md): put pi in a box with the project out of its own reach,
-  so its `bash` tool is its only way to a project file, and watch the policy permit three tasks and
-  refuse two.
 
 - [`tutorials/eks.md`](./tutorials/eks.md): build and run a Box coding workload on Amazon EKS, then inspect its permitted operations and refusals.
 - [`tutorials/agentcore-runtime.md`](./tutorials/agentcore-runtime.md): deploy a Strands or LangChain shipment agent to AgentCore Runtime with Box.
@@ -48,6 +42,8 @@ Box runs an agent, or another command, under an operator's policy, with operatin
   for AgentCore Runtime and Lambda MicroVM.
 - [`config.md`](./config.md): the `box.toml` reference: every key and table, its type and default,
   and what the loader refuses.
+- [`message-codes.md`](./message-codes.md): the format of the messages Box writes to stderr, and
+  what each message code means and what to do about it.
 - [`policy/actions.md`](./policy/actions.md): every action, its fields, and which part of the box
   raises it.
 

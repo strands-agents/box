@@ -170,7 +170,7 @@ The caller cannot select another socket. Tools and local MCP servers have no ali
 | Broker | The trusted process, its own thread | The whole run | Nothing. It routes each request. |
 | Strands Shell | The trusted process | One command | Asks policy for `shell:exec` or `shell:spawn`, and `fs:*` for interpreted file operations |
 | Monty | The trusted process | One script | Asks policy for `fs:*` for file operations |
-| Egress gateway | The trusted process | The whole run | Asks policy for `net:connect`, `http:request`, and `mcp:call` for remote servers |
+| Egress gateway | The trusted process | The whole run | Asks policy for `net:connect`, `http:request`, `websocket:connect`, and `mcp:call` for remote servers |
 | MCP broker | The trusted process, within the broker | The whole run | Asks policy for `shell:spawn` to start a local server, then `mcp:call` for requests |
 | Collector | The trusted process | Opens before the policy engine; drains after shutdown | Records decisions |
 | Trampoline | Outside the sandbox | Until it becomes the contained program | Nothing |
@@ -284,7 +284,8 @@ interpreters are part of the code the operator must trust.
 3. It runs the programs of the declared secret sources to read the secrets of telemetry targets,
    and opens the collector to record the steps that follow. A read that fails here is on stderr
    alone.
-4. It installs the policy. Parsing or validation errors stop startup. Box also
+4. It installs the policy, in log-only mode when the `policy` table says so, and prints one line on
+   stderr naming what a log-only run exposes. Parsing or validation errors stop startup. Box also
    [rejects rules it can prove will never match](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns).
    It warns when it finds a rule that may never match but cannot prove it.
    Box then binds each experimental tool grammar to the program file of each `[tool]` it covers,
@@ -313,6 +314,8 @@ interpreters are part of the code the operator must trust.
    before the runtime-minimum section. Each line maps a spelling to a file the process's existing
    grants authorize. These mappings add no executable or library access. The
    [configuration reference](../user/config.md#agentfilesystem-and-toolnamefilesystem) shows the output.
+   Each disclosure line starts with `strands-box: note[<code>]:`, and
+   [Message codes](../user/message-codes.md) explains each code.
 7. It starts the trampoline, which becomes the agent, and waits for the workload to end.
 
 Before a selected Linux workload starts, native filesystem setup probes whether the kernel can transfer path-only file handles.

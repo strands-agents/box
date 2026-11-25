@@ -24,6 +24,7 @@ script-adapter = ["dep:monty", "dep:monty-types"]
 
 
 [dependencies]
+diagnostics = { package = "strands-box-diagnostics", path = "../diagnostics" }
 async-trait = { version = "0.1", optional = true }
 # The policy engine (docs/design/decisions.md#the-engine-is-dogwood). Pinned to
 # EXACTLY 4.11.0 — a *security* pin: schema-directed context parsing differs across
@@ -85,3 +86,6 @@ bolero = "0.13.4"
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(box_native_test_faults)"] }
 # A swallowed `Result` on a decision path is a compile error.
 unused_must_use = "deny"
+
+[lints.clippy]
+print_stderr = "warn"
