@@ -1,8 +1,5 @@
 //! The broker's transport: one listener, one reader per connection, and dispatch on `Open`.
 //!
-//! Still threads `Arc<ShellSpec>` through four signatures, so it is not yet interpreter-agnostic;
-//! `AGENTS.md` records what closing that costs.
-//!
 //! | Cause | Response |
 //! |---|---|
 //! | The client disconnects mid-Call | Drop that Program, keep accepting |

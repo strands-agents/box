@@ -3,8 +3,7 @@
 //! Both `aws://` forms resolve through the AWS SDK
 //! (docs/design/decisions.md#a-provider-refuses-an-identity-it-cannot-honour): a bare `aws://`
 //! resolves the default credential provider chain, and `aws://PROFILE` resolves only the named
-//! profile through a profile-only provider. See the crate AGENTS.md for the worker, cache, region,
-//! and timeout design.
+//! profile through a profile-only provider.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
