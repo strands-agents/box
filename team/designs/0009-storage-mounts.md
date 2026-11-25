@@ -14,7 +14,7 @@ Strands Box restricts which files an agent and its tools can access. This propos
 
 Box sets up the connection before the sandbox starts. When Runtime later mounts the storage, Linux makes it visible in each connected sandbox before Runtime's mount call finishes. Box needs no separate process to watch for the mount and expose it afterward.
 
-This approach supports fewer permission settings than the earlier helper-based proposal. Each sandbox must allow read and write access across the whole mounted directory; the agent must also allow execution. Box rejects settings that require finer restrictions. The storage service and filesystem can still refuse operations. This permission trade-off needs approval before implementation.
+The [earlier helper proposal](#appendix-a-earlier-helper-proposal) used a trusted Box process to apply different permissions within an arriving filesystem before exposing it. Direct propagation removes that preparation step, so it supports fewer permission settings. Each sandbox must allow read and write access across the whole mounted directory; the agent must also allow execution. Box rejects settings that require finer restrictions. The storage service and filesystem can still refuse operations. This permission trade-off needs approval before implementation.
 
 ## 1. Why storage can be missing
 
@@ -209,7 +209,7 @@ Initial arrival is the first test target. Guarantees for replacement, removal, c
 
 ### 8.2 Keep the helper
 
-A helper can inspect new storage and build different restrictions for its files and directories before exposing them. The application or Runtime would then need to wait for that work before handling an invocation that uses storage. This remains an option when finer Box permissions are required.
+A helper can inspect new storage and build different restrictions for its files and directories before exposing them, as described in [Appendix A](#appendix-a-earlier-helper-proposal). The application or Runtime would then need to wait for that work before handling an invocation that uses storage. This remains an option when finer Box permissions are required.
 
 ### 8.3 Start Box after storage is mounted
 
@@ -247,3 +247,24 @@ The team agreed to measure direct propagation and review an explicit permission 
 | Delivery | Possible launch exclusion concerned remote-storage support, not Box overall. Later delivery was discussed without a final decision or date. | Keep the feature experimental. Separate design approval, implementation, Runtime testing, and release decisions. |
 
 The kernel inspection and local test in section 6 happened after the review. They are evidence for further work, not team approval or proof that the feature works in Runtime.
+
+## Appendix A. Earlier helper proposal
+
+The earlier proposal aimed to preserve Box's path-specific filesystem restrictions when storage arrived after sandbox startup. It used a **trusted helper**: a Box-controlled process outside the agent's sandbox that prepared storage before the agent could access it.
+
+For a configured storage path such as `/mnt/data`, the sequence was:
+
+1. **Cover the path.** At sandbox startup, Box placed an empty mount over `/mnt/data` while storage was pending. The sandbox kept its private mount namespace.
+2. **Receive the storage separately.** Runtime mounted the filesystem. Linux made the new mount visible to Box's helper, without exposing the unprotected mount to the agent.
+3. **Prepare the restrictions.** Box checked the paths required by that sandbox's `box.toml` filesystem rules and built a private mount arrangement with the required restrictions.
+4. **Expose the prepared view.** Once preparation succeeded, Box attached the completed arrangement over the empty cover. Each agent, tool, or local server received a view prepared under its own rules.
+
+For example, Box could make `/mnt/data` read-only, permit writes under `/mnt/data/output`, and hide `/mnt/data/private`. The direct-propagation proposal above rejects this mixed arrangement because it cannot reapply those restrictions to an arriving mount.
+
+Preparing a view did not mean copying the storage data or listing every remote object. It operated on mounts and the paths needed by the configured rules. Looking up those paths could still require remote storage requests.
+
+The drawback was a gap between Runtime finishing its mount and Box finishing preparation. Runtime could deliver an invocation during that gap. An agent opening `/mnt/data/report.txt` would still see the empty cover and could receive a file-not-found error. The helper proposal added no storage-ready handshake with Runtime; the application had to retry unavailable file operations.
+
+To prevent an invocation from encountering the empty cover, the application or Runtime would need to wait for Box's preparation to finish. The current proposal removes that separate preparation step and accepts a narrower permission contract instead.
+
+The helper design was experimental. Required permission targets had to exist when storage was prepared; preparation failure kept storage covered and stopped Box. Later mount changes and concurrent directory changes retained documented limits. See the [archived helper design](https://github.com/strands-agents/box/blob/2ed3ebac146ae75ec75a126676255e0f5079cde8/team/designs/0009-storage-mounts.md) and [combined prototype PR #579](https://github.com/strands-agents/box/pull/579) for the original proposal and its implementation evidence.
