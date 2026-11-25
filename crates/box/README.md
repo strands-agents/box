@@ -130,14 +130,26 @@ event metadata, the host-wide event count, and each volume's history identifier.
 also delete any volume's event history. Box prints these limitations at startup. See
 [file watching](../../docs/user/config.md#file-watching).
 
-`filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
-`exec`, and `deny` — and also takes `deny_write`, which keeps an existing directory inside a
-`write` directory read-only. A tool and a local MCP server take `deny_write` too.
+`filesystem` holds nine permission lists: `read`, `write`, `read_file`, `write_file`, `list`,
+`metadata`, `exec`, `deny`, and `deny_write`. The `deny_write` list keeps an existing directory
+inside a `write` directory read-only. A tool and a local MCP server take `deny_write` too.
 They give this process's own filesystem calls direct reach, because an
 unmodified coding agent's `Read`, `Write` and `Edit` issue those calls and containment refuses every
 one. A directory entry is recursive, and a file entry is exact. `write` does not imply `read`. Linux
 is the residual: a writable bind reads there, and the startup disclosure says so on that entry's
 line.
+
+In `box.toml`, the separate `filesystem.receive_mounts` array selects paths where the agent, a tool,
+or a local MCP server would receive externally attached filesystems. Each process has its own
+array, and listing a path grants no filesystem access. Linux requires no additional experimental
+setting, but this build still rejects nonempty arrays because incoming mount forwarding is
+unavailable. On Linux, an empty or omitted array leaves ordinary filesystem behavior unchanged.
+
+On macOS, any `receive_mounts` key rejects configuration loading, including an explicit empty
+array. Omit the key on macOS. Both platform refusals happen before Box creates state or starts a
+workload. The removed `[experimental-features] linux-storage-mounts` key is also an error, including
+when `false`. See [incoming mount declarations](../../docs/user/config.md#incoming-mount-declarations)
+for the per-process path checks.
 
 Without experimental native filesystem policy, no `fs:*` decision records these operations, so the box prints each grant
 on stderr when it starts. A grant that would expose the box's own directory is refused, which

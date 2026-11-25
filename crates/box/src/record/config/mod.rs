@@ -19,6 +19,7 @@
 //! | [`ingress`] | `[[agent.ingress]]`: where callers reach the agent |
 //! | [`limits`] | `[limits.shell]`: the execution timeout of one Shell submission |
 //! | `env` | which environment names a process may set, and which Core owns |
+//! | [`mounts`] | the incoming mount declarations and their platform checks |
 //! | [`mcp`] | `[mcp.<name>]`: which local MCP servers exist, and how each starts |
 //! | [`secret_source`] | `[secret-source.<scheme>]`: which host program reads a secret for a scheme |
 //! | [`telemetry`] | `[telemetry.<label>]`: where a box's decision records go |
@@ -34,6 +35,7 @@ pub(crate) mod grammar;
 pub(crate) mod ingress;
 pub(crate) mod limits;
 pub(crate) mod mcp;
+mod mounts;
 pub(crate) mod process;
 pub(crate) mod secret_source;
 pub(crate) mod telemetry;
@@ -835,6 +837,8 @@ const TOOL_CALLS_RECORD_VERSION: u32 = 40;
 /// The record version of a record whose policy applies in log-only mode, so an older build refuses
 /// the box rather than enforcing a policy the operator asked to trial.
 const LOG_ONLY_RECORD_VERSION: u32 = 41;
+/// The record version that preserves nonempty incoming mount declarations.
+const MOUNTS_RECORD_VERSION: u32 = 42;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -903,7 +907,12 @@ fn record_version<'a>(
     enforcement: Enforcement,
 ) -> u32 {
     let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
-    if enforcement.is_log_only() {
+    if specs
+        .clone()
+        .any(|spec| !spec.filesystem.receive_mounts.is_empty())
+    {
+        MOUNTS_RECORD_VERSION
+    } else if enforcement.is_log_only() {
         LOG_ONLY_RECORD_VERSION
     } else if telemetry::names_tool_calls(targets) {
         TOOL_CALLS_RECORD_VERSION
@@ -1095,6 +1104,12 @@ const REMOVED_MCP_FILESYSTEM_EXEC: RemovedKey = RemovedKey {
                   macOS, so it states no `exec` list; only `[agent.filesystem]` takes `exec`",
 };
 
+/// The unpublished protected-view prototype does not have an active replacement.
+const REMOVED_LINUX_STORAGE_MOUNTS: RemovedKey = RemovedKey {
+    key: "[experimental-features] linux-storage-mounts",
+    replacement: "remove this key; incoming mount forwarding is not available in this build",
+};
+
 /// The filesystem lists a leaf table no longer states, per `box.toml` section.
 const REMOVED_LEAF_FILESYSTEM_LISTS: [(&str, [(&str, &RemovedKey); 2]); 2] = [
     (
@@ -1130,6 +1145,13 @@ fn refuse_removed_keys(text: &str, path: &Path) -> Result<(), ConfigError> {
         key: removed.key,
         replacement: removed.replacement,
     };
+    if table
+        .get("experimental-features")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|features| features.contains_key("linux-storage-mounts"))
+    {
+        return Err(refuse(&REMOVED_LINUX_STORAGE_MOUNTS));
+    }
     for removed in &REMOVED_TOP_LEVEL_KEYS {
         if table.contains_key(removed.key.trim_matches(['[', ']'])) {
             return Err(refuse(removed));
@@ -1233,6 +1255,7 @@ impl Record {
             SECRET_SOURCE_RECORD_VERSION,
             TOOL_CALLS_RECORD_VERSION,
             LOG_ONLY_RECORD_VERSION,
+            MOUNTS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1287,6 +1310,7 @@ impl Record {
     fn validate_processes(&self) -> Result<(), ConfigError> {
         if let Some(agent) = &self.agent {
             agent.validate("[agent]")?;
+            mounts::validate_selection(agent, "[agent]", &self.experimental_features)?;
             agent.validate_native_policy(
                 "[agent]",
                 self.experimental_features.native_filesystem_policy,
@@ -1295,6 +1319,11 @@ impl Record {
         }
         for (label, tool) in &self.tool {
             tool.validate(&format!("[tool.{label}]"))?;
+            mounts::validate_selection(
+                tool,
+                &format!("[tool.{label}]"),
+                &self.experimental_features,
+            )?;
             tool.validate_native_policy(
                 &format!("[tool.{label}]"),
                 self.experimental_features.native_filesystem_policy,
@@ -1306,6 +1335,11 @@ impl Record {
         }
         for (name, contained) in &self.contained_mcp {
             contained.spec.validate(&format!("[mcp.{name}]"))?;
+            mounts::validate_selection(
+                &contained.spec,
+                &format!("[mcp.{name}]"),
+                &self.experimental_features,
+            )?;
             contained.spec.validate_native_policy(
                 &format!("[mcp.{name}]"),
                 self.experimental_features.native_filesystem_policy,
@@ -1746,6 +1780,8 @@ impl ConfigFile {
             path: path.to_path_buf(),
             source,
         })?;
+        #[cfg(not(target_os = "linux"))]
+        mounts::refuse_unsupported_config(text, path)?;
         file.validate()?;
         Ok(file)
     }
@@ -1785,6 +1821,7 @@ impl ConfigFile {
         self.gateway.validate()?;
         if let Some(agent) = &self.agent {
             agent.validate("[agent]")?;
+            mounts::validate_selection(agent, "[agent]", &self.experimental_features)?;
             agent.validate_native_policy(
                 "[agent]",
                 self.experimental_features.native_filesystem_policy,
@@ -1794,6 +1831,11 @@ impl ConfigFile {
         for (label, tool) in &self.tool {
             validate_tool_label(label)?;
             tool.validate(&format!("[tool.{label}]"))?;
+            mounts::validate_selection(
+                tool,
+                &format!("[tool.{label}]"),
+                &self.experimental_features,
+            )?;
             tool.validate_native_policy(
                 &format!("[tool.{label}]"),
                 self.experimental_features.native_filesystem_policy,
@@ -1805,6 +1847,11 @@ impl ConfigFile {
         }
         for (name, contained) in crate::record::config::mcp::contained_specs(&self.mcp) {
             contained.spec.validate(&format!("[mcp.{name}]"))?;
+            mounts::validate_selection(
+                &contained.spec,
+                &format!("[mcp.{name}]"),
+                &self.experimental_features,
+            )?;
             contained.spec.validate_native_policy(
                 &format!("[mcp.{name}]"),
                 self.experimental_features.native_filesystem_policy,
@@ -1827,7 +1874,23 @@ impl ConfigFile {
             &BTreeMap::new(),
             agent_ingress(self.agent.as_ref()),
         )?;
-        validate_egress(&self.egress, &self.declared_sources()?)
+        validate_egress(&self.egress, &self.declared_sources()?)?;
+        let contained = mcp::contained_specs(&self.mcp);
+        if self
+            .agent
+            .iter()
+            .chain(self.tool.values())
+            .chain(contained.values().map(|server| &server.spec))
+            .any(|spec| !spec.filesystem.receive_mounts.is_empty())
+        {
+            return Err(ConfigError::Contract {
+                reason:
+                    "cannot start Box with `filesystem.receive_mounts`: incoming mount forwarding \
+                         is not available in this build"
+                        .into(),
+            });
+        }
+        Ok(())
     }
 
     /// Every declared `ProcessSpec` beside the table that declared it.
@@ -3533,7 +3596,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, LOG_ONLY_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, MOUNTS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

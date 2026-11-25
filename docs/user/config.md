@@ -344,6 +344,9 @@ default.
 `secret-sources = true` turns on [`[secret-source.<scheme>]`](#secret-sourcescheme) and the
 `secret.env` key of a route or a remote MCP server, which are experimental and off by default.
 
+The former `linux-storage-mounts` key is rejected even when its value is `false`.
+Remove that key; this build has no replacement that enables incoming mount forwarding.
+
 ## `[agent]` and `[tool.<name>]`
 
 Both tables hold one process, in one shape:
@@ -681,6 +684,32 @@ A permission change also fails if its requested mode keeps a set-user-ID or set-
 that the file or directory already has. The request must clear both bits to succeed.
 This includes directories that inherited their group bit: GNU `chmod g+w` and even
 `chmod 755` preserve that bit and fail. A refused request leaves the existing permissions unchanged.
+
+### Incoming mount declarations
+
+In `box.toml`, the optional `receive_mounts` array in `[agent.filesystem]`,
+`[tool.<name>.filesystem]`, or a local `[mcp.<name>.filesystem]` selects paths where that sandbox
+would receive externally attached filesystems after startup. It does not tell Box to create or
+attach a filesystem. Omitting the array selects no paths. Each process has its own array; tools
+and local servers do not inherit the agent's entries. Listing a path grants no read, write, or
+execution access.
+
+**Incoming mount forwarding is unavailable in this build.** Linux requires no additional
+experimental setting, but a nonempty array still rejects configuration loading until forwarding
+is implemented. On Linux, an empty or omitted array leaves ordinary filesystem behavior unchanged.
+
+On macOS, the presence of `receive_mounts` rejects configuration loading, including
+`receive_mounts = []`. Omit the key on macOS. Both platform refusals happen before Box creates its
+state directory or starts a workload.
+
+The declaration checks require absolute, literal paths other than `/`. Entries cannot be
+home-relative, such as `~/data`, or contain patterns, control characters, or `..`. Within one
+process's array, paths cannot repeat or contain
+one another: `/mnt/data` and `/mnt/data/child` conflict, while `/mnt/data` and `/mnt/database` do not.
+Different processes may name the same path.
+A nonempty array also conflicts with enabled
+[native filesystem policy checks](native-filesystem-policy.md) for the same process.
+These checks do not validate a future filesystem's contents or establish that storage is available.
 
 ### Direct access by operating system
 
@@ -1545,6 +1574,12 @@ five `[[agent.ingress]]` entries, an `[[agent.ingress]] listen` that is not an I
 port of 0, two entries with one `listen` port or one `workload_port`, and on macOS a `listen` port
 equal to any entry's `workload_port`.
 An invalid `limits.shell.timeout`, `limits.shell.max_input`, `limits.shell.max_output`, or `limits.shell.max_stdin` is also a parse error.
+
+[Incoming mount declarations](#incoming-mount-declarations) also fail before Box creates state:
+invalid or overlapping `receive_mounts` paths, or a nonempty array combined with native filesystem
+policy for that process. This build rejects nonempty arrays on Linux because forwarding is
+unavailable. On macOS, any `receive_mounts` key is rejected, including `receive_mounts = []`.
+The removed `[experimental-features] linux-storage-mounts` key is an error regardless of its value.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload

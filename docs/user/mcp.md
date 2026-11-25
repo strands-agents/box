@@ -286,6 +286,16 @@ exactly. `box run` prints each credential store a server's lists name.
 
 A grant in this table is direct access, outside every `fs:*` decision.
 
+The separate `receive_mounts` array in `[mcp.<name>.filesystem]` selects paths where this local
+server's sandbox would receive externally attached filesystems. Omitting it selects no paths.
+It does not inherit the agent's entries and grants no filesystem access. Linux requires no
+additional experimental setting, but this build still rejects nonempty arrays because forwarding
+is unavailable. Leave the array empty or omit it on Linux.
+
+On macOS, omit `receive_mounts`: even an explicit empty array rejects configuration loading.
+Both platform refusals happen before Box creates state or starts a workload.
+See [incoming mount declarations](config.md#incoming-mount-declarations) for the path checks.
+
 ### Network
 
 `[mcp.<name>.network]` holds one key, `contain_egress`.
