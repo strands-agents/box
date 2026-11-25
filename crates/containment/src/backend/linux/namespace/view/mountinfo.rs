@@ -89,14 +89,16 @@ fn record(line: &str) -> Option<MountRecord<'_>> {
     let (mount, filesystem) = line.split_once(" - ")?;
     let fields: Vec<_> = mount.split_ascii_whitespace().collect();
     // The kernel preserves an explicitly empty source between two spaces.
-    // Splitting this suffix on whitespace would erase that legitimate column.
-    let filesystem: Vec<_> = filesystem.split(' ').collect();
+    // Split only the two fixed columns: filesystem-supplied options can contain
+    // unescaped spaces and tabs, and Box does not interpret that final text.
+    let filesystem: Vec<_> = filesystem.splitn(3, ' ').collect();
     if fields.len() < 6
         || filesystem.len() != 3
         || filesystem[0].is_empty()
         || filesystem[2].is_empty()
         || filesystem
             .iter()
+            .take(2)
             .any(|field| field.bytes().any(|byte| byte.is_ascii_whitespace()))
     {
         return None;
@@ -208,6 +210,25 @@ mod tests {
     }
 
     #[test]
+    fn filesystem_options_can_contain_unescaped_spaces_and_tabs() {
+        // v9fs_show_options writes aname with raw %s; these are option text,
+        // not extra mountinfo columns. Box does not interpret these options.
+        for options in [
+            r"rw,dirsync,aname=drvfs;path=C:\ProgramFiles;uid=1000",
+            r"rw,dirsync,aname=drvfs;path=C:\Program Files;uid=1000",
+            "rw,aname=two\twords",
+        ] {
+            let table = format!("93 20 0:51 / /mnt/pf rw,noatime - 9p drvfs {options}\n");
+            let rows =
+                parse(&table).expect("filesystem option text must not reject the mount table");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].identity, 93);
+            assert_eq!(rows[0].point, PathBuf::from("/mnt/pf"));
+            assert_eq!(rows[0].filesystem, "9p");
+        }
+    }
+
+    #[test]
     fn malformed_rows_and_duplicate_identities_refuse_the_whole_snapshot() {
         let valid = "20 999 8:1 / / rw - ext4 /dev/root rw\n";
         for bad in [
@@ -220,7 +241,6 @@ mod tests {
             r"21 20 8:1 / /bad\777path rw - ext4 /dev/root rw",
             r"21 20 8:1 / /bad\path rw - ext4 /dev/root rw",
             "21 20 8:1 / /data rw - ext4 /dev/root",
-            "21 20 8:1 / /data rw - ext4 /dev/root rw extra",
             "21 20 8:1 / /data rw -  /dev/root rw",
             "21 20 8:1 / /data rw - ext4 /dev/root ",
             "21 20 8:1 / /data rw - ext4  ",
