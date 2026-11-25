@@ -103,7 +103,7 @@ codes! {
     B0109 => strands_box error, "MCP servers that could not be prepared", "A declared MCP server could not be prepared, so the box did not start.";
     B0110 => strands_box error, "egress gateway failures", "The egress gateway or its relay failed, so the box did not start or stopped.";
     B0111 => strands_box error, "broker socket failures", "The socket the box's interpreters reach could not be served.";
-    B0112 => strands_box error, "refused library callbacks", "The library caller's `on_ready` callback returned an error, so the box did not start its workload.";
+    B0112 => strands_box error, "refused library callbacks", "The library caller's `on_ready` callback returned an error or changed native filesystem policy from off to on after startup preparation, so the box did not start its workload.";
     B0113 => strands_box error, "secret source failures", "A secret source program failed to read a secret, so the box did not start.";
     // Box: startup disclosures.
     B0201 => strands_box note, "filesystem grant disclosures", "A process reaches these paths directly, with no policy decision.";

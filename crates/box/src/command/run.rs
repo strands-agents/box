@@ -96,10 +96,7 @@ impl NativeSetup {
             return Ok(None);
         }
         if !self.prepared_native {
-            return Err(crate::error::SuperviseError::Native {
-                reason: "native filesystem selection changed after capability preparation; restart with native filesystem policy already enabled".to_string(),
-            }
-            .into());
+            return Err(crate::error::SuperviseError::NativeSelectionChanged.into());
         }
         Ok(Some(
             self.guard
@@ -1216,11 +1213,32 @@ mod tests {
             let error = execute(&config, &[], None, None, None, None, setup)
                 .await
                 .expect_err("late native selection refuses before preparing the workload");
-            assert_eq!(error.code(), ::diagnostics::Code::B0108.into());
+            assert_eq!(error.code(), ::diagnostics::Code::B0112.into());
             assert_eq!(
                 error.to_string(),
                 "workload process control failed: native filesystem selection changed after capability preparation; restart with native filesystem policy already enabled",
                 "execution must check the callback's final native selection"
+            );
+        }
+
+        #[test]
+        fn native_guard_setup_failure_keeps_host_diagnostic() {
+            let setup = NativeSetup {
+                contract: None,
+                prepared_native: true,
+                guard: Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "loader denied",
+                )),
+            };
+            let error = setup
+                .guard_for(true)
+                .err()
+                .expect("a native loader failure refuses startup");
+            assert_eq!(error.code(), ::diagnostics::Code::B0108.into());
+            assert_eq!(
+                error.to_string(),
+                "workload process control failed: native filesystem setup failed: loader denied"
             );
         }
 
@@ -1243,7 +1261,12 @@ mod tests {
                         let error = result
                             .err()
                             .expect("native selection without a guard refuses");
-                        assert_eq!(error.code(), ::diagnostics::Code::B0108.into());
+                        let expected_code = if prepared_native {
+                            ::diagnostics::Code::B0108
+                        } else {
+                            ::diagnostics::Code::B0112
+                        };
+                        assert_eq!(error.code(), expected_code.into());
                         let expected = if prepared_native {
                             "native filesystem interception requires CAP_BPF and CAP_PERFMON"
                         } else {
