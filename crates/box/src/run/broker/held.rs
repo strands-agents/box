@@ -51,16 +51,21 @@ impl HeldPath {
             Some(Component::Normal(leaf)) => c_name(leaf.as_bytes()).map_err(Unreached::Refused)?,
             _ => return Err(Unreached::Refused(not_canonical(approved))),
         };
+        // Refuse `.` / `..` before the walk: a missing earlier name must not mask a non-canonical
+        // spelling and classify the path as an answered probe.
+        let parents: Vec<_> = components
+            .map(|component| match component {
+                Component::Normal(name) => c_name(name.as_bytes()),
+                _ => Err(not_canonical(approved)),
+            })
+            .collect::<io::Result<_>>()
+            .map_err(Unreached::Refused)?;
         let mut parent =
             open_at(libc::AT_FDCWD, c"/", WALK & !libc::O_NOFOLLOW).map_err(Unreached::Refused)?;
-        for component in components {
-            let Component::Normal(name) = component else {
-                return Err(Unreached::Refused(not_canonical(approved)));
-            };
-            let name = c_name(name.as_bytes()).map_err(Unreached::Refused)?;
-            parent = match open_at(parent.as_raw_fd(), &name, WALK) {
+        for name in &parents {
+            parent = match open_at(parent.as_raw_fd(), name, WALK) {
                 Ok(next) => next,
-                Err(error) => return Err(unreached(&parent, &name, error)),
+                Err(error) => return Err(unreached(&parent, name, error)),
             };
         }
         Ok(Self { parent, leaf })
@@ -346,6 +351,29 @@ mod tests {
             HeldPath::reach(Path::new("relative/f.txt")),
             Err(Unreached::Refused(_))
         ));
+    }
+
+    /// A `..` component is a refusal even when an earlier name is missing, so the walk does not
+    /// classify the spelling as an answered probe. (`Path::components` already drops a middle `.`.)
+    #[test]
+    fn a_dotdot_component_is_a_refusal_before_the_walk() {
+        let (_dir, base) = scratch();
+        assert!(matches!(
+            HeldPath::reach(&base.join("absent/../x")),
+            Err(Unreached::Refused(_))
+        ));
+    }
+
+    /// An overlong component is a refusal, not an answered probe — so a metadata budget must not
+    /// count it the way a missing parent is counted.
+    #[test]
+    fn an_overlong_component_is_a_refusal() {
+        let (_dir, base) = scratch();
+        let reached = HeldPath::reach(&base.join(format!("{}/x", "a".repeat(300))));
+        assert!(
+            matches!(reached, Err(Unreached::Refused(_))),
+            "an overlong name must not classify as Answered"
+        );
     }
 
     /// `of` refuses every path that `reach` does not hold.
