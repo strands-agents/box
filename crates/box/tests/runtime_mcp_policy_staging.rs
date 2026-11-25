@@ -2853,3 +2853,125 @@ fn a_limit_over_a_tools_own_response_refuses_the_next_call() {
         "the refused call never reached the server"
     );
 }
+
+/// **In log-only mode an MCP method other than `tools/call` that the policy forbids reaches the
+/// server, and its record keeps the denial, unenforced, naming the `forbid`.** The same box
+/// enforcing refuses the frame before the server, which is the paired control.
+#[test]
+fn a_log_only_box_lets_a_forbidden_resource_read_reach_the_server() {
+    if !fixture::namespace_launcher_is_usable() {
+        eprintln!("skipping: a log-only MCP method needs a usable box launcher");
+        return;
+    }
+    for log_only in [true, false] {
+        let box_ = RuntimeMcpBox::new(if log_only {
+            "mcp-log-only-method"
+        } else {
+            "mcp-enforced-method"
+        });
+        let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
+        box_.install_server(&alpha);
+        let policy = format!(
+            "{}\n@id(\"no_resource_read\")\n\
+             forbid (principal, action == Box::Action::\"mcp:call\", resource)\n\
+             when {{ context.input.method == \"resources/read\" }};",
+            mcp_call_policy_for("alpha")
+        );
+        box_.write_workspace(&policy, &[alpha], BLOCKING_WORKLOAD);
+        if log_only {
+            box_.set_log_only();
+        }
+
+        let mut run = box_.spawn();
+        run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+        let mut client = box_.open_client("alpha-mcp");
+        run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
+        client.initialize_and_activate(json!("initialize-1"), STARTUP);
+        client.send(&json!({
+            "jsonrpc": "2.0",
+            "id": "read-1",
+            "method": "resources/read",
+            "params": {"uri": "file:///notes.txt"}
+        }));
+        let answer = client.receive(STARTUP);
+        assert_eq!(answer.get("id"), Some(&json!("read-1")), "{answer}");
+        if log_only {
+            assert_eq!(
+                error_code(&answer),
+                Some(-32601),
+                "the fixture server answers a method it does not implement, so the frame reached it: {answer}"
+            );
+        } else {
+            assert_eq!(
+                error_code(&answer),
+                Some(-32001),
+                "the enforcing box refuses the frame: {answer}"
+            );
+        }
+
+        drop(client);
+        box_.release_workload();
+        let output = run.wait(SHUTDOWN);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let text = std::fs::read_to_string(records_path(&box_)).expect("the records");
+        let denials: Vec<Value> = text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .flat_map(|request| {
+                request["resourceLogs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|resource| resource["scopeLogs"].as_array().into_iter().flatten())
+                    .flat_map(|scope| scope["logRecords"].as_array().into_iter().flatten())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .filter(|record| {
+                telemetry_attribute(record, "strands.box.policy.verdict")
+                    == Some(&json!({"stringValue": "deny"}))
+            })
+            .collect();
+        assert_eq!(
+            denials.len(),
+            1,
+            "one denial, the resource read: {denials:?}"
+        );
+        let denial = &denials[0];
+        assert_eq!(
+            telemetry_attribute(denial, "strands.box.policy.rule"),
+            Some(&json!({"stringValue": "no_resource_read"})),
+            "{denial}"
+        );
+        if log_only {
+            assert_eq!(
+                telemetry_attribute(denial, "strands.box.policy.enforced"),
+                Some(&json!({"boolValue": false})),
+                "{denial}"
+            );
+            assert_eq!(
+                telemetry_attribute(denial, "strands.box.policy.first_flip"),
+                Some(&json!({"boolValue": true})),
+                "{denial}"
+            );
+            assert_eq!(
+                telemetry_attribute(denial, "strands.box.policy.would_deny.ids"),
+                Some(&json!({"arrayValue": {"values": [{"stringValue": "no_resource_read"}]}})),
+                "{denial}"
+            );
+        } else {
+            for key in [
+                "strands.box.policy.enforced",
+                "strands.box.policy.first_flip",
+                "strands.box.policy.would_deny.ids",
+            ] {
+                assert_eq!(telemetry_attribute(denial, key), None, "{key}: {denial}");
+            }
+        }
+    }
+}

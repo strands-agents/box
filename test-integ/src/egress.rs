@@ -2407,6 +2407,9 @@ mod tests {
             reason: "no permit matched".to_string(),
             determining_ids: Vec::new(),
             at_unix_nano: 0,
+            enforced: true,
+            first_flip: false,
+            would_deny: Vec::new(),
         };
         assert_eq!(
             default_deny_pair(&native_decision, &body, "127.0.0.1:37469"),

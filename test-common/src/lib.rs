@@ -50,6 +50,14 @@ pub struct Decision {
     pub determining_ids: Vec<String>,
     /// The record's `timeUnixNano`, or 0 when the record carries none.
     pub at_unix_nano: u64,
+    /// False when log-only mode let the denied action through (`strands.box.policy.enforced`).
+    pub enforced: bool,
+    /// Whether this is the run's first decision log-only mode let through
+    /// (`strands.box.policy.first_flip`).
+    pub first_flip: bool,
+    /// `strands.box.policy.would_deny.ids`: each rule that would have denied the action in log-only
+    /// mode, across all its steps.
+    pub would_deny: Vec<String>,
 }
 
 /// The box's spelling of a refusal caused by a matching `forbid` (`telemetry.rs::deny_reason`).
@@ -118,6 +126,14 @@ pub fn parse_decisions(journal: &str) -> Vec<Decision> {
                     // first, then the pre-rename one, so this harness reports the same decisions
                     // against a box from either side of that change.
                     let read_any = |keys: &[&str]| keys.iter().find_map(|key| read(key));
+                    let read_flag = |key: &str| {
+                        entry["attributes"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .find(|attribute| attribute["key"] == key)
+                            .and_then(|attribute| attribute["value"]["boolValue"].as_bool())
+                    };
                     let Some(action) =
                         read_any(&["strands.box.policy.action", "strands.policy.action"])
                     else {
@@ -162,6 +178,9 @@ pub fn parse_decisions(journal: &str) -> Vec<Decision> {
                             serde_json::Value::Number(number) => number.as_u64().unwrap_or(0),
                             _ => 0,
                         },
+                        enforced: read_flag("strands.box.policy.enforced").unwrap_or(true),
+                        first_flip: read_flag("strands.box.policy.first_flip").unwrap_or(false),
+                        would_deny: read_list("strands.box.policy.would_deny.ids"),
                     });
                 }
             }
@@ -231,5 +250,28 @@ mod tests {
                 && !found[1].forbidden_by("policy_6")
                 && !found[0].forbidden_by("no_deletes")
         );
+    }
+
+    #[test]
+    fn a_let_through_denial_reads_as_unenforced_and_an_applied_one_as_enforced() {
+        let line = serde_json::json!({
+            "resourceLogs": [{"scopeLogs": [{"scope": {"name": "strands-box.policy"}, "logRecords": [
+                {"attributes": [
+                    {"key": "strands.box.policy.action", "value": {"stringValue": "fs:read"}},
+                    {"key": "strands.box.policy.verdict", "value": {"stringValue": "deny"}},
+                    {"key": "strands.box.policy.enforced", "value": {"boolValue": false}},
+                    {"key": "strands.box.policy.first_flip", "value": {"boolValue": true}},
+                    {"key": "strands.box.policy.would_deny.ids", "value": {"arrayValue": {"values": [{"stringValue": "no-read-a"}, {"stringValue": "no-move-onto-b"}]}}}
+                ]},
+                {"attributes": [
+                    {"key": "strands.box.policy.action", "value": {"stringValue": "fs:read"}},
+                    {"key": "strands.box.policy.verdict", "value": {"stringValue": "deny"}}
+                ]}
+            ]}]}]
+        });
+        let found = parse_decisions(&line.to_string());
+        assert!(!found[0].enforced && found[0].first_flip);
+        assert_eq!(found[0].would_deny, ["no-read-a", "no-move-onto-b"]);
+        assert!(found[1].enforced && !found[1].first_flip && found[1].would_deny.is_empty());
     }
 }

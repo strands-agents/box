@@ -683,6 +683,21 @@ while True:
         std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
     }
 
+    /// Open the box's policy in log-only mode.
+    pub fn set_log_only(&self) {
+        let path = self.workspace.join(".strands-box").join("box.toml");
+        let mut config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut policy = toml::map::Map::new();
+        policy.insert("source".into(), toml::Value::String("policy.dw".into()));
+        policy.insert("enforcement".into(), toml::Value::String("log_only".into()));
+        config
+            .as_table_mut()
+            .unwrap()
+            .insert("policy".into(), toml::Value::Table(policy));
+        std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
+    }
+
     pub fn set_server_executable(&self, server: &str, executable: &Path) {
         let path = self.workspace.join(".strands-box").join("box.toml");
         let mut config: toml::Value =

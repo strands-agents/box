@@ -203,7 +203,8 @@ fn main() {
     linux_library_ignores_retired_x86_opt_in();
     #[cfg(target_os = "macos")]
     a_supplied_box_id_names_the_box_and_its_telemetry();
-    reload_tests::suite();
+    reload_tests::suite(false);
+    reload_tests::suite(true);
     decision_tests::suite();
 }
 
@@ -556,13 +557,20 @@ mod reload_tests {
         let arguments: Vec<_> = std::env::args().collect();
         match arguments.get(1).map(String::as_str) {
             Some("--reload-workload") => workload(),
-            Some("--reload-run") => running_box(Path::new(&arguments[2]), Path::new(&arguments[3])),
+            Some("--reload-run") => running_box(
+                Path::new(&arguments[2]),
+                Path::new(&arguments[3]),
+                arguments.get(4).is_some_and(|mode| mode == "log-only"),
+            ),
             _ => return false,
         }
         true
     }
 
-    pub(super) fn suite() {
+    /// Reload a running box through every outcome, enforcing or in log-only mode. In log-only mode
+    /// each reload keeps the mode: the restricted policy's denial is let through and recorded
+    /// unenforced, and every `policy_installed` record states `log_only`.
+    pub(super) fn suite(log_only: bool) {
         if !fixture::namespace_launcher_is_usable() {
             eprintln!("skipping: live library reload requires a usable containment backend");
             return;
@@ -573,11 +581,20 @@ mod reload_tests {
             .unwrap()
             .into_temp_path();
         std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
-        let configured = fixture::Request::with_config(
-            "library-reload",
+        let request = fixture::Request::with_config(
+            if log_only {
+                "library-reload-log-only"
+            } else {
+                "library-reload"
+            },
             RESTRICTED,
             "[mcp.alpha-mcp]\ntype = \"stdio\"\ncommand = [\"echo\"]\n",
-        )
+        );
+        let configured = if log_only {
+            request.log_only()
+        } else {
+            request
+        }
         .expect();
         configured.write_command(executable.to_str().unwrap());
         std::fs::write(configured.workspace().join("target.txt"), "reload-target\n").unwrap();
@@ -586,6 +603,7 @@ mod reload_tests {
             .arg("--reload-run")
             .arg(configured.config())
             .arg(configured.box_home())
+            .arg(if log_only { "log-only" } else { "enforce" })
             .env("HOME", configured.operator_home())
             .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
             .env_remove("EXPERIMENTAL_X86_SUPPORT");
@@ -599,10 +617,41 @@ mod reload_tests {
             std::fs::read_to_string(configured.root().join("private/telemetry/records.jsonl"))
                 .unwrap();
         let mut reloads = Vec::new();
+        let mut modes = Vec::new();
+        let mut target_reads = Vec::new();
         for line in records.lines() {
             let batch: serde_json::Value = serde_json::from_str(line).unwrap();
             for resource in batch["resourceLogs"].as_array().into_iter().flatten() {
                 for scope in resource["scopeLogs"].as_array().into_iter().flatten() {
+                    if scope["scope"]["name"] == "strands-box.policy" {
+                        for record in scope["logRecords"].as_array().into_iter().flatten() {
+                            let attribute = |key: &str| {
+                                record["attributes"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .find(|attribute| attribute["key"] == key)
+                                    .map(|attribute| attribute["value"].clone())
+                            };
+                            let resource = attribute("strands.box.policy.resource");
+                            if resource
+                                .as_ref()
+                                .and_then(|value| value["stringValue"].as_str())
+                                .is_some_and(|resource| resource.ends_with("target.txt"))
+                            {
+                                target_reads.push((
+                                    attribute("strands.box.policy.verdict").unwrap()["stringValue"]
+                                        .as_str()
+                                        .unwrap()
+                                        .to_string(),
+                                    attribute("strands.box.policy.enforced")
+                                        .and_then(|value| value["boolValue"].as_bool())
+                                        .unwrap_or(true),
+                                ));
+                            }
+                        }
+                        continue;
+                    }
                     if scope["scope"]["name"] != "strands-box.control" {
                         continue;
                     }
@@ -621,6 +670,9 @@ mod reload_tests {
                         if matches!(subject, "library-policy.dw" | "<no authored policy>") {
                             let operation = read("strands.box.control.operation");
                             let outcome = read("strands.box.control.outcome");
+                            if operation == "policy_installed" {
+                                modes.push(read("strands.box.control.enforcement").to_string());
+                            }
                             reloads.push(format!("{operation} {outcome} {subject}"));
                         }
                     }
@@ -640,6 +692,27 @@ mod reload_tests {
                 "policy_installed ok <no authored policy>",
             ]
         );
+        let mode = if log_only { "log_only" } else { "enforce" };
+        assert!(
+            !modes.is_empty() && modes.iter().all(|stated| stated == mode),
+            "every policy_installed record states {mode}: {modes:?}"
+        );
+        // Steps 0 and 3 run under the restricted policy. Step 4's read, under no authored policy, is
+        // denied by the run's own check, which `change_policy` reads from the workload.
+        let denied: Vec<bool> = target_reads
+            .iter()
+            .filter(|(verdict, _)| verdict == "deny")
+            .map(|(_, enforced)| *enforced)
+            .collect();
+        if log_only {
+            assert_eq!(
+                denied,
+                [false, false],
+                "each restricted read is let through: {target_reads:?}"
+            );
+        } else {
+            assert_eq!(denied, [true, true], "{target_reads:?}");
+        }
     }
 
     fn sources(text: &str) -> [strands_box::Policy; 1] {
@@ -653,7 +726,7 @@ mod reload_tests {
         assert!(strands_box::reload(&[]).unwrap_err().is_not_running());
     }
 
-    fn running_box(config: &Path, home: &Path) {
+    fn running_box(config: &Path, home: &Path, log_only: bool) {
         assert_not_running();
         let original = std::fs::read(config.with_file_name("policy.dw")).unwrap();
         let code = std::thread::scope(|scope| {
@@ -663,7 +736,7 @@ mod reload_tests {
                 strands_box::RunOptions {
                     on_ready: Some(Box::new(|| {
                         assert_not_running();
-                        scope.spawn(|| change_policy(home));
+                        scope.spawn(move || change_policy(home, log_only));
                         Ok(())
                     })),
                     ..Default::default()
@@ -679,7 +752,10 @@ mod reload_tests {
         );
     }
 
-    fn change_policy(home: &Path) {
+    /// Reload through each step, and check each step's read against the mode: enforcing denies the
+    /// restricted policy's read, log-only mode lets it through, and no authored policy denies in
+    /// both.
+    fn change_policy(home: &Path, log_only: bool) {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             match strands_box::reload(&sources(RESTRICTED)) {
@@ -712,7 +788,15 @@ mod reload_tests {
                 _ => {}
             }
             std::fs::write(home.join(format!("request-{step}")), "").unwrap();
-            wait_for(&home.join(format!("response-{step}")));
+            let response = home.join(format!("response-{step}"));
+            wait_for(&response);
+            let expected = match step {
+                0 | 3 => log_only,
+                4 => false,
+                _ => true,
+            };
+            let read = std::fs::read_to_string(&response).unwrap();
+            assert_eq!(read == "allowed", expected, "step {step}: {read}");
         }
     }
 
@@ -720,23 +804,24 @@ mod reload_tests {
         let home = std::env::var_os("HOME").unwrap();
         let home = Path::new(&home);
         assert_not_running();
-        for (step, allowed) in [false, true, true, false, false].into_iter().enumerate() {
+        for step in 0..5 {
             wait_for(&home.join(format!("request-{step}")));
             let output = Command::new("bash")
                 .args(["-c", "cat target.txt"])
                 .output()
                 .unwrap();
             let stderr = String::from_utf8_lossy(&output.stderr);
-            assert_eq!(output.status.success(), allowed, "step {step}: {stderr}");
-            if allowed {
+            let answer = if output.status.success() {
                 assert_eq!(output.stdout, b"reload-target\n");
+                "allowed".to_string()
             } else {
                 assert!(
                     stderr.contains("policy denied") || stderr.contains("default-deny"),
                     "step {step} must fail at policy: {stderr}"
                 );
-            }
-            std::fs::write(home.join(format!("response-{step}")), "").unwrap();
+                format!("denied: {stderr}")
+            };
+            std::fs::write(home.join(format!("response-{step}")), answer).unwrap();
         }
     }
 

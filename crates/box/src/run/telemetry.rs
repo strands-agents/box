@@ -2018,6 +2018,74 @@ mod tests {
         );
     }
 
+    /// **In log-only mode the gateway completes a WebSocket handshake the policy denies, and the
+    /// record keeps the denial as `websocket:connect`, unenforced**, the same as a request leg.
+    #[test]
+    fn a_log_only_websocket_handshake_goes_ahead_and_records_the_denial() {
+        let history = tempfile::tempdir().expect("history directory");
+        let policy = PolicyEngine::open(
+            vec![Policy {
+                origin: PathBuf::from("policy.dw"),
+                text: r#"permit(principal, action == Box::Action::"net:connect", resource);
+@id("no-realtime")
+forbid(principal, action == Box::Action::"websocket:connect", resource);"#
+                    .to_string(),
+            }],
+            &history.path().join("dogwood.redb"),
+        )
+        .expect("policy opens")
+        .observed_by(Arc::new(PolicyDecisionObserver))
+        .log_only();
+        let recorder = DecisionRecorder::discarding();
+        let interceptor = EgressDecisionInterceptor::over(
+            EgressPolicyInterceptor::into_handle(
+                Arc::new(policy),
+                Principal::agent(),
+                GovernedBox::assigned("test-box"),
+            ),
+            Arc::clone(&recorder),
+        );
+        let emitter = EgressDecisionRecorder::over(Arc::clone(&recorder));
+
+        interceptor
+            .intercept(&EgressEffectAttempt::HttpRequest {
+                host: "api.example.com",
+                port: 443,
+                method: "GET",
+                path: "/v1/realtime",
+                body_bytes: 0,
+                intercepted: true,
+                websocket: true,
+                mcp: None,
+            })
+            .expect("log-only mode lets the handshake through")
+            .mark_indeterminate();
+        emitter.emit(EgressDecision {
+            host: "api.example.com".to_string(),
+            port: 443,
+            method: "GET".to_string(),
+            path: "/v1/realtime".to_string(),
+            decision: AuditDecision::Allow,
+            reason: String::new(),
+            correlation: RequestId::new("handshake"),
+        });
+
+        let recorded = recorder.recorded();
+        let [handshake] = recorded.as_slice() else {
+            panic!("one decision: {recorded:?}");
+        };
+        let (action, resource, _, verdict, _) = handshake.parts();
+        assert_eq!(action, r#"Box::Action::"websocket:connect""#);
+        assert_eq!(resource, "api.example.com:443/v1/realtime");
+        assert_eq!(verdict, EffectiveVerdict::Deny);
+        assert_eq!(handshake.cause(), DecisionCause::Forbidden);
+        assert!(
+            !handshake.enforced,
+            "the gateway completed it, so the denial was not enforced"
+        );
+        assert_eq!(handshake.would_deny, ["no-realtime"]);
+    }
+
     /// **Over http, the first gate log-only mode let through is what the record keeps**, not the
     /// per-tool permit after it.
     #[test]

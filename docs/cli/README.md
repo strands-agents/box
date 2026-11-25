@@ -30,6 +30,8 @@ shows how to set it up, run it, and change what the agent can reach.
   tool, or settings that a team shares.
 - [Plugins](plugins.md): what a plugin is, how to read a key from your password manager with one,
   and how to write one.
+- [Credentials](credentials.md): where a route's key comes from, such as a variable in your shell,
+  your AWS credentials, the credentials daemon, or a password manager.
 - [Starters](starters.md): what a starter is and where it lives, how to make a profile from one,
   and how to write a starter or a policy starter so your team gets one standard setup.
 - [Policies](policies.md): what a policy checks, where a run's rules come from, including the ones
@@ -102,7 +104,7 @@ fixes keeps them in a README, linked here.
 - [`@box/git`](../../resources/packs/git/README.md)
 - [`@box/go`](../../resources/packs/go/README.md)
 - [`@box/node`](../../resources/packs/node/README.md)
-- `@box/npm`
+- [`@box/npm`](../../resources/packs/npm/README.md)
 - [`@box/npx`](../../resources/packs/npx/README.md)
 - [`@box/pnpm`](../../resources/packs/pnpm/README.md)
 - [`@box/pnpx`](../../resources/packs/pnpx/README.md)
