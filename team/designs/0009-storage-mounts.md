@@ -6,6 +6,8 @@
 
 **Updated**: November 25, 2026
 
+> **Terminology:** This document uses **receiving mount** for the Linux mount mode documented as `slave`. It receives upstream mount changes without sending local changes back. Exact command and API identifiers, such as `rslave` and `MS_SLAVE`, remain unchanged so readers can use and look them up.
+
 ## Overview
 
 Strands Box restricts which files an agent and its tools can access. This proposal lets a running Linux sandbox receive storage that another service, such as Amazon Bedrock AgentCore Runtime, mounts later.
@@ -33,10 +35,10 @@ Linux can connect mounts across namespaces:
 | Setting | What it does |
 | --- | --- |
 | Shared mount | Forwards mounts added beneath it to connected mounts. |
-| Slave mount | Receives mount changes from an upstream shared mount without sending its own changes back. |
+| Receiving mount | Receives mount changes from an upstream shared mount without sending its own changes back. |
 | Private mount | Does not send or receive these changes. |
 
-`rslave` sets slave behavior recursively on an existing mount subtree. It configures the receiving side; it does not create an upstream connection by itself. It also does not inspect every file or wait for storage to arrive.
+`rslave` configures receiving behavior recursively on an existing mount subtree. It configures the receiving side; it does not create an upstream connection by itself. It also does not inspect every file or wait for storage to arrive.
 
 For a correctly connected set of mounts, Linux forwards and commits the new mount before the original mount call returns success. The sandboxed process need not run for this to happen. An intermediate mount can receive from upstream and share with downstream mounts; making an intermediate mount private breaks that connection. The [Linux documentation](https://docs.kernel.org/filesystems/sharedsubtree.html) and [mount implementation](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/fs/namespace.c#L2482-L2535) describe this behavior.
 
