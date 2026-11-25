@@ -213,6 +213,8 @@ Codex's default shell tool does not kill a command at a timeout. After 10 second
 
 ## Limitations
 
+- The pack turns off Codex shell snapshots. Commands do not reuse aliases, functions, or
+  environment changes captured from your shell startup files.
 - Policies set through macOS device management aren't supported.
 - Preference import does not read named Codex profiles in `config.toml`.
 - An MCP server's `cwd` setting may fail when Codex uses the server.
