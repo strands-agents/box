@@ -937,7 +937,7 @@ fn the_mount_scope_is_a_floor_policy_cannot_widen() {
 /// rather than implying. `[[bind]]` used to carry it — a bind kept its mount point, so a policy
 /// checked into a repository named `/workspace` on every clone — and the shared operator home
 /// removed binds. A path in an authored policy is a host path, so it holds only on the machine that
-/// wrote it. `box/AGENTS.md` records this.
+/// wrote it.
 #[test]
 fn the_shell_reaches_workload_files_under_the_workloads_own_spelling() {
     if !fixture::namespace_launcher_is_usable() {

@@ -225,21 +225,13 @@ async fn run_l7_legs(
     // and audit judge) stays the agent's own path, and the credential match already ran on it. An
     // explicitly empty query is preserved through `originally_empty_query`.
     let backend_prefix = backend.map(|dial| dial.path_prefix.as_str()).unwrap_or("");
-    // A backend prefix joins in front of the agent path. An encoded path separator (`%2F`, `%5C`)
-    // survives path canonicalization (which only decodes unreserved octets), so if the backend
-    // decodes it AFTER removing dot-segments, `/..%2Fslack/x` → `/github/..%2Fslack/x` could escape
-    // the prefix and reach another target under the same credential, while policy judged the
-    // pre-decode path. Whether a given backend decodes it is backend-specific and unknown, so a
-    // re-route with a prefix fails closed on either encoding rather than risk the escape.
-    if !backend_prefix.is_empty() {
-        let lower = workload_path.to_ascii_lowercase();
-        if lower.contains("%2f") || lower.contains("%5c") {
-            return Ok(refuse(
-                "a re-routed path under a backend prefix may not carry an encoded separator (%2F \
-                 or %5C): the backend could decode it and escape the prefix",
-                WorkloadResponse::refusal(403, b"request path is not a valid address"),
-            ));
-        }
+    if !backend_prefix.is_empty()
+        && let Some(reason) = escapes_backend_prefix(&workload_path)
+    {
+        return Ok(refuse(
+            reason,
+            WorkloadResponse::refusal(403, b"request path is not a valid address"),
+        ));
     }
     let fwd_target = prefixed_target(backend_prefix, &req.target, originally_empty_query);
     if let Err(error) = revalidate(&method, &fwd_target, &req.headers) {
@@ -777,6 +769,53 @@ fn canonicalize_request_path(path: &str) -> std::result::Result<String, String> 
     })
 }
 
+/// Why a canonical path could resolve outside a backend path prefix, or `None` when it cannot.
+fn escapes_backend_prefix(path: &str) -> Option<&'static str> {
+    if path.contains(';') {
+        return Some(
+            "a re-routed path under a backend prefix may not carry `;`: the backend could strip a \
+             path parameter and escape the prefix",
+        );
+    }
+    if path.split('/').any(|segment| {
+        segment
+            .replace("%20", "")
+            .replace("%2B", "")
+            .replace('+', "")
+            .starts_with("..")
+    }) {
+        return Some(
+            "a re-routed path under a backend prefix may not carry a segment that starts with \
+             `..`: the backend could fold it to `..` and escape the prefix",
+        );
+    }
+    let bytes = path.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let octet = path
+                .get(index + 1..index + 3)
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+            if octet.is_none_or(|octet| {
+                matches!(
+                    octet,
+                    b'/' | b'\\' | b'%' | b';' | b'?' | b'#' | 0x00..=0x1f | 0x7f | 0x80..=0xff
+                )
+            }) {
+                return Some(
+                    "a re-routed path under a backend prefix may not carry an encoded separator, \
+                     delimiter, percent sign, control, or non-ASCII octet: the backend could \
+                     decode it and escape the prefix",
+                );
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
 /// The `params.cursor` a `tools/list` request names.
 fn list_cursor(body: &[u8]) -> Option<String> {
     let request: serde_json::Value = serde_json::from_slice(body).ok()?;
@@ -931,6 +970,80 @@ mod tests {
             "static.rust-lang.org",
             "an upgraded request goes upstream as https on 443, so its Host is the bare host"
         );
+    }
+
+    #[test]
+    fn a_path_a_backend_could_fold_out_of_its_prefix_is_refused() {
+        for path in [
+            "/..;/admin",
+            "/..;x/admin",
+            "/a;b",
+            "/.../admin",
+            "/..../admin",
+            "/a/...",
+            "/..%20/admin",
+            "/.%20./admin",
+            "/...%20/admin",
+            "/%20../admin",
+            "/%252e%252e/admin",
+            "/a%252Fb",
+            "/a%255Cb",
+            "/a%2Fb",
+            "/a%5cb",
+            "/a%C0%AFb",
+            "/a%00b",
+            "/a%09b",
+            "/a%7Fb",
+            "/..%3B/admin",
+            "/..%3F/admin",
+            "/..%23/admin",
+            "/a/..b/c",
+            "/..::$INDEX_ALLOCATION/x",
+            "/..%3A%3A$INDEX_ALLOCATION/x",
+            "/..+/x",
+            "/..%2B/x",
+            "/..~/x",
+            "/..,/x",
+            "/%2E%2Ex/admin",
+            "/+..+/x",
+            "/%2B../x",
+            "/%2b../x",
+            "/+../x",
+            "/%20+%2B../x",
+        ] {
+            let canonical = canonicalize_request_path(path);
+            assert!(
+                escapes_backend_prefix(&canonical).is_some(),
+                "{path:?} canonicalizes to {canonical:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_that_stays_under_a_backend_prefix_passes() {
+        for path in [
+            "/model/a.b-v1%3A0/converse",
+            "/a.b/c",
+            "/v1.2/x",
+            "/.hidden/x",
+            "/a..b/c",
+            "/a/b../c",
+            "/.a.b/c",
+            "/a+b/c",
+            "/+/x",
+            "/+.hidden/x",
+            "/repos/o/r/contents/docs/My%20File.md",
+            "/v1.0/me/drive/root:/My%20Documents/a.docx:/content",
+            "/.%20/x",
+            "/",
+        ] {
+            let canonical = canonicalize_request_path(path);
+            assert_eq!(
+                escapes_backend_prefix(&canonical),
+                None,
+                "{path:?} canonicalizes to {canonical:?}"
+            );
+        }
     }
 
     /// A backend path prefix is prepended to the agent's path; an empty prefix forwards unchanged.

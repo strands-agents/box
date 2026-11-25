@@ -34,10 +34,8 @@ pub struct Decision {
     /// `enforcement:reach-floor`). NOT the policy's `@id` annotation: the engine numbers rules by
     /// position, so an authored id must be read from [`Decision::determining_ids`].
     ///
-    /// Carried by `strands.box.policy.rule`. Earlier boxes spelled it `security_rule.name`, and
-    /// before that `strands.policy.rule` (see the box's `crates/telemetry/AGENTS.md`); the same
-    /// value vocabulary throughout. Every generation is read, newest first, so this harness runs
-    /// against a box from either side of those renames.
+    /// Reads `strands.box.policy.rule`, `security_rule.name`, or `strands.policy.rule`, in that
+    /// order, with the same value vocabulary for each spelling.
     pub rule: String,
     /// `permit` or `deny`.
     pub verdict: String,

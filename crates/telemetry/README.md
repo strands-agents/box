@@ -4,15 +4,14 @@ Where one box's decisions, control operations, and MCP routing diagnostics go.
 
 ## Known limitations
 
-- **Delivery is best-effort.** A failing target loses the record. The loss is counted, and the drain
-  prints the count on one stderr line when the run ends. Each failure also prints with its cause
-  when the caller sets `TelemetryConfig::reporting_failures`. A full
-  queue drops records and does not count them, because the SDK reports that number only through a
-  `tracing` subscriber this workspace does not install.
+- **Delivery is best effort.** A failed export can lose records. The drain reports failed export
+  batches and records the OpenTelemetry SDK has not passed to an exporter on one stderr line.
+  The record count is per target, so a record missed by two targets counts twice.
+  With `TelemetryConfig::reporting_failures`, the exporter also prints each failed export's cause.
 - **Targets flush in sequence.** Each target has its own queue, but one slow or unreachable
   endpoint delays shutdown by its export deadline.
-- **A box can hang on exit inside this crate.** It was seen twice and is not fixed.
-  [AGENTS.md](AGENTS.md) records what was measured.
+- **Shutdown can leave a background thread blocked.** The bounded drain can return before the
+  OpenTelemetry SDK answers. See the [shutdown limits](AGENTS.md#file-writes-and-teardown).
 
 Do not put this on a path where losing a record matters.
 
