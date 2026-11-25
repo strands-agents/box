@@ -156,7 +156,7 @@ fn sign_request_at(
     let canonical_request = Zeroizing::new(format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
         method.to_ascii_uppercase(),
-        uri_encode(&path, false),
+        canonical_uri(service, &path),
         canonical_query(&query),
         *canonical_headers,
         signed_headers,
@@ -294,6 +294,15 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if m <= 2 { y + 1 } else { y };
     (year, m as u32, d as u32)
+}
+
+/// The canonical URI of `path`: the path as sent for S3, and the path encoded again otherwise.
+fn canonical_uri(service: &str, path: &str) -> String {
+    if service.eq_ignore_ascii_case("s3") {
+        path.to_string()
+    } else {
+        uri_encode(path, false)
+    }
 }
 
 /// URI-encode per RFC 3986 (SigV4 rules): the unreserved set (`A-Z a-z 0-9 - _ . ~`) passes
@@ -754,6 +763,73 @@ mod tests {
         // A value the client sent unencoded still encodes once, and sorting is by encoded key.
         assert_eq!(canonical_query("type=code&q=a b"), "q=a%20b&type=code");
         assert_eq!(canonical_query(""), "");
+    }
+
+    #[test]
+    fn canonical_uri_keeps_an_s3_path_as_sent() {
+        for path in [
+            "/bucket/a%2Fb",
+            "/bucket/my%20key",
+            "/bucket/a-b_c.d~e/f",
+            "/",
+        ] {
+            assert_eq!(canonical_uri("s3", path), path);
+        }
+    }
+
+    #[test]
+    fn canonical_uri_encodes_a_non_s3_path_again() {
+        assert_eq!(canonical_uri("service", "/a%2Fb"), "/a%252Fb");
+        assert_eq!(canonical_uri("service", "/my%20key"), "/my%2520key");
+        assert_eq!(canonical_uri("service", "/a-b_c.d~e/f"), "/a-b_c.d~e/f");
+    }
+
+    /// Each signature is the one that `S3SigV4Auth` or `SigV4Auth` in AWS CLI 2.34.27 makes.
+    #[test]
+    fn sign_request_matches_botocore_for_an_encoded_path() {
+        let time = SigningTime::from_unix_secs(1_440_938_160);
+        for (service, host, path, signature) in [
+            (
+                "s3",
+                "s3.us-east-1.amazonaws.com",
+                "/bucket/a%2Fb",
+                "32b9c8e5f4a215a254d796d934aa995c21b4eddfaf8bf6dfd89fc5db3359ef58",
+            ),
+            (
+                "s3",
+                "s3.us-east-1.amazonaws.com",
+                "/bucket/my%20key",
+                "1c03c06f40e389fa53430a4a733e7380cebc4c5be920008b562f08243d31e576",
+            ),
+            (
+                "service",
+                "example.amazonaws.com",
+                "/a%2Fb",
+                "1f6a184cf6814c4a68548c923194021e047ba5e48b0caba93a1c8936b11c5328",
+            ),
+        ] {
+            let headers = [("Host".to_string(), host.to_string())];
+            let signed = sign_request_at(
+                &fixed_creds(),
+                service,
+                "us-east-1",
+                "GET",
+                &format!("https://{host}{path}"),
+                &headers,
+                b"",
+                &time,
+            )
+            .unwrap();
+            let authorization = signed
+                .iter()
+                .find(|(k, _)| k == "Authorization")
+                .map(|(_, v)| v.as_str())
+                .expect("Authorization header present");
+            assert!(
+                authorization.ends_with(&format!("Signature={signature}")),
+                "{service} {path}: {authorization}"
+            );
+        }
     }
 
     /// The signing-time integer date math reproduces the canonical `get-vanilla` timestamp.
