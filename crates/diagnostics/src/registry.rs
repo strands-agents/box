@@ -112,6 +112,8 @@ codes! {
     B0118 => strands_box error, "refused process hardening", "This host refused the hardening that keeps the box's memory private, so the box did not start.";
     B0119 => strands_box error, "sandboxes that could not be applied", "This host could not apply the workload's sandbox, so the workload did not start.";
     B0120 => strands_box error, "workloads that could not be executed", "The sandbox was applied, but executing the workload's program failed, so the workload did not start.";
+    B0121 => strands_box error, "hosts without native filesystem policy", "Native filesystem policy needs macOS 27 or later and a build with the macOS 27 SDK, so the box did not start.";
+    B0122 => strands_box error, "unusable box directories", "The box directory cannot be created, read, or used safely, or `HOME` is not set, so the box did not start.";
     // Box: startup disclosures.
     B0201 => strands_box note, "filesystem grant disclosures", "A process reaches these paths directly, with no policy decision.";
     B0202 => strands_box note, "exposed credential stores", "A process's filesystem grant reaches a credential store.";

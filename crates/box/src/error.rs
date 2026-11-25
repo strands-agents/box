@@ -40,7 +40,7 @@ impl Internal {
                 | LayoutError::Remove { .. }
                 | LayoutError::ReadDirectory { .. }
                 | LayoutError::Create { .. }
-                | LayoutError::NotADirectory { .. } => Code::B0105.into(),
+                | LayoutError::NotADirectory { .. } => Code::B0122.into(),
             },
             Self::Daemon(error) => match error {
                 DaemonError::NotRunning
@@ -113,9 +113,11 @@ impl Internal {
                 | McpSchemaError::Policy(_)
                 | McpSchemaError::Write { .. } => Code::B0109.into(),
             },
-            Self::Policy(_) | Self::PolicyStaging(_) | Self::GrammarBinding(_) => {
-                Code::B0103.into()
-            }
+            Self::Policy(_) | Self::PolicyStaging(_) => Code::B0103.into(),
+            Self::GrammarBinding(refusal) => match refusal {
+                policy::BindingRefusal::UnreadableProgram { .. } => Code::B0116.into(),
+                policy::BindingRefusal::AnotherEngine => DEFECT,
+            },
             Self::HistoryDisagreesWithRecord { .. } => Code::B0105.into(),
             Self::HistoryFlush(_) => Code::P0303.into(),
             Self::Credential(_) | Self::CredentialProjection(_) => Code::B0104.into(),
@@ -142,9 +144,8 @@ impl Internal {
             },
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             Self::NativeFilesystem(error) => match error {
-                NativeFilesystemError::Runtime
-                | NativeFilesystemError::Sdk
-                | NativeFilesystemError::Allocation
+                NativeFilesystemError::Runtime | NativeFilesystemError::Sdk => Code::B0121.into(),
+                NativeFilesystemError::Allocation
                 | NativeFilesystemError::Deadlines
                 | NativeFilesystemError::Subscriptions
                 | NativeFilesystemError::ExistingChildren
@@ -947,7 +948,7 @@ mod tests {
     #[test]
     fn refusals_name_their_code() {
         use ::diagnostics::{Code, Kind, Severity};
-        let cases: [(BoxError, Kind); 29] = [
+        let cases: [(BoxError, Kind); 33] = [
             (
                 SuperviseError::NativeDuringRun {
                     reason: "native request deadline exceeded".into(),
@@ -1050,6 +1051,27 @@ mod tests {
                 containment::ContainmentError::PathNotFound("/missing".into()).into(),
                 Code::B0115.into(),
             ),
+            (LayoutError::NoOperatorHome.into(), Code::B0122.into()),
+            (
+                LayoutError::UnsafeDirectory {
+                    path: "/box".into(),
+                    reason: "writable by others".into(),
+                }
+                .into(),
+                Code::B0122.into(),
+            ),
+            (
+                policy::BindingRefusal::UnreadableProgram {
+                    program_path: "/usr/bin/git".into(),
+                    reason: "denied".into(),
+                }
+                .into(),
+                Code::B0116.into(),
+            ),
+            (
+                policy::BindingRefusal::AnotherEngine.into(),
+                Kind::Uncoded(Severity::Error),
+            ),
             (
                 InstallationError::Changed {
                     path: "/box".into(),
@@ -1136,6 +1158,15 @@ mod tests {
         ];
         for (error, expected) in cases {
             assert_eq!(error.code(), expected, "{error}");
+        }
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+        for (error, expected) in [
+            (NativeFilesystemError::Runtime, Code::B0121),
+            (NativeFilesystemError::Sdk, Code::B0121),
+            (NativeFilesystemError::Allocation, Code::B0108),
+        ] {
+            let error: BoxError = error.into();
+            assert_eq!(error.code(), expected.into(), "{error}");
         }
         #[cfg(target_os = "linux")]
         {

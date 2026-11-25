@@ -138,6 +138,8 @@ Each of these stops the box, almost always before the workload starts. `strands-
 | `B0118` | error | This host refused the hardening that keeps the box's memory private, so the box did not start. | See [operating system and container permissions](linux-requirements.md#operating-system-and-container-permissions) on Linux, and [macOS requirements](macos-requirements.md#requirements). |
 | `B0119` | error | This host could not apply the workload's sandbox, so the workload did not start. | See [operating system and container permissions](linux-requirements.md#operating-system-and-container-permissions) on Linux, and [macOS requirements](macos-requirements.md#requirements). |
 | `B0120` | error | The sandbox was applied, but executing the workload's program failed, so the workload did not start. | Check that the program and its interpreter or loader are installed and readable inside the box. The text names the error. |
+| `B0121` | error | Native filesystem policy needs macOS 27 or later and a build with the macOS 27 SDK, so the box did not start. | Run on macOS 27 or later with a Box build made with its SDK, or turn native filesystem policy off. See [macOS requirements](macos-requirements.md#requirements). |
+| `B0122` | error | The box directory cannot be created, read, or used safely, or `HOME` is not set, so the box did not start. | Read the path and reason the text names. Set `HOME`, or give `box_dir` a directory you own that no other user can write. |
 
 <a id="b02"></a>
 
