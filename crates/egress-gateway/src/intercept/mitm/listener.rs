@@ -1128,6 +1128,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_host_a_non_canonical_backend_pattern_names_fails_closed() {
+        for written in ["api.github.com.", ".api.github.com", "API.GitHub.com.."] {
+            let backend =
+                Recorder::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+            backend.assert_live();
+            let before = backend.accepted();
+            let dial = BackendDial {
+                host: backend.addr.ip().to_string(),
+                port: backend.addr.port(),
+                tls: false,
+                path_prefix: String::new(),
+            };
+            let pattern = credentials::DestinationPattern::parse(written).unwrap();
+            let shared = state_with_backends(AddressPolicy::permit_all(), vec![(pattern, dial)]);
+            assert!(shared.host_reroutes("api.github.com"), "{written:?}");
+            assert!(shared.host_reroutes("API.github.com."), "{written:?}");
+            assert!(!shared.host_reroutes("github.com"), "{written:?}");
+
+            let result = open_governed_upstream(
+                &shared,
+                &connect_to("api.github.com", 443),
+                &RequestId::new("t"),
+            );
+            assert!(
+                matches!(result, Err(OpenUpstreamError::Denied(_))),
+                "{written:?}: the host is refused, not dialled directly"
+            );
+            assert_eq!(backend.accepted(), before, "{written:?}");
+        }
+    }
+
+    #[test]
+    fn a_remote_mcp_server_classifies_in_any_case_and_with_a_trailing_dot() {
+        let mut shared = state(AddressPolicy::permit_all());
+        shared.config.mcp_servers = vec![("mcp.example.com".to_string(), "tools".to_string())];
+        for host in ["mcp.example.com", "MCP.Example.com", "mcp.example.com."] {
+            assert_eq!(shared.mcp_server_for(host), Some("tools"), "{host:?}");
+        }
+        assert_eq!(shared.mcp_server_for("example.com"), None);
+    }
+
     /// A destination with no backend returns no backend leg, so the upstream leg stays on the
     /// original destination (today's behaviour).
     #[test]

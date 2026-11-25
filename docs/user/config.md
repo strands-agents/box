@@ -245,7 +245,7 @@ See [Shell timeouts](shell.md#limitsshelltimeout) for the call scope and
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `upgrade_http` | string array | empty | Host names whose plain `http://` request to port 80 the gateway decides and sends as `https://` on port 443. A host name alone: no scheme, port, path, `*` wildcard, or IP address. |
+| `upgrade_http` | string array | empty | Host names whose plain `http://` request to port 80 the gateway decides and sends as `https://` on port 443. A host name alone: no scheme, port, path, `*` wildcard, or IP address, and no name that ends in a number, such as `0x7f.1`. |
 
 ```toml
 [gateway]
@@ -343,6 +343,9 @@ default.
 
 `secret-sources = true` turns on [`[secret-source.<scheme>]`](#secret-sourcescheme), which is
 experimental and off by default.
+
+The former `linux-storage-mounts` key is rejected even when its value is `false`.
+Remove that key; this build has no replacement that enables incoming mount forwarding.
 
 ## `[agent]` and `[tool.<name>]`
 
@@ -681,6 +684,32 @@ A permission change also fails if its requested mode keeps a set-user-ID or set-
 that the file or directory already has. The request must clear both bits to succeed.
 This includes directories that inherited their group bit: GNU `chmod g+w` and even
 `chmod 755` preserve that bit and fail. A refused request leaves the existing permissions unchanged.
+
+### Incoming mount declarations
+
+In `box.toml`, the optional `receive_mounts` array in `[agent.filesystem]`,
+`[tool.<name>.filesystem]`, or a local `[mcp.<name>.filesystem]` selects paths where that sandbox
+would receive externally attached filesystems after startup. It does not tell Box to create or
+attach a filesystem. Omitting the array selects no paths. Each process has its own array; tools
+and local servers do not inherit the agent's entries. Listing a path grants no read, write, or
+execution access.
+
+**Incoming mount forwarding is unavailable in this build.** Linux requires no additional
+experimental setting, but a nonempty array still rejects configuration loading until forwarding
+is implemented. On Linux, an empty or omitted array leaves ordinary filesystem behavior unchanged.
+
+On macOS, the presence of `receive_mounts` rejects configuration loading, including
+`receive_mounts = []`. Omit the key on macOS. Both platform refusals happen before Box creates its
+state directory or starts a workload.
+
+The declaration checks require absolute, literal paths other than `/`. Entries cannot be
+home-relative, such as `~/data`, or contain patterns, control characters, or `..`. Within one
+process's array, paths cannot repeat or contain
+one another: `/mnt/data` and `/mnt/data/child` conflict, while `/mnt/data` and `/mnt/database` do not.
+Different processes may name the same path.
+A nonempty array also conflicts with enabled
+[native filesystem policy checks](native-filesystem-policy.md) for the same process.
+These checks do not validate a future filesystem's contents or establish that storage is available.
 
 ### Direct access by operating system
 
@@ -1072,6 +1101,16 @@ requests out. The current reference for this table is
 
 The example takes every default: the key lands in the `Authorization` header with a `Bearer `
 prefix, and only a request that carries the placeholder gets it.
+
+A destination host, and a backend `url` host, must be a spelling that a connection can match. The
+loader removes a trailing dot, so `api.example.com.` loads as `api.example.com`. It refuses a host
+with an empty label, a character other than an ASCII letter, a digit, `.`, `-`, or `_`, a label over
+63 bytes, or a name over 253 bytes. It also refuses a name that ends in a number, such as `10.5` or
+`0x7f.1`, because a resolver reads it as an IPv4 address; write the address as four decimal
+numbers, such as `10.0.0.5`. The message names the host as written: `` destination host "10.5" is
+not the spelling the gateway matches a connection against: <reason> ``. A backend `url` host may not
+be a host that another entry re-routes, or a remote MCP server's host. See
+[destinations](egress.md#destinations).
 
 An entry needs a `secret` or a backend. One with neither is refused: `an entry with no secret
 declares only a destination, which policy already decides; give it a secret, add a backend, or set
@@ -1543,6 +1582,12 @@ five `[[agent.ingress]]` entries, an `[[agent.ingress]] listen` that is not an I
 port of 0, two entries with one `listen` port or one `workload_port`, and on macOS a `listen` port
 equal to any entry's `workload_port`.
 An invalid `limits.shell.timeout`, `limits.shell.max_input`, `limits.shell.max_output`, or `limits.shell.max_stdin` is also a parse error.
+
+[Incoming mount declarations](#incoming-mount-declarations) also fail before Box creates state:
+invalid or overlapping `receive_mounts` paths, or a nonempty array combined with native filesystem
+policy for that process. This build rejects nonempty arrays on Linux because forwarding is
+unavailable. On macOS, any `receive_mounts` key is rejected, including `receive_mounts = []`.
+The removed `[experimental-features] linux-storage-mounts` key is an error regardless of its value.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload

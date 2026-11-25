@@ -1947,7 +1947,7 @@ fn a_token_route_reaches_the_upstream(socket: &str, credential: &str, token: &st
     let record = std::fs::read_to_string(box_.root().join("private/box.toml"))
         .expect("the box started, so the record is stored");
     let record: toml::Value = toml::from_str(&record).expect("the record is TOML");
-    assert_eq!(record["version"].as_integer(), Some(42));
+    assert_eq!(record["version"].as_integer(), Some(43));
 
     let environment = String::from_utf8_lossy(&box_.run(&["/usr/bin/env"]).stdout).into_owned();
     let held = environment
