@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -22,19 +23,15 @@ pub(crate) fn configured_endpoint() -> Option<String> {
     if cfg!(test) && !cfg!(feature = "test-transport") {
         return None;
     }
-    let configured = if cfg!(feature = "test-transport") {
-        std::env::var("BOX_TEST_TELEMETRY_ENDPOINT").ok()
-    } else {
-        None
-    };
+    let configured = std::env::var_os("BOX_TEST_TELEMETRY_ENDPOINT");
     destination(cfg!(feature = "test-transport"), configured.as_deref())
 }
 
-fn destination(test_transport: bool, configured: Option<&str>) -> Option<String> {
-    if !test_transport {
-        return Some(ENDPOINT.to_owned());
-    }
-    let url = reqwest::Url::parse(configured?).ok()?;
+fn destination(test_transport: bool, configured: Option<&OsStr>) -> Option<String> {
+    let Some(configured) = configured else {
+        return (!test_transport).then(|| ENDPOINT.to_owned());
+    };
+    let url = reqwest::Url::parse(configured.to_str()?).ok()?;
     let host = url
         .host_str()?
         .trim_start_matches('[')
@@ -456,32 +453,47 @@ mod tests {
     }
 
     #[test]
-    fn test_endpoints_accept_only_loopback_http_without_credentials() {
-        for endpoint in [
-            "http://127.0.0.1:8080/box/ping",
-            "http://127.0.0.2:8080/box/ping",
-            "http://[::1]:8080/box/ping",
-        ] {
-            assert_eq!(destination(true, Some(endpoint)).as_deref(), Some(endpoint));
-        }
-        for endpoint in [
-            "http://localhost:8080/box/ping",
-            "http://192.0.2.1/box/ping",
-            "http://[2001:db8::1]/box/ping",
-            "https://127.0.0.1/box/ping",
-            "http://name@127.0.0.1/box/ping",
-            "http://:password@127.0.0.1/box/ping",
-            "file:///box/ping",
-            "not a URL",
-        ] {
-            assert!(destination(true, Some(endpoint)).is_none(), "{endpoint}");
-            assert_eq!(
-                destination(false, Some(endpoint)).as_deref(),
-                Some(ENDPOINT)
-            );
+    fn endpoint_overrides_accept_only_loopback_http_without_credentials_in_every_build() {
+        for test_transport in [false, true] {
+            for endpoint in [
+                "http://127.0.0.1:8080/box/ping",
+                "http://127.0.0.2:8080/box/ping",
+                "http://[::1]:8080/box/ping",
+            ] {
+                assert_eq!(
+                    destination(test_transport, Some(OsStr::new(endpoint))).as_deref(),
+                    Some(endpoint)
+                );
+            }
+            for endpoint in [
+                "",
+                "http://localhost:8080/box/ping",
+                "http://192.0.2.1/box/ping",
+                "http://[2001:db8::1]/box/ping",
+                "https://127.0.0.1/box/ping",
+                "http://name@127.0.0.1/box/ping",
+                "http://:password@127.0.0.1/box/ping",
+                "file:///box/ping",
+                "not a URL",
+            ] {
+                assert!(
+                    destination(test_transport, Some(OsStr::new(endpoint))).is_none(),
+                    "test_transport={test_transport}, endpoint={endpoint:?}"
+                );
+            }
         }
         assert!(destination(true, None).is_none());
         assert_eq!(destination(false, None).as_deref(), Some(ENDPOINT));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_non_utf8_endpoint_override_disables_delivery_in_every_build() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        for test_transport in [false, true] {
+            assert!(destination(test_transport, Some(OsStr::from_bytes(b"\xff"))).is_none());
+        }
     }
 
     #[test]
