@@ -1744,16 +1744,20 @@ project's folder is imported, and that project's box can change it. A host file 
 ### A run refuses write grants over `box`'s trusted directories
 
 The protected roots are the box home (`BOX_HOME`, else `~/.strands/box`), which holds each collection in `external/`, `~/.strands/box` when `BOX_HOME` moves
-the box home, `~/.local/bin`, and the directories of `box` and its shipped packs. `~/.strands/box` stays
+the box home, `~/.local/bin`, the directories of `box` and its shipped packs, and each `PATH` directory whose
+`box` resolves into the install root of the running `box`, such as Homebrew's `bin`, whose `box` links into the
+Caskroom. `~/.strands/box` stays
 protected because `install.sh` keeps the installed `box` in `~/.strands/box/packages`, and a later run of
-that `box` trusts it.
+that `box` trusts it. A shell starts the next `box` from one of those `PATH` directories, so a later run trusts
+each of them too. Every one counts, not only the first, because the next one starts `box` when an earlier one
+loses its `box`.
 `box run` resolves links and refuses overlapping write grants, except within the run's storage
 directories and each tool's storage, and within a launcher cache on the servers that its launcher
 starts. A write grant over `~/.strands` covers the protected box home
 and is refused. Other Strands tools can receive write grants for their own subfolders.
 It also refuses programs under write grants: existing absolute `command` files (except the
 arguments of [a detected server that no profile extends](#a-detected-servers-arguments-are-not-programs)),
-`exec` entries, `PATH` directories, and an `exec` folder that holds a write grant. Containment denies `<workspace>/.box`; policy forbids cover it, each box home outside the run's storage directories and each tool's storage (so each launcher cache too), the resources directory when it lies outside every box home, as with `BOX_RESOURCES`, and each other protected root outside every box home, such as `~/.local/bin` and the install root of the running `box`, so an operator permit cannot let the Shell or Monty change a root that no write grant may reach. They cover only the protected roots: a program, an `exec` entry, a `PATH` directory, and a source file are refused as write grants but get no forbid, so an operator permit reaches them.
+`exec` entries, `PATH` directories, and an `exec` folder that holds a write grant. Containment denies `<workspace>/.box`; policy forbids cover it, each box home outside the run's storage directories and each tool's storage (so each launcher cache too), the resources directory when it lies outside every box home, as with `BOX_RESOURCES`, and each other protected root outside every box home, such as `~/.local/bin`, the install root of the running `box`, and each `PATH` directory whose `box` resolves into that root, so an operator permit cannot let the Shell or Monty change a root that no write grant may reach. They cover only the protected roots: a program, an `exec` entry, a `PATH` directory, and a source file are refused as write grants but get no forbid, so an operator permit reaches them.
 A program inside a `deny_write` folder passes when every process that holds the write grant has that folder in its `deny_write`, as a profile's `[filesystem] deny_write` gives each of them ([below](#an-agents-deny-write-folder-is-closed-to-the-shell-and-monty)), so a tool that can write it without one still refuses the run. `box` adds forbids on `fs:write`, `fs:delete`, and `fs:move` for each `deny_write` folder, as it does for `.box`, forbids moving or deleting each folder between it and its write grant, so its path cannot change, and drops a `deny_write` folder that no agent write grant reaches.
 
 **Rejected.** The `deny` entries alone: the Strands Shell and Monty run outside the cage, so only

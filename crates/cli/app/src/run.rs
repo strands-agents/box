@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, Write};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Component, Path, PathBuf};
@@ -103,12 +103,49 @@ pub(crate) fn preview_instance(box_home: &Path) -> Instance {
 
 /// Every directory a later run trusts.
 pub(crate) fn protected(host: &Host, install: Option<&Path>, extra: &[PathBuf]) -> Vec<PathBuf> {
-    host.box_homes()
+    let mut protected: Vec<PathBuf> = host
+        .box_homes()
         .into_iter()
         .chain(std::iter::once(host.home.join(".local/bin")))
         .chain(install.map(Path::to_path_buf))
-        .chain(extra.iter().cloned())
-        .collect()
+        .collect();
+    for folder in install
+        .map(|install| launch_folders(&host.search_path, install))
+        .unwrap_or_default()
+    {
+        if !protected.contains(&folder) {
+            protected.push(folder);
+        }
+    }
+    protected.extend(extra.iter().cloned());
+    protected
+}
+
+/// The folders on `search_path` whose `box` resolves into `install`, such as Homebrew's `bin`,
+/// whose `box` links into the Caskroom. A shell starts `box` from one of them, so a later run
+/// trusts each one as it trusts `~/.local/bin`. Every such folder counts, not only the first: when
+/// an earlier `box` goes away, the shell starts the next one.
+fn launch_folders(search_path: &OsStr, install: &Path) -> Vec<PathBuf> {
+    let Ok(install) = install.canonicalize() else {
+        return Vec::new();
+    };
+    let mut folders = Vec::new();
+    for folder in std::env::split_paths(search_path) {
+        // A relative entry names a different folder in each working directory.
+        if !folder.is_absolute() || folders.contains(&folder) {
+            continue;
+        }
+        let launches_this_box = folder
+            .join("box")
+            .canonicalize()
+            .is_ok_and(|real| real.starts_with(&install));
+        // The install root itself is protected already.
+        let is_install = folder.canonicalize().is_ok_and(|real| real == install);
+        if launches_this_box && !is_install {
+            folders.push(folder);
+        }
+    }
+    folders
 }
 
 /// The installed package directory of this `box`, which a later run trusts.
@@ -2746,6 +2783,87 @@ mod tests {
             let error = launcher.preview("test", &workspace).unwrap_err();
             assert!(matches!(error, Error::WriteOverProtected { .. }), "{error}");
         }
+    }
+
+    /// A Homebrew-style layout: `install` holds the real `box`, and `brew/bin/box` links to it.
+    struct Linked {
+        _root: tempfile::TempDir,
+        home: PathBuf,
+        install: PathBuf,
+        brew_bin: PathBuf,
+        other_bin: PathBuf,
+        plain_bin: PathBuf,
+    }
+
+    fn linked() -> Linked {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let home = base.join("home");
+        let install = base.join("Caskroom/box/0.3.1");
+        let brew_bin = base.join("brew/bin");
+        let other_bin = base.join("other/bin");
+        let plain_bin = base.join("plain/bin");
+        for folder in [&home, &install, &brew_bin, &other_bin, &plain_bin] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        std::fs::write(install.join("box"), "").unwrap();
+        std::fs::write(base.join("another-box"), "").unwrap();
+        std::fs::write(plain_bin.join("box"), "").unwrap();
+        std::os::unix::fs::symlink(install.join("box"), brew_bin.join("box")).unwrap();
+        std::os::unix::fs::symlink(base.join("another-box"), other_bin.join("box")).unwrap();
+        Linked {
+            _root: root,
+            home,
+            install,
+            brew_bin,
+            other_bin,
+            plain_bin,
+        }
+    }
+
+    #[test]
+    fn each_path_folder_whose_box_links_into_the_install_is_protected() {
+        let layout = linked();
+        let mut host = Host::current();
+        host.set_home(layout.home.clone());
+        host.search_path = std::env::join_paths([
+            Path::new("relative/bin"),
+            &layout.other_bin,
+            &layout.brew_bin,
+            &layout.plain_bin,
+            &layout.install,
+            &layout.brew_bin,
+            Path::new("/no/such/folder"),
+        ])
+        .unwrap();
+        let protected = protected(&host, Some(&layout.install), &[]);
+        assert_eq!(
+            protected
+                .iter()
+                .filter(|folder| **folder == layout.brew_bin)
+                .count(),
+            1,
+            "{protected:?}"
+        );
+        assert_eq!(
+            protected
+                .iter()
+                .filter(|folder| **folder == layout.install)
+                .count(),
+            1,
+            "{protected:?}"
+        );
+        for other in [&layout.other_bin, &layout.plain_bin] {
+            assert!(!protected.contains(other), "{other:?} in {protected:?}");
+        }
+        assert!(
+            !protected.contains(&PathBuf::from("relative/bin")),
+            "{protected:?}"
+        );
+        assert!(
+            !super::protected(&host, None, &[]).contains(&layout.brew_bin),
+            "without an install root, no folder launches this box"
+        );
     }
 
     #[test]

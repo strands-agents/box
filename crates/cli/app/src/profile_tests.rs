@@ -4207,6 +4207,66 @@ fn each_protected_root_outside_the_box_home_is_forbidden_to_the_shell_and_monty(
     }
 }
 
+/// **A `PATH` folder whose `box` links into the install root is forbidden to every write, as
+/// `~/.local/bin` is.** Homebrew's `bin` holds such a link into the Caskroom. A write grant on a
+/// `PATH` folder is refused already, and the forbid also stops a policy `permit` from replacing
+/// the `box` that the next run starts.
+#[test]
+fn a_path_folder_that_launches_this_box_is_forbidden_to_the_shell_and_monty() {
+    let scene = Scene::new();
+    let install = scene.root.join("opt/homebrew/Caskroom/box/0.3.1");
+    let brew_bin = scene.root.join("opt/homebrew/bin");
+    std::fs::create_dir_all(&install).expect("an install root");
+    std::fs::create_dir_all(&brew_bin).expect("a bin folder");
+    std::fs::write(install.join("box"), "").expect("the real box");
+    std::os::unix::fs::symlink(install.join("box"), brew_bin.join("box")).expect("the link");
+    let mut host = crate::host::Host::current();
+    host.set_home(scene.home());
+    host.search_path = std::env::join_paths([&brew_bin, Path::new("/usr/bin")]).expect("a PATH");
+    let protected = crate::run::protected(&host, Some(&install), &[]);
+    let box_homes = host.box_homes();
+    let resolved_profile = scene
+        .resolve_with(
+            &profile("[agent]\ncommand = [\"/usr/bin/true\"]"),
+            &scene.context(),
+        )
+        .expect("a resolve");
+    let compiled = compile(&Run {
+        profile: &resolved_profile,
+        policy: Some(
+            "permit (principal, action == Box::Action::\"fs:write\", resource) \
+             when { context.input.path like \"/*\" };",
+        ),
+        tool_rules: &crate::render::Rules::default(),
+        workspace: &scene.workspace(),
+        instance: &scene.instance(),
+        home: &scene.home(),
+        box_homes: &box_homes,
+        trusted: &[],
+        protected: &protected,
+        resources: None,
+        search_path: &host.search_path,
+        resolve: &resolved,
+        root: false,
+    })
+    .expect("a compile");
+    let folder = brew_bin.display().to_string();
+    let below =
+        format!("context.input.path == \"{folder}\" || context.input.path like \"{folder}/*\"");
+    for action in ["fs:write", "fs:delete", "fs:move"] {
+        assert!(
+            compiled
+                .policy
+                .lines()
+                .any(|line| line.starts_with("@id(\"protected_")
+                    && line.contains(&format!("Box::Action::{action:?}"))
+                    && line.contains(&below)),
+            "{action} on {folder}:\n{}",
+            compiled.policy
+        );
+    }
+}
+
 #[test]
 fn each_route_permits_each_of_its_destination_hosts() {
     let scene = Scene::new();
