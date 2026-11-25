@@ -1562,6 +1562,50 @@ pub(crate) struct BoxName(String);
 /// The longest box name, which also bounds a caller-supplied box identity.
 pub(crate) const MAXIMUM_BOX_NAME: usize = 32;
 
+/// Why `host` is not a name the egress gateway can bind, or `None` when it is one.
+pub(crate) fn unbindable_host_name(host: &str) -> Option<&'static str> {
+    let canonical = egress_gateway::normalize_host(host);
+    if canonical.is_empty() {
+        return Some("it is empty");
+    }
+    if !canonical.is_ascii() {
+        return Some(
+            "it holds a character other than a letter, a digit, '.', '-', or '_'; write a \
+             non-ASCII name in its punycode (xn--) form",
+        );
+    }
+    let named = canonical.parse::<std::net::IpAddr>().is_err()
+        && canonical
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'));
+    if named && (canonical.len() > 253 || canonical.split('.').any(|label| label.len() > 63)) {
+        return Some("it is longer than DNS allows: 63 bytes in a label, 253 in a name");
+    }
+    if named && ends_in_a_number(&canonical) {
+        return Some(
+            "it ends in a number, so a resolver reads it as an IPv4 address; write the address \
+             as four decimal numbers with no leading zero, such as 10.0.0.5",
+        );
+    }
+    if !egress_gateway::is_bindable_host(&canonical) {
+        return Some("it holds a character other than a letter, a digit, '.', '-', or '_'");
+    }
+    if canonical.split('.').any(str::is_empty) {
+        return Some("it has an empty label");
+    }
+    None
+}
+
+/// Whether the last label of the lowercase `host` is decimal digits, or `0x` and hexadecimal digits.
+fn ends_in_a_number(host: &str) -> bool {
+    let last = host.rsplit('.').next().unwrap_or(host);
+    !last.is_empty()
+        && (last.bytes().all(|byte| byte.is_ascii_digit())
+            || last
+                .strip_prefix("0x")
+                .is_some_and(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit())))
+}
+
 /// Whether one character may appear in a box name, an MCP server name, or an alias filename.
 pub(crate) fn nameable(character: char) -> bool {
     matches!(character, 'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '-')
@@ -2122,6 +2166,69 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].url, "https://api.example.com/mcp");
     }
+    /// The refusal `read_remote_mcp_servers` gives for a `box.toml` with `body`.
+    fn remote_mcp_refusal(body: &str) -> String {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("box.toml");
+        std::fs::write(
+            &path,
+            format!("name = \"test\"\nbox_dir = \"/var/lib/box\"\n{body}"),
+        )
+        .unwrap();
+        match read_remote_mcp_servers(&path) {
+            Ok(_) => panic!("{body:?} loads"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_remote_mcp_server_the_gateway_cannot_recognize_is_refused() {
+        for (destination, reason) in [
+            ("bücher.example", "punycode (xn--)"),
+            ("*.example.com", "may not be a wildcard"),
+        ] {
+            let error = remote_mcp_refusal(&format!(
+                "[mcp.tools]\ntype = \"http\"\ndestinations = [{destination:?}]\n"
+            ));
+            assert!(error.contains(reason), "{destination:?}: {error}");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("box.toml");
+        std::fs::write(
+            &path,
+            "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+             [mcp.tools]\ntype = \"http\"\ndestinations = [\"xn--bcher-kva.example\"]\n\
+             [mcp.dotted]\ntype = \"http\"\ndestinations = [\"mcp.example.com.\"]\n",
+        )
+        .unwrap();
+        let servers = read_remote_mcp_servers(&path).unwrap();
+        let url = |name: &str| {
+            servers
+                .iter()
+                .find(|server| server.name == name)
+                .map(|server| server.url.clone())
+        };
+        assert_eq!(url("tools").unwrap(), "https://xn--bcher-kva.example/mcp");
+        assert_eq!(
+            url("dotted").unwrap(),
+            "https://mcp.example.com/mcp",
+            "a trailing dot is stripped at load"
+        );
+    }
+
+    #[test]
+    fn a_re_route_onto_a_remote_mcp_server_host_is_refused() {
+        let error = remote_mcp_refusal(
+            "[egress.api]\ndestinations = [\"api.github.com\"]\n\
+             [[egress.api.backends]]\nurl = \"https://gw.example.com\"\n\
+             [mcp.tools]\ntype = \"http\"\ndestinations = [\"gw.example.com\"]\n",
+        );
+        assert!(
+            error.contains("which `tools` declares as a remote MCP server"),
+            "{error}"
+        );
+    }
+
     // **The egress tests still live here.** They belong in `egress.rs` beside what they test;
     // moving them needs the `load` fixture below, which every other test also uses.
 

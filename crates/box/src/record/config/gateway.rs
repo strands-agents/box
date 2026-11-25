@@ -59,23 +59,15 @@ fn not_a_host_name(entry: &str) -> Option<&'static str> {
         return Some("it names a path");
     }
     let host = egress_gateway::normalize_host(entry);
-    if host.is_empty() {
-        return Some("it is empty");
-    }
-    if !egress_gateway::is_bindable_host(&host) {
-        return Some("it holds a character other than a letter, a digit, '.', '-', or '_'");
-    }
-    if host.split('.').any(str::is_empty) {
-        return Some("it has an empty label");
-    }
-    if host.parse::<IpAddr>().is_ok()
-        || host
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    if !host.is_empty()
+        && (host.parse::<IpAddr>().is_ok()
+            || host
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'.'))
     {
         return Some("it is an IP address");
     }
-    None
+    super::unbindable_host_name(entry)
 }
 
 #[cfg(test)]
@@ -123,6 +115,12 @@ mod tests {
             ("static rust", "a character other than"),
             ("bücher.example", "a character other than"),
             ("static..rust-lang.org", "an empty label"),
+            ("0x7f.1", "ends in a number"),
+            ("static.rust-lang.0x10", "ends in a number"),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.rust-lang.org",
+                "longer than DNS allows",
+            ),
         ] {
             let error = gateway(&["static.rust-lang.org", entry])
                 .validate()

@@ -93,7 +93,14 @@ Each entry in `destinations` is a host, with an optional port and path.
 | `api.example.com/v1` | Paths under `/v1` on that host, by whole segment |
 | `api.example.com/*/upload` | Paths on that host that end in `/upload` |
 
-A host is matched in lowercase. A path is matched case-sensitively, against the path in the
+A host is matched in lowercase. Write it as the gateway sees it on a connection: ASCII letters,
+digits, `.`, `-`, and `_`, with no empty label. Write an internationalized name in its punycode
+form, such as `xn--bcher-kva.example` for `bücher.example`. The loader refuses another spelling,
+such as `.api.example.com`, `api..example.com`, or `bücher.example`, because no connection could
+match it. It also refuses a name that ends in a number, such as `10.5` or `0x7f.1`, because a
+resolver reads it as an IPv4 address: write an IP address as four decimal numbers, such as
+`10.0.0.5`. A label holds at most 63 bytes, and a name at most 253. The loader removes a trailing dot from a host, so `api.example.com.` loads as
+`api.example.com`, as the gateway compares it. A path is matched case-sensitively, against the path in the
 gateway's canonical form. Two routes, or two entries in one route, can't match the same
 destination, and an http MCP server's host can't appear in a route.
 
@@ -181,6 +188,11 @@ A host that re-routes to a backend may be named by no other entry, on any port. 
 re-route by host alone, so any other entry that covers the host would load and then be refused on
 every request. That includes a direct entry on another port, a second backend, or a `*`/`*.suffix`
 wildcard that spans it. The loader refuses the pair instead.
+
+The box dials a backend host directly. So a backend `url` host may not be a host that another entry
+re-routes to its own backend, or a remote MCP server's host. The loader refuses either pair, because
+the dial would skip that entry's re-route or the server's `mcp:call` decisions. The backend `url`
+host follows the same spelling rule as a destination host.
 
 This version re-routes to one backend. More than one backend and routing rules are not yet
 available.
@@ -359,6 +371,10 @@ not upgrade `rust-lang.org`.
 | Cause | Fix |
 |---|---|
 | A route has no `destinations`, or an entry is empty, `*`, or has port `0` | Name each host the credential goes to. |
+| A destination host or a `backends.url` host has an empty label, or a character other than an ASCII letter, a digit, `.`, `-`, or `_` | Write the host as a connection names it, such as `api.example.com`. Write an internationalized name in its punycode (`xn--`) form. |
+| A destination host or a `backends.url` host ends in a number, such as `10.5` | Write an IPv4 address as four decimal numbers with no leading zero, such as `10.0.0.5`. |
+| A destination host or a `backends.url` host is longer than DNS allows | Write a host whose labels hold at most 63 bytes, and whose name holds at most 253. |
+| A `backends.url` host is a host that another entry re-routes, or a remote MCP server's host | Point the backend at a host that no other entry re-routes and that serves no declared MCP server. |
 | Two routes, or two entries in one route, match the same destination | Narrow one of them, for example by path or port. |
 | A route names an http MCP server's host | Put the credential on the `[mcp.<name>]` table. |
 | An entry declares more than one backend | Keep one backend. Routing across several is not yet available. |

@@ -489,6 +489,8 @@ Refused, each at startup with the destination named:
 | `destinations = ["*.*"]` | A misplaced wildcard names no destination. |
 | `destinations = [""]` | A destination must name a host. |
 | `destinations = ["api.test:0"]` | The port must be 1–65535. |
+| `destinations = [".api.test"]`, `["api..test"]`, `["bücher.example"]`, or `["10.5"]` | No connecting host can equal it, and a resolver reads a name that ends in a number as an IPv4 address. Write the host without an empty label, and an internationalized name in its punycode (`xn--`) form. A trailing dot is removed at load, so `api.test.` loads as `api.test`. |
+| A `[mcp.x] type = "http"` destination `*.example.com` | The gateway recognizes a remote MCP server by its exact host. |
 | `secret.ref = ""` | A destination alone is a reachability claim. |
 | `secret.ref = "STRIPE_KEY"` | A bare name is not a URI. |
 | `secret.ref = "env://PATH"` | The box sets that variable itself. |
@@ -500,6 +502,7 @@ Refused, each at startup with the destination named:
 | A signed (`aws://`/`credsd://`) `secret` beside a backend | A re-routed destination secret is phantom-only, so it must be `env://`; a signed secret mints no phantom to strip. |
 | Two `[[egress.x.backends]]` tables | At most one backend per destination in this version. |
 | A backend `url` with a query or fragment | A backend is an origin plus an optional path prefix; merging a query or sending a fragment is request rewriting. |
+| A backend `url` host that another entry re-routes or declares as a remote MCP server | The box dials a backend directly, so the dial would skip that re-route or the server's `mcp:call` decisions. |
 | A backend entry whose destination is not one exact host (a path, a wildcard, or several destinations) | A re-route is matched per connection (host and port), and the box presents the backend host on the wire, so anything but one exact host would bypass the backend or reach it with the agent's host lost. |
 | A signed (`aws://`/`credsd://`) `backends.auth` | A re-route rewrites the `Host`, which invalidates a SigV4 signature. |
 | A `backends.auth` on an `http` backend | A credential does not ride a plaintext upstream. |
