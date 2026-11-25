@@ -211,8 +211,8 @@ These apply only when native filesystem policy is on. See
 
 | Code | Severity | Meaning | What to do |
 |---|---|---|---|
-| `B0801` | note | This host's kernel limits what native filesystem policy can intercept. | See [Linux ARM64](native-filesystem-policy.md#linux-arm64). |
-| `B0802` | warning | Native filesystem policy refused a request it cannot decide. | The workload received a permission error. See [Linux ARM64](native-filesystem-policy.md#linux-arm64) for the requests it refuses. |
+| `B0801` | note | This host's kernel limits what native filesystem policy can intercept. | See [Linux](native-filesystem-policy.md#linux-arm64). |
+| `B0802` | warning | Native filesystem policy refused a request it cannot decide. | The workload received a permission error. See [Linux](native-filesystem-policy.md#linux-arm64) for the requests it refuses. |
 | `B0803` | warning | A native filesystem request was denied because deciding it failed. | Read the reason in the text. See [macOS](native-filesystem-policy.md#macos). |
 | `B0804` | note | Native filesystem enforcement is ready. | No action. |
 
