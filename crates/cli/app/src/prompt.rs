@@ -2254,6 +2254,16 @@ mod tests {
             suggested(b"eu-wx\x7f\r", None).as_deref(),
             Some("eu-west-1")
         );
+        // An unlisted saved value that the caller lists first is what Enter keeps.
+        let mut input = b"\r".as_slice();
+        let mut output = Vec::new();
+        let kept = suggest(
+            &mut Terminal::new(&mut input, &mut output),
+            &["us-west-9", "us-west-2"],
+            Some(0),
+        )
+        .expect("an answer");
+        assert_eq!(kept.as_deref(), Some("us-west-9"));
     }
 
     #[test]
