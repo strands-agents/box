@@ -1402,7 +1402,7 @@ mod credsd_e2e {
         .into_vault()
     }
 
-    /// The full credsd path: the daemon receives `credential/get` for the environment, and the box
+    /// The full credsd path: the daemon receives `credential/get` for the credential, and the box
     /// signs the request with SigV4 from the vended session credentials.
     #[test]
     fn a_credsd_route_signs_with_the_vended_credentials() {
@@ -1445,13 +1445,13 @@ mod credsd_e2e {
             "the secret access key must never reach a header value"
         );
 
-        // The daemon received exactly `credential/get` for the environment, with no profile, scope,
+        // The daemon received exactly `credential/get` for the credential, with no profile, scope,
         // or claim.
         let request = rx.recv().expect("the daemon recorded one request");
         let value: serde_json::Value =
             serde_json::from_slice(request.trim_ascii_end()).expect("one JSON line");
         assert_eq!(value["method"], "credential/get");
-        assert_eq!(value["params"]["environment"], "prod-inference");
+        assert_eq!(value["params"]["credential"], "prod-inference");
         assert!(value["params"].get("profile").is_none());
         assert!(value["params"].get("scope").is_none());
         assert!(value["params"].get("claim").is_none());
@@ -1491,7 +1491,7 @@ mod credsd_e2e {
         assert!(!error.is_soft(), "an unreachable credsd is a hard failure");
         assert!(
             error.to_string().contains("prod-inference"),
-            "the failure names the environment: {error}"
+            "the failure names the credential: {error}"
         );
     }
 
@@ -1514,25 +1514,25 @@ mod credsd_e2e {
         super::clear_var("E2E_BACKCOMPAT_TOKEN");
     }
 
-    fn assert_unknown_environment(error: &CredentialError, environment: &str) {
+    fn assert_unknown_credential(error: &CredentialError, credential: &str) {
         assert!(
             matches!(error, CredentialError::Credential(message)
             if message == &format!(
-                "credsd has no environment {environment:?}, or this box is not authorized for it"
+                "credsd has no credential {credential:?}, or this box is not authorized for it"
             )),
-            "expected the daemon's unknown-environment mapping, got: {error}"
+            "expected the daemon's unknown-credential mapping, got: {error}"
         );
     }
 
     #[test]
-    fn a_daemon_unknown_environment_response_has_the_specific_mapping() {
+    fn a_daemon_unknown_credential_response_has_the_specific_mapping() {
         let path = socket_path();
-        let response = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"x\",\"data\":{\"code\":\"ENVIRONMENT_NOT_FOUND\"}}}\n".to_vec();
+        let response = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"x\",\"data\":{\"code\":\"CREDENTIAL_NOT_FOUND\"}}}\n".to_vec();
         let (rx, handle) = fake_daemon(&path, response);
         let error = credsd_vault(path.clone())
             .attach_for(bedrock_request(&[]))
-            .expect_err("the daemon refused the environment");
-        assert_unknown_environment(&error, "prod-inference");
+            .expect_err("the daemon refused the credential");
+        assert_unknown_credential(&error, "prod-inference");
         let request: serde_json::Value = serde_json::from_slice(&rx.recv().unwrap()).unwrap();
         assert_eq!(
             request,
@@ -1540,7 +1540,7 @@ mod credsd_e2e {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "credential/get",
-                "params": { "environment": "prod-inference" },
+                "params": { "credential": "prod-inference" },
             })
         );
         handle.join().unwrap();
@@ -1548,7 +1548,7 @@ mod credsd_e2e {
     }
 
     #[test]
-    fn unrelated_daemon_failures_cannot_satisfy_the_unknown_environment_assertion() {
+    fn unrelated_daemon_failures_cannot_satisfy_the_unknown_credential_assertion() {
         for (response, expected_message) in [
             ("not-json", "credsd returned a malformed response"),
             (
@@ -1574,13 +1574,13 @@ mod credsd_e2e {
             };
             assert_eq!(
                 message,
-                &format!("{expected_message} for environment \"prod-inference\"")
+                &format!("{expected_message} for credential \"prod-inference\"")
             );
             rx.recv().expect("the daemon received the request");
             handle.join().unwrap();
             std::fs::remove_file(path).unwrap();
             assert!(
-                std::panic::catch_unwind(|| assert_unknown_environment(&error, "prod-inference"))
+                std::panic::catch_unwind(|| assert_unknown_credential(&error, "prod-inference"))
                     .is_err(),
                 "an unrelated daemon failure must fail the live response assertion"
             );
@@ -1588,7 +1588,7 @@ mod credsd_e2e {
     }
 
     #[test]
-    fn a_stale_socket_cannot_satisfy_the_unknown_environment_assertion() {
+    fn a_stale_socket_cannot_satisfy_the_unknown_credential_assertion() {
         let path = socket_path();
         drop(UnixListener::bind(&path).expect("create an owned stale socket"));
         assert!(path.exists());
@@ -1597,23 +1597,23 @@ mod credsd_e2e {
             .expect_err("no daemon listens on this socket");
         assert!(matches!(error, CredentialError::KeystoreAccess(_)));
         assert!(
-            std::panic::catch_unwind(|| assert_unknown_environment(&error, "prod-inference"))
+            std::panic::catch_unwind(|| assert_unknown_credential(&error, "prod-inference"))
                 .is_err(),
             "a transport failure must fail the live test's response assertion"
         );
         let _ = std::fs::remove_file(path);
     }
 
-    /// A configured fixture proves caller access before the unknown-environment request.
+    /// A configured fixture proves caller access before the unknown-credential request.
     #[test]
-    fn a_live_daemon_maps_an_unknown_environment_to_a_hard_failure() {
+    fn a_live_daemon_maps_an_unknown_credential_to_a_hard_failure() {
         let explicit_socket = std::env::var_os("CREDSD_SOCKET")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
-        let known_environment = std::env::var("CREDSD_TEST_ENVIRONMENT")
+        let known_credential = std::env::var("CREDSD_TEST_CREDENTIAL")
             .ok()
             .filter(|value| !value.trim().is_empty());
-        let required = explicit_socket.is_some() || known_environment.is_some();
+        let required = explicit_socket.is_some() || known_credential.is_some();
         let socket = explicit_socket.unwrap_or_else(|| {
             if cfg!(target_os = "macos") {
                 PathBuf::from("/var/run/credsd/credsd.sock")
@@ -1630,24 +1630,24 @@ mod credsd_e2e {
             eprintln!("skipping: no credsd daemon at {}", socket.display());
             return;
         }
-        let Some(known_environment) = known_environment else {
+        let Some(known_credential) = known_credential else {
             assert!(
                 !required,
-                "set CREDSD_TEST_ENVIRONMENT to the fixture's configured environment"
+                "set CREDSD_TEST_CREDENTIAL to a credential the fixture holds"
             );
-            eprintln!("skipping: CREDSD_TEST_ENVIRONMENT is absent");
+            eprintln!("skipping: CREDSD_TEST_CREDENTIAL is absent");
             return;
         };
-        credsd_preflight(Some(&socket), &[&known_environment])
-            .expect("the fixture must answer health and authorize the caller's known environment");
-        let environment = format!("strands-e2e-nonexistent-{}", std::process::id());
-        assert_ne!(environment, known_environment);
+        credsd_preflight(Some(&socket), &[&known_credential])
+            .expect("the fixture must answer health and authorize the caller's known credential");
+        let credential = format!("strands-e2e-nonexistent-{}", std::process::id());
+        assert_ne!(credential, known_credential);
         let vault = Vault::open(
             VaultConfig::new(credentials::Backend::local(), "tenant-e2e")
                 .credsd_socket(socket)
                 .route(RouteSpec::signed_aws(
                     DestinationPattern::parse("*.amazonaws.com").unwrap(),
-                    Locator::parse_uri(&format!("credsd://{environment}")).unwrap(),
+                    Locator::parse_uri(&format!("credsd://{credential}")).unwrap(),
                 ))
                 .require_every_route(),
         )
@@ -1655,7 +1655,7 @@ mod credsd_e2e {
         .into_vault();
         let error = vault
             .attach_for(bedrock_request(&[]))
-            .expect_err("an environment no daemon is enrolled for must fail");
-        assert_unknown_environment(&error, &environment);
+            .expect_err("a credential the daemon does not hold must fail");
+        assert_unknown_credential(&error, &credential);
     }
 }

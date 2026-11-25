@@ -299,11 +299,17 @@ fn homebrew_support_follows_the_executable_and_needs_no_prefix_input() {
         ],
         "{node}"
     );
-    let hosts: Vec<String> = Path::new("/private/etc/hosts")
+    let shell = Path::new("/bin")
         .canonicalize()
-        .ok()
-        .iter()
-        .map(|path| text(path))
+        .expect("the /bin folder")
+        .join("sh");
+    let hosts: Vec<String> = std::iter::once(text(&shell))
+        .chain(
+            Path::new("/private/etc/hosts")
+                .canonicalize()
+                .ok()
+                .map(|path| text(&path)),
+        )
         .collect();
     assert_eq!(
         node["filesystem"]

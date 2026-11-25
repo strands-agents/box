@@ -19,12 +19,19 @@ npm_config_cache = "${{ workspace }}/.npm"
 npm_config_update_notifier = "false"
 npm_config_audit = "false"
 npm_config_fund = "false"
-npm_config_script_shell = "/bin/bash"
+# npm's script shell, by its full path: npm's own default, so a script runs as it does outside the
+# box. npm keeps its package PATH, and the shell does not depend on a search through ancestor
+# folders that the box cannot read. Each pack that extends this one, such as @box/npm and
+# @box/npx, takes it in.
+npm_config_script_shell = "/bin/sh"
 
 [filesystem]
 # node resolves `localhost` from the hosts file, so a test runner or dev server that looks it up
 # starts.
+# npm runs each lifecycle script, such as postinstall, and each package's bin through
+# npm_config_script_shell, so it needs that shell.
 read_file = [
+    "/bin/sh",
     { path = "/private/etc/hosts", when = "macos" },
     { path = "/etc/hosts", when = "linux" },
 ]

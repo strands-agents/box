@@ -320,7 +320,7 @@ fn choice_rows(ask: &Choices<'_>, width: usize, height: usize, density: u8) -> (
             ask.labels,
             ask.descriptions,
             ask.selected,
-            None,
+            ask.default,
             "",
             width,
             height.saturating_sub(2),
@@ -481,6 +481,7 @@ fn paint_line(line: &str, stage: usize) -> String {
     } else {
         let code = if line.starts_with("  > [")
             || line.starts_with("  > ✓ ")
+            || line.starts_with("    › ")
             || (stage == REVIEW
                 && matches!(
                     line,
@@ -617,7 +618,7 @@ pub(crate) fn choose(
     choices: &[&str],
     default: Option<usize>,
 ) -> Result<Option<String>, Error> {
-    select(terminal, choices, &[], default, true, false)
+    select(terminal, choices, &[], default, true, Mode::Pick)
 }
 
 /// Pick one of `actions`, the first selected, with no `(default)` label.
@@ -633,7 +634,7 @@ pub(crate) fn act(
         descriptions,
         Some(selected),
         false,
-        false,
+        Mode::Pick,
     )
 }
 
@@ -643,11 +644,11 @@ pub(crate) fn described(
     descriptions: &[&str],
     default: Option<usize>,
 ) -> Result<Option<String>, Error> {
-    select(terminal, choices, descriptions, default, true, false)
+    select(terminal, choices, descriptions, default, true, Mode::Pick)
 }
 
 pub(crate) fn text(terminal: &mut Terminal<'_>) -> Result<Option<String>, Error> {
-    select(terminal, &[], &[], None, true, false)
+    select(terminal, &[], &[], None, true, Mode::Pick)
 }
 
 /// An existing selection has a NUL prefix, which the keyboard cannot enter.
@@ -656,7 +657,81 @@ pub(crate) fn profile_name(
     names: &[&str],
     descriptions: &[&str],
 ) -> Result<Option<String>, Error> {
-    select(terminal, names, descriptions, None, false, true)
+    select(terminal, names, descriptions, None, false, Mode::Name)
+}
+
+/// The regions that serve Amazon Bedrock (bedrock-runtime), from AWS's "Regional availability by
+/// endpoints" page, checked 2026-11-25. The region prompt offers them in this order: the pack's
+/// default and the other large US regions first, then the busiest outside the US, then the rest
+/// by geography. Any other region that passes the input's pattern still works.
+pub(crate) const BEDROCK_REGIONS: &[&str] = &[
+    "us-west-2",
+    "us-east-1",
+    "us-east-2",
+    "eu-central-1",
+    "eu-west-1",
+    "ap-northeast-1",
+    "us-west-1",
+    "ca-central-1",
+    "ca-west-1",
+    "mx-central-1",
+    "eu-central-2",
+    "eu-north-1",
+    "eu-south-1",
+    "eu-south-2",
+    "eu-west-2",
+    "eu-west-3",
+    "ap-east-2",
+    "ap-northeast-2",
+    "ap-northeast-3",
+    "ap-south-1",
+    "ap-south-2",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "ap-southeast-3",
+    "ap-southeast-4",
+    "ap-southeast-5",
+    "ap-southeast-6",
+    "ap-southeast-7",
+    "il-central-1",
+    "me-central-1",
+    "me-south-1",
+    "af-south-1",
+    "sa-east-1",
+    "us-gov-east-1",
+    "us-gov-west-1",
+];
+
+/// Type a value, with `suggestions` that narrow to the ones holding the typed text. Enter answers
+/// the selected suggestion, or the typed text when none is selected.
+pub(crate) fn suggest(
+    terminal: &mut Terminal<'_>,
+    suggestions: &[&str],
+    default: Option<usize>,
+) -> Result<Option<String>, Error> {
+    select(terminal, suggestions, &[], default, true, Mode::Filter)
+}
+
+/// The most matches that a filter shows at once.
+const FILTER_ROWS: usize = 4;
+
+/// How a menu takes its answer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Pick a choice by number or arrows, or type an answer.
+    Pick,
+    /// Pick an existing name, or type a new one.
+    Name,
+    /// Type an answer, and pick from the choices that hold it.
+    Filter,
+}
+
+/// The indices of the `choices` that hold `typed`, ignoring case.
+fn matching(choices: &[&str], typed: &str) -> Vec<usize> {
+    let typed = typed.trim().to_lowercase();
+    (0..choices.len())
+        .filter(|index| choices[*index].to_lowercase().contains(&typed))
+        .collect()
 }
 
 pub(crate) fn wrap_line(text: &str, indent: usize, width: usize) -> Vec<String> {
@@ -918,16 +993,9 @@ fn select(
     descriptions: &[&str],
     default: Option<usize>,
     labeled: bool,
-    name_entry: bool,
+    mode: Mode,
 ) -> Result<Option<String>, Error> {
-    let result = select_choice(
-        terminal,
-        choices,
-        descriptions,
-        default,
-        labeled,
-        name_entry,
-    );
+    let result = select_choice(terminal, choices, descriptions, default, labeled, mode);
     // A guided session shows the cursor again in `finish`, so it stays hidden between questions.
     if terminal.choice_controls && terminal.session.is_none() {
         let _ = write!(terminal.output, "\x1b[?25h").and_then(|()| terminal.output.flush());
@@ -941,8 +1009,10 @@ fn select_choice(
     descriptions: &[&str],
     default: Option<usize>,
     labeled: bool,
-    name_entry: bool,
+    mode: Mode,
 ) -> Result<Option<String>, Error> {
+    let name_entry = mode == Mode::Name;
+    let filter = mode == Mode::Filter;
     let saved = if let Some(session) = &mut terminal.session {
         let question = format!(
             "{:?}|{choices:?}|{descriptions:?}|{default:?}",
@@ -970,6 +1040,8 @@ fn select_choice(
             answer
                 .strip_prefix('\0')
                 .and_then(|name| choices.iter().position(|choice| *choice == name))
+        } else if filter {
+            choices.iter().position(|choice| *choice == answer)
         } else {
             answer
                 .parse::<usize>()
@@ -982,6 +1054,7 @@ fn select_choice(
         .or(default)
         .or_else(|| (!name_entry && !choices.is_empty()).then_some(0));
     let mut moved = saved_index.is_some();
+    let revisited = saved.is_some();
     let mut typed = saved
         .filter(|answer| !answer.is_empty() && saved_index.is_none())
         .unwrap_or_default()
@@ -996,6 +1069,8 @@ fn select_choice(
         .map(|(index, label)| {
             if name_entry {
                 format!("✓ {label}")
+            } else if filter {
+                label.to_string()
             } else if terminal.session.is_some() || labeled {
                 format!("[{}] {label}", index + 1)
             } else {
@@ -1004,7 +1079,37 @@ fn select_choice(
         })
         .collect();
     let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    // In a filter, `selected` indexes the choices that hold the typed text.
+    // A saved answer that is no suggestion comes back as typed text, with nothing selected.
+    // A revisited filter shows the answer it took as the typed text, the default included.
+    if filter
+        && revisited
+        && typed.is_empty()
+        && let Some(index) = selected
+    {
+        typed = choices[index].as_bytes().to_vec();
+    }
+    let mut refilter = filter && !typed.is_empty();
+    // Whether Enter already warned that the typed text matches no choice; the next Enter keeps it.
+    let mut warned = false;
+    let top = std::cell::Cell::new(selected.unwrap_or(0));
     loop {
+        let shown: Vec<usize> = if filter {
+            matching(choices, std::str::from_utf8(&typed).unwrap_or_default())
+        } else {
+            (0..choices.len()).collect()
+        };
+        if refilter {
+            selected = if typed.is_empty() {
+                default.or(Some(0))
+            } else {
+                (!shown.is_empty()).then_some(0)
+            };
+            top.set(selected.unwrap_or(0));
+            refilter = false;
+        }
+        let shown_labels: Vec<&str> = shown.iter().map(|index| labels[*index]).collect();
+        let shown_default = default.and_then(|default| shown.iter().position(|i| *i == default));
         let (width, height) = if terminal.choice_controls {
             size().map_err(|source| io_error("read size", Path::new("stderr"), source))?
         } else {
@@ -1047,30 +1152,73 @@ fn select_choice(
             std::str::from_utf8(&typed[..error.valid_up_to()]).expect("valid UTF-8 prefix")
         });
         let text = entry_text(input_text, width.saturating_sub(5));
-        let entering = if name_entry {
+        let entering = if filter {
+            true
+        } else if name_entry {
             selected.is_none()
         } else {
             choices.is_empty() || !typed.is_empty()
         };
         let mut cursor = None;
+        // A filter lays out only the rows it draws, so the header keeps its blank rows.
         let ask = Choices {
-            labels: &labels,
+            labels: if filter {
+                &labels[..labels.len().min(FILTER_ROWS)]
+            } else {
+                &labels
+            },
             descriptions,
-            selected,
+            selected: if filter { None } else { selected },
             default: if name_entry {
                 None
             } else {
                 default.filter(|_| labeled)
             },
-            typed: if name_entry { "" } else { text },
-            name_entry,
+            typed: if name_entry || filter { "" } else { text },
+            name_entry: name_entry || filter,
+        };
+        // A filter draws its entry first, then as many matches as the rows that the full list gets
+        // in this terminal, so the rows stay put while the list narrows.
+        let filtered = |room: usize| {
+            let room = room.clamp(1, FILTER_ROWS);
+            let mut rows = vec![fit_line(&format!("  > {text}"), width)];
+            if shown.is_empty() {
+                rows.push(fit_line("      No match", width));
+            } else {
+                // The list opens at the selected match and scrolls only when it leaves view.
+                let at = selected.unwrap_or(0);
+                let mut first = top.get().min(at);
+                if at >= first + room {
+                    first = at + 1 - room;
+                }
+                let first = first.min(shown.len().saturating_sub(room));
+                top.set(first);
+                for (offset, label) in shown_labels.iter().enumerate().skip(first).take(room) {
+                    let marker = if selected == Some(offset) { "›" } else { " " };
+                    let suffix = if shown_default == Some(offset) {
+                        " (default)"
+                    } else {
+                        ""
+                    };
+                    rows.push(fit_line(&format!("    {marker} {label}{suffix}"), width));
+                }
+            }
+            rows.resize(room + 2, String::new());
+            rows
         };
         let (section, mut lines, room, scrollable) = if let Some(session) = &terminal.session {
             let layout = guided_layout(session, &ask, width, height, scroll);
-            (Some(layout.section), layout.menu, layout.room, layout.cut)
+            let menu = if filter {
+                filtered(layout.menu.len())
+            } else {
+                layout.menu
+            };
+            (Some(layout.section), menu, layout.room, layout.cut)
         } else {
             let rows = height.saturating_sub(content_room + usize::from(content.is_some()));
-            (None, choice_rows(&ask, width, rows, 0).0, 0, false)
+            let menu = choice_rows(&ask, width, rows, 0).0;
+            let menu = if filter { filtered(menu.len()) } else { menu };
+            (None, menu, 0, false)
         };
         if name_entry {
             let marker = if selected.is_none() { ">" } else { " " };
@@ -1092,7 +1240,12 @@ fn select_choice(
             section.append(&mut lines);
             let feedback = &terminal.session.as_ref().unwrap().feedback;
             let back = terminal.can_go_back || terminal.session.as_ref().unwrap().cursor > 0;
-            let hint = if name_entry && !choices.is_empty() {
+            let hint = if filter && width >= 72 {
+                format!(
+                    "  Type to filter  ↑↓ choose  Tab/Enter pick  Esc {}  Ctrl+C exit",
+                    if back { "back" } else { "exit" }
+                )
+            } else if name_entry && !choices.is_empty() {
                 if width >= 72 {
                     format!(
                         "  ↑↓ edit existing  Type a new name  Enter  Esc {}  Ctrl+C exit",
@@ -1202,9 +1355,16 @@ fn select_choice(
                 }
                 return Err(Error::Interrupted);
             }
-            Key::Enter => {
+            key @ (Key::Enter | Key::Tab) if filter || matches!(key, Key::Enter) => {
                 let line = if name_entry && let Some(index) = selected {
                     format!("\0{}", choices[index])
+                } else if filter && let Some(index) = selected {
+                    choices[shown[index]].to_string()
+                } else if filter && !warned {
+                    let value = String::from_utf8_lossy(&typed).trim().to_string();
+                    notice = format!("  {value} isn't on the list. Press Enter again to use it.");
+                    warned = true;
+                    continue;
                 } else if !typed.is_empty() {
                     String::from_utf8(typed)
                         .map_err(|source| {
@@ -1228,6 +1388,8 @@ fn select_choice(
                 }
                 let chosen = if line.is_empty() {
                     default
+                } else if filter {
+                    None
                 } else {
                     line.parse::<usize>()
                         .ok()
@@ -1292,6 +1454,17 @@ fn select_choice(
                     scroll.saturating_add(step).min(last)
                 };
             }
+            Key::Up | Key::Down if filter => {
+                let count = shown.len();
+                if count > 0 {
+                    let at = selected.unwrap_or(0);
+                    selected = Some(if matches!(key, Key::Up) {
+                        (at + count - 1) % count
+                    } else {
+                        (at + 1) % count
+                    });
+                }
+            }
             Key::Up | Key::Down if !choices.is_empty() => {
                 if name_entry {
                     selected = match (selected, key) {
@@ -1317,15 +1490,22 @@ fn select_choice(
                 if name_entry {
                     selected = None;
                 }
+                refilter = filter;
+                warned = false;
+                notice.clear();
                 while typed.pop().is_some_and(|byte| byte & 0xc0 == 0x80) {}
             }
             Key::Byte(byte) => {
                 if name_entry {
                     selected = None;
                 }
+                refilter = filter;
+                warned = false;
+                notice.clear();
                 typed.push(byte);
             }
-            Key::Ignore
+            Key::Enter
+            | Key::Ignore
             | Key::Left
             | Key::Right
             | Key::Tab
@@ -2048,6 +2228,87 @@ mod tests {
         assert_eq!(answer(b"\x1b[A\r", None).as_deref(), Some("3"));
         assert_eq!(answer(b"\x1b[B\r", Some(1)).as_deref(), Some("3"));
         assert_eq!(answer(b"\x1bOA\r", Some(0)).as_deref(), Some("3"));
+    }
+
+    fn suggested(input: &[u8], default: Option<usize>) -> Option<String> {
+        let mut input = input;
+        let mut output = Vec::new();
+        suggest(
+            &mut Terminal::new(&mut input, &mut output),
+            &["us-east-1", "us-west-2", "eu-west-1", "eu-west-3"],
+            default,
+        )
+        .expect("an answer")
+    }
+
+    #[test]
+    fn typing_narrows_the_suggestions_and_tab_or_enter_picks_the_highlighted_one() {
+        // Enter with nothing typed keeps the default, as other prompts do.
+        assert_eq!(suggested(b"\r", Some(1)).as_deref(), Some("us-west-2"));
+        assert_eq!(suggested(b"EU\r", Some(1)).as_deref(), Some("eu-west-1"));
+        assert_eq!(suggested(b"eu\t", Some(1)).as_deref(), Some("eu-west-1"));
+        assert_eq!(
+            suggested(b"eu\x1b[B\r", Some(1)).as_deref(),
+            Some("eu-west-3")
+        );
+        assert_eq!(
+            suggested(b"west-\x1b[A\r", None).as_deref(),
+            Some("eu-west-3")
+        );
+        assert_eq!(
+            suggested(b"eu-wx\x7f\r", None).as_deref(),
+            Some("eu-west-1")
+        );
+        // An unlisted saved value that the caller lists first is what Enter keeps.
+        let mut input = b"\r".as_slice();
+        let mut output = Vec::new();
+        let kept = suggest(
+            &mut Terminal::new(&mut input, &mut output),
+            &["us-west-9", "us-west-2"],
+            Some(0),
+        )
+        .expect("an answer");
+        assert_eq!(kept.as_deref(), Some("us-west-9"));
+    }
+
+    #[test]
+    fn a_value_that_matches_no_suggestion_needs_a_second_enter() {
+        // The first Enter only warns, so an edit after it answers with a listed value.
+        assert_eq!(
+            suggested(b"us-west-9\r\x7f2\r", None).as_deref(),
+            Some("us-west-2")
+        );
+        assert_eq!(
+            suggested(b"us-west-9\r\r", None).as_deref(),
+            Some("us-west-9")
+        );
+        // An edit after the warning asks for the second Enter again.
+        let mut input = b"us-west-9\rx\x7f\r".as_slice();
+        let mut output = Vec::new();
+        let result = suggest(
+            &mut Terminal::new(&mut input, &mut output),
+            &["us-west-2"],
+            None,
+        );
+        assert!(matches!(result, Err(Error::Interrupted)));
+    }
+
+    #[test]
+    fn the_matches_draw_under_the_typed_text() {
+        let mut input = b"eu".as_slice();
+        let mut output = Vec::new();
+        let _ = suggest(
+            &mut Terminal::new(&mut input, &mut output),
+            &["us-west-2", "eu-west-1", "eu-west-3"],
+            None,
+        );
+        let output = String::from_utf8_lossy(&output);
+        let last = output.rsplit("  > eu").next().expect("the typed text");
+        assert!(
+            last.contains("› eu-west-1") && last.contains("  eu-west-3"),
+            "{last}"
+        );
+        assert!(!last.contains("us-west-2"), "{last}");
     }
 
     #[test]
