@@ -1,0 +1,25 @@
+# The profile the agent layer runs the GitHub cells under with `--profile kiro`: the routes of
+# corpus-github, with Kiro CLI in place of bash. The box puts a read-only GitHub token on each
+# request, and Kiro holds only a stand-in, so a cell can read the repository and write nothing.
+packs = ["@box/kiro", "@box/git", "@box/gh"]
+# A copy of the @box/open policy starter, as the agent layer's other profiles take with
+# `box profile create --policy open`, so the GitHub cells differ from the rest only in their routes.
+policies = ["policy.dw"]
+
+[options]
+kiro.sign-in = "api-key"
+agent.skip-permissions = "true"
+
+# gh sends `Authorization: token <value>` to the API.
+[egress.github]
+destinations = ["api.github.com"]
+secret.ref = "env://GH_TOKEN"
+secret.prefix = "token "
+
+# git over HTTPS gets no stand-in to send, so the box adds the token as Basic auth to every request
+# to github.com. GIT_GITHUB holds `x-access-token:<token>`.
+[egress.github_git]
+destinations = ["github.com"]
+secret.ref = "env://GIT_GITHUB"
+secret.placement = "basic_auth"
+secret.inject = "always"

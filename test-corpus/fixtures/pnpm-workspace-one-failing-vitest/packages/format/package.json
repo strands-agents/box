@@ -1,0 +1,13 @@
+{
+  "name": "@shop/format",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/formatPrice.js",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "3.2.7"
+  }
+}

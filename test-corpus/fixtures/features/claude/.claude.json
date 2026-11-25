@@ -1,0 +1,20 @@
+{
+  "hasCompletedOnboarding": true,
+  "lastOnboardingVersion": "2.1.316",
+  "primaryApiKey": "feature-probe-key",
+  "oauthAccount": {
+    "emailAddress": "feature-probe-login@example.invalid"
+  },
+  "projects": {
+    "{workspace}": {
+      "hasTrustDialogAccepted": true
+    }
+  },
+  "mcpServers": {
+    "probe-mcp": {
+      "type": "stdio",
+      "command": "/bin/cat",
+      "args": []
+    }
+  }
+}

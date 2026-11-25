@@ -1,0 +1,30 @@
+// The download sites the Playwright, Prisma, and torch cells need, beyond the hosts their packs name.
+// `npx playwright install` downloads a browser from cdn.playwright.dev, falling back to
+// playwright.download.prss.microsoft.com, and `npx prisma` downloads its engine from
+// binaries.prisma.sh. The Next.js cell's check runs `next build`, which downloads the template's
+// Geist font: its CSS from fonts.googleapis.com and the font files from fonts.gstatic.com. A
+// failed font fetch only falls back to a local font under `next dev`; `next build` fails.
+// These permits live here, not in a `[tool.npx] hosts` list, because a
+// profile's `hosts` replaces the pack's list, and the corpus then stops testing @box/npx's own.
+// Like a tool's hosts, these permits apply to the whole box.
+
+@id("corpus_downloads_connect")
+permit (principal, action == Box::Action::"net:connect", resource)
+when { (context.input.host == "cdn.playwright.dev" || context.input.host == "playwright.download.prss.microsoft.com" || context.input.host == "binaries.prisma.sh" || context.input.host == "fonts.googleapis.com" || context.input.host == "fonts.gstatic.com") && context.input.port == 443 };
+
+@id("corpus_downloads_request")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "cdn.playwright.dev" || context.input.host == "playwright.download.prss.microsoft.com" || context.input.host == "binaries.prisma.sh" || context.input.host == "fonts.googleapis.com" || context.input.host == "fonts.gstatic.com" };
+
+// The torch cell downloads distilbert-base-uncased from the Hugging Face Hub. transformers asks
+// huggingface.co for each file, which sends the large ones on to a host under hf.co: its file
+// CDN, or the Xet storage hosts that hf_xet reads chunks from. The cell's `net` names
+// huggingface.co, and the uv pack names only the package registry.
+
+@id("corpus_huggingface_connect")
+permit (principal, action == Box::Action::"net:connect", resource)
+when { (context.input.host == "huggingface.co" || context.input.host like "*.hf.co") && context.input.port == 443 };
+
+@id("corpus_huggingface_request")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "huggingface.co" || context.input.host like "*.hf.co" };
