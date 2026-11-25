@@ -24,8 +24,7 @@ pub struct Outbound<'a> {
 /// An inbound response, as much of it as the vault needs to scan for a leaked secret.
 #[derive(Debug, Clone, Copy)]
 pub struct Inbound<'a> {
-    /// The destination of the *request* this response answers — the same binding graph the request leg
-    /// used, so the response is scanned for the secret that was actually attached.
+    /// The request destination, which identifies the fixed secret to scan for.
     pub destination: Destination<'a>,
     /// The response headers.
     pub headers: &'a [(String, String)],

@@ -209,10 +209,15 @@ A remote MCP server re-routes the same way: attach `[[mcp.<name>.backends]]` to 
 | `aws://PROFILE` | The named profile `PROFILE`, resolved through the AWS SDK | On each request. The gateway signs the request with SigV4. |
 | `aws://` (no profile) | The AWS SDK default credential provider chain on the host | On each request. The gateway signs the request with SigV4, under the host's ambient identity. |
 | `credsd://NAME`, with `secret.type = "aws"` or no `secret.type` | The credential `NAME` in the [AWS Credential Daemon](https://github.com/aws/credential-daemon) (credsd), over its socket: `CREDSD_SOCKET`, or the [platform default](#the-credsd-socket) | On each request. The gateway signs the request with SigV4, using the credential's AWS session credentials, and never falls back to the host's ambient identity. Before the workload starts, `box run` checks that the daemon answers and lists `NAME`, and stops the box if it doesn't. Needs credsd 0.2.0 or later. With no `secret.type`, the box warns when it starts. |
-| `credsd://NAME`, with `secret.type = "token"` | The access token that the credsd daemon serves as `NAME`, such as a token stored with `creds bootstrap --credential github static-secret` | Once, when the box starts. The box keeps the token for the run and doesn't refresh it, so a token that expires stops working until the next run. The box warns when the token has an expiry. With `secret.env`, the workload gets a placeholder in that variable. Without it, the workload holds none, and the route needs `secret.inject = "always"`. |
+| `credsd://NAME`, with `secret.type = "token"` | The access token that the credsd daemon serves as `NAME`, such as a token stored with `creds bootstrap --credential github static-secret` | At startup. If the token has an expiry, the first request near or past expiry reads it again. If that read fails, Box refuses the request. A token without an expiry stays in use for the run. With `secret.env`, the workload gets a placeholder in that variable. Without it, the workload holds none, and the route needs `secret.inject = "always"`. |
 | `<scheme>://NAME[#FIELD]`, for a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table declares | The host program that the table names | Experimental. Once, when the box starts: Box runs the program and reads the secret from its stdout. The agent, each tool, each stdio MCP server, and the Shell get a placeholder in the variable that `secret.env` names. You don't set that variable. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |
 
-This route sends a GitHub token from credsd to `github.com`, for `git` over HTTPS:
+Box checks expiry when it attaches a token. It keeps the workload's placeholder and asks
+the daemon for a token during the last fifth of the remaining lifetime measured at acquisition,
+up to 60 seconds before expiry. Concurrent requests share the read. After a failed read, a later
+request can retry. Once a route has an expiry, each replacement must include a valid future expiry.
+
+This route sends a GitHub token from credsd to `github.com` for Git over HTTPS.
 
 ```toml
 [egress.github]
@@ -412,6 +417,7 @@ not upgrade `rust-lang.org`.
 | A credsd token route has no `secret.env` and no `secret.inject = "always"` | Set `secret.inject = "always"`, or name the placeholder variable with `secret.env`. |
 | At startup, `credsd credential "<name>" is "<kind>", but a route that reads it expects "<kind>"` | On an egress or MCP route, set `secret.type` to the credential's kind in `creds list`: `aws` for `session_credentials`, `token` for `access_token`. A telemetry target always signs, so name a `session_credentials` credential there. |
 | At startup, a credsd token route reads a token whose type is not `Bearer` | Use a bearer token. The box can't make the proof that a DPoP token needs. |
+| An expiring credsd token fails to load or refresh | Check the local daemon and the credential name. Each replacement must include a future RFC 3339 `expires_at`. Retry after the source recovers. |
 | A `credsd://` route has no `secret.type`, at startup (a warning) | Set `secret.type = "aws"`, or `"token"` for a token. A later release requires the key. |
 | `secret.env` on an `env://NAME` route is not `NAME`, or an `aws://` route sets `secret.env` | Remove `secret.env`. |
 | Two entries hold a placeholder in one variable and name different secrets | Give one of them another variable. One placeholder variable holds one secret. |

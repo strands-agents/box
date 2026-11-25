@@ -146,17 +146,19 @@ states why the configuration names it rather than Box asking the daemon.
 
 | | `secret.type = "aws"`, or none | `secret.type = "token"` |
 |---|---|---|
-| Box reads it | On each request, as `aws://` | Once, when the vault opens |
+| Box reads it | On each request, as `aws://` | When the vault opens, and again near the expiry the daemon names |
 | A process in the box gets | Placeholder AWS keys | A placeholder in `secret.env`, or nothing with `secret.inject = "always"` |
 | The gateway | Signs the request with SigV4 | Attaches the token at the route's placement |
 | Takes `placement`, `header`, `prefix`, `param`, `inject`, `phantom_prefix`, `secret.env` | No | Yes, as `env://` |
 
-A token route follows the model of a declared secret source on purpose: Box reads the token before
-the workload starts and holds it for the run
-([a credsd token is read once at startup](./decisions.md#a-credsd-token-is-read-once-at-startup)).
-Because it matches a declared source, it allows what a declared source allows: two routes can read
-one token under two placeholder variables, with one read for each variable. A token with an expiry warns at
-startup, and a `token_type` other than `Bearer` is refused, because Box cannot make a DPoP proof.
+A token route reads the token before the workload starts. If the daemon names an expiry, the first
+request near or past it reads the token again, and the workload keeps the same placeholder; a token
+with no expiry is held for the run, as a declared secret source holds its secret
+([a credsd token is read at startup and again near its expiry](./decisions.md#a-credsd-token-is-read-at-startup-and-near-its-expiry)).
+Concurrent requests share one refresh, and a failed refresh refuses the request. Each response is
+scrubbed with the token its request carried, even after another request has refreshed it. Two
+routes can read one token under two placeholder variables, with one read for each variable. A
+`token_type` other than `Bearer` is refused, because Box cannot make a DPoP proof.
 
 `secret.env` is stable, not experimental. It only names the variable that holds a placeholder, and
 it runs no program. The `[experimental-features] secret-sources` switch guards a

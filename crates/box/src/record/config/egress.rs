@@ -852,8 +852,8 @@ enum SecretScheme {
     /// `credsd://credential` with no `secret.type`, or `secret.type = "aws"`: credsd AWS
     /// credentials, signed in the boundary, so nothing is placed.
     Credsd,
-    /// `credsd://credential` with `secret.type = "token"`: a credsd access token the box reads once
-    /// at start, which the workload presents as a placeholder.
+    /// `credsd://credential` with `secret.type = "token"`: an access token behind a stable placeholder.
+    /// Box reads it at startup and refreshes it near expiry.
     CredsdToken,
     /// A scheme that a `[secret-source.<scheme>]` table can declare: a host program reads the
     /// secret, and the workload presents a placeholder.

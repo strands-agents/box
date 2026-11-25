@@ -1395,13 +1395,234 @@ fn a_plain_echo_of_the_real_secret_is_redacted() {
     );
 }
 
+#[cfg(unix)]
+mod rotating_credsd {
+    use std::io::Write as _;
+    use std::os::unix::net::UnixListener;
+    use std::sync::{Mutex, mpsc};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, SystemTime};
+
+    use egress_gateway::{HeaderMap, InterceptedRequest, Target};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    use super::*;
+
+    const INITIAL: &str = "test-token-before-refresh";
+    const REFRESHED: &str = "test-token-after-refresh";
+    const LONG_EXPIRY: &str = "2099-01-01T00:00:00Z";
+    const TIMEOUT: Duration = Duration::from_secs(20);
+
+    fn token_store(
+        pattern: DestinationPattern,
+        replies: Vec<(&'static str, String)>,
+    ) -> (Arc<Vault>, String, JoinHandle<()>) {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let name = format!(
+            "box-test-token-{}-{}.sock",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let socket = std::env::temp_dir().join(name);
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let daemon = thread::spawn({
+            let socket = socket.clone();
+            move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let served = runtime.block_on(async {
+                    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+                    tokio::time::timeout(TIMEOUT, async {
+                        for (token, expiry) in replies {
+                            let (stream, _) = listener.accept().await.unwrap();
+                            let mut stream = BufReader::new(stream);
+                            let mut line = String::new();
+                            stream.read_line(&mut line).await.unwrap();
+                            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                            assert_eq!(request["method"], "credential/get");
+                            assert_eq!(request["params"]["credential"], "echo");
+                            let reply = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": request["id"],
+                                "result": {
+                                    "credential": "echo",
+                                    "material": {
+                                        "type": "access_token",
+                                        "token": token,
+                                        "token_type": "Bearer"
+                                    },
+                                    "expires_at": expiry
+                                }
+                            });
+                            stream
+                                .write_all(format!("{reply}\n").as_bytes())
+                                .await
+                                .unwrap();
+                        }
+                    })
+                    .await
+                });
+                std::fs::remove_file(socket).unwrap();
+                served.expect("the gateway must acquire every scripted token");
+            }
+        });
+        let opened = Vault::open(
+            VaultConfig::new(Backend::local(), "tenant")
+                .credsd_socket(socket)
+                .require_every_route()
+                .route(RouteSpec::opaque(
+                    pattern,
+                    Locator::parse_uri("credsd://echo").unwrap(),
+                    InjectMode::header("Bearer {}", None).unwrap(),
+                )),
+        )
+        .unwrap();
+        let phantom = opened.phantoms()[0].token().to_owned();
+        (Arc::new(opened.into_vault()), phantom, daemon)
+    }
+
+    fn rfc3339(instant: SystemTime) -> String {
+        let utc = rcgen::date_time_ymd(1970, 1, 1)
+            + instant.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        format!(
+            "{}T{:02}:{:02}:{:02}.{:09}Z",
+            utc.date(),
+            utc.hour(),
+            utc.minute(),
+            utc.second(),
+            utc.nanosecond()
+        )
+    }
+
+    #[test]
+    fn unpaired_request_edits_refuse_a_rotating_credential() {
+        let host = "api.unpaired.test";
+        let pattern = pat(host, 443);
+        let (store, phantom, daemon) =
+            token_store(pattern.clone(), vec![(INITIAL, LONG_EXPIRY.into())]);
+        let advisory_host = "*.unpaired.test";
+        let set = CapabilitySet::new(vec![
+            CredentialCapability::new(
+                pat(advisory_host, 443),
+                advisory_store(advisory_host, 443, "test-fixed-advisory-token"),
+            ),
+            CredentialCapability::new(pattern, store),
+        ]);
+        let mut headers = HeaderMap::new();
+        headers.append("Authorization", format!("Bearer {phantom}"));
+        headers.append("Accept-Encoding", "gzip");
+        let target = Target::new(host, 443);
+        let original_note = "existing advisory note";
+        let mut request = InterceptedRequest {
+            method: "GET".into(),
+            target: target.clone(),
+            headers: headers.clone(),
+            body: b"unchanged".to_vec(),
+            advisory_note: Some(original_note.into()),
+        };
+
+        let reason = set.apply_to_request(&mut request).unwrap_err();
+
+        assert!(reason.contains("paired response redactor"), "{reason}");
+        assert_eq!(request.headers, headers);
+        assert_eq!(request.target, target);
+        assert_eq!(request.body, b"unchanged");
+        assert_eq!(request.advisory_note.as_deref(), Some(original_note));
+
+        let backend = BackendDial {
+            host: host.into(),
+            port: 443,
+            tls: true,
+            path_prefix: String::new(),
+        };
+        let reason = set
+            .backend_signature_mutations(
+                &request.target.as_destination(),
+                &request.method,
+                request.headers.iter(),
+                &backend,
+                "/",
+                &request.body,
+            )
+            .unwrap_err();
+        assert!(reason.contains("paired response redactor"), "{reason}");
+        daemon.join().unwrap();
+    }
+
+    #[test]
+    fn an_in_flight_response_uses_its_attached_credsd_token_after_refresh() {
+        let host = "api.rotating-echo.test";
+        let (seen, arrivals) = mpsc::sync_channel(2);
+        let (release_first, held) = mpsc::sync_channel(1);
+        let held = Mutex::new(held);
+        let upstream = TlsUpstream::start_custom(host, move |tls, request| {
+            let auth = request.header("authorization").unwrap();
+            let token = auth.strip_prefix("Bearer ").unwrap();
+            seen.send(token.to_owned()).unwrap();
+            if request.raw.starts_with("GET /before ") {
+                held.lock().unwrap().recv_timeout(TIMEOUT).unwrap();
+            }
+            tls.sock.set_write_timeout(Some(TIMEOUT)).unwrap();
+            let (prefix, suffix) = token.split_at(token.len() / 2);
+            write!(
+                tls,
+                "HTTP/1.1 200 OK\r\nX-Echo: {token}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
+                 {:X}\r\n{prefix}\r\n{:X}\r\n{suffix}\r\n0\r\n\r\n",
+                prefix.len(),
+                suffix.len()
+            )
+            .unwrap();
+            tls.flush().unwrap();
+        });
+        let port = upstream.port();
+        let pattern = pat(host, port);
+        let expiry = SystemTime::now() + Duration::from_secs(10);
+        let (store, phantom, daemon) = token_store(
+            pattern.clone(),
+            vec![(INITIAL, rfc3339(expiry)), (REFRESHED, LONG_EXPIRY.into())],
+        );
+        let controls = CapabilitySet::new(vec![CredentialCapability::new(pattern, store)]);
+        let handle = start_gateway(host, &upstream, controls, FixedPolicy::allowing(&[host]));
+        let proxy = proxy_port(&handle);
+        let auth = format!("Bearer {phantom}");
+        let mut first = WorkloadClient::connect(proxy, host, port);
+        first.set_read_timeout(TIMEOUT);
+        first.send_request("GET", "/before", &[("Authorization", &auth)], b"");
+        assert_eq!(arrivals.recv_timeout(TIMEOUT).unwrap(), INITIAL);
+
+        // Begin the second exchange only once refresh is due and the first token is already on
+        // the wire, with its entire response (including the head) still held by the origin.
+        if let Ok(wait) = expiry.duration_since(SystemTime::now()) {
+            thread::sleep(wait.min(TIMEOUT));
+        }
+        assert!(SystemTime::now() >= expiry, "test token must expire");
+        let mut second = WorkloadClient::connect(proxy, host, port);
+        second.set_read_timeout(TIMEOUT);
+        second.send_request("GET", "/after", &[("Authorization", &auth)], b"");
+        assert_eq!(arrivals.recv_timeout(TIMEOUT).unwrap(), REFRESHED);
+        release_first.send(()).unwrap();
+
+        for client in [&mut first, &mut second] {
+            let response = client.read_response();
+            let (head, body) = response.split_once("\r\n\r\n").unwrap();
+            assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+            let header = SeenRequest { raw: head.into() }.header("x-echo");
+            assert_eq!(header.as_deref(), Some("[REDACTED]"));
+            assert_eq!(body, "[REDACTED]");
+        }
+        daemon.join().unwrap();
+    }
+}
+
 /// A backend reply that echoes its OWN token (`gw-token-SECRET`) in a plain JSON body, as a debug or
 /// error body might. Content-Length is the 33-byte body.
 const BACKEND_ECHO_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 33\r\nConnection: close\r\n\r\n{\"echo\":\"Bearer gw-token-SECRET\"}";
 
 /// A streamed response from a backend that echoes the box-owned backend token is redacted, not
-/// returned to the workload. This covers `box_owned` in `Vault::response_redactor`, the streaming
-/// scrubber; without it the backend token leaks back on an echo.
+/// returned to the workload. This covers a box-owned attachment's streaming scrubber.
 #[test]
 fn a_backend_echo_of_its_token_is_redacted() {
     let backend_host = "gw.example.test";
