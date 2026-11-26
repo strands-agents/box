@@ -1,10 +1,11 @@
 //! Inode permissions for uncertain hard-link aliases of native dependencies.
 
+use super::mountinfo;
 use crate::model::{ObjectIdentity, PathGrant};
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub(super) fn hard_link_alias_may_be_writable(file: &File, write_root: &PathGrant) -> bool {
     let Ok(metadata) = file.metadata() else {
@@ -44,10 +45,12 @@ pub(super) fn hard_link_alias_may_be_writable(file: &File, write_root: &PathGran
     if write_root.identity != Some(ObjectIdentity::from_metadata(&root_metadata)) {
         return true;
     }
-    let (Some(source_mount), Some(root_mount)) = (mount_id(file), mount_id(&root)) else {
+    let (Ok(source_mount), Ok(root_mount)) =
+        (mountinfo::mount_id(file), mountinfo::mount_id(&root))
+    else {
         return true;
     };
-    let Ok(table) = std::fs::read_to_string("/proc/self/mountinfo") else {
+    let Ok(table) = mountinfo::read() else {
         return true;
     };
     !root_uses_compatible_mounts(
@@ -69,48 +72,15 @@ fn inode_may_be_writable(
         || !matches!(access(), Err(error) if error.raw_os_error() == Some(libc::EACCES))
 }
 
-fn mount_id(file: &File) -> Option<u64> {
-    let mut metadata = std::mem::MaybeUninit::<libc::statx>::zeroed();
-    // SAFETY: the descriptor is live, and statx receives a valid output buffer.
-    let result = unsafe {
-        libc::statx(
-            file.as_raw_fd(),
-            c"".as_ptr(),
-            libc::AT_EMPTY_PATH,
-            libc::STATX_MNT_ID,
-            metadata.as_mut_ptr(),
-        )
-    };
-    if result != 0 {
-        return None;
-    }
-    // SAFETY: statx initialized the output buffer after a successful call.
-    let metadata = unsafe { metadata.assume_init() };
-    (metadata.stx_mask & libc::STATX_MNT_ID != 0).then_some(metadata.stx_mnt_id)
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct MountRecord<'a> {
-    identity: u64,
-    point: PathBuf,
-    idmapped: bool,
-    filesystem: &'a str,
-}
-
 fn root_uses_compatible_mounts(
     table: &str,
     roots: [&Path; 2],
     source_identity: u64,
     root_identity: u64,
 ) -> bool {
-    let Some(mounts) = table.lines().map(mount_record).collect::<Option<Vec<_>>>() else {
+    let Some(mounts) = mountinfo::parse(table) else {
         return false;
     };
-    let identities: std::collections::BTreeSet<_> =
-        mounts.iter().map(|mount| mount.identity).collect();
-    if identities.len() != mounts.len() {
-        return false;
-    }
     // Descriptor mount IDs identify these records. Inode device IDs can differ
     // from mountinfo devices, including for Btrfs subvolumes.
     let Some(source) = mounts
@@ -145,41 +115,10 @@ fn ordinary_local_filesystem(filesystem: &str) -> bool {
     )
 }
 
-fn mount_record(line: &str) -> Option<MountRecord<'_>> {
-    let fields: Vec<_> = line.split_ascii_whitespace().collect();
-    let separator = fields.iter().position(|field| *field == "-")?;
-    if separator < 6 || fields.len() != separator + 4 {
-        return None;
-    }
-    let identity = fields[0].parse().ok()?;
-    fields[1].parse::<u64>().ok()?;
-    let (major, minor) = fields[2].split_once(':')?;
-    major.parse::<u32>().ok()?;
-    minor.parse::<u32>().ok()?;
-    let raw = fields[4];
-    let mut remaining = raw;
-    while let Some(index) = remaining.find('\\') {
-        remaining = &remaining[index..];
-        if ![r"\040", r"\011", r"\012", r"\134"]
-            .iter()
-            .any(|escape| remaining.starts_with(*escape))
-        {
-            return None;
-        }
-        remaining = &remaining[4..];
-    }
-    let point = PathBuf::from(super::unescape_mount_field(raw));
-    point.is_absolute().then_some(MountRecord {
-        identity,
-        point,
-        idmapped: fields[5].split(',').any(|option| option == "idmapped"),
-        filesystem: fields[separator + 1],
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn foreign_owned_readonly_inode_permissions_exclude_writes() {
@@ -313,15 +252,11 @@ mod tests {
     fn mount_paths_preserve_unicode_and_decode_kernel_escapes() {
         let point = "/work/café\u{a0}data/two words\ttab\nline\\end";
         let line = r"21 20 8:1 / /work/café data/two\040words\011tab\012line\134end rw - ext4 /dev/root rw";
-        assert_eq!(
-            mount_record(line),
-            Some(MountRecord {
-                identity: 21,
-                point: PathBuf::from(point),
-                idmapped: false,
-                filesystem: "ext4",
-            })
-        );
+        let parsed = mountinfo::parse(line).unwrap();
+        assert_eq!(parsed[0].identity, 21);
+        assert_eq!(parsed[0].point, PathBuf::from(point));
+        assert!(!parsed[0].idmapped);
+        assert_eq!(parsed[0].filesystem, "ext4");
         let table = format!("20 1 8:1 / / rw - ext4 /dev/root rw\n{line}\n");
         let roots = [Path::new("/work/link"), Path::new("/work/café\u{a0}data")];
         assert!(!root_uses_compatible_mounts(&table, roots, 20, 20));
