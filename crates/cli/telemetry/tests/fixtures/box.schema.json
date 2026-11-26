@@ -335,7 +335,7 @@
             }
           ]
         },
-        "core_code": {
+        "core_failure_code": {
           "description": "The message code of the failure that ended Box Core's run, as its stderr line prints it, such as B0114, or uncoded for a Box defect. Null means Core reported no failure: the run succeeded, or the failure was the CLI's own.",
           "oneOf": [
             {

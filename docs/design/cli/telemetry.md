@@ -7,7 +7,7 @@ The snapshot keeps what was collected before success or failure and stays unchan
 and resolved targets at the preparation steps. The fields follow the pinned schema, which the repository holds as
 [`crates/cli/telemetry/tests/fixtures/box.schema.json`](../../../crates/cli/telemetry/tests/fixtures/box.schema.json),
 copied from the telemetry service's `schema/box.schema.json` at revision `f8b2541` with one addition,
-the optional `shutdown` field `core_code`, which the service must accept before a release sends it. The telemetry
+the optional `shutdown` field `core_failure_code`, which the service must accept before a release sends it. The telemetry
 tests check each payload against it.
 The schema describes startup latency from invocation start. The CLI uses the narrower
 launch-preparation boundary below; the schema's validation rules are unchanged.
@@ -208,10 +208,10 @@ The event contains no raw refusal reason.
 The schema permits `zero` with `refused`, but the current Core error path produces a
 nonzero CLI result. These fields do not expose a workload exit code or signal.
 
-`core_code` names the failure that ended Core's run, by its
+`core_failure_code` names the failure that ended Core's run, by its
 [message code](../../user/message-codes.md), such as `B0114`, or `uncoded` for a Box defect.
 `Launch::run_with_telemetry` passes a `strands_box::run_events` sender to Core, reads the one
-`RunEvent::Refused` after Core returns, and hands its code to `Session::core_code` before
+`RunEvent::Refused` after Core returns, and hands its code to `Session::core_failure_code` before
 `finish`. The code is the one Core's stderr line prints. It arrives even when Core fails before it
 opens telemetry, where `core_outcome` is `null`. It is `null` when Core reports no failure: the
 run succeeded, the workload exited nonzero, or the CLI failed before Core ran.

@@ -307,8 +307,11 @@ fn assert_completed(events: &[Value], outcome: &str, core_outcome: Option<&str>)
     assert_eq!(shutdown["data"]["core_outcome"], json!(core_outcome));
 }
 
-fn assert_core_code(events: &[Value], code: Option<&str>) {
-    assert_eq!(events.last().unwrap()["data"]["core_code"], json!(code));
+fn assert_core_failure_code(events: &[Value], code: Option<&str>) {
+    assert_eq!(
+        events.last().unwrap()["data"]["core_failure_code"],
+        json!(code)
+    );
 }
 
 fn decision_count(event: &Value, action: &str, outcome: &str) -> u64 {
@@ -745,7 +748,7 @@ fn a_missing_core_credential_still_delivers_run_and_shutdown() {
     assert_completed(&events, "nonzero", None);
     // Core refused before it opened telemetry, so no `box_stopped` record exists; the run event
     // channel still names the failure.
-    assert_core_code(&events, Some("B0104"));
+    assert_core_failure_code(&events, Some("B0104"));
 }
 
 #[test]
@@ -808,7 +811,7 @@ fn box_telemetry_overrides_a_saved_choice() {
     let events = server.invocation();
     assert_eq!(events[0]["installation_id"], scene.installation_id());
     assert_completed(&events, "zero", Some("ok"));
-    assert_core_code(&events, None);
+    assert_core_failure_code(&events, None);
 }
 
 #[test]

@@ -2637,8 +2637,8 @@ impl Launch {
         let result = execute(&self, events);
         let completed = Instant::now();
         if let Some(session) = telemetry {
-            if let Some(code) = core_code(&received) {
-                session.core_code(code);
+            if let Some(code) = core_failure_code(&received) {
+                session.core_failure_code(code);
             }
             let outcome = if result.as_ref().is_ok_and(|code| *code == ExitCode::SUCCESS) {
                 ExitOutcome::Zero
@@ -2683,7 +2683,7 @@ impl Launch {
 
 /// The message code of the failure that ended Core's run, as the run's event channel reports
 /// it: `None` when Core sent none, because the run succeeded or never reached Core.
-fn core_code(received: &strands_box::RunEventReceiver) -> Option<&'static str> {
+fn core_failure_code(received: &strands_box::RunEventReceiver) -> Option<&'static str> {
     while let Ok(event) = received.try_recv() {
         if let strands_box::RunEvent::Refused { code } = event {
             return Some(match code {
@@ -2697,8 +2697,8 @@ fn core_code(received: &strands_box::RunEventReceiver) -> Option<&'static str> {
 
 #[cfg(test)]
 #[test]
-fn every_core_code_fits_the_telemetry_schema_pattern() {
-    // The schema's `core_code` pattern is `^([BHPT][0-9]{4}|uncoded)$`.
+fn every_core_failure_code_fits_the_telemetry_schema_pattern() {
+    // The schema's `core_failure_code` pattern is `^([BHPT][0-9]{4}|uncoded)$`.
     for code in diagnostics::Code::ALL {
         let text = code.as_str();
         let (prefix, digits) = text.split_at(1);
@@ -2706,7 +2706,7 @@ fn every_core_code_fits_the_telemetry_schema_pattern() {
             "BHPT".contains(prefix)
                 && digits.len() == 4
                 && digits.bytes().all(|b| b.is_ascii_digit()),
-            "{text} does not fit the shutdown event's core_code pattern"
+            "{text} does not fit the shutdown event's core_failure_code pattern"
         );
     }
 }

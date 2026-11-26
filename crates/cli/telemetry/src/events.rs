@@ -61,7 +61,7 @@ struct ShutdownData {
     invocation_duration_ms: u64,
     exit_outcome: ExitOutcome,
     core_outcome: Option<CoreOutcome>,
-    core_code: Option<&'static str>,
+    core_failure_code: Option<&'static str>,
 }
 
 /// The process result on controlled completion.
@@ -155,20 +155,20 @@ impl Invocation {
         }))
     }
 
-    /// Construct the completion event at the supplied monotonic instant. `core_code` is the
+    /// Construct the completion event at the supplied monotonic instant. `core_failure_code` is the
     /// message code of the failure that ended Core's run, such as `B0114`, or `uncoded`.
     pub fn shutdown_event(
         &self,
         completed: Instant,
         outcome: ExitOutcome,
         core_outcome: Option<CoreOutcome>,
-        core_code: Option<&'static str>,
+        core_failure_code: Option<&'static str>,
     ) -> Event {
         self.event(Message::Shutdown(ShutdownData {
             invocation_duration_ms: elapsed_ms(completed.saturating_duration_since(self.started)),
             exit_outcome: outcome,
             core_outcome,
-            core_code,
+            core_failure_code,
         }))
     }
 
@@ -400,7 +400,7 @@ mod tests {
                         "invocation_duration_ms": 1234,
                         "exit_outcome": expected,
                         "core_outcome": expected_core,
-                        "core_code": null,
+                        "core_failure_code": null,
                     })
                 );
                 for key in ["v", "installation_id", "run_id", "context"] {
@@ -415,12 +415,12 @@ mod tests {
             None,
         ));
         assert_eq!(early["data"]["invocation_duration_ms"], 0);
-        // A released CLI sends no `core_code`; the schema must still accept its shutdown event.
+        // A released CLI sends no `core_failure_code`; the schema must still accept its shutdown event.
         let mut released = refused_without_code(&invocation, completed);
         released["data"]
             .as_object_mut()
             .unwrap()
-            .remove("core_code");
+            .remove("core_failure_code");
         let schema: Value =
             serde_json::from_str(include_str!("../tests/fixtures/box.schema.json")).unwrap();
         assert!(
@@ -435,7 +435,7 @@ mod tests {
                 None,
                 Some(code),
             ));
-            assert_eq!(refused["data"]["core_code"], code);
+            assert_eq!(refused["data"]["core_failure_code"], code);
         }
     }
 
