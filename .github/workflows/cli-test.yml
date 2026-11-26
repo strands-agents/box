@@ -345,7 +345,7 @@ jobs:
 
       - name: Save build log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-package-build-log
           path: ${{ runner.temp }}/package-build.log
@@ -353,7 +353,7 @@ jobs:
           retention-days: 7
 
       - name: Save unsigned package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-package
           path: ${{ runner.temp }}/distribution/
@@ -361,7 +361,7 @@ jobs:
           retention-days: 7
 
       - name: Save package test and expected source inputs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-package-test
           path: |
@@ -425,7 +425,7 @@ jobs:
 
       - name: Save verification log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-package-verification-${{ matrix.os }}
           path: ${{ runner.temp }}/package-verification.log
