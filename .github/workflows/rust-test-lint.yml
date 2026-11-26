@@ -154,7 +154,7 @@ jobs:
         # the current pack. Long-term fix — widen the `node` pack or
         # resolve Node dynamically — tracked at
         # https://github.com/strands-agents/box/issues/9.
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: '22'
 
@@ -435,7 +435,7 @@ jobs:
 
       - name: Install Node 22
         # See the unit-test job: Homebrew's Node 24 needs a library the node pack does not grant.
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: '22'
 
