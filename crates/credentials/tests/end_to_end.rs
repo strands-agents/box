@@ -1722,8 +1722,8 @@ mod credsd_e2e {
         let phantom = opened.phantoms()[0].token().to_string();
         let vault = opened.into_vault();
         let headers = [("Authorization".to_string(), format!("Bearer {phantom}"))];
-        let attachment = vault
-            .attach_for(Outbound {
+        let (attachment, redactor) = vault
+            .attach_with_redactor(Outbound {
                 destination: Destination {
                     host: "api.github.com",
                     port: 443,
@@ -1740,8 +1740,9 @@ mod credsd_e2e {
         let authorization = attachment
             .set_headers()
             .find(|(name, _)| name.eq_ignore_ascii_case("Authorization"))
-            .map(|(_, value)| value.to_string());
-        assert_eq!(authorization, Some(format!("Bearer {token}")));
+            .and_then(|(_, value)| value.strip_prefix("Bearer "));
+        assert!(authorization == Some(token.as_str()), "unexpected token");
+        assert!(redactor.unwrap().redact_header(&token).as_deref() == Some("[REDACTED]"));
 
         let missing = format!("strands-e2e-nonexistent-{}", std::process::id());
         let error = Vault::open(
