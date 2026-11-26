@@ -123,6 +123,16 @@ impl Reach {
         })?;
         let home_source = utf8(&canonical_home, "the resolved home")?;
 
+        if home_text != home_source
+            && receiving
+                .iter()
+                .any(|root| canonical_home.starts_with(root) || root.starts_with(&canonical_home))
+        {
+            return Err(invalid_input(format!(
+                "the agent's home {home_text} resolves to {home_source} and overlaps a receiving directory; use the resolved home path"
+            )));
+        }
+
         let mut forbidden = forbidden_roots();
         if let Some(box_root) = box_root {
             let canonical = box_root.canonicalize().map_err(|source| {
@@ -1519,6 +1529,37 @@ mod linked_command_mutation_tests {
 #[cfg(test)]
 mod receiving_tests {
     use super::*;
+
+    #[test]
+    fn aliased_home_requires_canonical_spelling_for_overlapping_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let nested = home.join("storage");
+        let alias = root.join("alias");
+        let state = root.join("state");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(&state).unwrap();
+        std::os::unix::fs::symlink(&home, &alias).unwrap();
+        for selected in [&root, &home, &nested] {
+            let result = Reach::over_box(
+                &alias,
+                None,
+                None,
+                &state,
+                &[],
+                std::slice::from_ref(selected),
+            );
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("use the resolved home path")
+            );
+        }
+        assert!(Reach::over_box(&alias, None, None, &state, &[], &[]).is_ok());
+    }
 
     /// A receiving root joins every hosted view without admitting adjacent paths or hiding floors.
     #[test]
