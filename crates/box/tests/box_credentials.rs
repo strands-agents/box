@@ -1825,7 +1825,7 @@ fn a_configured_destination_is_admitted_through_the_boundary() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// credsd tokens — `secret.type = "token"` reads the daemon's access token once at start.
+// Static credsd tokens are read once at startup.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// The access token the fake credsd serves, which must never appear inside the box.

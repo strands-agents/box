@@ -2726,19 +2726,25 @@ permanent default for a route with no type: AWS stays a special case.
 **Cost.** An operator states what credsd already knows. An existing AWS route warns until it names
 its type, and a record that names it moves to version 43.
 
+<a id="a-credsd-token-is-read-at-startup-and-near-its-expiry"></a>
 <a id="a-credsd-token-is-read-once-at-startup"></a>
-### A credsd token is read once at startup, as a declared secret source is
+### A credsd token is read at startup and again near its expiry
 
-A token route reads its access token when the vault opens, before the workload starts, and holds it
-for the run. It behaves as an `env://` route or a secret source does: the workload holds a
-placeholder, routes that name one token under one placeholder variable share one read, and two
-variables for one token are allowed, as they are for a declared secret source, with one read each.
+A token route reads its access token when the vault opens, before the workload starts. If the daemon
+names an expiry, the first request near or past it reads the token again, and the workload keeps
+the same placeholder. The daemon issues tokens; Box only asks for the current one. A token with no
+expiry is held for the run, as an `env://` route or a secret source holds its secret. Routes that
+name one token under one placeholder variable share one read and one refresh, and two variables
+for one token are allowed, as they are for a declared secret source, with one read each.
 
-**Rejected.** Fetching the token on each request, or caching it until its expiry: either one
-needs a token lifecycle that no source has yet, and redaction that follows a changing value.
+**Rejected.** Reading the token once and holding it for the run: a long-running agent outlives a
+short-lived token, such as an OAuth client-credentials token, even when the daemon has a fresh one.
+Fetching the token on each request: it puts the daemon on every request's path.
 
-**Cost.** A token that expires during a run stops working until the next run. Box warns at startup
-when the token names an expiry.
+**Cost.** Redaction must follow a changing value, so each response is scrubbed with the token its
+request carried, and a library caller with an expiring token must attach through
+`Vault::attach_with_redactor`. A failed refresh serves the old token until it expires, and after that refuses
+requests until a later refresh succeeds.
 
 ## Telemetry
 

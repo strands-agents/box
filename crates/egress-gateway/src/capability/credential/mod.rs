@@ -2,13 +2,11 @@
 
 use std::sync::Arc;
 
-use credentials::{DestinationPattern, Inbound, Outbound, Vault};
+use credentials::{DestinationPattern, Inbound, Outbound, ResponseRedactor, Vault};
 use zeroize::{Zeroize, Zeroizing};
 
-use super::Outcome;
+use super::{Outcome, RequestMode};
 use crate::boundary::{InterceptedRequest, InterceptedResponse, Mutation, Target};
-#[cfg(feature = "tls-intercept")]
-use {super::ResponseControls, crate::boundary::HeaderMap};
 
 /// The `accept-encoding` every credentialed request carries.
 const IDENTITY_ENCODING: &str = "identity";
@@ -17,6 +15,14 @@ const IDENTITY_ENCODING: &str = "identity";
 pub struct CredentialCapability {
     pattern: DestinationPattern,
     store: Arc<Vault>,
+}
+
+/// Staged edits, the advisory reason, and the scrubber for this attachment.
+#[derive(Debug, Default)]
+pub(super) struct RequestEdits {
+    pub(super) mutations: Vec<Mutation>,
+    pub(super) advisory: Option<String>,
+    pub(super) redactor: Option<ResponseRedactor>,
 }
 
 impl CredentialCapability {
@@ -31,13 +37,16 @@ impl CredentialCapability {
         &self.pattern
     }
 
-    /// The edits that attach this credential to `req`. Reads the request, and writes only its
-    /// advisory note; the set applies the edits.
-    pub(super) fn on_request(&self, req: &mut InterceptedRequest) -> Outcome {
+    /// The request edits, retaining a redactor for any rotating credential attached.
+    pub(super) fn on_request(
+        &self,
+        req: &InterceptedRequest,
+        mode: RequestMode,
+    ) -> Result<RequestEdits, String> {
         // Not applicable to this request → no edits. A mutation capability simply does not act
         // off-route.
         if !self.pattern.matches(&req.target.as_destination()) {
-            return Ok(Vec::new());
+            return Ok(RequestEdits::default());
         }
 
         // The vault signs these headers, so each one must already hold the value that goes on the
@@ -53,13 +62,7 @@ impl CredentialCapability {
             body: &req.body,
         };
         // `headers` wipes its value copies on drop (`SigningHeaders`); it outlives this `Outbound`.
-        let (mutations, advisory) = self.edits_for(outbound)?;
-        // An advisory injection (secret attached without a matching placeholder) is a noteworthy
-        // allow. Set only when present, so a second matching control's normal swap cannot clobber it.
-        if let Some(reason) = advisory {
-            req.advisory_note = Some(reason);
-        }
-        Ok(mutations)
+        self.edits_for(outbound, mode)
     }
 
     /// The SigV4 edits for a re-routed request whose `Host` the gateway has already rewritten to the
@@ -69,19 +72,23 @@ impl CredentialCapability {
     /// by the `tls-intercept` backend signature pass.
     #[cfg(feature = "tls-intercept")]
     pub(super) fn on_backend_request(&self, outbound: Outbound<'_>) -> Outcome {
-        Ok(self.edits_for(outbound)?.0)
+        Ok(self.edits_for(outbound, RequestMode::Unpaired)?.mutations)
     }
 
-    /// Turn the vault's `attach_for` result for `outbound` into mutations, plus the advisory reason
-    /// when the vault set one. Shared by the request leg and the post-rewrite backend signature.
-    fn edits_for(
-        &self,
-        outbound: Outbound<'_>,
-    ) -> std::result::Result<(Vec<Mutation>, Option<String>), String> {
-        match self.store.attach_for(outbound) {
+    /// Convert the vault attachment into staged request edits.
+    fn edits_for(&self, outbound: Outbound<'_>, mode: RequestMode) -> Result<RequestEdits, String> {
+        let attachment = match mode {
+            RequestMode::Unpaired => self
+                .store
+                .attach_for(outbound)
+                .map(|attachment| attachment.map(|attachment| (attachment, None))),
+            #[cfg(feature = "tls-intercept")]
+            RequestMode::Paired => self.store.attach_with_redactor(outbound),
+        };
+        match attachment {
             // The vault governs no credential for this destination.
-            Ok(None) => Ok((Vec::new(), None)),
-            Ok(Some(attachment)) => {
+            Ok(None) => Ok(RequestEdits::default()),
+            Ok(Some((attachment, redactor))) => {
                 let advisory = attachment.advisory_reason().map(str::to_string);
                 let mut mutations = Vec::new();
                 // Strips first: the phantom must be gone before the real secret is set, and for a
@@ -120,7 +127,11 @@ impl CredentialCapability {
                     name: "accept-encoding".to_string(),
                     value: Zeroizing::new(IDENTITY_ENCODING.to_string()),
                 });
-                Ok((mutations, advisory))
+                Ok(RequestEdits {
+                    mutations,
+                    advisory,
+                    redactor,
+                })
             }
             // An ambiguous binding, a missing or mismatched phantom, an underivable signing scope, or a
             // signer error. Every one of them means the request must not go out carrying this
@@ -179,39 +190,6 @@ impl CredentialCapability {
         }
         Ok(mutations)
     }
-
-    /// The header edits and body checks for a streamed response from this capability's destination.
-    #[cfg(feature = "tls-intercept")]
-    pub(super) fn response_controls(
-        &self,
-        headers: &HeaderMap,
-        target: &Target,
-    ) -> (Vec<Mutation>, ResponseControls) {
-        if !self.pattern.matches(&target.as_destination()) {
-            return (Vec::new(), ResponseControls::default());
-        }
-        let redactor = self.store.response_redactor(target.as_destination());
-        let edits = redactor
-            .iter()
-            .flat_map(|redactor| {
-                headers.iter().filter_map(move |(name, value)| {
-                    redactor
-                        .redact_header(value)
-                        .map(|value| Mutation::SetHeader {
-                            name: name.to_string(),
-                            value: Zeroizing::new(value),
-                        })
-                })
-            })
-            .collect();
-        (
-            edits,
-            ResponseControls {
-                redactors: redactor.into_iter().collect(),
-                requires_empty_body: content_encoding(headers).is_some(),
-            },
-        )
-    }
 }
 
 /// The request headers to sign over: every header except `accept-encoding` and `content-length`,
@@ -257,7 +235,7 @@ impl Drop for SigningHeaders {
 }
 
 /// The response's `Content-Encoding` when it names any coding other than `identity`.
-fn content_encoding(headers: &crate::boundary::HeaderMap) -> Option<&str> {
+pub(super) fn content_encoding(headers: &crate::boundary::HeaderMap) -> Option<&str> {
     let value = headers.get("content-encoding")?;
     value
         .split(',')
@@ -274,6 +252,7 @@ pub(super) mod tests {
 
     use super::*;
     use crate::boundary::HeaderMap;
+    use crate::capability::CapabilitySet;
 
     /// Place `secret` in a uniquely-named environment variable and return its `env://` locator.
     pub(in crate::capability) fn env_locator(secret: &str) -> Locator {
@@ -313,7 +292,10 @@ pub(super) mod tests {
     }
 
     /// A capability over one opaque header route in `advisory` mode; returns it with the phantom.
-    fn advisory_header_capability(dest: &str, secret: &str) -> (CredentialCapability, String) {
+    pub(in crate::capability) fn advisory_header_capability(
+        dest: &str,
+        secret: &str,
+    ) -> (CredentialCapability, String) {
         let opened = Vault::open(
             VaultConfig::new(Backend::local(), "tenant").route(
                 RouteSpec::opaque(
@@ -334,8 +316,11 @@ pub(super) mod tests {
     }
 
     /// Assert that `outcome` swaps in the real secret and strips the placeholder location.
-    fn assert_swapped_to_real_secret(outcome: &Outcome) {
-        let edits = outcome.as_ref().expect("advisory must inject, not refuse");
+    fn assert_swapped_to_real_secret(outcome: &Result<RequestEdits, String>) {
+        let edits = &outcome
+            .as_ref()
+            .expect("advisory must inject, not refuse")
+            .mutations;
         assert!(
             edits.iter().any(|m| matches!(
                 m,
@@ -369,11 +354,11 @@ pub(super) mod tests {
         let (capability, phantom) = header_capability("api.github.com", "real-secret");
         let mut headers = HeaderMap::new();
         headers.append("Authorization", format!("Bearer {phantom}"));
-        let mut req = request("api.github.com", headers);
+        let req = request("api.github.com", headers);
 
-        let outcome = capability.on_request(&mut req);
+        let outcome = capability.on_request(&req, RequestMode::Unpaired);
 
-        let edits = outcome.expect("the happy path produces edits");
+        let edits = outcome.expect("the happy path produces edits").mutations;
         assert!(
             edits.iter().any(|m| matches!(
                 m,
@@ -406,9 +391,9 @@ pub(super) mod tests {
         let (capability, _phantom) = header_capability("api.github.com", "real-secret");
         let mut headers = HeaderMap::new();
         headers.append("Authorization", "Bearer strands_box_not-the-right-phantom");
-        let mut req = request("api.github.com", headers);
+        let req = request("api.github.com", headers);
 
-        let outcome = capability.on_request(&mut req);
+        let outcome = capability.on_request(&req, RequestMode::Unpaired);
 
         assert!(
             outcome.is_err(),
@@ -421,18 +406,18 @@ pub(super) mod tests {
     #[test]
     fn a_missing_phantom_is_unavailable() {
         let (capability, _) = header_capability("api.github.com", "real-secret");
-        let mut req = request("api.github.com", HeaderMap::new());
+        let req = request("api.github.com", HeaderMap::new());
 
-        assert!(capability.on_request(&mut req).is_err());
+        assert!(capability.on_request(&req, RequestMode::Unpaired).is_err());
     }
 
     /// An advisory route injects the real secret when the request presents no placeholder.
     #[test]
     fn advisory_injects_when_the_placeholder_is_absent() {
         let (capability, _) = advisory_header_capability("api.github.com", "real-secret");
-        let mut req = request("api.github.com", HeaderMap::new());
+        let req = request("api.github.com", HeaderMap::new());
 
-        let outcome = capability.on_request(&mut req);
+        let outcome = capability.on_request(&req, RequestMode::Unpaired);
         assert_swapped_to_real_secret(&outcome);
     }
 
@@ -442,9 +427,9 @@ pub(super) mod tests {
         let (capability, _phantom) = advisory_header_capability("api.github.com", "real-secret");
         let mut headers = HeaderMap::new();
         headers.append("Authorization", "Bearer strands_box_not-the-right-phantom");
-        let mut req = request("api.github.com", headers);
+        let req = request("api.github.com", headers);
 
-        let outcome = capability.on_request(&mut req);
+        let outcome = capability.on_request(&req, RequestMode::Unpaired);
         assert_swapped_to_real_secret(&outcome);
     }
 
@@ -454,12 +439,12 @@ pub(super) mod tests {
         let (capability, phantom) = advisory_header_capability("api.github.com", "real-secret");
         let mut headers = HeaderMap::new();
         headers.append("Authorization", format!("Bearer {phantom}"));
-        let mut req = request("api.github.com", headers);
+        let req = request("api.github.com", headers);
 
-        let outcome = capability.on_request(&mut req);
+        let outcome = capability.on_request(&req, RequestMode::Unpaired);
         assert_swapped_to_real_secret(&outcome);
         assert!(
-            req.advisory_note.is_none(),
+            outcome.unwrap().advisory.is_none(),
             "a matching placeholder is not an advisory override"
         );
     }
@@ -469,8 +454,9 @@ pub(super) mod tests {
     fn advisory_injection_annotates_the_request_for_the_journal() {
         let (capability, _) = advisory_header_capability("api.github.com", "real-secret");
         let mut req = request("api.github.com", HeaderMap::new());
-
-        let _ = capability.on_request(&mut req);
+        CapabilitySet::new(vec![capability])
+            .apply_to_request(&mut req)
+            .unwrap();
         let note = req
             .advisory_note
             .as_deref()
@@ -494,13 +480,17 @@ pub(super) mod tests {
         let mut req = request("api.github.com", HeaderMap::new());
 
         // Advisory injection (absent placeholder) records the note.
-        let _ = advisory_cap.on_request(&mut req);
+        CapabilitySet::new(vec![advisory_cap])
+            .apply_to_request(&mut req)
+            .unwrap();
         assert!(req.advisory_note.is_some(), "advisory records the note");
 
         // A second control that matches its own phantom is a normal swap and must not erase it.
         req.headers
-            .append("Authorization", format!("Bearer {phantom}"));
-        let _ = strict_cap.on_request(&mut req);
+            .set("Authorization", format!("Bearer {phantom}"));
+        CapabilitySet::new(vec![strict_cap])
+            .apply_to_request(&mut req)
+            .unwrap();
         assert!(
             req.advisory_note.is_some(),
             "a normal swap must not clobber the advisory note"
@@ -513,7 +503,7 @@ pub(super) mod tests {
         let (capability, _) = header_capability("api.github.com", "real-secret");
         let mut req = request("api.github.com", HeaderMap::new());
 
-        let outcome = capability.on_request(&mut req);
+        let outcome = CapabilitySet::new(vec![capability]).apply_to_request(&mut req);
         assert!(outcome.is_err(), "strict fails closed");
         assert!(req.advisory_note.is_none(), "a refusal is not an allow");
     }
@@ -524,10 +514,10 @@ pub(super) mod tests {
         let (capability, phantom) = header_capability("api.github.com", "real-secret");
         let mut headers = HeaderMap::new();
         headers.append("Authorization", format!("Bearer {phantom}"));
-        let mut req = request("api.stripe.com", headers);
+        let req = request("api.stripe.com", headers);
 
-        let outcome = capability.on_request(&mut req);
-        assert_eq!(outcome, Ok(Vec::new()));
+        let outcome = capability.on_request(&req, RequestMode::Unpaired).unwrap();
+        assert!(outcome.mutations.is_empty());
     }
 
     /// A secret echoed back by the upstream is redacted out of the response body.
@@ -555,12 +545,12 @@ pub(super) mod tests {
         let mut headers = HeaderMap::new();
         headers.append("Authorization", format!("Bearer {phantom}"));
         headers.append("Accept-Encoding", "gzip, br");
-        let mut req = request("api.github.com", headers);
+        let req = request("api.github.com", headers);
 
-        let outcome = capability.on_request(&mut req);
+        let outcome = capability.on_request(&req, RequestMode::Unpaired);
 
         assert!(
-            outcome.as_ref().unwrap().iter().any(|m| matches!(
+            outcome.as_ref().unwrap().mutations.iter().any(|m| matches!(
                 m,
                 Mutation::SetHeader { name, value }
                     if name == "accept-encoding" && value.as_str() == "identity"
@@ -575,11 +565,11 @@ pub(super) mod tests {
         let (capability, _) = header_capability("api.github.com", "real-secret");
         let mut headers = HeaderMap::new();
         headers.append("Accept-Encoding", "gzip");
-        let mut req = request("example.com", headers);
+        let req = request("example.com", headers);
 
-        let outcome = capability.on_request(&mut req);
+        let outcome = capability.on_request(&req, RequestMode::Unpaired).unwrap();
 
-        assert_eq!(outcome, Ok(Vec::new()));
+        assert!(outcome.mutations.is_empty());
     }
 
     /// A compressed body on a credentialed route is refused, because the scrub cannot read it.
