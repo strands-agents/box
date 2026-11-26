@@ -6,7 +6,8 @@ The snapshot keeps what was collected before success or failure and stays unchan
 `strands-box-cli-telemetry` [owns collection and serialization](decisions.md#telemetry-owns-observation-and-payload-construction). The CLI passes loaded sources
 and resolved targets at the preparation steps. The fields follow the pinned schema, which the repository holds as
 [`crates/cli/telemetry/tests/fixtures/box.schema.json`](../../../crates/cli/telemetry/tests/fixtures/box.schema.json),
-copied from the telemetry service's `schema/box.schema.json` at revision `f8b2541`, and the telemetry
+copied from the telemetry service's `schema/box.schema.json` at revision `f8b2541` with one addition,
+the optional `shutdown` field `core_code`, which the service must accept before a release sends it. The telemetry
 tests check each payload against it.
 The schema describes startup latency from invocation start. The CLI uses the narrower
 launch-preparation boundary below; the schema's validation rules are unchanged.
@@ -214,6 +215,8 @@ nonzero CLI result. These fields do not expose a workload exit code or signal.
 `finish`. The code is the one Core's stderr line prints. It arrives even when Core fails before it
 opens telemetry, where `core_outcome` is `null`. It is `null` when Core reports no failure: the
 run succeeded, the workload exited nonzero, or the CLI failed before Core ran.
+The CLI always sends the field, but the schema does not require it, so shutdown events from
+released CLIs that lack it still validate.
 
 The shutdown event retains the invocation's IDs and context. A crash or force-kill can prevent
 it. Its absence does not establish a crash, and its exit outcome does not establish that the

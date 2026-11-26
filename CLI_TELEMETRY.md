@@ -27,7 +27,7 @@ or turn it off through environment variables.
 | [Profile](docs/cli/profiles.md) | A hash (a fingerprint) of `profile.toml`, the names of packs included with `box` that it uses, and whether it names policy files, uses custom packs, or has MCP servers set up. |
 | Start | Whether the box launched, the kind of error if it didn't, and how long startup took. |
 | Activity | How many times the box permitted or denied each kind of action, such as `fs:write` or `shell:exec`. |
-| End | How long the run took, whether the command succeeded, and whether the box finished or reported an error. |
+| End | How long the run took, whether the command succeeded, and whether the box finished or reported an error, with that error's [message code](docs/user/message-codes.md). |
 
 Counts can be incomplete and don't replace your
 [local records](docs/cli/cli.md#box-runs-history).

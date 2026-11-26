@@ -415,6 +415,19 @@ mod tests {
             None,
         ));
         assert_eq!(early["data"]["invocation_duration_ms"], 0);
+        // A released CLI sends no `core_code`; the schema must still accept its shutdown event.
+        let mut released = refused_without_code(&invocation, completed);
+        released["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("core_code");
+        let schema: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/box.schema.json")).unwrap();
+        assert!(
+            jsonschema::validator_for(&schema)
+                .unwrap()
+                .is_valid(&released)
+        );
         for code in ["B0114", "P0303", "uncoded"] {
             let refused = validate(&invocation.shutdown_event(
                 completed,
@@ -424,6 +437,10 @@ mod tests {
             ));
             assert_eq!(refused["data"]["core_code"], code);
         }
+    }
+
+    fn refused_without_code(invocation: &Invocation, completed: Instant) -> Value {
+        validate(&invocation.shutdown_event(completed, ExitOutcome::Nonzero, None, None))
     }
 
     #[test]

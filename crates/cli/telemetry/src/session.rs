@@ -104,13 +104,13 @@ impl Session {
         }
     }
 
-    /// Observe the journal while the caller retains the box's instance lock.
     /// Report the message code of the failure that ended Core's run, such as `B0114`, or
     /// `uncoded` for a Box defect. The shutdown event carries it; call it before `finish`.
     pub fn core_code(&self, code: &'static str) {
         let _ = self.commands.send(Command::CoreCode(code));
     }
 
+    /// Observe the journal while the caller retains the box's instance lock.
     pub fn observe(&mut self, journal: Journal, catalog: ActionCatalog) {
         self.observe_from(journal, catalog, Instant::now());
     }

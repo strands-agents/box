@@ -2695,6 +2695,22 @@ fn core_code(received: &strands_box::RunEventReceiver) -> Option<&'static str> {
     None
 }
 
+#[cfg(test)]
+#[test]
+fn every_core_code_fits_the_telemetry_schema_pattern() {
+    // The schema's `core_code` pattern is `^([BHPT][0-9]{4}|uncoded)$`.
+    for code in diagnostics::Code::ALL {
+        let text = code.as_str();
+        let (prefix, digits) = text.split_at(1);
+        assert!(
+            "BHPT".contains(prefix)
+                && digits.len() == 4
+                && digits.bytes().all(|b| b.is_ascii_digit()),
+            "{text} does not fit the shutdown event's core_code pattern"
+        );
+    }
+}
+
 /// Ask `question` before a removal, and refuse to go on without a yes or when `interactive` is
 /// false.
 pub fn confirm(
