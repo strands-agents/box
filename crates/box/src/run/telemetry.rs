@@ -1834,14 +1834,17 @@ mod tests {
         collector.drained().await;
 
         let text = std::fs::read_to_string(&records).expect("the records");
+        // One exported line can carry several log records, so each record's attributes are read.
+        let items = |value: &serde_json::Value, key: &str| {
+            value[key].as_array().cloned().unwrap_or_default()
+        };
         let decided: Vec<Vec<serde_json::Value>> = text
             .lines()
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .filter_map(|line| {
-                line.pointer("/resourceLogs/0/scopeLogs/0/logRecords/0/attributes")
-                    .and_then(serde_json::Value::as_array)
-                    .cloned()
-            })
+            .flat_map(|line| items(&line, "resourceLogs"))
+            .flat_map(|resource| items(&resource, "scopeLogs"))
+            .flat_map(|scope| items(&scope, "logRecords"))
+            .map(|record| items(&record, "attributes"))
             .collect();
         let value = |host: &str, key: &str| {
             decided
