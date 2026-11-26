@@ -920,7 +920,7 @@ fn two_servers_whose_commands_expand_to_one_command_are_refused_at_start() {
     );
 
     box_.release_workload();
-    let output = box_.spawn_attempt().wait(SHUTDOWN);
+    let output = box_.spawn_attempt().wait(BOX_STARTUP);
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -1157,7 +1157,7 @@ fn overlapping_wildcard_commands_are_refused_before_the_workload_starts() {
         box_.set_argument_wildcards("alpha", true);
         box_.set_argument_wildcards("beta", true);
         box_.release_workload();
-        let output = box_.spawn_attempt().wait(SHUTDOWN);
+        let output = box_.spawn_attempt().wait(BOX_STARTUP);
         assert!(!output.status.success(), "{output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("overlapping wildcard commands"), "{stderr}");
@@ -1169,7 +1169,7 @@ fn overlapping_wildcard_commands_are_refused_before_the_workload_starts() {
         assert_eq!(box_.invocation_count("shared-mcp"), 0);
 
         box_.set_argument_wildcards("alpha", false);
-        let output = box_.spawn_attempt().wait(SHUTDOWN);
+        let output = box_.spawn_attempt().wait(BOX_STARTUP);
         assert!(output.status.success(), "{output:?}");
         assert!(box_.workload_path("workload.started").exists());
     }
