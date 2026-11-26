@@ -435,11 +435,14 @@ mod tests {
 
     #[test]
     fn request_timeout_does_not_retry_an_ambiguous_failure() {
-        let server = Server::start(OK, Duration::from_millis(250));
+        // The server answers long after the 40 ms timeout, so a send that waited for it shows,
+        // and a loaded runner still has margin below the bound. The server reads one connection
+        // at a time, so a retry reaches it only after the delay; the last window outlasts that.
+        let server = Server::start(OK, Duration::from_millis(1_000));
         let delivery = server.delivery(Duration::from_millis(40));
         let started = Instant::now();
         delivery.send(&invocation().run_event(LaunchOutcome::Unknown), None);
-        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(started.elapsed() < Duration::from_millis(500));
         server
             .requests
             .recv_timeout(Duration::from_secs(1))
@@ -447,7 +450,7 @@ mod tests {
         assert!(
             server
                 .requests
-                .recv_timeout(Duration::from_millis(350))
+                .recv_timeout(Duration::from_millis(1_350))
                 .is_err()
         );
     }

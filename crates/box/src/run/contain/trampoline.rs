@@ -1264,7 +1264,9 @@ mod tests {
         let moved = parent.path().join("moved-cache");
         let image_name = std::ffi::OsStr::new("image");
         std::fs::create_dir(&cache).expect("cache directory");
-        std::fs::copy("/usr/bin/true", cache.join(image_name)).expect("approved image");
+        // Scripts, not copies of /usr/bin/true and false: a multi-call coreutils binary picks its
+        // behavior from its file name, so a copy named `image` exits 1.
+        std::fs::write(cache.join(image_name), "#!/bin/sh\nexit 0\n").expect("approved image");
         std::fs::set_permissions(
             cache.join(image_name),
             std::fs::Permissions::from_mode(0o700),
@@ -1273,7 +1275,7 @@ mod tests {
         let opened = File::open(&cache).expect("cache descriptor");
         std::fs::rename(&cache, &moved).expect("move cache directory");
         std::fs::create_dir(&cache).expect("replacement cache directory");
-        std::fs::copy("/usr/bin/false", cache.join(image_name)).expect("replacement image");
+        std::fs::write(cache.join(image_name), "#!/bin/sh\nexit 1\n").expect("replacement image");
         std::fs::set_permissions(
             cache.join(image_name),
             std::fs::Permissions::from_mode(0o700),
@@ -1282,7 +1284,20 @@ mod tests {
 
         let mut command = command_in_directory(opened, image_name);
         command.current_dir(&cache);
-        let status = command.status().await.expect("cached image runs");
+        // A sibling test's child can hold the copy's writer until it execs, and Linux then answers
+        // ETXTBSY, so retry for a short while.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let status = loop {
+            match command.status().await {
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ETXTBSY)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                result => break result.expect("cached image runs"),
+            }
+        };
 
         assert!(status.success(), "the opened cache must select the image");
     }

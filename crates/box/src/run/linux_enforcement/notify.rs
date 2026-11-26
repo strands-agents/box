@@ -415,12 +415,23 @@ mod tests {
         transfer(&sender, &[writer.as_raw_fd()]).unwrap();
         drop(writer);
         assert!(receive_handles(&receiver, 2).is_err());
+        // A sibling test's forked child holds a copy of the writer until it execs, so wait briefly
+        // for end of file. A writer the handoff leaked keeps the read at EAGAIN and fails.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let mut byte = 0_u8;
-        assert_eq!(
+        let read = loop {
             // SAFETY: byte is writable for the one byte requested; the reader remains owned.
-            unsafe { libc::read(reader.as_raw_fd(), (&mut byte as *mut u8).cast(), 1) },
-            0
-        );
+            let read = unsafe { libc::read(reader.as_raw_fd(), (&mut byte as *mut u8).cast(), 1) };
+            if read == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN)
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            break read;
+        };
+        assert_eq!(read, 0);
     }
 
     #[test]
