@@ -12,6 +12,19 @@ print(json.dumps({"ready": True}), flush=True)
 for line in sys.stdin:
     request = json.loads(line)
     path = request["path"]
+    if request["interpreter"] == "native":
+        # The contained agent uses native grants, without a hosted interpreter alias.
+        try:
+            if request["operation"] == "read":
+                output = pathlib.Path(path).read_text()
+            else:
+                pathlib.Path(path).write_text(request["text"])
+                output = ""
+            result = {"status": 0, "stdout": output, "stderr": ""}
+        except OSError as error:
+            result = {"status": 1, "stdout": "", "stderr": str(error)}
+        print(json.dumps(result), flush=True)
+        continue
     if request["interpreter"] == "shell":
         if request["operation"] == "read":
             source = "cat " + shlex.quote(path)

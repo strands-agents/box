@@ -244,12 +244,11 @@ policy to decide the write. It then acts on the resolved object. A symlink swap 
 and the write cannot redirect the operation because
 [the resolved token binds the object](decisions.md#a-resolved-token-binds-the-object-it-names).
 
-The reachable paths check runs after policy and can still refuse the operation. It rejects paths
-outside the operator's home, the agent's home, the workspace, and the approved directories selected
-by `[agent.filesystem] receive_mounts` in `box.toml`. Tool and local MCP selections do not expand
-this set. The check also rejects paths inside the box directory and the configuration and policy
-files loaded for this run. A policy permit cannot
-override these restrictions.
+The reachable paths check runs after policy and can still refuse the operation. It rejects host
+filesystem access outside the [hosted filesystem roots](../user/config.md#hosted-filesystem-roots),
+inside the box directory, and to the configuration and policy files loaded for this run. A policy
+permit cannot override these restrictions. The resolver and Shell binds use the approved canonical storage
+paths; accepting a symbolic link in a native mount selection does not create a hosted alias.
 
 That check does not protect credentials elsewhere in the operator's home. An `fs:read` permit with
 no path condition can expose files under `~/.ssh`, because

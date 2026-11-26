@@ -122,6 +122,7 @@ fn drop_publisher_capabilities() -> std::io::Result<()> {
 #[derive(Clone, Copy)]
 enum Selection {
     Agent,
+    AgentAlias,
     ToolOnly,
     Omitted,
 }
@@ -201,7 +202,13 @@ impl Publisher {
         )
         .unwrap();
         std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let read = [
+        let alias_parent = root.join("native-alias");
+        let alias = alias_parent.join("data");
+        if matches!(selection, Selection::AgentAlias) {
+            std::fs::create_dir(&alias_parent).unwrap();
+            std::os::unix::fs::symlink(&selected, &alias).unwrap();
+        }
+        let mut read = [
             vec![
                 bin.clone(),
                 agent_home.clone(),
@@ -211,6 +218,10 @@ impl Publisher {
             libraries.clone(),
         ]
         .concat();
+        if matches!(selection, Selection::AgentAlias) {
+            // Make the link visible to native code while grants still name canonical storage.
+            read.push(alias_parent);
+        }
         let exec = [
             vec![python.clone(), selected.clone(), other.clone()],
             libraries,
@@ -218,6 +229,7 @@ impl Publisher {
         .concat();
         let receive = match selection {
             Selection::Agent => format!("receive_mounts = [{selected:?}]\n"),
+            Selection::AgentAlias => format!("receive_mounts = [{alias:?}]\n"),
             _ => String::new(),
         };
         let mut text = format!(
@@ -517,4 +529,111 @@ fn hosted_interpreters_obey_readonly_options_on_arriving_mounts() {
         );
         run.finish();
     });
+}
+
+#[test]
+fn an_authored_receiving_alias_keeps_canonical_hosted_paths_and_policy() {
+    for policy_path in ["permit", "authored", "canonical"] {
+        isolated(|root| {
+            let publisher = Publisher::new(root, Selection::AgentAlias);
+            // The alias is outside every hosted root; its parent has only a native read grant.
+            let alias = root.join("native-alias/data");
+            let forbidden = match policy_path {
+                "authored" => Some(&alias),
+                "canonical" => Some(&publisher.selected),
+                _ => None,
+            };
+            let mut policy = "permit(principal, action, resource);\n".to_owned();
+            if let Some(path) = forbidden {
+                let pattern = format!("{}/*", path.display());
+                policy.push_str(&format!(
+                    "forbid(principal, action in [Box::Action::\"fs:read\", Box::Action::\"fs:write\"], resource) when {{ context.input.path like {pattern:?} }};\n"
+                ));
+            }
+            std::fs::write(publisher.config.parent().unwrap().join("policy.dw"), policy).unwrap();
+            let mut run = publisher.start();
+            for path in [&alias, &publisher.selected] {
+                run.read("native", &path.join("value"), "initial");
+            }
+            publisher.arrive(false);
+            for path in [&alias, &publisher.selected] {
+                run.read("native", &path.join("value"), "arrived");
+            }
+            let policy_denied = |result: &Value| {
+                assert_ne!(result["status"], 0, "{policy_path}: {result}");
+                assert_eq!(result["stdout"], "", "{policy_path}: {result}");
+                assert!(
+                    result["stderr"]
+                        .as_str()
+                        .unwrap()
+                        .contains("policy denied this operation"),
+                    "{policy_path}: {result}"
+                );
+            };
+            for interpreter in ["shell", "monty"] {
+                let canonical_read =
+                    run.request(interpreter, "read", &publisher.selected.join("value"), "");
+                let created_name = format!("{interpreter}-created");
+                let canonical_write = run.request(
+                    interpreter,
+                    "write",
+                    &publisher.selected.join(&created_name),
+                    "canonical-write",
+                );
+                if policy_path == "canonical" {
+                    policy_denied(&canonical_read);
+                    policy_denied(&canonical_write);
+                    assert!(!publisher.payload.join(&created_name).exists());
+                } else {
+                    assert_eq!(canonical_read["status"], 0, "{canonical_read}");
+                    assert_eq!(canonical_read["stdout"], "arrived", "{canonical_read}");
+                    assert_eq!(canonical_write["status"], 0, "{canonical_write}");
+                    assert_eq!(
+                        std::fs::read_to_string(publisher.payload.join(&created_name)).unwrap(),
+                        "canonical-write"
+                    );
+                }
+                for (operation, name) in [
+                    ("read", "value"),
+                    ("write", "value"),
+                    ("write", "alias-created"),
+                ] {
+                    let result =
+                        run.request(interpreter, operation, &alias.join(name), "alias-write");
+                    if policy_path == "authored" {
+                        // Policy checks the requested spelling before Monty's reach check.
+                        policy_denied(&result);
+                    } else if interpreter == "monty" {
+                        assert_ne!(result["status"], 0, "{result}");
+                        assert!(
+                            result["stderr"]
+                                .as_str()
+                                .unwrap()
+                                .contains("outside this box's home and every declared bind"),
+                            "{result}"
+                        );
+                    }
+                    if operation == "read" {
+                        assert_ne!(result["stdout"], "arrived", "{result}");
+                    }
+                    // Shell may use an ordinary virtual path here; it must not alias host storage.
+                    assert_eq!(
+                        std::fs::read_to_string(publisher.payload.join("value")).unwrap(),
+                        "arrived"
+                    );
+                    assert!(!publisher.payload.join("alias-created").exists());
+                }
+            }
+            // The same authored alias still reaches the arrived mount through native grants.
+            let native_write = run.request("native", "write", &alias.join("value"), "native-write");
+            assert_eq!(native_write["status"], 0, "{native_write}");
+            run.read("native", &publisher.selected.join("value"), "native-write");
+            assert_eq!(
+                std::fs::read_to_string(publisher.payload.join("value")).unwrap(),
+                "native-write"
+            );
+            run.finish();
+            eprintln!("authored receiving alias: {policy_path} scenario passed after real arrival");
+        });
+    }
 }

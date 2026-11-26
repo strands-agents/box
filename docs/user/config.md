@@ -699,14 +699,11 @@ entries. An empty or omitted array keeps ordinary, private mount behavior. Linux
 experimental feature flag. On macOS, any `receive_mounts` key rejects configuration loading,
 including `receive_mounts = []`; omit the key to start Box.
 
-An agent selection also makes its approved canonical directory available to Strands Shell and
-Monty, the hosted Python interpreter, in the box's trusted process. Each file operation still
-requires a policy permit and passes the existing protected-state and command checks. A tool or
-local server selection does not extend hosted access. Omitting the agent selection does not remove
-the interpreters' existing access to the operator home, agent home, or workspace under policy.
+Agent selections also extend [hosted filesystem access](#hosted-filesystem-roots). Native grants
+and hosted policy permissions remain separate.
 
-Listing a directory grants no access. The agent must separately grant the whole directory read,
-write, and execution access. Tools and local servers need whole-directory read and write grants;
+Selection adds no native grant or hosted policy permission. The agent must separately grant the
+whole directory read, write, and execution access. Tools and local servers need whole-directory read and write grants;
 their existing execution rules already permit code in those grants. A covering parent grant works;
 child and exact-file grants do not. For an existing connected mount at `/mnt/data`, add:
 
@@ -740,6 +737,34 @@ local servers that start on demand.
 Paths must be absolute and literal, other than `/`. They cannot be home-relative, contain patterns,
 control characters, or `..`. Within one process, selections cannot repeat or contain one another:
 `/mnt/data` and `/mnt/data/child` conflict. Different processes may select the same directory.
+
+### Hosted filesystem roots
+
+Strands Shell and Monty, the hosted Python interpreter, can access the operator home, agent home,
+and workspace under policy. On Linux, the agent's approved `receive_mounts` directories also join
+this set, using their canonical paths: the paths after symbolic links are resolved. Tool and local
+server selections add no hosted roots. Ordinary native grants do not expand this set.
+
+Every hosted file operation still needs a policy permit and must pass Box's protected-state,
+configured-command, and file-identity checks. Selecting a directory supplies no policy permission.
+
+Use the canonical path in hosted commands and policy rules. For example, if `/data` is a symbolic
+link to `/mnt/storage`, the native mount selection may name `/data`, but hosted commands must use
+`/mnt/storage`. A policy rule for `/data/*` does not restrict `/mnt/storage/*`. Below the operator
+home, policy uses `~/<relative path>` instead of the absolute canonical path.
+
+Assume the agent selects `/mnt/storage`, the mounted filesystem contains `input.txt`, and policy
+permits the commands and reads. Inside the agent, run these commands from its workspace to read
+the same host file through Shell and Monty:
+
+```sh
+sh -c 'cat /mnt/storage/input.txt'
+python3 -c 'from pathlib import Path; print(Path("/mnt/storage/input.txt").read_text())'
+```
+
+An alias outside the hosted roots does not expose that host file. Monty refuses the path. Shell
+treats it as an in-memory path: an operation can fail or affect only that command's temporary
+filesystem. Use the canonical path to access the mounted storage.
 
 ### Direct access by operating system
 
