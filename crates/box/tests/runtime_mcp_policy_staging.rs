@@ -2566,7 +2566,7 @@ fn runtime_ignores_workspace_and_private_generated_schema_artifacts() {
     }
     let box_ = RuntimeMcpBox::new("mcp-stale-schemas");
     box_.write_workspace("", &[], ":");
-    let initialized = box_.spawn().wait(SHUTDOWN);
+    let initialized = box_.spawn().wait(BOX_STARTUP);
     assert!(
         initialized.status.success(),
         "the initial run must create valid private state: {}",
