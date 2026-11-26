@@ -9,6 +9,7 @@ use crate::model::{
     BackendOverride, CommandIdentity, IpcMode, Network, Operation, PathGrant,
     PreparedFilesystemPath, ProcessInfoMode, Scope, SignalMode, WriteProtection,
 };
+use crate::receiving::ReceivingMount;
 
 type Result<T> = std::result::Result<T, ContainmentError>;
 
@@ -23,6 +24,13 @@ type Result<T> = std::result::Result<T, ContainmentError>;
 #[serde(deny_unknown_fields)]
 pub struct ContainmentConfig {
     paths: Vec<PathGrant>,
+    /// Approved sources for incoming Linux mounts. Selecting a source grants no access.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::receiving::deserialize_sources"
+    )]
+    receiving_mounts: Vec<ReceivingMount>,
     identity_requirements: Vec<WriteProtection>,
     write_protections: Vec<WriteProtection>,
     /// Directories inside a write grant whose whole tree the workload may read but not write.
@@ -93,6 +101,7 @@ impl ContainmentConfig {
     pub fn new() -> Self {
         Self {
             paths: Vec::new(),
+            receiving_mounts: Vec::new(),
             identity_requirements: Vec::new(),
             write_protections: Vec::new(),
             write_protected_trees: Vec::new(),
@@ -194,6 +203,28 @@ impl ContainmentConfig {
     /// Resolve one existing filesystem path before an authorization decision.
     pub fn prepare_filesystem_path(path: impl AsRef<Path>) -> Result<PreparedFilesystemPath> {
         PreparedFilesystemPath::new(path)
+    }
+
+    /// Receive incoming Linux mounts at an already-approved directory.
+    ///
+    /// `path` must be the directory's canonical absolute path. The opened `directory` fixes the
+    /// approved object identity; this call retains a duplicate and refuses a replaced path. It adds
+    /// no access grants. The Linux backend separately requires whole-directory permissions and a
+    /// dedicated source mount with an upstream connection. Other platforms refuse this setting.
+    pub fn receive_mounts_from(
+        mut self,
+        path: impl AsRef<Path>,
+        directory: &std::fs::File,
+    ) -> Result<Self> {
+        let source = ReceivingMount::from_opened(path.as_ref(), directory)?;
+        source.require_disjoint(&self.receiving_mounts)?;
+        self.receiving_mounts.push(source);
+        Ok(self)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn receiving_mounts(&self) -> &[ReceivingMount] {
+        &self.receiving_mounts
     }
 
     /// Authorize one operation at one scope on one path.
@@ -623,6 +654,9 @@ impl ContainmentConfig {
     /// `pub(crate)` because each backend re-runs it at its own last safe point, which is this crate's
     /// stated pattern: validate at the façade, then again where the rule is built.
     pub(crate) fn require_live_path_identities(&self) -> Result<()> {
+        for source in &self.receiving_mounts {
+            source.validate_live_identity()?;
+        }
         for granted in &self.paths {
             granted.validate_live_identity()?;
         }

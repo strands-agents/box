@@ -338,19 +338,20 @@ Those checks govern the requested operation, not later actions by a separate pro
 macOS also retains root file creation inside granted directories.
 Seatbelt path denials govern the sandboxed process's own access.
 
-### Linux incoming mount groundwork
+### Linux incoming mounts
 
-Normal Box launches build a private filesystem view. They do not receive filesystems mounted
-elsewhere after startup. Box Core rejects nonempty `filesystem.receive_mounts` selections, as
-[the configuration reference](../user/config.md) describes.
+Box launches build a private filesystem view except at explicitly selected
+`filesystem.receive_mounts` directories. At those directories, Box establishes a one-way receiving
+connection before the process starts. Linux propagates later mounts directly; no background watcher,
+copy of file contents, or Runtime readiness handshake is involved. See
+[the configuration reference](../user/config.md#incoming-mount-declarations) for the permission contract.
 
-The Linux backend also has an internal `MountView::plan_receiving_mounts` path for selected
-storage directories. Each directory must already be a dedicated mount point with an upstream
+The Linux mount planner receives each selected storage directory through `ContainmentConfig`. Each directory must already be a dedicated mount point with an upstream
 connection. This implementation pins and verifies each selected mount by its own mount ID.
 A shared parent alone cannot satisfy that check. This is a planner requirement, not a Linux
 limitation on receiving mounts beneath an ordinary directory. The internal planner requires
 covering writable and executable grants and rejects intersecting protected paths; these checks
-do not replace the complete per-process permission checks needed before public activation.
+do not replace Core's per-process permission checks.
 
 During setup, this path keeps sources attached, binds the selected subtrees into the sandbox,
 and makes unrelated mounts private. A bind makes the same filesystem visible at another path;
@@ -367,9 +368,45 @@ ordinary grants and selected storage.
 Future mounts retain the trusted publisher's
 options and contents: Box does not add read-only, `noexec`, `nosuid`, or `nodev` restrictions to
 those arrivals. These options respectively block writes, executable file mappings, privilege
-gains through executable file attributes, and device-node use. Complete per-process permission
-validation and the handoff of each approved source remain separate work. The normal planner
-passes an empty selection, so this internal path does not change normal launches.
+gains through executable file attributes, and device-node use. Core's per-process checks
+are described below. Omitting the selection leaves ordinary launches unchanged.
+
+### Core validation of incoming mount selections
+
+Core checks the directories in one process's `filesystem.receive_mounts`
+selection. It runs during run-wide judgment and again when translating an agent, configured tool,
+or local MCP server's launch. The agent must grant the whole directory read, write, and execute
+access. A tool or local MCP server must grant read and write access; its existing execution rules
+already cover those grants. A covering parent grant is sufficient. Child and exact-file grants are not.
+Provider read-only or execution restrictions do not reduce these configuration requirements.
+
+The checker rejects overlapping selections and any intersection with a denied path, a write-protected
+path, Box's state directory, or loaded authority sources. Restrictions on absent descendants also
+cause rejection. Existing configured-command and installed-program protections still run. The
+native filesystem policy cannot be combined with a nonempty selection. No mount feature flag is
+required on Linux. macOS rejects declarations through its existing configuration checks.
+
+Each selected directory stays open while the checker compares permissions and protected paths.
+Coverage and identity comparisons follow parent directories from this open object, rather than
+reopening the selected pathname. Path comparisons also preserve restrictions on future descendants.
+These checks visit permission paths and their ancestors; they do not list all storage contents.
+Existing command-alias scans retain their separate behavior.
+
+The translated boundary passes each already-open directory to
+`ContainmentConfig::receive_mounts_from`. This method records its canonical path and mandatory object
+identity separately from access grants. Core retains the open object through launch; the serialized
+configuration cannot silently adopt another directory at the same pathname. The existing opened
+configuration file and digest bind the handoff to the bytes Core prepared.
+
+The trampoline loads the configuration and checks each identity again. The Linux planner checks
+the selected directory against the lowered grants, then captures the corresponding mount in its
+current namespace. It retains the existing mount-ID and connection checks before and after setup.
+The setup process releases its pins through the existing cleanup before workload execution; the
+workload gains no source descriptor. Core retains its own approved objects through launch. A failed
+check prevents that process from running.
+
+The startup disclosure names each selected path and its whole-directory permission contract.
+On-demand local MCP servers are disclosed before the agent starts and again when the server starts.
 
 ### Linux filesystem metadata
 

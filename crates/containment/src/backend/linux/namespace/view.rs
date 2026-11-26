@@ -92,16 +92,32 @@ pub(crate) struct MountView {
 }
 
 impl MountView {
-    /// Plan the view from a request, without touching any namespace.
-    pub(crate) fn plan(config: &ContainmentConfig) -> Result<Self, ContainmentError> {
-        Self::plan_receiving_mounts(config, &[])
-    }
-
-    /// Plan whole-directory receiving mounts for a caller that has checked compatibility.
+    /// Test callers use the same approved-source builder as production callers.
+    #[cfg(test)]
     pub(crate) fn plan_receiving_mounts(
         config: &ContainmentConfig,
         incoming_mounts: &[PathBuf],
     ) -> Result<Self, ContainmentError> {
+        let mut config = config.clone();
+        for path in incoming_mounts {
+            let directory = std::fs::File::open(path).map_err(|error| {
+                refusal(format!(
+                    "opening incoming mount '{}': {error}",
+                    path.display()
+                ))
+            })?;
+            config = config.receive_mounts_from(path, &directory)?;
+        }
+        Self::plan(&config)
+    }
+
+    /// Plan the view from a request, without touching any namespace.
+    pub(crate) fn plan(config: &ContainmentConfig) -> Result<Self, ContainmentError> {
+        let incoming_mounts: Vec<PathBuf> = config
+            .receiving_mounts()
+            .iter()
+            .map(|source| source.path().to_path_buf())
+            .collect();
         // A script names its interpreter by the host's spelling, such as `#!/bin/sh`. The view
         // copies the host's top-level links into `/usr` and mounts every path written through one
         // at its `/usr` name, so `/bin/sh` resolves wherever `/usr/bin/sh` is bound.
@@ -605,17 +621,13 @@ impl MountView {
                 })
         });
 
-        incoming_mounts::require_compatible_entries(incoming_mounts, &entries)?;
-        for path in incoming_mounts {
-            let metadata = std::fs::metadata(path).map_err(|error| {
-                refusal(format!(
-                    "inspecting incoming mount '{}': {error}",
-                    path.display()
-                ))
-            })?;
-            let identity = ObjectIdentity::from_metadata(&metadata);
+        incoming_mounts::require_compatible_entries(&incoming_mounts, &entries)?;
+        for source in config.receiving_mounts() {
+            source.validate_live_identity()?;
+            let path = source.path();
+            let identity = source.identity();
             if grant_identities
-                .insert(path.clone(), identity)
+                .insert(path.to_path_buf(), identity)
                 .is_some_and(|previous| previous != identity)
             {
                 return Err(refusal(format!(
@@ -627,13 +639,13 @@ impl MountView {
         // Validate the reachable dedicated source mounts before namespace entry. Capture again
         // during materialization so an intervening replacement cannot select an older mount.
         drop(incoming_mounts::capture(
-            incoming_mounts,
+            &incoming_mounts,
             &grant_identities,
         )?);
         let root_links = root_links(&entries, &host_links);
         Ok(Self {
             entries,
-            incoming_mounts: incoming_mounts.to_vec(),
+            incoming_mounts,
             root_links,
             protected_parents,
             grant_identities,
@@ -641,6 +653,12 @@ impl MountView {
                 .authorizations()
                 .iter()
                 .filter_map(|grant| grant.pin.clone())
+                .chain(
+                    config
+                        .receiving_mounts()
+                        .iter()
+                        .map(|source| source.pin().clone()),
+                )
                 .collect(),
             dependency_sources: RefCell::new(dependency_sources),
             mount_locations: RefCell::new(BTreeMap::new()),

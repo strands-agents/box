@@ -35,7 +35,7 @@ pub(crate) mod grammar;
 pub(crate) mod ingress;
 pub(crate) mod limits;
 pub(crate) mod mcp;
-mod mounts;
+pub(crate) mod mounts;
 pub(crate) mod process;
 pub(crate) mod secret_source;
 pub(crate) mod telemetry;
@@ -50,6 +50,7 @@ use policy::{Policy, PolicyEngine, ToolGrammars};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{BoxError, ConfigError};
+use crate::run::contain::boundary::RuntimeReach;
 
 #[cfg(test)]
 use self::egress::routes_for;
@@ -167,10 +168,17 @@ pub(crate) fn read_remote_mcp_servers(path: &Path) -> Result<Vec<RemoteMcpServer
     Ok(servers)
 }
 
+/// One process table, with its diagnostic name and typed containment role.
+pub(crate) struct ProcessTable {
+    pub(crate) name: String,
+    pub(crate) spec: ProcessSpec,
+    pub(crate) runtime_reach: RuntimeReach,
+}
+
 /// Each process table of one configuration, with what judges its filesystem lists.
 pub(crate) struct ProcessTables {
-    /// `[agent]`, each `[tool.<name>]`, and each stdio `[mcp.<name>]`, by table name.
-    pub(crate) tables: Vec<(String, ProcessSpec)>,
+    /// `[agent]`, each `[tool.<name>]`, and each stdio `[mcp.<name>]`, with their roles.
+    pub(crate) tables: Vec<ProcessTable>,
     /// The policy file of the configuration.
     pub(crate) policy: Option<PathBuf>,
     /// Whether the configuration declares a stdio MCP server.
@@ -188,18 +196,24 @@ impl ProcessTables {
         declares_stdio_mcp: bool,
         secret_source: &BTreeMap<String, SecretSourceEntry>,
     ) -> Self {
-        let agent = agent.into_iter().map(|spec| ("[agent]".to_string(), spec));
+        let agent = agent
+            .into_iter()
+            .map(|spec| ("[agent]".to_string(), spec, RuntimeReach::Agent));
         let tools = tool
             .iter()
-            .map(|(label, spec)| (format!("[tool.{label}]"), spec));
+            .map(|(label, spec)| (format!("[tool.{label}]"), spec, RuntimeReach::Leaf));
         let servers = contained_mcp
             .iter()
-            .map(|(label, server)| (format!("[mcp.{label}]"), &server.spec));
+            .map(|(label, server)| (format!("[mcp.{label}]"), &server.spec, RuntimeReach::Leaf));
         Self {
             tables: agent
                 .chain(tools)
                 .chain(servers)
-                .map(|(table, spec)| (table, spec.clone()))
+                .map(|(name, spec, runtime_reach)| ProcessTable {
+                    name,
+                    spec: spec.clone(),
+                    runtime_reach,
+                })
                 .collect(),
             policy,
             declares_stdio_mcp,
@@ -1114,7 +1128,7 @@ const REMOVED_MCP_FILESYSTEM_EXEC: RemovedKey = RemovedKey {
 /// The unpublished protected-view prototype does not have an active replacement.
 const REMOVED_LINUX_STORAGE_MOUNTS: RemovedKey = RemovedKey {
     key: "[experimental-features] linux-storage-mounts",
-    replacement: "remove this key; incoming mount forwarding is not available in this build",
+    replacement: "remove this key; select incoming mounts with filesystem.receive_mounts on Linux; no experimental feature flag is required",
 };
 
 /// The filesystem lists a leaf table no longer states, per `box.toml` section.
@@ -1928,21 +1942,6 @@ impl ConfigFile {
             agent_ingress(self.agent.as_ref()),
         )?;
         validate_egress(&self.egress, &self.declared_sources()?)?;
-        let contained = mcp::contained_specs(&self.mcp);
-        if self
-            .agent
-            .iter()
-            .chain(self.tool.values())
-            .chain(contained.values().map(|server| &server.spec))
-            .any(|spec| !spec.filesystem.receive_mounts.is_empty())
-        {
-            return Err(ConfigError::Contract {
-                reason:
-                    "cannot start Box with `filesystem.receive_mounts`: incoming mount forwarding \
-                         is not available in this build"
-                        .into(),
-            });
-        }
         Ok(())
     }
 
@@ -4663,23 +4662,28 @@ env = {}
     }
 
     /// **The process tables of a configuration are `[agent]`, each `[tool.<name>]`, and each
-    /// stdio `[mcp.<name>]`**, for a stored record and for the file that offline schema generation
-    /// reads.
+    /// stdio `[mcp.<name>]`**, with an agent or leaf role, for a stored record and for the file that
+    /// offline schema generation reads.
     #[test]
     fn the_process_tables_are_the_agent_each_tool_and_each_stdio_mcp_server() {
         const BODY: &str = "[agent]\ncommand = [\"/bin/bash\"]\n\
              [tool.build]\ncommand = [\"/usr/bin/make\"]\n\
              [mcp.local]\ntype = \"stdio\"\ncommand = [\"mcp-server-fetch\"]\n\
              [mcp.remote]\ntype = \"http\"\ndestinations = [\"mcp.example.com\"]\n";
-        let names = |tables: &ProcessTables| {
+        let roles = |tables: &ProcessTables| {
             tables
                 .tables
                 .iter()
-                .map(|(table, _)| table.clone())
+                .map(|table| (table.name.clone(), table.runtime_reach))
                 .collect::<Vec<_>>()
         };
+        let expected = [
+            ("[agent]".to_string(), RuntimeReach::Agent),
+            ("[tool.build]".to_string(), RuntimeReach::Leaf),
+            ("[mcp.local]".to_string(), RuntimeReach::Leaf),
+        ];
         let stored = pinned_record(BODY).process_tables();
-        assert_eq!(names(&stored), ["[agent]", "[tool.build]", "[mcp.local]"]);
+        assert_eq!(roles(&stored), expected);
         assert!(stored.declares_stdio_mcp);
         assert_eq!(
             stored.policy.as_deref(),
@@ -4694,12 +4698,12 @@ env = {}
         )
         .unwrap();
         let (_, _, read) = read_secret_sources(&path).unwrap();
-        assert_eq!(names(&read), ["[agent]", "[tool.build]", "[mcp.local]"]);
+        assert_eq!(roles(&read), expected);
         assert!(read.declares_stdio_mcp);
         assert_eq!(read.policy, None);
         // A configuration with no stdio server searches no program directory.
         let none = pinned_record("[agent]\ncommand = [\"/bin/bash\"]\n").process_tables();
-        assert_eq!(names(&none), ["[agent]"]);
+        assert_eq!(roles(&none), [("[agent]".to_string(), RuntimeReach::Agent)]);
         assert!(!none.declares_stdio_mcp);
 
         // Each path that a secret source protects goes with the tables, so each judgement of a

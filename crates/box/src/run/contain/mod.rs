@@ -11,6 +11,7 @@
 
 pub(crate) mod boundary;
 pub(crate) mod executable;
+mod mounts;
 pub(crate) mod runtime_minimum;
 pub(crate) mod supervise;
 pub(crate) mod terminal;

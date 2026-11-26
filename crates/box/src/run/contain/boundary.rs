@@ -89,13 +89,21 @@ impl ApprovedReach {
         let tables = judged
             .tables
             .iter()
-            .map(|(table, spec)| {
-                let mut reach = judge_lists(spec, table, &judged, protected_sources)?;
-                commands.validate_reach(table, &reach)?;
-                installation.validate_reach(table, &reach)?;
+            .map(|table| {
+                let mut reach = judge_lists(&table.spec, &table.name, &judged, protected_sources)?;
+                commands.validate_reach(&table.name, &reach)?;
+                installation.validate_reach(&table.name, &reach)?;
+                super::mounts::prepare(
+                    &table.spec,
+                    &table.name,
+                    table.runtime_reach,
+                    stored,
+                    &reach,
+                    protected_sources,
+                )?;
                 reach.installation = Some(std::sync::Arc::clone(&installation));
-                reach.command = commands.get(table).cloned();
-                Ok((table.clone(), reach))
+                reach.command = commands.get(&table.name).cloned();
+                Ok((table.name.clone(), reach))
             })
             .collect::<Result<BTreeMap<_, _>, BoxError>>()?;
         Ok(Self {
@@ -288,6 +296,8 @@ pub(crate) enum ShebangInterpreters {
 /// The translated boundary for one process.
 pub(crate) struct Boundary {
     installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
+    /// Approved sources, held through launch so serialized identities cannot be reused.
+    _receiving_mounts: Vec<super::mounts::ApprovedMount>,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
         all(target_os = "linux", feature = "native-filesystem-policy")
@@ -522,6 +532,17 @@ impl Boundary {
             None => std::sync::Arc::new(crate::run::installation::TrustedInstallation::load()?),
         };
         installation.validate_reach(table, reach)?;
+        let receiving_mounts = super::mounts::prepare(
+            spec,
+            table,
+            launch.runtime_reach,
+            stored,
+            reach,
+            site.protected_sources,
+        )?;
+        for source in &receiving_mounts {
+            containment = source.forward_into(containment)?;
+        }
         let exec_trees: Vec<&Path> = reach
             .grants
             .iter()
@@ -833,6 +854,7 @@ impl Boundary {
             table,
             grants: &reach.grants,
             write_protections: &reach.write_protections,
+            receiving_mounts: &receiving_mounts,
             minimum: &minimum,
             interpreters: &interpreters,
             interpreter_aliases: &interpreter_aliases,
@@ -878,6 +900,7 @@ impl Boundary {
             .map(|spelled| spelled.display().to_string());
         Ok(Self {
             installation,
+            _receiving_mounts: receiving_mounts,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
                 all(target_os = "linux", feature = "native-filesystem-policy")
@@ -1008,6 +1031,7 @@ struct DisclosureInputs<'a> {
     table: &'a str,
     grants: &'a [DirectGrant],
     write_protections: &'a [PathBuf],
+    receiving_mounts: &'a [super::mounts::ApprovedMount],
     minimum: &'a [MinimumCell],
     interpreters: &'a [PathBuf],
     interpreter_aliases: &'a [(PathBuf, PathBuf)],
@@ -1033,6 +1057,18 @@ pub(crate) fn file_watching_disclosure(table: &str) -> String {
          as the host-wide event count and each volume's history identifier; file-content and \
          write restrictions still apply, except that a root process can delete any volume's \
          event history"
+    )
+}
+
+/// The selected sources and the whole-directory contract, including on-demand servers.
+pub(crate) fn incoming_mounts_disclosure(table: &str, paths: &[PathBuf]) -> String {
+    let paths = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{table} incoming mounts: {paths}; this process permits read, write, and execution throughout each selected directory. New mounts keep the trusted publisher's options; Box does not add restrictions to them"
     )
 }
 
@@ -1072,6 +1108,14 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> Vec<DisclosureMessage> {
         ));
     }
     messages.push((grant, lines.join("\n")));
+    if !inputs.receiving_mounts.is_empty() {
+        let paths: Vec<_> = inputs
+            .receiving_mounts
+            .iter()
+            .map(|source| source.resolved_path().to_path_buf())
+            .collect();
+        messages.push((grant, incoming_mounts_disclosure(table, &paths)));
+    }
     if !inputs.interpreter_aliases.is_empty() {
         let mut lines = vec![format!(
             "{table} interpreter aliases for configured access:"
@@ -6286,6 +6330,47 @@ write = ["/Users/example/box-demo/aws-tmp"]
             .expect("protected source cannot become an interpreter alias")
             .to_string();
             assert!(refusal.contains("protected authority source"), "{refusal}");
+        }
+    }
+
+    /// A spawn rechecks its own selected paths, including leaves prepared after run-wide judgment.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn receiving_mounts_are_checked_during_boundary_translation() {
+        for (table, role) in [
+            ("[agent]", RuntimeReach::Agent),
+            ("[tool.reader]", RuntimeReach::Leaf),
+            ("[mcp.local]", RuntimeReach::Leaf),
+        ] {
+            let fixture = Fixture::new();
+            let mut spec = fixture.spec();
+            spec.filesystem.receive_mounts = vec![fixture.path("scratch")];
+            if role == RuntimeReach::Agent {
+                spec.filesystem.exec.push(fixture.path("scratch"));
+            }
+            let boundary = fixture
+                .try_translate_full(&spec, table, role, EgressMode::Gateway)
+                .unwrap();
+            assert_eq!(boundary._receiving_mounts.len(), 1);
+            assert_eq!(
+                boundary._receiving_mounts[0].resolved_path(),
+                fixture.path("scratch")
+            );
+            spec.filesystem.write.clear();
+            let refusal = fixture
+                .try_translate_full(&spec, table, role, EgressMode::Gateway)
+                .err()
+                .expect("a selected read-only directory is incompatible")
+                .to_string();
+            assert!(
+                refusal.contains(table)
+                    && refusal.contains("`write` grant covering the whole directory"),
+                "{refusal}"
+            );
+            spec.filesystem.receive_mounts.clear();
+            fixture
+                .try_translate_full(&spec, table, role, EgressMode::Gateway)
+                .expect("ordinary read-only grants remain valid");
         }
     }
 }

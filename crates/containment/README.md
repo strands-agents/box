@@ -13,9 +13,10 @@ The public API describes one complete request and applies it once:
 
 | Item | Role |
 |------|------|
-| `ContainmentConfig` | Complete validated request: path grants, network, process reach modes, and an explicit backend override. Fields are private, and the type *is* the wire format — it serializes itself, and each field that holds an invariant validates itself on load. |
+| `ContainmentConfig` | Complete validated request: path grants, selected incoming mount sources, network, process reach modes, and an explicit backend override. Fields are private, and the type *is* the wire format — it serializes itself, and each field that holds an invariant validates itself on load. |
 | `ContainmentConfig::allow` | Grant one `Operation` at one `Scope` on one path. A path needing read and write takes two calls. |
 | `ContainmentConfig::prepare_filesystem_path` / `allow_prepared` | Resolve a path's identity once, inspect it, then consume that same identity in a grant — the TOCTOU-free route for a path the caller must also use for something else. |
+| `ContainmentConfig::receive_mounts_from` | Select an already-opened directory for incoming Linux mounts. Retain its approved identity without adding access grants. Other platforms refuse this builder. |
 | `PreparedFilesystemPath` | Opaque existing path identity prepared once by containment. Callers read its canonical path and its kind, then consume it in a grant. |
 | `Operation`, `Scope` | The grant vocabulary: `Exec`/`Read`/`Write`/`Connect`/`Metadata` by `File`/`Dir`/`Root`. |
 | `Network`, and the signal, process-info, IPC and backend-override enums | Typed arguments for `ContainmentConfig` builders. |
@@ -81,14 +82,44 @@ the process or returns a `ContainmentError`. Treat every error as incomplete
 containment — terminate the process, do not execute the workload, and do not
 reuse the process.
 
+### Receive incoming Linux mounts from approved directories
+
+`ContainmentConfig::receive_mounts_from(path, &directory)` selects where the Linux sandbox
+receives filesystems mounted later. The caller must first approve the open `File` for that
+directory and supply its canonical absolute path. The builder retains a duplicate handle
+and refuses a path that no longer names that object. It adds no read, write, or execute grants.
+
+For example, after policy checks approve `approved_directory` and its canonical
+`approved_path`, add the selection to the process's existing configuration:
+
+```rust,ignore
+let config = config.receive_mounts_from(&approved_path, &approved_directory)?;
+```
+
+The directory must already be a dedicated mount point with an upstream connection.
+Its grants must cover the whole directory with read, write, and executable access; a covering
+parent grant is sufficient. Existing broad execution for tool processes can provide the
+execution coverage. Intersecting refusals and protected paths prevent setup.
+The backend preserves source restrictions and validates the connection before workload code runs.
+Future mounts retain the trusted publisher's options and contents; Box does not add restrictions
+to each arrival. See [the mount design](../../team/designs/0009-storage-mounts.md) for the supported
+source arrangement and the publisher's responsibilities.
+
+The selection and its required object identity travel in the configuration's `receiving_mounts`
+field. Loading rejects missing identities and changed directories. Keep the originating handles
+alive until the receiving process loads the configuration. The backend closes its source pins
+after verifying the completed mount view, before workload execution. No source descriptor or new
+readiness protocol is added to the trampoline interface. An omitted or empty selection keeps
+ordinary private-mount behavior. Other platforms reject nonempty selections.
+
 ### Grants describe access, not callers
 
 A grant is a path, one `Operation`, and one `Scope` — nothing about who asked for
 it. Backends render a grant by its cell, so the same `allow` call serves a
 composition layer and an ordinary caller alike, and no caller can obtain a
-widening it could not also write as a plain grant. This is also why there is one
-`apply` rather than one entry point per backend: a request that describes only
-access has nothing backend-specific left to dispatch on.
+widening it could not also write as a plain grant. Incoming mount selections are separate
+from these access grants. The single `apply` entry point selects the platform backend and
+refuses capabilities that the backend cannot support.
 
 **Nine cells are legal and six are refused by the vocabulary itself**, so no
 backend ever sees a pair it cannot render. `Exec` at `Dir` or `Root` is refused

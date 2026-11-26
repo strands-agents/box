@@ -4,9 +4,10 @@
 use std::path::{Path, PathBuf};
 
 use super::*;
-use crate::record::config::ProcessTables;
 use crate::record::config::RECORD_VERSION;
 use crate::record::config::telemetry::TelemetryEntry;
+use crate::record::config::{ProcessTable, ProcessTables};
+use crate::run::contain::boundary::RuntimeReach;
 
 /// The shell that runs each stand-in program.
 const SHELL: &str = "/bin/sh";
@@ -762,7 +763,11 @@ fn agent_writes(folder: &Path) -> ProcessTables {
     ))
     .expect("the agent table parses");
     ProcessTables {
-        tables: vec![("[agent]".to_string(), agent)],
+        tables: vec![ProcessTable {
+            name: "[agent]".to_string(),
+            spec: agent,
+            runtime_reach: RuntimeReach::Agent,
+        }],
         policy: None,
         declares_stdio_mcp: false,
         source_paths: Vec::new(),
@@ -894,7 +899,11 @@ fn agent_beside(body: &str, entries: &BTreeMap<String, SecretSourceEntry>) -> Pr
     let agent = toml::from_str(&format!("command = [\"/bin/bash\"]\n{body}"))
         .expect("the agent table parses");
     ProcessTables {
-        tables: vec![("[agent]".to_string(), agent)],
+        tables: vec![ProcessTable {
+            name: "[agent]".to_string(),
+            spec: agent,
+            runtime_reach: RuntimeReach::Agent,
+        }],
         policy: None,
         declares_stdio_mcp: false,
         source_paths: crate::record::config::secret_source::protected_paths(entries),

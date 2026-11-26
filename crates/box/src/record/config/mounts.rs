@@ -7,7 +7,7 @@ use crate::error::ConfigError;
 use super::ExperimentalFeatures;
 use super::process::{ProcessSpec, validate_path_spelling};
 
-pub(super) fn validate_paths(paths: &[PathBuf], table: &str) -> Result<(), ConfigError> {
+pub(crate) fn validate_paths(paths: &[PathBuf], table: &str) -> Result<(), ConfigError> {
     let refuse = |reason| ConfigError::Process {
         table: table.into(),
         reason,
@@ -34,7 +34,7 @@ pub(super) fn validate_paths(paths: &[PathBuf], table: &str) -> Result<(), Confi
     Ok(())
 }
 
-pub(super) fn validate_selection(
+pub(crate) fn validate_selection(
     spec: &ProcessSpec,
     table: &str,
     features: &ExperimentalFeatures,
@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn loading_checks_each_table_and_keeps_forwarding_unavailable() {
+    fn loading_checks_each_table_and_preserves_linux_selections() {
         use super::super::ConfigFile;
 
         for (table, kind) in [
@@ -213,10 +213,27 @@ mod tests {
         ] {
             let base = "name = 'mounts'\nbox_dir = '/tmp/box-mount-test'\n";
             let text = format!("{base}{}", declaration(table, kind, "['/mnt/data']"));
-            let error = ConfigFile::parse(&text, Path::new("box.toml")).unwrap_err();
+            let result = ConfigFile::parse(&text, Path::new("box.toml"));
             if cfg!(target_os = "linux") {
-                assert!(matches!(error, ConfigError::Contract { ref reason }
-                    if reason.contains("not available in this build")));
+                let config = result.unwrap();
+                let selected = if table == "agent" {
+                    config
+                        .agent
+                        .as_ref()
+                        .unwrap()
+                        .filesystem
+                        .receive_mounts
+                        .clone()
+                } else if table == "tool.reader" {
+                    config.tool["reader"].filesystem.receive_mounts.clone()
+                } else {
+                    super::super::mcp::contained_specs(&config.mcp)["reader"]
+                        .spec
+                        .filesystem
+                        .receive_mounts
+                        .clone()
+                };
+                assert_eq!(selected, paths(&["/mnt/data"]));
                 let malformed = text.replace("'/mnt/data'", "'/mnt/data', '/mnt/data/child'");
                 assert!(matches!(
                     ConfigFile::parse(&malformed, Path::new("box.toml")),
@@ -224,7 +241,7 @@ mod tests {
                 ));
             } else {
                 assert!(
-                    matches!(error, ConfigError::Process { table: ref actual, ref reason }
+                    matches!(result.unwrap_err(), ConfigError::Process { table: ref actual, ref reason }
                     if actual == &format!("[{table}]") && reason.contains("only on Linux"))
                 );
             }
@@ -252,7 +269,7 @@ mod tests {
                 ConfigError::RemovedKey { key, replacement, .. }
                     if key == "[experimental-features] linux-storage-mounts"
                         && replacement.contains("remove this key")
-                        && replacement.contains("not available in this build")
+                        && replacement.contains("filesystem.receive_mounts")
                         && !replacement.contains("linux-passthrough-mounts")
             ));
             let removed_flag = text.replace("linux-storage-mounts", "linux-passthrough-mounts");
@@ -302,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mount_request_refuses_startup_before_creating_box_state() {
+    fn an_invalid_mount_request_refuses_before_creating_box_state() {
         use super::super::RunContract;
 
         let directory = tempfile::tempdir().unwrap();
@@ -324,14 +341,25 @@ mod tests {
             );
             std::fs::write(
                 &path,
-                format!("{ordinary}{}", declaration(table, kind, "['/mnt/data']")),
+                format!(
+                    "{ordinary}{}",
+                    declaration(
+                        table,
+                        kind,
+                        if cfg!(target_os = "linux") {
+                            "['relative']"
+                        } else {
+                            "['/mnt/data']"
+                        }
+                    )
+                ),
             )
             .unwrap();
             let error = RunContract::read(&path, &workspace)
                 .err()
                 .expect("must refuse");
             let expected = if cfg!(target_os = "linux") {
-                "not available in this build"
+                "must be an absolute directory path"
             } else {
                 "only on Linux"
             };
