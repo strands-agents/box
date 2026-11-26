@@ -572,6 +572,27 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    /// `box explain` named a well-formed code that this `box` does not know.
+    #[error(
+        "{code} is not a message code that box {version} knows. A newer box may know it; see:\n  {page}"
+    )]
+    UnknownCode {
+        /// The code as given, in capitals.
+        code: String,
+        /// The version of this `box`.
+        version: &'static str,
+        /// The message codes page on `main`.
+        page: String,
+    },
+
+    /// An explanation could not be written.
+    #[error("cannot write the explanation to stdout: {source}")]
+    ExplainOutput {
+        /// The write failure.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// Decision output or its warnings could not be written.
     #[error("cannot write records to {stream}: {source}")]
     RecordsOutput {

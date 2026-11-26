@@ -60,7 +60,8 @@ pub use dogwood::event_schema_source;
 pub use error::{PolicyDiagnostic, PolicyError, PolicyStagingError};
 pub use grammar::{BindingRefusal, GrammarBindings, ToolGrammar, ToolGrammarError, ToolGrammars};
 pub use mcp_schema::{
-    McpSchemaError, compose_action_schema, generate_mcp_schema, validate_mcp_schema_composition,
+    McpSchemaError, OmittedTool, compose_action_schema, generate_mcp_schema,
+    generate_mcp_schema_with_omissions, validate_mcp_schema_composition,
 };
 pub use observe::DecisionObserver;
 pub use outcome::{Delivery, FsResult, McpReply, Outcome, PendingToolResponse};

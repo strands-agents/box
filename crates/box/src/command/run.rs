@@ -432,9 +432,9 @@ async fn hosted(
     };
 
     // Validate any declared credsd credential, and sign once with each telemetry `aws://` profile,
-    // before the workload starts, so a missing daemon, an unusable environment, or a profile that
+    // before the workload starts, so a missing daemon, an unlisted credential, or a profile that
     // cannot sign fails here rather than at the first signed request. The checks do blocking I/O
-    // with a per-environment deadline, so run them off the async worker: a slow or hung daemon then
+    // with a per-request deadline, so run them off the async worker: a slow or hung daemon then
     // delays this startup alone and never stalls the runtime.
     let egress = locked.record.egress.clone();
     let remote_mcp = locked.record.remote_mcp.clone();
@@ -575,7 +575,19 @@ async fn hosted(
             approved: hosted.approved().table("[agent]"),
         },
         &site,
-    )?;
+    )
+    // An agent whose program is not installed is its own kind, whichever check noticed: a bare
+    // name off the PATH, or an absolute path that no longer exists. A program Box refuses to
+    // expand is a config error, as `leave_out_absent` judges it for a tool.
+    .map_err(|error| {
+        if crate::run::contain::boundary::environment::program_refusal(&agent).is_none()
+            && crate::run::contain::executable::is_absent(agent.program(), &agent.search_path())
+        {
+            error.agent_not_found()
+        } else {
+            error
+        }
+    })?;
     boundary.disclose();
     // The record waits for the trampoline's `exec` to succeed, so a containment or `exec` failure
     // after the spawn writes none.

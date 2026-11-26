@@ -1,7 +1,8 @@
 # Message codes
 
 Box writes its own messages to stderr in one format, and most messages carry a code that names
-their kind. This page explains each code and what to do when you see it.
+their kind. This page explains each code and what to do when you see it. With the `box` CLI,
+[`box explain <code>`](../cli/cli.md#box-explain) prints a code's row from this page.
 
 ## How a message reads
 
@@ -125,12 +126,21 @@ Each of these stops the box, almost always before the workload starts. `strands-
 | `B0105` | error | The box directory holds another box, a newer record, or history that disagrees with its record. | Remove the box directory to start again, or name a new `box_dir`. See [a reused box whose history and record disagree](policy.md#a-reused-box-whose-history-and-record-disagree) and [if something goes wrong](getting-started.md#if-something-goes-wrong). |
 | `B0106` | error | The box is already running, or this process already ran a box. | Stop the other run of this box, or give this box its own `box_dir`. |
 | `B0107` | error | A program the box needs is missing from its installation, or cannot be trusted. | Keep all of the Box executables from one build together. See [Linux requirements](linux-requirements.md#requirements), [macOS requirements](macos-requirements.md#check-the-installed-package), and [installation integrity](config.md#installation-integrity). |
-| `B0108` | error | This host cannot harden the box's process or build its sandboxes, so the box did not start. | See [operating system and container permissions](linux-requirements.md#operating-system-and-container-permissions) on Linux, and [macOS requirements](macos-requirements.md#requirements). |
+| `B0108` | error | This host cannot build the box's sandboxes, so the box did not start. | See [operating system and container permissions](linux-requirements.md#operating-system-and-container-permissions) on Linux, and [macOS requirements](macos-requirements.md#requirements). |
 | `B0109` | error | A declared MCP server could not be prepared, so the box did not start. | Read the step that the text names. See [MCP errors and exit codes](mcp.md#errors-and-exit-codes). |
 | `B0110` | error | The egress gateway or its relay failed, so the box did not start or stopped. | Report it as a bug with the full stderr of the run. |
 | `B0111` | error | The socket the box's interpreters reach could not be served. | Report it as a bug with the full stderr of the run. |
 | `B0112` | error | The library caller's `on_ready` callback returned an error, so the box did not start its workload. | Read the callback's error in the text; it comes from the program that runs the box, not from Box. |
 | `B0113` | error | A secret source program failed to read a secret, so the box did not start. | Sign in to the vault or correct the reference, then run the box again. The line names the entry and the program's own error. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |
+| `B0114` | error | The program that `[agent] command` names is not installed, so the box did not start. | Install the agent, or correct `[agent] command` to the path where it is installed. |
+| `B0115` | error | A path the box grants does not exist, or is a file where a directory was expected or the reverse, so the box did not start. | Correct the path that the text names in `box.toml`, or create it. |
+| `B0116` | error | A program that a `command` names cannot be resolved or run, so the box did not start. | Correct the `command` that the text names: write an absolute path, or a bare name that `env.PATH` finds, to an executable file. |
+| `B0117` | error | A trusted Box executable changed after this run loaded it. | Stop Box before updating its installation, then run the box again. |
+| `B0118` | error | This host refused the hardening that keeps the box's memory private, so the box did not start. | See [operating system and container permissions](linux-requirements.md#operating-system-and-container-permissions) on Linux, and [macOS requirements](macos-requirements.md#requirements). |
+| `B0119` | error | This host could not apply the workload's sandbox, so the workload did not start. | See [operating system and container permissions](linux-requirements.md#operating-system-and-container-permissions) on Linux, and [macOS requirements](macos-requirements.md#requirements). |
+| `B0120` | error | The sandbox was applied, but executing the workload's program failed, so the workload did not start. | Check that the program and its interpreter or loader are installed and readable inside the box. The text names the error. |
+| `B0121` | error | Native filesystem policy needs macOS 27 or later and a build with the macOS 27 SDK, so the box did not start. | Run on macOS 27 or later with a Box build made with its SDK, or turn native filesystem policy off. See [macOS requirements](macos-requirements.md#requirements). |
+| `B0122` | error | The box directory cannot be created, read, or used safely, or `HOME` is not set, so the box did not start. | Read the path and reason the text names. Set `HOME`, or give `box_dir` a directory you own that no other user can write. |
 
 <a id="b02"></a>
 
@@ -154,6 +164,7 @@ is what you intended.
 | `B0211` | note | Box gives a process with native egress no proxy and no certificate authority, so its client uses its own defaults. | No action when the program trusts its own roots. See [Network](mcp.md#network). |
 | `B0212` | warning | A process's write grant reaches the program it runs, so the process can replace that program. | Move the program out of the writable grant, or narrow the grant. See [what is refused](config.md#what-is-refused). |
 | `B0213` | note | The policy runs in log-only mode, so each denial is recorded and the action goes ahead. | Use log-only mode only to trial a policy where it is acceptable that the policy protects nothing. See [log-only mode](policy.md#log-only-mode). |
+| `B0214` | warning | A credsd route names no secret.type, so it signs with AWS credentials. | Set `secret.type = "aws"`, or `"token"` for a token. A later release requires the key. See [credential sources](egress.md#credential-sources). |
 
 <a id="b03"></a>
 
@@ -172,6 +183,7 @@ is what you intended.
 |---|---|---|---|
 | `B0401` | warning | A server's tool catalog could not be read, so its calls are decided without per-tool actions. | Read the reason in the text. See [when a rule cannot load](mcp-policy.md#when-a-rule-cannot-load). |
 | `B0402` | warning | A server's per-tool policy rules did not load, so they decide none of its calls. | Check the rule's tool and argument names against the server's catalog. See [when a rule cannot load](mcp-policy.md#when-a-rule-cannot-load) and [which rules Box can refuse for](mcp-policy.md#which-rules-box-can-refuse-for). |
+| `B0403` | warning | A tool's schema could not be read, so Box left the tool out of its server's catalog and refuses its calls. | The server's other tools work. A rule that names the tool does not load. See [find the tool and argument names](mcp-policy.md#step-3-find-the-tool-and-argument-names). |
 
 <a id="b05"></a>
 

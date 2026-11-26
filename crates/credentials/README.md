@@ -67,9 +67,14 @@ signed route the call is accepted and changes nothing, because there is no injec
 
 | Call | Answers |
 |---|---|
-| `attach_for(&self, req: Outbound<'_>) -> Result<Option<Attachment>>` | What to edit before this request goes upstream, as an `Attachment` of header, path, and query edits. `Ok(None)` when this vault governs no credential for the destination. |
-| `redact_leaks(&self, res: Inbound<'_>) -> Option<Redactions>` | The `Redactions` a response needs because it echoed the injected secret back, or `None` when nothing leaked. It returns no `Result`: a response is already received, so there is nothing to fail closed on. |
-| `response_redactor(&self, destination: Destination<'_>) -> Option<ResponseRedactor>` | An owned scrubber for a streamed response, or `None` when no unique opaque binding matches. |
+| `attach_with_redactor(req)` | The request edits and the optional response scrubber for this exchange. Returns `Ok(None)` if no route matches. |
+| `attach_for(req)` | The request edits alone. Refuses routes with rotating tokens. |
+| `redact_leaks(res)` | Edits for literal echoes of a fixed secret in a complete response. |
+| `response_redactor(destination)` | An owned scrubber for a fixed secret in a streamed response. |
+
+Use `attach_with_redactor` for expiring tokens. Keep the returned scrubber with the request
+until its response completes. Looking up the destination again cannot identify which token
+an earlier request sent. Neither destination-based response method handles rotating tokens.
 
 `ResponseRedactor` keeps credential material private and replaces exact secret occurrences with
 `[REDACTED]`. Use `redact_header()` for each header value and `push()` for each body chunk. Each
@@ -79,17 +84,12 @@ to release the tail; on failure, drop the scrubber. Matches can cross chunk boun
 can wait for more bytes or clean completion. Retained state depends on the credential size, not the
 total response size.
 
-`attach_for` performs binding dispatch, phantom location, phantom **validation**,
-and SigV4 signing internally, so the phantom check is not a step a caller can skip.
-It fails closed — rather than sending a request whose credential material is wrong —
-when more than one **opaque** binding matches the destination, when the request presents no
-phantom or a phantom that does not match its binding, or when a signed route's
-service and region cannot be derived from the host.
+Both request methods select the binding, check the phantom and sign AWS requests. They refuse
+ambiguous opaque bindings, missing or incorrect phantoms on strict routes, and signed requests
+whose service or region cannot be derived from the host.
 
-Two things `attach_for` does in a fixed order, and a caller depends on both. A signed AWS
-binding is tried first, so a destination matched by both a signed and an opaque route signs.
-And the signed-route lookup takes the **first** matching pattern rather than refusing an
-overlap, so two overlapping signed patterns let declaration order decide which profile signs.
+Signed AWS bindings take precedence over opaque bindings. The first matching signed pattern
+selects the profile, even if another signed pattern also matches.
 Declare signed patterns that do not overlap.
 
 `Backend::local().resolve(&locator)` resolves one locator to plaintext. Its signature is
@@ -111,6 +111,13 @@ through one. See [Declared secret sources](#declared-secret-sources).
 | `aws://profile` | Structured AWS session credentials for SigV4 signing, resolved as the named profile through the AWS SDK (static keys, credential_process, assume-role, or web identity). Not a single secret, so `Backend::resolve` rejects it. | hard |
 | `aws://` (no profile) | Structured AWS session credentials from the AWS SDK default credential provider chain (the host's ambient identity), driven on a worker thread and cached. Not a single secret, so `Backend::resolve` rejects it. | hard |
 | `SCHEME://NAME` or `SCHEME://NAME#FIELD`, for a declared `SCHEME` | The stdout of the declared program, or one string field of it. Only `Backend::declared` resolves it. | hard: a program cannot signal "absent" |
+| `credsd://credential` on `RouteSpec::signed_aws` | Structured AWS session credentials from one `credential/get` of that credential to the credsd daemon, on each request. Not a single secret, so `Backend::resolve` rejects it. | hard |
+| `credsd://credential` on `RouteSpec::opaque` | Box reads the `access_token` when the vault opens. Requests near expiry share a fresh `credential/get`. The daemon must return a usable bearer token. Tokens without an expiry are read only at startup. | hard |
+
+`credsd_preflight(socket, signed, tokens)` checks the daemon before a workload starts: its
+protocol version, and with one `credential/list`, that each named credential exists and is
+`session_credentials` for a `signed` name or `access_token` for a `tokens` one. The client
+addresses credsd by credential name, as credsd 0.2 requires; it sends no `environment` member.
 
 A soft outcome means the vault comes up and the route appears in `skipped()`. A hard one aborts
 the open. A present value is always judged on content, so an empty, whitespace-only, non-UTF-8,
@@ -274,20 +281,33 @@ instead of `*`.
 
 ## Live daemon test
 
-The `credsd_e2e` tests use local socket fixtures. One optional test checks a running
-credsd daemon. Configure a test environment that permits the test process to list
-credentials, then run:
+The `credsd_e2e` tests use local socket fixtures. Two optional tests check a running credsd
+daemon. For a signed route, give the test process an AWS credential that it can list, then run:
 
 ```sh
-CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_ENVIRONMENT=test-environment \
+CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_CREDENTIAL=test-credential \
   cargo test -p strands-box-credentials --all-features --test end_to_end \
-  credsd_e2e::a_live_daemon_maps_an_unknown_environment_to_a_hard_failure -- --exact --nocapture
+  credsd_e2e::a_live_daemon_maps_an_unknown_credential_to_a_hard_failure -- --exact --nocapture
 ```
 
-The test checks daemon health and caller access to the configured environment before
-requesting an unknown environment. It requires the specific unknown-environment error.
-A connection failure cannot satisfy that assertion. The configured environment is used
+The test checks daemon health and that the daemon lists the configured credential. Then it
+requests a credential that does not exist. It requires the specific unknown-credential error.
+A connection failure cannot satisfy that assertion. The configured credential is used
 only for the credential-list check, not for credential acquisition.
 
-An explicit socket or test environment makes setup failures fatal. Without either
-setting, the test reports a skip. A skipped test does not prove daemon compatibility.
+`CREDSD_TEST_CREDENTIAL` makes setup failures fatal. Without it, the test reports a skip, so
+`CREDSD_SOCKET` can be set for the token test alone. A skipped test does not prove daemon compatibility.
+
+For a token route, store a token with `creds bootstrap --credential <name> static-secret`, then
+name it and its value. The test reads the token at open, attaches it in place of the phantom, and
+requires the unknown-credential error for a name the daemon does not serve:
+
+```sh
+CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_TOKEN_CREDENTIAL=github CREDSD_TEST_TOKEN=<token> \
+  cargo test -p strands-box-credentials --all-features --test end_to_end \
+  credsd_e2e::a_live_daemon_serves_a_token_route -- --exact --nocapture
+```
+
+The same three variables run `box_credentials::a_live_credsd_token_reaches_the_upstream`, which
+starts the real `strands-box` binary against the daemon.
+

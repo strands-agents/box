@@ -481,7 +481,7 @@ pub(crate) enum AmbientFallbackPolicy {
 pub(crate) enum AwsAcquisition {
     /// Credentials came from the declared scoped `profile`.
     Profile(String),
-    /// Credentials came from the named `credsd` environment. Never an ambient fallback, so it
+    /// Credentials came from the named `credsd` credential. Never an ambient fallback, so it
     /// carries no warning.
     Credsd(String),
     /// No scoped `profile` was declared; the AWS SDK default credential provider chain was resolved
@@ -492,7 +492,7 @@ pub(crate) enum AwsAcquisition {
 
 impl AwsAcquisition {
     /// The operator-facing warning for this acquisition, if any. Present only for
-    /// [`DefaultChain`](Self::DefaultChain) — a scoped profile or a `credsd` environment names its
+    /// [`DefaultChain`](Self::DefaultChain) — a scoped profile or a `credsd` credential names its
     /// identity, so neither needs a warning.
     pub(crate) fn warning(&self) -> Option<&'static str> {
         match self {
@@ -682,9 +682,9 @@ use super::credsd::{CredentialResult, CredsdClient, SESSION_CREDENTIALS_TYPE};
 /// route. The one AWS-aware piece of the credsd path — the client itself names no type.
 pub(crate) fn credsd_session_credentials(
     client: &CredsdClient,
-    environment: &str,
+    credential: &str,
 ) -> Result<AwsSessionCredentials> {
-    session_credentials_from(client.get(environment)?, environment)
+    session_credentials_from(client.get(credential)?, credential)
 }
 
 /// Map a `credsd` result onto [`AwsSessionCredentials`], asserting the material tag.
@@ -694,12 +694,12 @@ pub(crate) fn credsd_session_credentials(
 /// the region is `None` — the signing region comes from the route host, never from credsd.
 fn session_credentials_from(
     result: CredentialResult,
-    environment: &str,
+    credential: &str,
 ) -> Result<AwsSessionCredentials> {
     let mut material = result.material;
     if material.kind != SESSION_CREDENTIALS_TYPE {
         return Err(CredentialError::Credential(format!(
-            "credsd environment {environment:?} returned {kind:?} material, but an AWS route needs \
+            "credsd credential {credential:?} returned {kind:?} material, but an AWS route needs \
              {SESSION_CREDENTIALS_TYPE}",
             kind = material.kind
         )));
@@ -713,7 +713,7 @@ fn session_credentials_from(
         || material.session_token.is_empty()
     {
         return Err(CredentialError::Credential(format!(
-            "credsd environment {environment:?} returned session_credentials with an empty access \
+            "credsd credential {credential:?} returned session_credentials with an empty access \
              key id, secret access key, or session token"
         )));
     }
@@ -1493,7 +1493,10 @@ mod tests {
                 access_key_id: "ASIACREDSDEXAMPLE".to_string(),
                 secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_string(),
                 session_token: session_token.to_string(),
+                token: Default::default(),
+                token_type: String::new(),
             },
+            expires_at: None,
         }
     }
 
@@ -1529,7 +1532,7 @@ mod tests {
         );
         assert!(
             error.to_string().contains("prod-inference"),
-            "the error names the environment"
+            "the error names the credential"
         );
         assert!(
             !error.to_string().contains("wJalr"),
@@ -1552,14 +1555,17 @@ mod tests {
                     access_key_id: access_key_id.to_string(),
                     secret_access_key: secret_access_key.to_string(),
                     session_token: session_token.to_string(),
+                    token: Default::default(),
+                    token_type: String::new(),
                 },
+                expires_at: None,
             };
             let error = session_credentials_from(result, "prod-inference")
                 .expect_err("empty AWS fields must fail closed");
             assert!(matches!(error, CredentialError::Credential(_)));
             assert!(
                 error.to_string().contains("prod-inference"),
-                "names the environment: {error}"
+                "names the credential: {error}"
             );
         }
     }

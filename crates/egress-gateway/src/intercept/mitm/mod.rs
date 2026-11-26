@@ -231,10 +231,9 @@ impl SharedState {
     /// through to a direct dial, so a CONNECT to such a host on a port no entry covers fails closed
     /// rather than reach the original destination.
     fn host_reroutes(&self, host: &str) -> bool {
-        self.config
-            .backends
-            .iter()
-            .any(|(pattern, _)| backend_pattern_host(pattern).eq_ignore_ascii_case(host))
+        self.config.backends.iter().any(|(pattern, _)| {
+            connect::same_host(backend_pattern_host(pattern).trim_start_matches('.'), host)
+        })
     }
 
     /// The remote MCP server name configured for `host`, if any (host-only match).

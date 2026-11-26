@@ -11,7 +11,7 @@ use crate::sources::{
     AwsAcquisition, AwsResolution, AwsSource, CREDSD_SCHEME, CredsdClient,
     credsd_session_credentials,
 };
-use crate::vault::{BoxOwnedBinding, OpaqueBinding, StripBinding};
+use crate::vault::{OpaqueBinding, StripBinding};
 use crate::{
     CredentialError, InjectMode, Locator, PhantomCheck, RequestId, Result, Vault, sign_request,
 };
@@ -39,7 +39,8 @@ impl Vault {
         &self,
         binding: &OpaqueBinding,
         req: &Outbound<'_>,
-    ) -> Result<Attachment> {
+        paired: bool,
+    ) -> Result<(Attachment, Option<crate::ResponseRedactor>)> {
         // Read the phantom the harness placed, wherever it placed it. A `Strict` route fails closed
         // on an absent or mismatched placeholder; an `Advisory` route warns and attaches anyway,
         // for a workload the box cannot seed the placeholder into.
@@ -71,31 +72,29 @@ impl Vault {
                             .to_string(),
                     ));
                 }
-                PhantomCheck::Advisory => {
-                    self.warn(&format!(
-                        "attaching the real credential to {host} against {against}: the route sets \
-                         secret.inject = \"always\", so the box injects without a matching placeholder",
-                        host = req.destination.host,
-                    ));
-                    advisory = Some(against);
-                }
+                PhantomCheck::Advisory => advisory = Some(against),
             }
         }
 
         let mut attachment = Attachment::new();
-        attach_secret(binding.inject(), binding.secret(), &mut attachment);
-        if let Some(against) = advisory {
-            // Journalled on the gateway's allow decision (with the destination and requester
-            // correlation the vault does not hold), so an advisory injection is reconstructable.
-            attachment.note_advisory(format!("inject = always, against {against}"));
-        }
-
+        let redactor = binding.attach(self, &mut attachment, paired)?;
         // The harness may have placed the phantom at a *different* location than the one the secret
         // attaches to. `attach_secret` clears the attach location; when the harness location differs,
         // clear that one too so the phantom never rides upstream.
         strip_location(binding.harness(), &mut attachment)?;
 
-        Ok(attachment)
+        if let Some(against) = advisory {
+            self.warn(&format!(
+                "attaching the real credential to {host} against {against}: the route sets \
+                 secret.inject = \"always\", so the box injects without a matching placeholder",
+                host = req.destination.host,
+            ));
+            // Journalled on the gateway's allow decision (with the destination and requester
+            // correlation the vault does not hold), so an advisory injection is reconstructable.
+            attachment.note_advisory(format!("inject = always, against {against}"));
+        }
+
+        Ok((attachment, redactor))
     }
 
     /// SigV4-sign `req` in-boundary against the AWS `config` bound to its destination. `scope` is the
@@ -170,7 +169,7 @@ impl Vault {
     ///
     /// A `credsd://` locator routes to the credsd client and the AWS delivery adapter; every other
     /// signed locator is the ambient/scoped AWS source. The audit reference names the credsd
-    /// environment; a structured aws route has no such non-secret label, so it keeps the
+    /// credential; a structured aws route has no such non-secret label, so it keeps the
     /// `scheme://structured` form.
     pub(crate) fn audit_aws_resolve(&self, config: &Locator) -> Result<AwsResolution> {
         let request_id = RequestId::new(SIGN_CORRELATION);
@@ -196,33 +195,33 @@ impl Vault {
         AwsSource::with_provider(self.aws_provider(), self.ambient_policy()).resolve(config)
     }
 
-    /// Resolve a `credsd://<environment>` locator to AWS session credentials.
+    /// Resolve a `credsd://<credential>` locator to AWS session credentials.
     ///
-    /// A `credsd` route always names an environment, so there is no unscoped case and no ambient
+    /// A `credsd` route always names a credential, so there is no unscoped case and no ambient
     /// fallback — the acquisition carries no warning.
     fn resolve_credsd(&self, config: &Locator) -> Result<AwsResolution> {
-        let environment = credsd_environment(config)?;
+        let credential = credsd_credential(config)?;
         let socket = self.credsd_socket().ok_or_else(|| {
             CredentialError::KeystoreAccess(format!(
-                "no credsd socket was resolved for environment {environment:?}"
+                "no credsd socket was resolved for credential {credential:?}"
             ))
         })?;
         let client = CredsdClient::new(socket.to_path_buf());
-        let credentials = credsd_session_credentials(&client, environment)?;
+        let credentials = credsd_session_credentials(&client, credential)?;
         Ok(AwsResolution {
             credentials: zeroize::Zeroizing::new(credentials),
-            acquisition: AwsAcquisition::Credsd(environment.to_string()),
+            acquisition: AwsAcquisition::Credsd(credential.to_string()),
         })
     }
 }
 
-/// The environment a `credsd://<environment>` locator names.
-fn credsd_environment(config: &Locator) -> Result<&str> {
+/// The credential a `credsd://<credential>` locator names.
+pub(crate) fn credsd_credential(config: &Locator) -> Result<&str> {
     match config {
         Locator::Uri(uri) => {
-            let (scheme, environment) = uri.split_once("://").ok_or_else(|| {
+            let (scheme, credential) = uri.split_once("://").ok_or_else(|| {
                 CredentialError::Credential(format!(
-                    "malformed credsd credential reference {uri:?} (expected `credsd://<environment>`)"
+                    "malformed credsd credential reference {uri:?} (expected `credsd://<credential>`)"
                 ))
             })?;
             if scheme != CREDSD_SCHEME {
@@ -230,24 +229,17 @@ fn credsd_environment(config: &Locator) -> Result<&str> {
                     "a credsd route needs a credsd:// reference, not {scheme:?}"
                 )));
             }
-            if environment.is_empty() {
+            if credential.is_empty() {
                 return Err(CredentialError::Credential(
-                    "a credsd:// reference names no environment".to_string(),
+                    "a credsd:// reference names no credential".to_string(),
                 ));
             }
-            Ok(environment)
+            Ok(credential)
         }
         Locator::Structured(_) => Err(CredentialError::Credential(
             "a credsd route needs a credsd:// reference, not a structured block".to_string(),
         )),
     }
-}
-
-/// Attach the box's own credential unconditionally at its inject location, with no phantom check and
-/// no warning. For a re-route's backend token, which the workload never presents a placeholder for.
-/// Writes into `attachment` so it can compose with a strip in one `attach_for`.
-pub(crate) fn attach_box_owned(binding: &BoxOwnedBinding, attachment: &mut Attachment) {
-    attach_secret(binding.inject(), binding.secret(), attachment);
 }
 
 /// Strip the workload's placeholder at the binding's harness location, attaching nothing. For a
@@ -286,7 +278,7 @@ fn strip_location(location: &InjectMode, attachment: &mut Attachment) -> Result<
 
 /// Write the strip-attach-location + attach-real edits for `inject` into `attachment`, honoring its
 /// mode.
-fn attach_secret(inject: &InjectMode, secret: &str, attachment: &mut Attachment) {
+pub(crate) fn attach_secret(inject: &InjectMode, secret: &str, attachment: &mut Attachment) {
     match inject {
         InjectMode::Header {
             format,

@@ -59,7 +59,9 @@ box profile create claude --with bedrock
 `box` asks for the region, how the box signs in to Bedrock, whether to bring in your MCP servers
 and hooks, and the policy. Press Enter to accept each default: `us-west-2`, your AWS credentials
 (`aws`), no MCP servers or hooks, and the Open policy, which lets the agent search the web and read
-docs. If your Claude Code settings or your shell
+docs. To pick another region, type part of its name to narrow the list of regions that serve
+Bedrock, then press Tab or Enter on the highlighted one. For a region that isn't listed, type its full
+name and press Enter twice. If your Claude Code settings or your shell
 (`AWS_REGION` or `AWS_DEFAULT_REGION`) already name a region, `box` doesn't ask, and the Review
 tab lists it under **DETECTED OPTIONS**. To pick another policy later, see
 [Pick the agent's policy](starters.md#pick-the-agents-policy).

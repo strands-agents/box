@@ -12,6 +12,12 @@ impl BoxError {
         matches!(self.0, Internal::Daemon(DaemonError::NotRunning))
     }
 
+    /// Mark this failure as the agent's program not being installed, so its kind is
+    /// `AgentNotFound`. The message stays as it was.
+    pub(crate) fn agent_not_found(self) -> Self {
+        Self(Internal::AgentNotFound(Box::new(self.0)))
+    }
+
     /// The message code of this refusal (docs/user/message-codes.md), or an uncoded error for a
     /// Box defect the reader can only report.
     pub(crate) fn code(&self) -> ::diagnostics::Kind {
@@ -34,7 +40,8 @@ impl Internal {
                 | LayoutError::Remove { .. }
                 | LayoutError::ReadDirectory { .. }
                 | LayoutError::Create { .. }
-                | LayoutError::NotADirectory { .. } => Code::B0105.into(),
+                | LayoutError::NotADirectory { .. } => Code::B0122.into(),
+                LayoutError::NotThisBox { .. } => Code::B0105.into(),
             },
             Self::Daemon(error) => match error {
                 DaemonError::NotRunning
@@ -46,11 +53,13 @@ impl Internal {
                 DaemonError::Refused { .. } => Code::B0102.into(),
                 DaemonError::NoProxyPort => Code::B0110.into(),
             },
+            // Whichever check noticed, the fix is to install the agent or correct its command.
+            Self::AgentNotFound(_) => Code::B0114.into(),
             Self::Executable(error) => match error {
                 ExecutableError::NotExecutable { .. }
                 | ExecutableError::NotOnPath { .. }
                 | ExecutableError::RelativeProgram { .. }
-                | ExecutableError::NotUtf8 { .. } => Code::B0107.into(),
+                | ExecutableError::NotUtf8 { .. } => Code::B0116.into(),
             },
             Self::Trampoline(error) => match error {
                 TrampolineError::Missing { .. }
@@ -61,16 +70,23 @@ impl Internal {
                 TrampolineError::UnsupportedPlatform { .. }
                 | TrampolineError::StatusPipe { .. }
                 | TrampolineError::StatusRead { .. }
-                | TrampolineError::SetupIncomplete
-                | TrampolineError::SetupFailed { .. } => Code::B0108.into(),
+                | TrampolineError::SetupIncomplete => Code::B0108.into(),
+                TrampolineError::SetupFailed { stage, .. } => match stage {
+                    SetupStage::Apply => Code::B0119.into(),
+                    SetupStage::Exec => Code::B0120.into(),
+                    SetupStage::ConfigRead
+                    | SetupStage::ConfigValidation
+                    | SetupStage::TargetEnvironment => Code::B0108.into(),
+                },
                 TrampolineError::StatusProtocol { .. }
                 | TrampolineError::Environment { .. }
                 | TrampolineError::WorkloadPath { .. } => DEFECT,
             },
             Self::Installation(error) => match error {
-                InstallationError::Locate { .. }
-                | InstallationError::Invalid { .. }
-                | InstallationError::Changed { .. } => Code::B0107.into(),
+                InstallationError::Locate { .. } | InstallationError::Invalid { .. } => {
+                    Code::B0107.into()
+                }
+                InstallationError::Changed { .. } => Code::B0117.into(),
             },
             Self::Supervise(error) => match error {
                 SuperviseError::Spawn { .. } | SuperviseError::Native { .. } => Code::B0108.into(),
@@ -95,16 +111,24 @@ impl Internal {
                 | McpSchemaError::Discover { .. }
                 | McpSchemaError::Credential { .. }
                 | McpSchemaError::UnsupportedPlacement { .. }
+                | McpSchemaError::CredsdSecret { .. }
                 | McpSchemaError::Policy(_)
                 | McpSchemaError::Write { .. } => Code::B0109.into(),
             },
-            Self::Policy(_) | Self::PolicyStaging(_) | Self::GrammarBinding(_) => {
-                Code::B0103.into()
-            }
+            Self::Policy(_) | Self::PolicyStaging(_) => Code::B0103.into(),
+            Self::GrammarBinding(refusal) => match refusal {
+                policy::BindingRefusal::UnreadableProgram { .. } => Code::B0116.into(),
+                policy::BindingRefusal::AnotherEngine => DEFECT,
+            },
             Self::HistoryDisagreesWithRecord { .. } => Code::B0105.into(),
             Self::HistoryFlush(_) => Code::P0303.into(),
             Self::Credential(_) | Self::CredentialProjection(_) => Code::B0104.into(),
             Self::Proxy(_) => Code::B0110.into(),
+            Self::Containment(
+                containment::ContainmentError::PathNotFound(_)
+                | containment::ContainmentError::ExpectedDirectory(_)
+                | containment::ContainmentError::ExpectedFile(_),
+            ) => Code::B0115.into(),
             Self::Containment(_) => Code::B0108.into(),
             Self::Telemetry(_) => Code::T0103.into(),
             #[cfg(target_os = "linux")]
@@ -122,9 +146,8 @@ impl Internal {
             },
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
             Self::NativeFilesystem(error) => match error {
-                NativeFilesystemError::Runtime
-                | NativeFilesystemError::Sdk
-                | NativeFilesystemError::Allocation
+                NativeFilesystemError::Runtime | NativeFilesystemError::Sdk => Code::B0121.into(),
+                NativeFilesystemError::Allocation
                 | NativeFilesystemError::Deadlines
                 | NativeFilesystemError::Subscriptions
                 | NativeFilesystemError::ExistingChildren
@@ -208,6 +231,10 @@ pub(crate) enum Internal {
 
     #[error(transparent)]
     Daemon(#[from] DaemonError),
+
+    /// The agent's own program is not installed, which [`BoxError::agent_not_found`] marks.
+    #[error(transparent)]
+    AgentNotFound(Box<Internal>),
 
     #[error(transparent)]
     Executable(#[from] ExecutableError),
@@ -350,6 +377,12 @@ pub(crate) enum McpSchemaError {
         "MCP server {server:?} uses credential placement {placement:?}, which schema discovery does not support"
     )]
     UnsupportedPlacement { server: String, placement: String },
+
+    #[error(
+        "MCP server {server:?} reads its secret from credsd, which `box run` reads and schema \
+         discovery does not: generate the schema from a box.toml without this server"
+    )]
+    CredsdSecret { server: String },
 
     #[error(transparent)]
     Policy(#[from] policy::McpSchemaError),
@@ -549,6 +582,11 @@ pub(crate) enum LayoutError {
 
     #[error("unsafe box directory {path}: {reason}")]
     UnsafeDirectory { path: PathBuf, reason: String },
+
+    /// The box directory holds something other than this box's valid record: a folder that is
+    /// not a box, or a record that was edited. Same text as `UnsafeDirectory`, a different cause.
+    #[error("unsafe box directory {path}: {reason}")]
+    NotThisBox { path: PathBuf, reason: String },
 
     #[error("cannot remove {path}: {source}")]
     Remove {
@@ -923,7 +961,7 @@ mod tests {
     #[test]
     fn refusals_name_their_code() {
         use ::diagnostics::{Code, Kind, Severity};
-        let cases: [(BoxError, Kind); 23] = [
+        let cases: [(BoxError, Kind); 34] = [
             (
                 SuperviseError::NativeDuringRun {
                     reason: "native request deadline exceeded".into(),
@@ -1013,7 +1051,78 @@ mod tests {
                     program: "claude".into(),
                 }
                 .into(),
-                Code::B0107.into(),
+                Code::B0116.into(),
+            ),
+            (
+                BoxError::from(ExecutableError::NotOnPath {
+                    program: "claude".into(),
+                })
+                .agent_not_found(),
+                Code::B0114.into(),
+            ),
+            (
+                containment::ContainmentError::PathNotFound("/missing".into()).into(),
+                Code::B0115.into(),
+            ),
+            (LayoutError::NoOperatorHome.into(), Code::B0122.into()),
+            (
+                LayoutError::NotThisBox {
+                    path: "/box".into(),
+                    reason: "it is not empty and contains no valid private record".into(),
+                }
+                .into(),
+                Code::B0105.into(),
+            ),
+            (
+                LayoutError::UnsafeDirectory {
+                    path: "/box".into(),
+                    reason: "writable by others".into(),
+                }
+                .into(),
+                Code::B0122.into(),
+            ),
+            (
+                policy::BindingRefusal::UnreadableProgram {
+                    program_path: "/usr/bin/git".into(),
+                    reason: "denied".into(),
+                }
+                .into(),
+                Code::B0116.into(),
+            ),
+            (
+                policy::BindingRefusal::AnotherEngine.into(),
+                Kind::Uncoded(Severity::Error),
+            ),
+            (
+                InstallationError::Changed {
+                    path: "/box".into(),
+                }
+                .into(),
+                Code::B0117.into(),
+            ),
+            (
+                TrampolineError::SetupFailed {
+                    stage: SetupStage::Apply,
+                    detail: None,
+                }
+                .into(),
+                Code::B0119.into(),
+            ),
+            (
+                TrampolineError::SetupFailed {
+                    stage: SetupStage::Exec,
+                    detail: None,
+                }
+                .into(),
+                Code::B0120.into(),
+            ),
+            (
+                TrampolineError::SetupFailed {
+                    stage: SetupStage::ConfigRead,
+                    detail: None,
+                }
+                .into(),
+                Code::B0108.into(),
             ),
             (McpDiscoveryError::NoOutcome.into(), Code::B0109.into()),
             (DaemonError::NoProxyPort.into(), Code::B0110.into()),
@@ -1047,7 +1156,7 @@ mod tests {
             ),
             (
                 TrampolineError::SetupFailed {
-                    stage: SetupStage::Apply,
+                    stage: SetupStage::TargetEnvironment,
                     detail: None,
                 }
                 .into(),
@@ -1070,6 +1179,15 @@ mod tests {
         ];
         for (error, expected) in cases {
             assert_eq!(error.code(), expected, "{error}");
+        }
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+        for (error, expected) in [
+            (NativeFilesystemError::Runtime, Code::B0121),
+            (NativeFilesystemError::Sdk, Code::B0121),
+            (NativeFilesystemError::Allocation, Code::B0108),
+        ] {
+            let error: BoxError = error.into();
+            assert_eq!(error.code(), expected.into(), "{error}");
         }
         #[cfg(target_os = "linux")]
         {

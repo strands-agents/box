@@ -635,7 +635,11 @@ only when its first request names no cursor and each later request names the cur
 previous page returned on the same connection. Box holds the reply to the last page until it stages
 the schema. The client therefore cannot see a tool before Box enforces its rules. A list that does
 not change the catalog commits nothing. A list that changes it replaces it, and a refused list keeps
-a stdio server's accepted catalog. We replaced discovery that made Box page the server itself. That
+a stdio server's accepted catalog. A tool whose schema doesn't generate, or doesn't compose with the
+Box schema, on its own is left out of the catalog with a warning, so its calls are refused and the
+server's other tools stay usable. Refusing the whole server was rejected, because one tool that the
+operator can't change cost every tool on it. We replaced discovery that made Box page the server
+itself. That
 approach made the broker an MCP client and required two discovery models. If the client stops
 paging, Box never stages the server and refuses its tool calls. A server the MCP client never lists
 stays undiscovered, and a terminal server failure stops a later open from starting another process
@@ -2697,6 +2701,50 @@ prefix changes the leading literal only. The box validates the prefix once. It m
 contain at most 64 characters, and use only the RFC 3986 unreserved set. A custom-prefixed phantom
 looks like a real key, so a reader of a log or a bug report can no longer recognize it as a
 placeholder.
+
+
+<a id="a-credsd-route-declares-its-credential-type"></a>
+### A credsd route declares its credential type, because explicit is better than implicit
+
+A `credsd://NAME` reference does not say what credsd holds under that name, so the route names it
+with `secret.type`: `aws` for session credentials Box signs with, or `token` for an access token
+Box attaches. The type is explicit so that a reader of `box.toml` sees how each secret is used, and
+so that AWS is not a special case that a route gets by saying nothing. A route with no type signs
+as `aws` and warns for now, and a later release requires the key. The startup preflight checks each
+declared type against the kind credsd lists, and a mismatch stops the box.
+
+The type also lets Box settle a route without the daemon. When the configuration loads, Box decides
+which keys the route accepts, which `secret.env` variable the composed environment holds, and what
+the stored record says. The vault mints the placeholder later, when it opens after the preflight.
+
+**Rejected.** Inferring the type from the daemon's reply: a route's keys and stored record would
+depend on what credsd holds when the box starts, and `box.toml` could not be checked without the
+daemon. Inferring it from the other keys, such as `secret.env` for a token: the kind becomes a side
+effect of unrelated keys, and it fails when credsd adds a third kind. Keeping `aws` as the
+permanent default for a route with no type: AWS stays a special case.
+
+**Cost.** An operator states what credsd already knows. An existing AWS route warns until it names
+its type, and a record that names it moves to version 43.
+
+<a id="a-credsd-token-is-read-at-startup-and-near-its-expiry"></a>
+<a id="a-credsd-token-is-read-once-at-startup"></a>
+### A credsd token is read at startup and again near its expiry
+
+A token route reads its access token when the vault opens, before the workload starts. If the daemon
+names an expiry, the first request near or past it reads the token again, and the workload keeps
+the same placeholder. The daemon issues tokens; Box only asks for the current one. A token with no
+expiry is held for the run, as an `env://` route or a secret source holds its secret. Routes that
+name one token under one placeholder variable share one read and one refresh, and two variables
+for one token are allowed, as they are for a declared secret source, with one read each.
+
+**Rejected.** Reading the token once and holding it for the run: a long-running agent outlives a
+short-lived token, such as an OAuth client-credentials token, even when the daemon has a fresh one.
+Fetching the token on each request: it puts the daemon on every request's path.
+
+**Cost.** Redaction must follow a changing value, so each response is scrubbed with the token its
+request carried, and a library caller with an expiring token must attach through
+`Vault::attach_with_redactor`. A failed refresh serves the old token until it expires, and after that refuses
+requests until a later refresh succeeds.
 
 ## Telemetry
 

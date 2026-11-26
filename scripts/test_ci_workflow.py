@@ -161,6 +161,65 @@ class SuiteStepTests(unittest.TestCase):
             with self.subTest(step=name):
                 self.assertEqual(self.step_if(name), self.TESTS)
 
+    LAUNCH = "${{ !cancelled() && steps.build.outcome == 'success' && env.LAUNCH == 'true' }}"
+
+    def test_the_launch_checks_run_only_for_all(self):
+        self.assertIn("      LAUNCH: ${{ inputs.suite == 'all' }}\n", job(CLI_TEST, "macos"))
+        for name in ["Corpus launch check", "Install the agents", "Launch checks"]:
+            with self.subTest(step=name):
+                self.assertEqual(self.step_if(name), self.LAUNCH)
+        self.assertEqual(self.step_if("Corpus runner unit tests"),
+                         "${{ !cancelled() && env.LAUNCH == 'true' }}")
+
+    def test_the_launch_checks_run_before_the_test_build(self):
+        lines = job(CLI_TEST, "macos").splitlines()
+        order = [lines.index(f"      - name: {name}") for name in
+                 ["Build Box and helpers", "Corpus launch check", "Launch checks", "Test"]]
+        self.assertEqual(order, sorted(order))
+
+
+    def test_endpoint_override_is_checked_without_the_apps_test_transport_feature(self):
+        name = "Test telemetry endpoint without test transport"
+        for job_name in ["build-test-lint", "macos"]:
+            with self.subTest(job=job_name):
+                self.assertEqual(self.step_if(name, job_name=job_name), self.ALL)
+                self.assertEqual(
+                    step_run(CLI_TEST, job_name, name).split(),
+                    ["cargo", "test", "--locked", "-p", "strands-box-cli-telemetry",
+                     "--no-default-features", "--test", "endpoint_override"],
+                )
+
+class LaunchCommandTests(unittest.TestCase):
+    """The macOS job runs the corpus's launch checks and its runner's unit tests."""
+
+    def test_the_probe_and_the_agents_launch(self):
+        self.assertIn("python3 test-corpus/run_corpus.py --layer launch --ids probe --install-profiles",
+                      step_run(CLI_TEST, "macos", "Corpus launch check"))
+        self.assertIn("python3 test-corpus/run_corpus.py --layer launch --install-profiles --no-skip",
+                      step_run(CLI_TEST, "macos", "Launch checks"))
+
+    def test_the_runner_unit_tests_run(self):
+        self.assertEqual(step_run(CLI_TEST, "macos", "Corpus runner unit tests"),
+                         "python3 -m unittest discover -s test-corpus -p 'test_*.py'")
+
+    def test_each_agent_download_is_checked(self):
+        install = step_run(CLI_TEST, "macos", "Install the agents")
+        self.assertIn('echo "$CLAUDE_CODE_SHA256  $claude" | shasum -a 256 -c -', install)
+        self.assertIn('echo "$CODEX_SHA256  $RUNNER_TEMP/codex.tar.gz" | shasum -a 256 -c -', install)
+        self.assertIn('--version "$KIRO_CLI_VERSION"', install)
+        check = 'echo "$KIRO_INSTALL_SHA256  $RUNNER_TEMP/kiro-install.sh" | shasum -a 256 -c -'
+        self.assertLess(install.index(check), install.index('bash "$RUNNER_TEMP/kiro-install.sh"'))
+
+    def test_the_workloads_jobs_check_the_kiro_installer(self):
+        text = (WORKFLOWS / "workloads.yml").read_text()
+        self.assertEqual(text.count('bash "$RUNNER_TEMP/kiro-install.sh"'), 2)
+        self.assertEqual(text.count(
+            'echo "$KIRO_INSTALL_SHA256  $RUNNER_TEMP/kiro-install.sh" | shasum -a 256 -c -'), 2)
+        for line in text.splitlines():
+            if 'bash "$RUNNER_TEMP/kiro-install.sh"' in line:
+                before = text[:text.index(line)]
+                self.assertTrue(before.rstrip().endswith("shasum -a 256 -c -"), line)
+
 
 class CiWorkflowTests(unittest.TestCase):
     def test_ci_calls_cli_test_with_the_change_classes(self):

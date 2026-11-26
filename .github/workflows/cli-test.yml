@@ -1,9 +1,9 @@
 name: "CLI: Test"
 
-# The CLI's test jobs: build, test, and lint on Linux, every macOS check in one job, and the
-# macOS package. A reusable workflow (`workflow_call`): ci.yml calls it, and the release workflow
-# calls it to gate a release. Every job tests `ref`, or the commit that triggered the caller
-# (`github.sha`) when `ref` is empty.
+# The CLI's test jobs: build, test, and lint on Linux, every macOS check in one job (the corpus's
+# launch checks included), and the macOS package. A reusable workflow (`workflow_call`): ci.yml calls
+# it, and the release workflow calls it to gate a release. Every job tests `ref`, or the commit that
+# triggered the caller (`github.sha`) when `ref` is empty.
 #
 # `suite` picks what runs:
 #   all     every job below.
@@ -103,8 +103,14 @@ jobs:
       - name: Test
         run: cargo test -p strands-box-cli -p strands-box-cli-pack-tests -p strands-box-cli-profile -p strands-box-cli-telemetry --all-features
 
-  # Every macOS check in one job, so a pull request waits for one macOS runner. The host tests and
-  # the engine suite run last, because they rebuild box with test-support.
+      # Test the ordinary library separately: the app's dev dependency enables test-transport.
+      - name: Test telemetry endpoint without test transport
+        if: ${{ !cancelled() && inputs.suite == 'all' }}
+        run: cargo test --locked -p strands-box-cli-telemetry --no-default-features --test endpoint_override
+
+  # Every macOS check in one job, so a pull request waits for one macOS runner. The corpus and
+  # launch checks run the build without test-support. The host tests and the engine suite run last,
+  # because they rebuild box with it.
   macos:
     name: macOS checks
     needs: check-suite
@@ -113,9 +119,22 @@ jobs:
       contents: read
     runs-on: macos-latest
     timeout-minutes: 60
+    # The agents the launch checks start, pinned. To add one, add its check to
+    # test-corpus/launch.toml and its program to the "Install the agents" step.
     env:
       # The checks' runs send no telemetry.
       BOX_TELEMETRY: "0"
+      CLAUDE_CODE_VERSION: "2.1.316"
+      CLAUDE_CODE_SHA256: 64c327e92b2c5e0f78c0a980c5a518121e1f0d140ca771ca5dd4488d1a2dcb3f
+      CODEX_VERSION: "0.166.0"
+      CODEX_SHA256: c48824462fc57681eafb0925d97b11b589010475613904f570b42fea53e240d5
+      # Kiro's installer checks the package against the SHA-256 in Kiro's own release index, and the
+      # job checks the installer against this SHA-256. A new installer script fails the check until
+      # this changes.
+      KIRO_CLI_VERSION: "3.4.0"
+      KIRO_INSTALL_SHA256: a8bce4c6b740deb61009e3ad10995ec3027a51e6345025f1a2e5048ffdbf4b84
+      # The `engine` suite skips the corpus and launch checks.
+      LAUNCH: ${{ inputs.suite == 'all' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -167,6 +186,74 @@ jobs:
           node-version: "22.22.2"
           package-manager-cache: false
 
+      # The probe launch check: the box starts.
+      - name: Corpus launch check
+        id: launch-check
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && env.LAUNCH == 'true' }}
+        run: |
+          export PATH="$PWD/target/debug:$PATH"
+          python3 test-corpus/run_corpus.py --layer launch --ids probe --install-profiles \
+            --timeout 60 --out "$RUNNER_TEMP/corpus-out"
+
+      - name: Upload the launch check results
+        if: ${{ !cancelled() && steps.launch-check.outcome != 'skipped' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: corpus-launch-check-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/corpus-out
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Corpus runner unit tests
+        if: ${{ !cancelled() && env.LAUNCH == 'true' }}
+        run: python3 -m unittest discover -s test-corpus -p 'test_*.py'
+
+      # Each agent's native program, where its own installer puts it: the box cannot start an npm
+      # launcher (docs/cli/troubleshooting.md). Only the launch checks put it on PATH.
+      - name: Install the agents
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && env.LAUNCH == 'true' }}
+        run: |
+          bin="$HOME/.local/bin"
+          mkdir -p "$bin" "$HOME/.local/share/claude/versions"
+          claude="$HOME/.local/share/claude/versions/$CLAUDE_CODE_VERSION"
+          curl -fsSL -o "$claude" "https://downloads.claude.ai/claude-code-releases/$CLAUDE_CODE_VERSION/darwin-arm64/claude"
+          echo "$CLAUDE_CODE_SHA256  $claude" | shasum -a 256 -c -
+          chmod 755 "$claude"
+          ln -sf "$claude" "$bin/claude"
+          curl -fsSL -o "$RUNNER_TEMP/codex.tar.gz" "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/codex-aarch64-apple-darwin.tar.gz"
+          echo "$CODEX_SHA256  $RUNNER_TEMP/codex.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/codex.tar.gz" -C "$RUNNER_TEMP"
+          install -m 755 "$RUNNER_TEMP/codex-aarch64-apple-darwin" "$bin/codex"
+          curl -fsSL -o "$RUNNER_TEMP/kiro-install.sh" https://cli.kiro.dev/install
+          echo "$KIRO_INSTALL_SHA256  $RUNNER_TEMP/kiro-install.sh" | shasum -a 256 -c -
+          bash "$RUNNER_TEMP/kiro-install.sh" --version "$KIRO_CLI_VERSION" --force --no-modify-path
+          # The box runs Kiro's runtime only from a folder it cannot write (resources/packs/kiro/README.md).
+          # Kiro CLI refuses to start a chat until it has a login or a key. Listing sessions makes no
+          # model call, so a stand-in key is enough.
+          KIRO_API_KEY=ksk_placeholder-no-model-call KIRO_RUNTIME_DIR="$HOME/.kiro-runtime" \
+            "$bin/kiro-cli" --v3 chat --list-sessions
+
+      # Each check's result must match its expect in test-corpus/launch.toml (test-corpus/README.md).
+      - name: Launch checks
+        id: launch
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && env.LAUNCH == 'true' }}
+        run: |
+          export PATH="$PWD/target/debug:$HOME/.local/bin:$PATH"
+          claude --version
+          codex --version
+          kiro-cli --version
+          python3 test-corpus/run_corpus.py --layer launch --install-profiles --no-skip \
+            --timeout 120 --out "$RUNNER_TEMP/launch-out"
+
+      - name: Upload the launch check results
+        if: ${{ !cancelled() && steps.launch.outcome != 'skipped' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: launch-checks-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/launch-out
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Install fish for installer tests
         if: ${{ !cancelled() && inputs.suite == 'all' }}
         run: HOMEBREW_NO_AUTO_UPDATE=1 brew install fish
@@ -177,8 +264,7 @@ jobs:
           sh -n install.sh scripts/package_macos.sh
           python3 scripts/test_distribution.py
 
-      # Lint runs after the build, so a lint failure does not skip the tests. Format runs on Linux
-      # only.
+      # Lint runs after the checks, so a lint failure does not skip them. Format runs on Linux only.
       - name: Clippy
         if: ${{ !cancelled() && inputs.suite == 'all' }}
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -200,7 +286,7 @@ jobs:
           command -v npx uvx bunx pnpx python3 node pi
 
       # The host tests and the engine suite (crates/cli/app/tests/engine.rs). The test-support build
-      # of box replaces the one built above. The engine suite runs Apple's /usr/bin/git
+      # of box replaces the one the checks above ran. The engine suite runs Apple's /usr/bin/git
       # stub, so the step refuses a runner that does not select full Xcode.
       - name: Test
         if: ${{ !cancelled() }}
@@ -218,6 +304,10 @@ jobs:
           else
             cargo test -p strands-box-cli -p strands-box-cli-pack-tests -p strands-box-cli-profile -p strands-box-cli-telemetry --all-features
           fi
+
+      - name: Test telemetry endpoint without test transport
+        if: ${{ !cancelled() && inputs.suite == 'all' }}
+        run: cargo test --locked -p strands-box-cli-telemetry --no-default-features --test endpoint_override
 
   # The macOS package, built as the release builds it, then run on each supported macOS.
   package:

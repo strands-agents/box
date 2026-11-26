@@ -99,12 +99,21 @@ codes! {
     B0105 => strands_box error, "box directories holding another box", "The box directory holds another box, a newer record, or history that disagrees with its record.";
     B0106 => strands_box error, "boxes already running", "The box is already running, or this process already ran a box.";
     B0107 => strands_box error, "incomplete installations", "A program the box needs is missing from its installation, or cannot be trusted.";
-    B0108 => strands_box error, "hosts that cannot contain a box", "This host cannot harden the box's process or build its sandboxes, so the box did not start.";
+    B0108 => strands_box error, "hosts that cannot contain a box", "This host cannot build the box's sandboxes, so the box did not start.";
     B0109 => strands_box error, "MCP servers that could not be prepared", "A declared MCP server could not be prepared, so the box did not start.";
     B0110 => strands_box error, "egress gateway failures", "The egress gateway or its relay failed, so the box did not start or stopped.";
     B0111 => strands_box error, "broker socket failures", "The socket the box's interpreters reach could not be served.";
     B0112 => strands_box error, "refused library callbacks", "The library caller's `on_ready` callback returned an error, so the box did not start its workload.";
     B0113 => strands_box error, "secret source failures", "A secret source program failed to read a secret, so the box did not start.";
+    B0114 => strands_box error, "agents that are not installed", "The program that `[agent] command` names is not installed, so the box did not start.";
+    B0115 => strands_box error, "granted paths that do not exist", "A path the box grants does not exist, or is a file where a directory was expected or the reverse, so the box did not start.";
+    B0116 => strands_box error, "programs that cannot run", "A program that a `command` names cannot be resolved or run, so the box did not start.";
+    B0117 => strands_box error, "installations changed during a run", "A trusted Box executable changed after this run loaded it.";
+    B0118 => strands_box error, "refused process hardening", "This host refused the hardening that keeps the box's memory private, so the box did not start.";
+    B0119 => strands_box error, "sandboxes that could not be applied", "This host could not apply the workload's sandbox, so the workload did not start.";
+    B0120 => strands_box error, "workloads that could not be executed", "The sandbox was applied, but executing the workload's program failed, so the workload did not start.";
+    B0121 => strands_box error, "hosts without native filesystem policy", "Native filesystem policy needs macOS 27 or later and a build with the macOS 27 SDK, so the box did not start.";
+    B0122 => strands_box error, "unusable box directories", "The box directory cannot be created, read, or used safely, or `HOME` is not set, so the box did not start.";
     // Box: startup disclosures.
     B0201 => strands_box note, "filesystem grant disclosures", "A process reaches these paths directly, with no policy decision.";
     B0202 => strands_box note, "exposed credential stores", "A process's filesystem grant reaches a credential store.";
@@ -119,12 +128,14 @@ codes! {
     B0211 => strands_box note, "native trust disclosures", "Box gives a process with native egress no proxy and no certificate authority, so its client uses its own defaults.";
     B0212 => strands_box warning, "replaceable programs", "A process's write grant reaches the program it runs, so the process can replace that program.";
     B0213 => strands_box note, "log-only mode disclosures", "The policy runs in log-only mode, so each denial is recorded and the action goes ahead.";
+    B0214 => strands_box warning, "untyped credsd routes", "A credsd route names no secret.type, so it signs with AWS credentials.";
     // Box: lifecycle.
     B0301 => strands_box note, "box state changes", "The box was created, opened, or refreshed.";
     B0302 => strands_box note, "workload starts", "The box starts its workload.";
     // Box: MCP at run time.
     B0401 => strands_box warning, "unread MCP catalogs", "A server's tool catalog could not be read, so its calls are decided without per-tool actions.";
     B0402 => strands_box warning, "unloaded MCP tool rules", "A server's per-tool policy rules did not load, so they decide none of its calls.";
+    B0403 => strands_box warning, "left-out MCP tools", "A tool's schema could not be read, so Box left the tool out of its server's catalog and refuses its calls.";
     // Box: egress and fetch.
     B0501 => strands_box warning, "failed upstream requests", "A request through the egress gateway to an upstream failed.";
     B0502 => strands_box warning, "fetches with no egress route", "A Monty fetch was refused because no egress route reaches it.";

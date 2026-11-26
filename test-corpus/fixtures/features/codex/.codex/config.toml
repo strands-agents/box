@@ -1,0 +1,19 @@
+model = "openai.gpt-5.4"
+file_opener = "none"
+
+[tui]
+theme = "feature-probe-theme"
+
+[tui.presets.1]
+input = "feature-probe-command"
+
+[projects."{workspace}"]
+trust_level = "trusted"
+
+[model_providers.feature-probe]
+name = "feature-probe"
+base_url = "http://127.0.0.1:9/v1"
+experimental_bearer_token = "feature-probe-key"
+
+[mcp_servers.probe-mcp]
+command = "/bin/cat"

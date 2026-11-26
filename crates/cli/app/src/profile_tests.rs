@@ -14715,9 +14715,16 @@ fn the_shipped_node_pack_reads_the_hosts_file() {
     } else {
         "/etc/hosts"
     };
-    let expected: Vec<String> = std::fs::canonicalize(hosts)
-        .map(|path| vec![path.display().to_string()])
-        .unwrap_or_default();
+    let shell = std::fs::canonicalize("/bin")
+        .expect("the /bin folder")
+        .join("sh");
+    let expected: Vec<String> = std::iter::once(shell.display().to_string())
+        .chain(
+            std::fs::canonicalize(hosts)
+                .ok()
+                .map(|path| path.display().to_string()),
+        )
+        .collect();
     assert_eq!(resolved.tool["node"].filesystem.read_file, expected);
 }
 

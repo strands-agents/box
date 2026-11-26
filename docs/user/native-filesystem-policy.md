@@ -3,9 +3,13 @@
 This experimental feature adds Dogwood checks to selected native file operations on macOS and Linux ARM64.
 
 ### macOS requirements
-It requires macOS 27 or later and a binary built with the macOS 27 SDK or later.
+
+Enabling native filesystem policy requires macOS 27 or later and a binary built with the macOS 27 SDK or later.
 The binary must carry Apple's Endpoint Security entitlement and a valid signature.
 Endpoint Security is the macOS interface that lets a client decide selected operating system requests.
+
+These requirements apply only when native filesystem policy is enabled.
+Runs with the feature disabled use the [standard Box Core requirements](getting-started.md#before-you-start).
 
 ## Enable native filesystem policy
 
@@ -254,6 +258,7 @@ Record version 42 preserves each process's
 when any such array is nonempty; empty or omitted arrays do not require it. Record-format support
 does not enable mount forwarding. This build rejects nonempty arrays in Linux run configurations
 and any `receive_mounts` key in macOS run configurations before creating Box state.
+A `secret.type` key on a route or a remote MCP server requires record version 43.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 

@@ -64,14 +64,15 @@ when { context.input.host == "api.github.com" };
 |---|---|---|---|
 | `destinations` | string array | required | The destinations the credential goes to. See [Destinations](#destinations). |
 | `secret.ref` | string | required, unless the entry declares a backend | Where the credential comes from: `env://NAME`, `aws://PROFILE`, a bare `aws://` for the default credential chain, `credsd://NAME` for a credential in the credentials daemon, or a reference in a declared scheme. See [Credential sources](#credential-sources). |
-| `secret.env` | string | `NAME` for `env://NAME` | Experimental: needs `secret-sources = true` in [`[experimental-features]`](config.md#experimental-features). The variable that holds the placeholder in the workload. Required for a reference in a declared scheme. For `env://NAME` it is optional and must equal `NAME`. Refused for `aws://` and `credsd://`. |
+| `secret.type` | string | `aws`, with a warning | For `credsd://` only: the kind of credential that credsd serves under that name. `aws` signs each request with SigV4. `token` attaches an access token, as an `env://` route attaches its variable. Other schemes refuse the key, because the scheme sets the type. A later release requires the key. |
+| `secret.env` | string | `NAME` for `env://NAME` | The variable that holds the placeholder in the workload. Required for a reference in a declared scheme. For `env://NAME` it is optional and must equal `NAME`. Optional for a credsd token. Refused for `aws://` and a credsd AWS route. |
 | `backends` | table array | none | A destination to re-route this entry's requests to. At most one. See [Backends](#backends). |
-| `secret.placement` | string | `header` | For `env://` and a declared scheme: where the credential goes. `header`, `basic_auth`, or `query_param`. |
-| `secret.header` | string | `Authorization` | For `env://` and a declared scheme, with `placement = "header"`: the header name. |
-| `secret.prefix` | string | `Bearer ` on `Authorization`, empty on any other header | For `env://` and a declared scheme, with `placement = "header"`: the text before the credential. |
-| `secret.param` | string | none | For `env://` and a declared scheme, with `placement = "query_param"`: the query parameter name. Required for that placement. |
-| `secret.inject` | string | `phantom` | For `env://` and a declared scheme: `phantom` adds the credential only to a request that carries the placeholder, and refuses any other request to the destinations. `always` adds it to every request to the destinations. Refused beside a backend, where the destination secret is phantom-only and the box injects nothing. |
-| `secret.phantom_prefix` | string | `strands_box_` | For `env://` and a declared scheme: the start of the placeholder, such as `sk-ant-` for a client that checks the key's format. 1 to 64 letters, digits, `-`, `_`, `.`, or `~`. |
+| `secret.placement` | string | `header` | For `env://`, a declared scheme, and a credsd token: where the credential goes. `header`, `basic_auth`, or `query_param`. |
+| `secret.header` | string | `Authorization` | For `env://`, a declared scheme, and a credsd token, with `placement = "header"`: the header name. |
+| `secret.prefix` | string | `Bearer ` on `Authorization`, empty on any other header | For `env://`, a declared scheme, and a credsd token, with `placement = "header"`: the text before the credential. |
+| `secret.param` | string | none | For `env://`, a declared scheme, and a credsd token, with `placement = "query_param"`: the query parameter name. Required for that placement. |
+| `secret.inject` | string | `phantom` | For `env://`, a declared scheme, and a credsd token: `phantom` adds the credential only to a request that carries the placeholder, and refuses any other request to the destinations. `always` adds it to every request to the destinations. Refused beside a backend, where the destination secret is phantom-only and the box injects nothing. |
+| `secret.phantom_prefix` | string | `strands_box_` | For `env://`, a declared scheme, and a credsd token: the start of the placeholder, such as `sk-ant-` for a client that checks the key's format. 1 to 64 letters, digits, `-`, `_`, `.`, or `~`. |
 
 ### Placement
 
@@ -93,7 +94,14 @@ Each entry in `destinations` is a host, with an optional port and path.
 | `api.example.com/v1` | Paths under `/v1` on that host, by whole segment |
 | `api.example.com/*/upload` | Paths on that host that end in `/upload` |
 
-A host is matched in lowercase. A path is matched case-sensitively, against the path in the
+A host is matched in lowercase. Write it as the gateway sees it on a connection: ASCII letters,
+digits, `.`, `-`, and `_`, with no empty label. Write an internationalized name in its punycode
+form, such as `xn--bcher-kva.example` for `bücher.example`. The loader refuses another spelling,
+such as `.api.example.com`, `api..example.com`, or `bücher.example`, because no connection could
+match it. It also refuses a name that ends in a number, such as `10.5` or `0x7f.1`, because a
+resolver reads it as an IPv4 address: write an IP address as four decimal numbers, such as
+`10.0.0.5`. A label holds at most 63 bytes, and a name at most 253. The loader removes a trailing dot from a host, so `api.example.com.` loads as
+`api.example.com`, as the gateway compares it. A path is matched case-sensitively, against the path in the
 gateway's canonical form. Two routes, or two entries in one route, can't match the same
 destination, and an http MCP server's host can't appear in a route.
 
@@ -139,11 +147,15 @@ auth downstream. Because the box never reads the real value, the named variable 
 `credsd://`) is refused beside a backend, because it mints no placeholder to strip. A destination
 `secret` in a declared scheme is refused too, because the box never reads that secret.
 
-When the backend `url` has a path prefix, the box refuses a request whose path contains an encoded
-slash (`%2F`) or backslash (`%5C`): joining a prefix in front of an escaped separator could change
-which path the backend sees, so the box fails the request rather than risk a traversal. This rejects
-some legitimate requests, for example a GitLab path such as
-`/api/v4/projects/1/repository/files/src%2FREADME.md`. If a destination needs encoded separators,
+When the backend `url` has a path prefix, the box refuses a request whose path a backend could fold
+out of that prefix. It refuses a `;`, a segment that starts with two dots once each escaped space
+(`%20`), plus sign (`+`), and escaped plus sign (`%2B`) is removed, such as `...`, `..%20`, `+..`,
+`..+`, or `..b`, and a percent-escape of a slash (`%2F`), a backslash
+(`%5C`), a percent sign (`%25`), a `;`, `?`, or `#` (`%3B`, `%3F`, `%23`), a control character, or a
+byte at or above `%80`. Each one can change which path the backend sees after the prefix is joined, so the
+box fails the request with `403` rather than risk a traversal. Other escapes, such as `%3A`, pass.
+This rejects some legitimate requests, for example a GitLab path such as
+`/api/v4/projects/1/repository/files/src%2FREADME.md`. If a destination needs these spellings,
 give the backend a **dedicated host with no path prefix** (`url = "https://gw.example.com"`), which
 carries no join and so no restriction.
 
@@ -178,6 +190,11 @@ re-route by host alone, so any other entry that covers the host would load and t
 every request. That includes a direct entry on another port, a second backend, or a `*`/`*.suffix`
 wildcard that spans it. The loader refuses the pair instead.
 
+The box dials a backend host directly. So a backend `url` host may not be a host that another entry
+re-routes to its own backend, or a remote MCP server's host. The loader refuses either pair, because
+the dial would skip that entry's re-route or the server's `mcp:call` decisions. The backend `url`
+host follows the same spelling rule as a destination host.
+
 This version re-routes to one backend. More than one backend and routing rules are not yet
 available.
 
@@ -191,10 +208,34 @@ A remote MCP server re-routes the same way: attach `[[mcp.<name>.backends]]` to 
 | `env://NAME` | The variable `NAME` in the environment of `box run` | Once, when the box starts. The agent, each tool, each stdio MCP server, and the Shell get a placeholder in `NAME`. Every destination that names `NAME`, in one route or in several, accepts the same placeholder. |
 | `aws://PROFILE` | The named profile `PROFILE`, resolved through the AWS SDK | On each request. The gateway signs the request with SigV4. |
 | `aws://` (no profile) | The AWS SDK default credential provider chain on the host | On each request. The gateway signs the request with SigV4, under the host's ambient identity. |
-| `credsd://NAME` | The credential `NAME` in the [AWS Credential Daemon](https://github.com/aws/credential-daemon) (credsd), over its socket: `CREDSD_SOCKET`, or the [platform default](#the-credsd-socket) | On each request. The gateway signs the request with SigV4, using the credential's AWS session credentials, and never falls back to the host's ambient identity. Before the workload starts, `box run` checks that the daemon answers and lists `NAME`, and stops the box if it doesn't. Needs credsd 0.2.0 or later. |
+| `credsd://NAME`, with `secret.type = "aws"` or no `secret.type` | The credential `NAME` in the [AWS Credential Daemon](https://github.com/aws/credential-daemon) (credsd), over its socket: `CREDSD_SOCKET`, or the [platform default](#the-credsd-socket) | On each request. The gateway signs the request with SigV4, using the credential's AWS session credentials, and never falls back to the host's ambient identity. Before the workload starts, `box run` checks that the daemon answers and lists `NAME`, and stops the box if it doesn't. Needs credsd 0.2.0 or later. With no `secret.type`, the box warns when it starts. |
+| `credsd://NAME`, with `secret.type = "token"` | The access token that the credsd daemon serves as `NAME`, such as a token stored with `creds bootstrap --credential github static-secret` | At startup. If the token has an expiry, the first request near or past expiry reads it again. If that read fails, Box keeps attaching the old token until it expires, and then refuses requests until a read succeeds. A token without an expiry stays in use for the run. With `secret.env`, the workload gets a placeholder in that variable. Without it, the workload holds none, and the route needs `secret.inject = "always"`. |
 | `<scheme>://NAME[#FIELD]`, for a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table declares | The host program that the table names | Experimental. Once, when the box starts: Box runs the program and reads the secret from its stdout. The agent, each tool, each stdio MCP server, and the Shell get a placeholder in the variable that `secret.env` names. You don't set that variable. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |
 
-An `aws://` or `credsd://` route takes no placement, `header`, `prefix`, `param`, `inject`, or
+Box checks expiry when it attaches a token. It keeps the workload's placeholder and asks
+the daemon for a token during the last fifth of the remaining lifetime measured at acquisition,
+up to 60 seconds before expiry. Concurrent requests share the read. After a failed read, the next
+request more than 5 seconds later retries. Once a route has an expiry, each replacement must include a valid future expiry.
+
+This route sends a GitHub token from credsd to `github.com` for Git over HTTPS.
+
+```toml
+[egress.github]
+destinations = ["github.com"]
+secret.ref = "credsd://github"
+secret.type = "token"
+secret.placement = "basic_auth"
+secret.inject = "always"
+```
+
+With `basic_auth`, the credential is `user:password`, so the credsd secret holds
+`x-access-token:<token>`. A credsd token route with no `secret.env` gives the workload no
+placeholder to present, so it needs `secret.inject = "always"`.
+
+Before the workload starts, the box checks that credsd serves each named credential, with the kind
+that its routes name. The name is the credential's name in `creds list`.
+
+An `aws://` route, or a `credsd://` route that signs, takes no placement, `header`, `prefix`, `param`, `inject`, or
 `phantom_prefix`. The gateway signs each request to the destinations. The service and region come
 from the host, which ends in `.amazonaws.com` or `.api.aws`: `<service>.<region>.amazonaws.com`, a
 global `<service>.amazonaws.com` (signed for `us-east-1`), or an API Gateway
@@ -355,20 +396,30 @@ not upgrade `rust-lang.org`.
 | Cause | Fix |
 |---|---|
 | A route has no `destinations`, or an entry is empty, `*`, or has port `0` | Name each host the credential goes to. |
+| A destination host or a `backends.url` host has an empty label, or a character other than an ASCII letter, a digit, `.`, `-`, or `_` | Write the host as a connection names it, such as `api.example.com`. Write an internationalized name in its punycode (`xn--`) form. |
+| A destination host or a `backends.url` host ends in a number, such as `10.5` | Write an IPv4 address as four decimal numbers with no leading zero, such as `10.0.0.5`. |
+| A destination host or a `backends.url` host is longer than DNS allows | Write a host whose labels hold at most 63 bytes, and whose name holds at most 253. |
+| A `backends.url` host is a host that another entry re-routes, or a remote MCP server's host | Point the backend at a host that no other entry re-routes and that serves no declared MCP server. |
 | Two routes, or two entries in one route, match the same destination | Narrow one of them, for example by path or port. |
 | A route names an http MCP server's host | Put the credential on the `[mcp.<name>]` table. |
 | An entry declares more than one backend | Keep one backend. Routing across several is not yet available. |
 | A `backends.url` has a query, fragment, no host, or a scheme other than `http`/`https` | Name the backend as `scheme://host[:port][/prefix]`. A path prefix is allowed; a query or fragment is not. |
 | An entry has a backend, and its destination is not one exact host | A re-route is matched per connection, on host and port, and the box presents the backend host on the wire. Give a backend entry exactly one destination with an exact host (no path, no wildcard). Write one entry per host. |
 | A host with a backend is also named by another entry (any port) | A re-route is matched by host alone, so a host that re-routes may name no other entry. Move the other destination to its own host, or drop it. |
-| An entry has a backend and a signed (`aws://`/`credsd://`) `secret`, or one in a declared scheme | A re-routed destination secret is phantom-only, so it must be `env://`. |
+| An entry has a backend and a signed (`aws://`/`credsd://`) `secret`, a credsd token, or one in a declared scheme | A re-routed destination secret is phantom-only, so it must be `env://`. |
 | An entry has a backend and sets `secret.inject` | A re-routed destination secret is phantom-only: it is provisioned to the workload and stripped, never injected. So `inject` has no effect. Remove `secret.inject`. |
-| A `backends.auth` uses `credsd://`, or sits on an `http` backend | Use an `env://` token or an `aws://` profile on an `https` backend. |
+| A `backends.auth` uses `credsd://`, with any `secret.type`, or sits on an `http` backend | Use an `env://` token or an `aws://` profile on an `https` backend. |
 | A `backends.auth` uses `aws://` without a valid `aws.service`/`aws.region` (or sets them on a non-`aws://` auth) | An `aws://` backend auth signs over the backend host, so state `backends.auth.aws.service` and `backends.auth.aws.region`, each non-empty and only lowercase letters, digits, or `-`. They are valid only on an `aws://` auth. |
-| `secret.ref` has a scheme other than `env` or `aws`, and no `[secret-source.<scheme>]` table declares it | Use one of the two schemes, or declare the [secret source](config.md#secret-sourcescheme). |
+| `secret.ref` has a scheme other than `env`, `aws`, or `credsd`, and no `[secret-source.<scheme>]` table declares it | Use one of the three schemes, or declare the [secret source](config.md#secret-sourcescheme). |
 | A route in a declared scheme has no `secret.env` | Name the variable that holds the placeholder, such as `secret.env = "GH_TOKEN"`. |
+| `secret.type` is set on a scheme other than `credsd://` | Remove it. The scheme sets the type. |
+| `secret.type` is a value other than `aws` or `token` | Use `aws` or `token`. |
+| A credsd token route has no `secret.env` and no `secret.inject = "always"` | Set `secret.inject = "always"`, or name the placeholder variable with `secret.env`. |
+| At startup, `credsd credential "<name>" is "<kind>", but a route that reads it expects "<kind>"` | On an egress or MCP route, set `secret.type` to the credential's kind in `creds list`: `aws` for `session_credentials`, `token` for `access_token`. A telemetry target always signs, so name a `session_credentials` credential there. |
+| At startup, a credsd token route reads a token whose type is not `Bearer` | Use a bearer token. The box can't make the proof that a DPoP token needs. |
+| An expiring credsd token fails to load or refresh | Check the local daemon and the credential name. Each replacement must include a future RFC 3339 `expires_at`. Retry after the source recovers. |
+| A `credsd://` route has no `secret.type`, at startup (a warning) | Set `secret.type = "aws"`, or `"token"` for a token. A later release requires the key. |
 | `secret.env` on an `env://NAME` route is not `NAME`, or an `aws://` route sets `secret.env` | Remove `secret.env`. |
-| `secret.env` is set while `secret-sources` is off | Set `secret-sources = true` in `[experimental-features]`, or remove `secret.env` from an `env://` route, where it has no effect. |
 | Two entries hold a placeholder in one variable and name different secrets | Give one of them another variable. One placeholder variable holds one secret. |
 | An entry holds a placeholder in `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` beside a signed (`aws://`/`credsd://`) route | Give the entry another variable. A signed route fills those two variables with its own placeholders. |
 | `env://NAME` names a variable that a `pass-secret-env` list of a `[secret-source.<scheme>]` table names | Use another variable. No `env://` reference can read the credential of a declared source's vault. |

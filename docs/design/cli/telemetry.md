@@ -17,7 +17,7 @@ context construction and identity persistence.
 ## Delivery
 
 `Session::delivering` connects event capture to `Delivery`. Each event is one compact JSON
-`POST` to `https://telemetry.strandsagents.com/box/ping`, with
+`POST`, sent by default to `https://telemetry.strandsagents.com/box/ping`, with
 `Content-Type: application/json` and `User-Agent: box/<version>`, where `<version>` is the
 `context.box_version` the events carry. The request has no authentication header or cookies.
 The service accepts the existing envelope and returns 204. It does not deduplicate requests,
@@ -51,11 +51,15 @@ progress can finish later. The worker retains a clone of the instance lock until
 ends, even if the caller returns first. A request already in progress when the run ends can
 use the whole budget. There is no disk queue, and a crash or process exit can lose events.
 
-The `test-transport` feature replaces the service destination with
-`BOX_TEST_TELEMETRY_ENDPOINT`. It accepts only HTTP URLs with a literal loopback address
-and no credentials, and bypasses HTTP proxies. A missing or invalid value disables delivery.
-Production builds ignore the variable. The CLI dev dependency enables this feature during
-Cargo tests. CI checks, the corpus, and the nightly agent workloads build with the production
+`Delivery` reads `BOX_TEST_TELEMETRY_ENDPOINT` before choosing the destination. A present value
+must pass the [local capture URL checks](../../cli/cli.md#environment-variables); otherwise,
+delivery is disabled with no fallback to the service. Reading the raw environment value keeps
+an empty or non-UTF-8 override distinct from an absent variable. Local HTTP delivery bypasses
+proxies.
+
+When the variable is absent, ordinary builds use the service endpoint. The `test-transport`
+feature disables that default. The CLI dev dependency enables this feature during Cargo tests.
+CI checks, the corpus, and the nightly agent workloads build with the production
 transport and set `BOX_TELEMETRY=0`; downloadable trial builds send events, and so does a
 package that `Release Box` builds. Local package smoke checks use the
 [caller's installation identity](decisions.md#smoke-telemetry-follows-the-callers-identity).

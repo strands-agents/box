@@ -1,0 +1,10 @@
+[project]
+name = "greet"
+version = "0.1.0"
+description = "Greets people from the command line."
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"

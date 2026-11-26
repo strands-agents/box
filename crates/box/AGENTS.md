@@ -23,6 +23,9 @@ Read [configuration](../../docs/user/config.md) for the surface, and the relevan
   the gateway and broker cannot distinguish callers within one box. Use another box for that split.
 - Public library additions must not expose policy engines, environment overlays, proxy handles, or
   resolved host paths. Decision notifications are copies and must never block an authorization.
+- A run event carries only the code from `BoxError::code`, the code its stderr line prints; never
+  a path or message. Send it only at the exit points in `lib.rs` and `command::execute`
+  (`box_library.rs::event_tests`).
 - Keep credential-path floors in containment. The Shell and Monty are outside OS containment;
   their `Reach` checks and policy are separate controls, not sandbox grants.
 

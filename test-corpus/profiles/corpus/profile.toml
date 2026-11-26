@@ -1,0 +1,87 @@
+# The profile the scripted layer runs each cell under: the tool packs that
+# `box profile create` adds, box's npx, uv, uvx, and go packs, and the corpus's own packs
+# for toolchains box does not ship, with bash in place of a model agent.
+packs = ["@box/git", "@box/node", "@box/npm", "@box/npx", "@box/pnpm", "@box/yarn", "@box/cargo", "@box/uv", "@box/uvx", "sqlite3", "python3", "poetry", "pixi", "@box/go"]
+# policy.dw is a copy of the @box/scoped policy starter, which lets the box's shell run, as
+# `box profile create --policy scoped` would copy it. downloads.dw permits the Playwright, Prisma,
+# and Hugging Face Hub download sites. Its comment says why it is a policy file rather than a hosts
+# list.
+policies = ["policy.dw", "downloads.dw"]
+
+[agent]
+command = ["/bin/bash", "--noprofile", "--norc"]
+env.PATH = "/usr/bin:/bin"
+env.TMPDIR = "${{ workspace }}"
+
+# A scripted cell has no agent tool to stop a hung command, so the Shell stops it after 600
+# seconds. A first npm install, a Playwright browser download, and a Prisma engine download each
+# run past Box Core's own 30 seconds.
+[limits]
+shell.timeout = 600
+
+# create-next-app saves its answers in $HOME/Library/Preferences/create-next-app-nodejs, outside
+# the project, and the box refuses that write. With npx's HOME inside the project, the Next.js
+# cell gets past it and records the walls behind it. The cost: this HOME reaches every npx call,
+# so it hides three writes a real @box/npx user still has refused. create-next-app's answers,
+# Playwright's browser in ~/Library/Caches/ms-playwright, and Prisma's engine in ~/.cache/prisma
+# all land in .npx-home instead. The Playwright and Prisma cells' notes say so. Remove the HOME
+# line once @box/npx gives a tool a writable home for these.
+[tool.npx.env]
+HOME = "${{ workspace }}/.npx-home"
+# Prisma's CLI reports each command to checkpoint.prisma.io. The box refuses that, which marks
+# the Prisma cell red even when its work succeeds. The profile turns the report off rather than
+# permitting the host, because refusing a tool's report home is the rule book working.
+CHECKPOINT_DISABLE = "1"
+
+# wrangler dev runs under npm. It keeps its state in $HOME/Library/Preferences/.wrangler, outside
+# the project, and sends optional metrics to sparrow.cloudflare.com. The box refuses both. These
+# keep the state in the project and turn the metrics off, so the Wrangler cell needs no grant to
+# the home folder or to a metrics host. The cost: these reach every npm call and all that npm
+# starts, so they hide the home write and the metrics request that a real @box/npm user still has
+# refused. The Wrangler cell's note says so. Remove this table once @box/npm gives a tool a
+# writable config home.
+[tool.npm.env]
+XDG_CONFIG_HOME = "${{ workspace }}/.config"
+WRANGLER_SEND_METRICS = "false"
+
+# The uv and uvx cells pin what they install, and these hold the packages those pins bring in to
+# what PyPI had on this date, so a new release cannot change those cells' results.
+[tool.uv.env]
+UV_EXCLUDE_NEWER = "2025-06-01T00:00:00Z"
+# transformers keeps the models it downloads in ~/.cache/huggingface, outside the project, and the
+# box refuses that write: `[Errno 30] Read-only file system: '/home/runner/.cache'`. The cost:
+# this hides the write, which a real @box/uv user still has refused. The torch cell's note says so.
+# Remove this line once @box/uv gives a tool a writable cache home.
+HF_HOME = "${{ workspace }}/.cache/huggingface"
+
+[tool.uvx.env]
+UV_EXCLUDE_NEWER = "2025-06-01T00:00:00Z"
+# pre-commit runs through uvx and keeps its hook environments in ~/.cache/pre-commit, outside the
+# project, which the box refuses.
+PRE_COMMIT_HOME = "${{ workspace }}/.cache/pre-commit"
+# The git that pre-commit starts reads no config the uvx tool cannot read, as @box/git's git does.
+GIT_CONFIG_GLOBAL = "/dev/null"
+GIT_CONFIG_NOSYSTEM = "1"
+
+# pre-commit also runs git, and the uvx tool's PATH finds /usr/bin/git. A path that is not on the
+# host is dropped, so a host without that git still loads the profile.
+[tool.uvx.filesystem]
+read = [
+    "/usr/bin/git",
+    "/usr/libexec/git-core",
+    "/usr/share/git-core",
+    { path = "${{ macos.developer_dir }}", when = "macos" },
+]
+
+# cli/cli's pr create tests look git up on PATH and run a stub in its place, so go's tests need to
+# see /usr/bin/git, which they never start.
+[tool.go.filesystem]
+read = ["/usr/bin/git"]
+
+# The hook that pre-commit installs runs under git when git commit starts it.
+[tool.git.env]
+PRE_COMMIT_HOME = "${{ workspace }}/.cache/pre-commit"
+
+# The project access that `box profile create --policy scoped` writes.
+[project]
+access = "write"

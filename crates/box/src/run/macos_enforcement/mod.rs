@@ -677,7 +677,7 @@ impl FileMonitor {
 impl Drop for FileMonitor {
     fn drop(&mut self) {
         if let Err(error) = self.stop() {
-            ::diagnostics::diag!(error, "{error}");
+            ::diagnostics::diag!(B1001, "shutdown failed: {error}");
         }
     }
 }

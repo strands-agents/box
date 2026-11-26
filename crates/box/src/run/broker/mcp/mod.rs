@@ -19,6 +19,7 @@ mod server;
 pub(crate) use admission::admit_server;
 #[cfg(test)]
 pub(crate) use discovery::CompletionOutcome;
+pub(crate) use discovery::report_omitted;
 pub(crate) use discovery::{DiscoveryRegistry, DiscoveryRegistryHost, DiscoveryReleaseGuard};
 pub(crate) use exchange::McpProgram;
 pub(crate) use server::{RunningMcpServer, list_tools};

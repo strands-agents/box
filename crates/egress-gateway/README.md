@@ -110,6 +110,10 @@ A capability returns either its mutations — empty when it does not apply to th
 exchange — or a fault on a credential integrity failure such as a phantom
 mismatch, an ambiguous binding, or a signer error. It cannot authorize.
 
+The intercepting gateway keeps the scrubber for a rotating token with the request through
+response delivery. The separate `apply_to_request` and `apply_to_response` calls cannot carry
+that state. `apply_to_request` refuses rotating credentials before applying any edits.
+
 Any fault denies the exchange, whatever the order of the capabilities.
 `apply_to_request` and `apply_to_response` apply the mutations only when no
 capability faults. Two set-like mutations on one header, path, or query

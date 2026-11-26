@@ -395,23 +395,24 @@ secret.ref   = "aws://prod"
 |---|---|---|
 | `destinations` | required | One or more destinations this secret is attached at. Each is an exact host, a `*.` suffix wildcard, an explicit `:port`, and a path prefix or `/*suffix`. Not a regex. |
 | `protocol` | `http` | What the destination speaks. `mcp` makes the gateway parse JSON-RPC frames and raise `mcp:call`; `http` is an ordinary request. |
-| `secret.ref` | required unless a backend is declared | `env://NAME`, `aws://profile` (static keys), a bare `aws://` (the AWS default credential chain), or a reference in a scheme that a `[secret-source.<scheme>]` table declares. No other scheme. See below. Beside a backend it must be `env://`, and it is phantom-only: the box provisions the placeholder and strips it, and never injects the real destination credential (the backend handles the destination's auth). |
-| `secret.env` | `NAME` for `env://NAME` | Experimental: refused unless `[experimental-features] secret-sources = true`. The workload variable that holds the phantom. Required with a declared scheme. With `env://NAME` it is optional and equals `NAME`. A signed route and a backend `auth` take none. Two entries with one variable and different references are refused. |
+| `secret.ref` | required unless a backend is declared | `env://NAME`, `aws://profile` (static keys), a bare `aws://` (the AWS default credential chain), `credsd://credential` (a credential the credsd daemon serves by that name), or a reference in a scheme that a `[secret-source.<scheme>]` table declares. No other scheme. See below. Beside a backend it must be `env://`, and it is phantom-only: the box provisions the placeholder and strips it, and never injects the real destination credential (the backend handles the destination's auth). |
+| `secret.env` | `NAME` for `env://NAME` | The workload variable that holds the phantom. Required with a declared scheme. With `env://NAME` it is optional and equals `NAME`. Optional with a credsd token; without it the token route needs `secret.inject = "always"`. A signed route and a backend `auth` take none. Two entries with one variable and different references are refused. |
+| `secret.type` | `aws`, with a warning | `credsd://` only: `aws` signs in the boundary, and `token` attaches the credential's access token behind a phantom and refreshes it near expiry. It accepts the placement keys of an `env://` route. Refused with every other scheme. A token route needs `secret.env` or `secret.inject = "always"`. |
 | `backends.url` | — | A single backend this destination re-routes to, as `scheme://host[:port][/prefix]` (`https` or `http`; a path prefix is allowed, a query or fragment is not). Box dials the backend, presents the backend host (SNI, certificate, and `Host`), prepends the `url`'s path prefix to the agent's path, and keeps the original destination and path in policy and audit. At most one. |
 | `backends.auth.ref` | — | `env://NAME`, or a reference in a declared scheme, for the backend's own token. The box attaches it (no phantom; it takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `env`, `inject`, or `phantom_prefix`). A signed (`aws://` or `credsd://`) auth is refused, and an auth needs an `https` backend. |
 | `secret.placement` | `header` | Where the credential lands: `header`, `basic_auth`, or `query_param`. |
 | `secret.header` | `Authorization` | The header the credential is attached under. `header` placement only. |
 | `secret.prefix` | `Bearer ` for `Authorization`, else empty | Literal text prepended to the credential in the header value. `header` placement only, and carries no braces. |
 | `secret.param` | required for `query_param` | The query-parameter name the credential is attached under. |
-| `secret.inject` | `phantom` | When the gateway attaches the real secret. `phantom` attaches it only to a request that carries the route's phantom, and refuses any other; `always` attaches it to every request to the destinations, and warns. `env://` and a declared scheme only. |
-| `secret.phantom_prefix` | `strands_box_` | The literal prefix the minted phantom carries, before its random suffix. `env://` and a declared scheme only, so a harness that checks its key format accepts the phantom. |
+| `secret.inject` | `phantom` | When the gateway attaches the real secret. `phantom` attaches it only to a request that carries the route's phantom, and refuses any other; `always` attaches it to every request to the destinations, and warns. `env://`, a declared scheme, and a credsd token only. |
+| `secret.phantom_prefix` | `strands_box_` | The literal prefix the minted phantom carries, before its random suffix. `env://`, a declared scheme, and a credsd token only, so a harness that checks its key format accepts the phantom. |
 
-The entry carries no credential-type key, so a `secret.type` on any scheme is an unknown key the box
-refuses.
+Only a `credsd://` reference takes `secret.type`, because only its reference does not say what it
+holds. The type is fixed when the configuration loads, before the box contacts the daemon, because a
+token route mints a phantom at open and a signed route does not.
 
 **A `[secret-source.<scheme>]` table declares the host program that reads a secret for a scheme.**
-It is experimental: it needs `[experimental-features] secret-sources = true`. The `secret.env` key
-needs the same switch. The table takes `protocol`, `command`, `output`, `pass-env`, `pass-secret-env`, `reads`, and
+It is experimental: it needs `[experimental-features] secret-sources = true`. The table takes `protocol`, `command`, `output`, `pass-env`, `pass-secret-env`, `reads`, and
 `deny`, and `credentials::SecretSourceCommand` checks the first five. A reference in that scheme is
 then valid on an egress route and a remote MCP server (with `secret.env`), and on a backend
 `auth.ref` and a telemetry `secret.ref` (with no placeholder variable). An `env://NAME` or
@@ -499,6 +500,8 @@ Refused, each at startup with the destination named:
 | `destinations = ["*.*"]` | A misplaced wildcard names no destination. |
 | `destinations = [""]` | A destination must name a host. |
 | `destinations = ["api.test:0"]` | The port must be 1–65535. |
+| `destinations = [".api.test"]`, `["api..test"]`, `["bücher.example"]`, or `["10.5"]` | No connecting host can equal it, and a resolver reads a name that ends in a number as an IPv4 address. Write the host without an empty label, and an internationalized name in its punycode (`xn--`) form. A trailing dot is removed at load, so `api.test.` loads as `api.test`. |
+| A `[mcp.x] type = "http"` destination `*.example.com` | The gateway recognizes a remote MCP server by its exact host. |
 | `secret.ref = ""` | A destination alone is a reachability claim. |
 | `secret.ref = "STRIPE_KEY"` | A bare name is not a URI. |
 | `secret.ref = "env://PATH"` | The box sets that variable itself. |
@@ -510,6 +513,7 @@ Refused, each at startup with the destination named:
 | A signed (`aws://`/`credsd://`) `secret` beside a backend | A re-routed destination secret is phantom-only, so it must be `env://`; a signed secret mints no phantom to strip. |
 | Two `[[egress.x.backends]]` tables | At most one backend per destination in this version. |
 | A backend `url` with a query or fragment | A backend is an origin plus an optional path prefix; merging a query or sending a fragment is request rewriting. |
+| A backend `url` host that another entry re-routes or declares as a remote MCP server | The box dials a backend directly, so the dial would skip that re-route or the server's `mcp:call` decisions. |
 | A backend entry whose destination is not one exact host (a path, a wildcard, or several destinations) | A re-route is matched per connection (host and port), and the box presents the backend host on the wire, so anything but one exact host would bypass the backend or reach it with the agent's host lost. |
 | A signed (`aws://`/`credsd://`) `backends.auth` | A re-route rewrites the `Host`, which invalidates a SigV4 signature. |
 | A `backends.auth` on an `http` backend | A credential does not ride a plaintext upstream. |
@@ -703,6 +707,8 @@ Use `RunOptions::terminal` to supply the workload's terminal and `RunOptions::on
 to start host threads after hardening and signal registration, before workload setup.
 Use `RunOptions::policy_decisions` to receive each policy decision in memory as the box makes it
 (see [Policy decisions for a library caller](#policy-decisions-for-a-library-caller)).
+Use `RunOptions::events` to learn, in memory, why the box itself failed
+(see [Run events for a library caller](#run-events-for-a-library-caller)).
 Use `RunOptions::box_id` to give a new box your own ID, such as
 `my-app-3f9a1c0e7b2d4a6f`: a prefix of 1 to 15 letters, digits, `.`, `_`, or `-`, then `-` and 16
 lowercase hexadecimal digits. Box stores it, prints it, and labels telemetry with it. A box that
@@ -774,6 +780,33 @@ receive it as their `include` lists select. `recv` waits for the next decision. 
 ended and the channel is empty, it returns an error, and `try_recv` and `recv_timeout` return
 `Disconnected`, so the reader above stops with the run. While the run goes on, they return `Empty`
 and `Timeout` instead.
+
+## Run events for a library caller
+
+A program that runs a box through the library can learn what happened to the run without reading
+its stderr or a records file. Make a channel with `run_events()`, pass its sender in
+`RunOptions::events`, and read the receiver after `run` returns.
+
+```rust
+let (sender, receiver) = strands_box::run_events();
+let code = strands_box::run(config, workload, strands_box::RunOptions {
+    events: Some(sender),
+    ..Default::default()
+});
+while let Ok(event) = receiver.try_recv() {
+    match event {
+        strands_box::RunEvent::Refused { code } => eprintln!("box failed: {code:?}"),
+        _ => {}
+    }
+}
+```
+
+When the box itself ends the run, before or after its workload starts, it sends one
+`RunEvent::Refused` with the [message code](../../docs/user/message-codes.md) of the failure's
+stderr line, such as `B0101` or `B0114`. The code holds no path, host, or message; the message
+still goes to stderr. An error or warning in a run that keeps going, and a workload that exits
+non-zero, send nothing. The channel is unbounded, so no event is dropped. `RunEvent` may gain
+variants, so match it with a wildcard arm.
 
 ## Running
 

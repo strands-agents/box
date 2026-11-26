@@ -55,6 +55,11 @@ before changing persistence; code and tests own its current commit and recovery 
 - One common schema type per grammar action caused quadratic load time in measured Dogwood builds.
   Keep grammar inputs inline (`a_grammar_with_many_actions_declares_no_type_per_action_and_loads`).
   MCP schemas still declare per-tool types; large catalogs need measurement before performance claims.
+- A tool whose MCP schema does not generate is left out of the catalog, never kept with untyped
+  arguments: a guarded `forbid` on an argument would load and never fire
+  (`a_rule_on_a_left_out_tool_degrades_it_and_the_rest_of_the_server_works`). The per-tool retry
+  composes with a `Box::Agent` and `Box::Resource` stub and skips a list with no `$ref`, because a
+  full composition per tool timed out `catalog_page_limit_accepts_256_pages_and_refuses_a_257th`.
 
 ## Verification beyond the root gates
 

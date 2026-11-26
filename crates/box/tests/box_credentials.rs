@@ -1487,10 +1487,10 @@ fn an_unsafe_secret_source_configuration_is_refused_at_configure() {
     }
 }
 
-/// **`secret.env` is refused while `secret-sources` is off**, through the shipped binary, on each
-/// operating system.
+/// **`secret.env` loads while `secret-sources` is off**, through the shipped binary, on each
+/// operating system, and the box stores its record.
 #[test]
-fn a_placeholder_variable_key_is_refused_while_the_switch_is_off() {
+fn a_placeholder_variable_key_loads_while_the_switch_is_off() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
@@ -1502,18 +1502,11 @@ fn a_placeholder_variable_key_is_refused_while_the_switch_is_off() {
              secret.ref = \"env://{SECRET_VARIABLE}\"\nsecret.env = \"{SECRET_VARIABLE}\"\n"
         ),
     );
-    assert_refused(
-        &box_,
-        &output,
-        &[
-            "secret.env is experimental: set `secret-sources = true` in \
-           `[experimental-features]` to load it, or remove secret.env, because an env:// \
-           reference already names its variable",
-        ],
-    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "the box must start: {stderr}");
     assert!(
-        !box_.root().join("private/box.toml").exists(),
-        "a refused configuration stores no record"
+        box_.root().join("private/box.toml").exists(),
+        "the box stores its record"
     );
 }
 
@@ -1829,6 +1822,332 @@ fn a_configured_destination_is_admitted_through_the_boundary() {
         !out.contains(REAL_SECRET) && !stderr.contains(REAL_SECRET),
         "the real secret must never appear inside the box: {out:?} / {stderr:?}"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Static credsd tokens are read once at startup.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// The access token the fake credsd serves, which must never appear inside the box.
+const CREDSD_TOKEN: &str = "ghp_e2eCredsdTokenExample";
+
+/// The variable that holds a credsd token route's placeholder.
+const CREDSD_VARIABLE: &str = "STRANDS_BOX_E2E_CREDSD_TOKEN";
+
+/// A fake credsd 0.2 daemon on a Unix socket that answers every connection: `system/health` with
+/// protocol 1, `credential/list` with one credential `github` of `kind`, and `credential/get` with
+/// an access token. It records each method it is asked, in order.
+struct FakeCredsd {
+    socket: std::path::PathBuf,
+    methods: Arc<Mutex<Vec<String>>>,
+    _directory: tempfile::TempDir,
+}
+
+impl FakeCredsd {
+    fn start(kind: &'static str) -> Self {
+        Self::serving(kind, true)
+    }
+
+    /// A fake whose `credential/get` answers `CREDENTIAL_NOT_FOUND` when `serves_get` is false.
+    fn serving(kind: &'static str, serves_get: bool) -> Self {
+        use std::io::BufRead;
+        let directory = tempfile::tempdir().expect("a socket directory");
+        let socket = directory.path().join("credsd.sock");
+        let listener =
+            std::os::unix::net::UnixListener::bind(&socket).expect("bind the fake credsd");
+        let methods = Arc::new(Mutex::new(Vec::new()));
+        let seen = methods.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut line = String::new();
+                if std::io::BufReader::new(stream.try_clone().expect("clone the stream"))
+                    .read_line(&mut line)
+                    .is_err()
+                {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(line.trim_end()).unwrap_or_default();
+                let method = request["method"].as_str().unwrap_or_default().to_string();
+                let result = match method.as_str() {
+                    "system/health" => json!({"protocol": 1, "version": "0.0.0-test"}),
+                    "credential/list" => json!({"credentials": [{
+                        "credential": "github", "kind": kind, "source": "static_secret",
+                        "status": "active", "tags": {}
+                    }]}),
+                    _ if !serves_get => {
+                        seen.lock().expect("methods lock").push(method);
+                        let reply = json!({"jsonrpc": "2.0", "id": 1, "error": {
+                            "code": -32000, "message": "x",
+                            "data": {"code": "CREDENTIAL_NOT_FOUND"}
+                        }});
+                        let _ = stream.write_all(format!("{reply}\n").as_bytes());
+                        continue;
+                    }
+                    _ => json!({
+                        "credential": "github",
+                        "material": {"type": "access_token", "token": CREDSD_TOKEN,
+                                     "token_type": "Bearer"},
+                        "expires_at": null
+                    }),
+                };
+                seen.lock().expect("methods lock").push(method);
+                let reply = json!({"jsonrpc": "2.0", "id": 1, "result": result});
+                let _ = stream.write_all(format!("{reply}\n").as_bytes());
+            }
+        });
+        Self {
+            socket,
+            methods,
+            _directory: directory,
+        }
+    }
+
+    fn socket(&self) -> String {
+        self.socket.to_string_lossy().into_owned()
+    }
+
+    fn methods(&self) -> Vec<String> {
+        self.methods.lock().expect("methods lock").clone()
+    }
+}
+
+/// Start a box whose `[egress.github]` route reads `credsd://<credential>` as a token from the
+/// daemon at `socket`, and assert that the upstream receives `token` while the workload holds only a
+/// placeholder. Answers the startup output.
+fn a_token_route_reaches_the_upstream(socket: &str, credential: &str, token: &str) -> Output {
+    let upstream = RecordingUpstream::start();
+    let host = "localhost";
+    let request = Request::with_config(
+        "credsd-token",
+        &permit_egress_to(host, upstream.port),
+        &format!(
+            "[experimental-features]\nsecret-sources = true\n\n\
+             [egress.github]\ndestinations = [\"{host}:{port}\"]\n\
+             secret.ref = \"credsd://{credential}\"\nsecret.type = \"token\"\n\
+             secret.env = \"{CREDSD_VARIABLE}\"\n",
+            port = upstream.port
+        ),
+    );
+    let trust = request.operator_home().join("company-trust");
+    std::fs::create_dir_all(&trust).expect("a host trust directory");
+    let roots = trust.join("roots.pem");
+    std::fs::write(&roots, &upstream.certificate_pem).expect("the host trust file");
+    let (box_, output) = request
+        .env("CREDSD_SOCKET", socket)
+        .env("SSL_CERT_FILE", roots.to_str().expect("UTF-8"))
+        .attempt();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "the box must start: {stderr}");
+    assert!(
+        !stderr.contains("no secret.type"),
+        "a typed route warns not: {stderr}"
+    );
+
+    let record = std::fs::read_to_string(box_.root().join("private/box.toml"))
+        .expect("the box started, so the record is stored");
+    let record: toml::Value = toml::from_str(&record).expect("the record is TOML");
+    assert_eq!(record["version"].as_integer(), Some(43));
+
+    let environment = String::from_utf8_lossy(&box_.run(&["/usr/bin/env"]).stdout).into_owned();
+    let held = environment
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{CREDSD_VARIABLE}=")))
+        .unwrap_or_default();
+    assert!(
+        held.starts_with("strands_box_"),
+        "a placeholder, got {held:?}"
+    );
+    assert!(
+        !environment.contains(token),
+        "the token never enters the workload"
+    );
+
+    let probed = probe(
+        &box_,
+        CREDSD_VARIABLE,
+        &format!("https://{host}:{}/v1/user", upstream.port),
+    );
+    let out = String::from_utf8_lossy(&probed.stdout).into_owned();
+    assert!(out.contains("status=200"), "{probed:?}");
+    assert!(
+        !out.contains(token),
+        "the response reaches the workload scrubbed"
+    );
+    assert_eq!(
+        upstream.authorizations(),
+        [format!("Bearer {token}")],
+        "the upstream receives the daemon's token"
+    );
+    output
+}
+
+/// **A credsd token route attaches the daemon's token and the workload holds only a placeholder.**
+/// The box reads the token once at start, before the workload, and the upstream receives it.
+#[test]
+fn a_credsd_token_reaches_the_upstream_and_the_workload_holds_a_placeholder() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let credsd = FakeCredsd::start("access_token");
+    a_token_route_reaches_the_upstream(&credsd.socket(), "github", CREDSD_TOKEN);
+    let one_run = ["system/health", "credential/list", "credential/get"];
+    assert_eq!(
+        credsd.methods(),
+        one_run.repeat(3),
+        "in each of the three runs, the preflight checks the kind, then the vault reads the token \
+         once"
+    );
+}
+
+/// **A live credsd daemon's token reaches the upstream.** Set `CREDSD_SOCKET`,
+/// `CREDSD_TEST_TOKEN_CREDENTIAL` to an `access_token` credential the daemon serves, and
+/// `CREDSD_TEST_TOKEN` to its value. Skipped when unset.
+#[test]
+fn a_live_credsd_token_reaches_the_upstream() {
+    let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    let (Some(socket), Some(credential), Some(token)) = (
+        var("CREDSD_SOCKET"),
+        var("CREDSD_TEST_TOKEN_CREDENTIAL"),
+        var("CREDSD_TEST_TOKEN"),
+    ) else {
+        eprintln!(
+            "skipping: CREDSD_SOCKET, CREDSD_TEST_TOKEN_CREDENTIAL, or CREDSD_TEST_TOKEN is absent"
+        );
+        return;
+    };
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    a_token_route_reaches_the_upstream(&socket, &credential, &token);
+}
+
+/// **A credsd token route with no `secret.env` and `secret.inject = "always"` starts and attaches
+/// the token**, though the workload holds no placeholder: the client's own `Authorization` is
+/// replaced, and the token never reaches the workload.
+#[test]
+fn a_credsd_token_with_no_placeholder_variable_is_attached_to_every_request() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let credsd = FakeCredsd::start("access_token");
+    let upstream = RecordingUpstream::start();
+    let host = "localhost";
+    let request = Request::with_config(
+        "credsd-always",
+        &permit_egress_to(host, upstream.port),
+        &format!(
+            "[egress.github]\ndestinations = [\"{host}:{port}\"]\n\
+             secret.ref = \"credsd://github\"\nsecret.type = \"token\"\n\
+             secret.inject = \"always\"\n",
+            port = upstream.port
+        ),
+    );
+    let trust = request.operator_home().join("company-trust");
+    std::fs::create_dir_all(&trust).expect("a host trust directory");
+    let roots = trust.join("roots.pem");
+    std::fs::write(&roots, &upstream.certificate_pem).expect("the host trust file");
+    let (box_, output) = request
+        .env("CREDSD_SOCKET", &credsd.socket())
+        .env("SSL_CERT_FILE", roots.to_str().expect("UTF-8"))
+        .attempt();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "the box must start: {stderr}");
+
+    // The probe sends `Authorization: Bearer <the variable's value>`; with no placeholder variable,
+    // it sends the workload's own `HOME`, which the gateway replaces.
+    let output = probe(
+        &box_,
+        "HOME",
+        &format!("https://{host}:{}/v1/user", upstream.port),
+    );
+    let out = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(out.contains("status=200"), "{output:?}");
+    assert_eq!(
+        upstream.authorizations(),
+        [format!("Bearer {CREDSD_TOKEN}")],
+        "the upstream receives the daemon's token"
+    );
+}
+
+/// **A token route whose credsd credential is AWS credentials stops the box before the
+/// workload**, naming both kinds and the key that fixes it.
+#[test]
+fn a_credsd_token_route_whose_credential_is_aws_stops_the_box() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let credsd = FakeCredsd::start("session_credentials");
+    let (_, output) = Request::with_config(
+        "credsd-token-kind",
+        &permit_egress_to("api.github.com", 443),
+        "[egress.github]\ndestinations = [\"api.github.com\"]\n\
+         secret.ref = \"credsd://github\"\nsecret.type = \"token\"\nsecret.inject = \"always\"\n",
+    )
+    .env("CREDSD_SOCKET", &credsd.socket())
+    .attempt();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "the run must refuse: {stderr}");
+    assert!(
+        stderr.contains(
+            r#"credsd credential "github" is "session_credentials", but a route that reads it expects "access_token""#
+        ) && stderr.contains(r#"secret.type = "aws""#),
+        "{stderr}"
+    );
+    assert!(
+        !credsd
+            .methods()
+            .iter()
+            .any(|method| method == "credential/get"),
+        "the box read no token: {:?}",
+        credsd.methods()
+    );
+}
+
+/// **A token that credsd does not serve stops the box before the workload**, and the refusal names
+/// the route's host and the credential.
+#[test]
+fn a_credsd_token_that_does_not_resolve_stops_the_box_naming_host_and_credential() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let credsd = FakeCredsd::serving("access_token", false);
+    let (_, output) = Request::with_config(
+        "credsd-token-missing",
+        &permit_egress_to("api.github.com", 443),
+        "[egress.github]\ndestinations = [\"api.github.com\"]\n\
+         secret.ref = \"credsd://github\"\nsecret.type = \"token\"\nsecret.inject = \"always\"\n",
+    )
+    .env("CREDSD_SOCKET", &credsd.socket())
+    .attempt();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "the run must refuse: {stderr}");
+    assert!(
+        stderr.contains("credential for api.github.com did not resolve")
+            && stderr.contains(r#"credsd has no credential "github""#),
+        "{stderr}"
+    );
+}
+
+/// **A credsd route with no `secret.type` warns once at start** and still signs as AWS.
+#[test]
+fn an_untyped_credsd_route_warns_at_start() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let credsd = FakeCredsd::start("session_credentials");
+    let (_, output) = Request::with_config(
+        "credsd-untyped",
+        &permit_egress_to("bedrock-runtime.us-west-2.amazonaws.com", 443),
+        "[egress.model]\ndestinations = [\"bedrock-runtime.us-west-2.amazonaws.com\"]\n\
+         secret.ref = \"credsd://github\"\n",
+    )
+    .env("CREDSD_SOCKET", &credsd.socket())
+    .attempt();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let warning = "strands-box: warning[B0214]: [egress.model] reads credsd://github with no \
+                   secret.type, so the box signs it with AWS credentials";
+    assert_eq!(stderr.matches(warning).count(), 1, "{stderr}");
 }
 
 /// **A root the host trusts reaches an upstream the built-in roots refuse.** The box process runs
