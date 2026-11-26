@@ -103,10 +103,8 @@ and a path under the operator's home starts with `~/`.
 Each read or write on a handle from `open()` is decided again. `os.stat()` returns the real size
 and file type, with `st_uid` and `st_gid` set to `0` and `st_nlink` set to `1`.
 
-The hosted filesystem roots are the operator home, agent home, workspace, and, on Linux, canonical
-directories approved from `box.toml`'s `[agent.filesystem] receive_mounts` selection. Each operation
-still needs a policy permit and passes the protected-state and command checks. Tool and local-server
-selections add no hosted roots. See [incoming mount declarations](config.md#incoming-mount-declarations).
+Monty accesses host files only within the [hosted filesystem roots](config.md#hosted-filesystem-roots).
+That section defines the selected storage paths and the spelling to use in commands and policy.
 
 These raise an error whatever the policy says:
 

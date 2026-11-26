@@ -19,10 +19,11 @@ shell](decisions.md#interpreters-are-vendored-not-the-host-shell).
 An alias is a small client program in the agent's sandbox, named `zsh`, `bash`, or `sh`, that
 forwards a command to the box's trusted process over a local socket. The broker is the part of that
 process that accepts the alias's connection and hands the command to the Shell. The reachable paths
-check is deny-only and runs after policy. Its roots are the operator's home, the agent's home, the
-workspace, and the canonical directories approved from `[agent.filesystem] receive_mounts` in
-`box.toml`. It refuses paths outside those roots, the box directory, and the `box.toml` and policy
-this run loaded, whatever a `permit` says. Tool and local-server selections add no hosted roots.
+check is deny-only and runs after policy. It refuses host filesystem access outside the
+[hosted filesystem roots](../user/config.md#hosted-filesystem-roots), inside the box directory, and
+to the `box.toml` and policy this run loaded, whatever a `permit` says. See the
+[operation sequence](architecture.md#one-command-from-the-agent-to-the-file) for how the resolver,
+policy, and protected-path checks work together.
 
 ## How a command reaches the Shell
 

@@ -141,14 +141,14 @@ line.
 
 On Linux, `filesystem.receive_mounts` in `box.toml` selects directories where the agent, a tool,
 or a local MCP server receives host-mounted filesystems. Each process has its own selection.
-Listing a directory grants no access: the agent needs whole-directory read, write, and execution
-grants; tools and servers need read and write grants under their existing execution rules.
+Selection adds no native grant or hosted policy permission. The agent needs whole-directory read,
+write, and execution grants; tools and servers need read and write grants under their existing
+execution rules.
 Box rejects intersecting denied or protected paths and incompatible native filesystem policy.
 
-The agent's approved canonical selections also extend the paths Strands Shell and Monty may access
-in the box's trusted process. Every operation still needs a policy permit and passes the existing
-protected-state and command checks. Tool and local-server selections do not extend these hosted
-paths. The operator home, agent home, and workspace remain available under their existing checks.
+For Shell and Monty, see [hosted filesystem roots](../../docs/user/config.md#hosted-filesystem-roots).
+That section defines which selections extend hosted access, the required path spelling, and the
+separate policy and protected-path checks.
 
 Each selected directory must already be a dedicated mount point connected to an upstream publisher.
 Box verifies the approved directory identity and prepares the receiving connection before the process

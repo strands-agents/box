@@ -66,10 +66,8 @@ the agent. So `curl -H "Authorization: Bearer $GITHUB_TOKEN" ...` sends the plac
 request to the route's destination that policy permits, the gateway puts the real token in its
 place.
 
-The hosted filesystem roots are the operator home, agent home, workspace, and, on Linux, canonical
-directories approved from `box.toml`'s `[agent.filesystem] receive_mounts` selection. Selecting a
-directory grants no policy permission. Tool and local-server selections add no hosted roots. See
-[incoming mount declarations](config.md#incoming-mount-declarations).
+Shell accesses host files only within the [hosted filesystem roots](config.md#hosted-filesystem-roots).
+That section defines the selected storage paths and the spelling to use in commands and policy.
 
 The alias takes the directory it was run from from `PWD` when `PWD` names it, and otherwise asks
 the operating system. A directory other than the workspace takes the same `fs:read` decision, with
@@ -85,9 +83,9 @@ input: the command reads its input as empty.
 
 ## What runs where
 
-The reachable paths check is deny-only and runs after policy. It refuses a path outside the hosted
-filesystem roots, a path inside the box directory, and the `box.toml` and `policy.dw` the run loaded,
-whatever a `permit` says.
+The reachable paths check is deny-only and runs after policy. It refuses host filesystem access
+outside the hosted roots, inside the box directory, and to the `box.toml` and `policy.dw` the run
+loaded, whatever a `permit` says.
 
 Once the alias hands a command to the Shell, each command in it runs as follows:
 

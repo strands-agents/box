@@ -17,8 +17,9 @@ The box's trusted process runs outside the agent's sandbox. It holds the policy 
 which accepts the agent's requests to Box's interpreters, and the egress gateway, which checks and
 forwards every outbound request. The reachable paths check is deny-only and runs after policy. It
 refuses the box directory, the `box.toml` and policy this run loaded, and any path outside the
-operator's home, the agent's `HOME`, the workspace, and the approved directories selected by
-`[agent.filesystem] receive_mounts` in `box.toml`. Tool and local MCP selections do not expand this set.
+[hosted filesystem roots](../user/config.md#hosted-filesystem-roots). See the
+[operation sequence](architecture.md#one-command-from-the-agent-to-the-file) for how the resolver,
+policy, and protected-path checks work together.
 
 For the Python that Monty supports, the file operations, `fetch()`, and the rules to write, read
 [Python scripts in a box](../user/monty.md).
@@ -109,9 +110,8 @@ sequenceDiagram
 3. Approve the canonical path. After policy permits, the reachable paths check inspects the path's
    canonical form, with every link resolved. It refuses the box directory, the `box.toml` and policy
    this run loaded, and any spelling that isn't its own canonical path. The path must fall under
-   the operator home, agent home, workspace, or a canonical directory approved from
-   `[agent.filesystem] receive_mounts` in `box.toml`. Tool and local-server selections add no hosted
-   roots. A permit can't widen this set. See [the policy is the only decision
+   a [hosted filesystem root](../user/config.md#hosted-filesystem-roots). A permit can't widen this
+   set. See [the policy is the only decision
    authority](decisions.md#the-authored-policy-is-the-only-decision-authority), and its refusal is
    also a `PermissionError`.
 4. Act on the approved path. Box walks the approved path from `/`, one directory at a time,
