@@ -286,7 +286,7 @@ interpreters are part of the code the operator must trust.
    alone.
 4. It installs the policy, in log-only mode when the `policy` table says so, and prints one line on
    stderr naming what a log-only run exposes. For each `[enrichment.<name>]` table, it prints one
-   line that says whether each DNS name the workload connects to goes to that classification source,
+   line that says whether the DNS names the workload connects to go to that classification source,
    which happens only when a rule reads the table. Parsing or validation errors stop startup. Box also
    [rejects rules it can prove will never match](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns).
    It warns when it finds a rule that may never match but cannot prove it.

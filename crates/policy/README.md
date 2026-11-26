@@ -630,8 +630,11 @@ this boundary serves. The interceptor holds all three and passes the box into ev
 
 The interceptor maps connect and HTTP request attempts to `Request::Connect` and
 `Request::Http`. `into_handle_with_discovery` also takes a `HostEnricher`. The host decision takes
-the host's `EnrichmentFacts` from `enrich`, which may ask a source, and each per-address decision
-takes them from `recall`, which asks none. `into_handle` puts `EnrichmentFacts::NONE` on each. A response release raises **no request and no decision**, and its permit
+the host's `EnrichmentFacts` from `enrich`, which may ask a source, unless the installed rules
+refuse the host whatever a source says. Then no source is asked and every entry reads unanswered.
+The adapter keeps the facts of each host decision, and the per-address decisions after it read them
+and ask nothing. A per-address decision with no kept host decision calls `enrich` itself.
+`into_handle` puts `EnrichmentFacts::NONE` on each. A response release raises **no request and no decision**, and its permit
 records nothing. The gateway consumes the request permit when the exchange ends and records
 the matching HTTP outcome. An `http:request::response` event carries delivered request bytes
 and any reply status in `output.status`, which only a `when temporal { … }` rule reads.

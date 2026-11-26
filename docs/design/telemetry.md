@@ -58,7 +58,8 @@ command line because both can contain credentials.
 
 A `net:connect` decision in a box that declares `[enrichment.<name>]` tables also states what each
 classification source answered about the destination, as `strands.box.enrichment.<name>.answered`
-and `strands.box.enrichment.<name>.labels`, so a reader sees the fact the policy decided on. The
+and `strands.box.enrichment.<name>.labels`, so a reader sees the fact the policy decided on. A
+refusal for which Box asked no source states none. The
 receiver removes these keys from a relayed payload as it removes every `strands.box.*` key, so the
 workload cannot forge an answer.
 

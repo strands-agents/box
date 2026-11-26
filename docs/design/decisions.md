@@ -807,15 +807,16 @@ The box's trusted process decides every governed request locally, with no signat
 remote authorization. The one outside call is an `[enrichment.<name>]` source. Before the first
 `net:connect` decision on a host, Box asks the source about the DNS name, and the answer becomes
 `context.input.enrichment.<name>`. The source grants nothing: the authored policy decides, including
-what an unanswered question means through `answered`, and Box asks only when a rule reads the entry.
-Box has no control plane for signed bundle distribution, an organizational ceiling tier, or
-quarantine pushes. The operator distributes the policy file.
+what an unanswered question means through `answered`, and Box asks only when a rule reads the entry
+and the answer can change the decision. Box has no control plane for signed bundle distribution, an
+organizational ceiling tier, or quarantine pushes. The operator distributes the policy file.
 
 **Rejected.** A remote decision for each request: it fails open during an outage and exceeds the
 latency budget. A Dogwood provider call inside a rule: the engine decides with no input or output.
 
-**Cost.** Each DNS name the workload connects to leaves the box for that source, and Box discloses
-this at startup. The first connection to a name waits up to the entry's `timeout` for its answer.
+**Cost.** The DNS name of each host whose decision the answer can change leaves the box for that
+source, and Box discloses this at startup. The first connection to a name waits up to the entry's
+`timeout` for its answer.
 
 <a id="the-engine-is-dogwood"></a>
 ### The policy language is Dogwood, a superset of Cedar

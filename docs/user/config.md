@@ -85,7 +85,7 @@ The file carries fifteen keys. `name` and `box_dir` are required.
 | `[secret-source.<scheme>]` | tables | Experimental: the host program that reads the secret of a reference in `<scheme>://`. See [`[secret-source.<scheme>]`](#secret-sourcescheme). |
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
-| `[enrichment.<name>]` | tables | The outside classification sources Box asks about the DNS name of each host the workload connects to. See [`[enrichment.<name>]`](#enrichmentname). |
+| `[enrichment.<name>]` | tables | The outside classification sources Box asks about the DNS name of a host the workload connects to. See [`[enrichment.<name>]`](#enrichmentname). |
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
 | `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, ingress, and secret sources. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
@@ -1595,7 +1595,7 @@ The record omits `url.full` and `process.command_line`.
 ## `[enrichment.<name>]`
 
 Each table declares one classification source: an outside service that Box asks about the DNS name
-of each host the workload connects to, before policy decides the connection. The answer reaches the
+of a host the workload connects to, before policy decides the connection. The answer reaches the
 rule as `context.input.enrichment.<name>`, and the policy decides. The table itself permits and
 refuses nothing. [Ask a classification source about each
 host](egress.md#ask-a-classification-source-about-each-host) states when Box asks and how long it
@@ -1636,11 +1636,11 @@ max_age = "300s"
 
 `<kind>` stands in for a kind, because a release build implements none.
 
-Box asks a source only when a rule reads its entry. Before the workload starts, Box prints one line
-on stderr for each table. For a table that a rule reads:
+Before the workload starts, Box prints one line on stderr for each table. For a table that a rule
+reads:
 
 ```text
-strands-box: note[B0215]: [enrichment.threat] sends each DNS name the workload connects to to its classification source (kind "<kind>") before policy decides the connection.
+strands-box: note[B0215]: [enrichment.threat] sends its classification source (kind "<kind>") the DNS name of each host the workload connects to, before policy decides the connection, unless policy refuses the host whatever the source answers.
 ```
 
 For a table that no rule reads:

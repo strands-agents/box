@@ -699,6 +699,17 @@ impl PolicyEngine {
         self.authority.read_enrichment()
     }
 
+    /// Every declared enrichment entry unanswered when the installed rules refuse the `net:connect`
+    /// `request` whatever a read entry answers, and `None` when an answer can change the decision.
+    #[cfg(feature = "egress-adapter")]
+    pub(crate) fn refused_whatever_answered(
+        &self,
+        principal: &Principal,
+        request: &Request<'_>,
+    ) -> Option<crate::EnrichmentFacts> {
+        self.authority.refused_whatever_answered(principal, request)
+    }
+
     /// The per-tool refinement for one `tools/call`, and the `::response` an allowed call owes.
     ///
     /// Returns `Allow` when the composed schema declares no per-tool action for the tool (it rides

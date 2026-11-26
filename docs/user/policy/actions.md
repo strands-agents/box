@@ -110,7 +110,7 @@ Each outbound call is two decisions, both of which must permit.
 | `ip4?` | String | The IPv4 address the gateway connects to, as a dotted quad, such as `"203.0.113.7"`. Present for an IPv4 destination, and for an IPv6 destination that carries an IPv4 address in a wrapping Box recognises. |
 | `ip6?` | String | The IPv6 address the gateway connects to, as text, compressed and in lowercase, such as `"64:ff9b::cb00:7107"`. Present for every IPv6 destination, and absent for an IPv4 one. |
 | `enrichment` | Record | What each classification source answered about `host`: one entry for each [`[enrichment.<name>]`](../config.md#enrichmentname) table, as `enrichment.<name>`. Present only in a box that declares a table, and then on every `net:connect`. |
-| `enrichment.<name>.answered` | Bool | `true` when the source answered about the host. `false` when it gave no answer in time or failed, and when the host is an IP address, which Box asks no source about. |
+| `enrichment.<name>.answered` | Bool | `true` when the source answered about the host. `false` when it gave no answer in time or failed, and when Box did not ask it, as for an IP address. [Ask a classification source about each host](../egress.md#ask-a-classification-source-about-each-host) lists when Box asks. |
 | `enrichment.<name>.labels` | Set of String | The labels the source gave, from the table's `outputs`, each at `min_confidence` or above. Empty when `answered` is `false`. |
 
 `ip4` and `ip6` are absent before resolution, on the decision for the host. A destination that
@@ -123,7 +123,7 @@ Compare either as a String behind its own guard, as
 with `expected ipaddr but saw String`.
 
 `enrichment` holds the same answer on the decision for the host and on the decision for each
-address: Box asks the source on the first and reuses its answer on the rest. A rule reads an entry
+address. A rule reads an entry
 as `context.input.enrichment.threat.labels.contains("malware")` or
 `context.input.enrichment.threat.answered`, with no guard. A rule that reads an entry no table
 declares refuses to load, and so does a policy in which a rule reads an entry's `labels` and no rule

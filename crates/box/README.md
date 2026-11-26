@@ -115,7 +115,8 @@ rule as `context.input.enrichment.<name>`, with `answered` and `labels`, and the
 table grants nothing. `kind` must be one this build implements, and a release build implements
 none. `endpoint`, `outputs`, and `min_confidence` are required; `secret.ref`, `timeout`, and
 `max_age` are optional. A table stores the record at version 44. Box asks a source only when a rule
-reads its entry, and prints one `B0215` line for each table at startup. See
+reads its entry and the answer can change the decision, and prints one `B0215` line for each table
+at startup. See
 [ask a classification source about each host](../../docs/user/egress.md#ask-a-classification-source-about-each-host).
 
 **`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the

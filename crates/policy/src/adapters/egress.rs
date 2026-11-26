@@ -1,8 +1,8 @@
 //! Adapters from the policy facade to egress effect interception.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
 use egress_gateway::{
@@ -37,6 +37,8 @@ pub struct EgressPolicyInterceptor {
     on_remote_finished: Arc<dyn Fn() + Send + Sync>,
     /// What each declared enrichment entry says about a destination host.
     enricher: Arc<dyn HostEnricher>,
+    /// The facts each recent host decision read, which that connection's address decisions read.
+    decided: Mutex<DecidedHosts>,
 }
 
 /// The enricher of a box that declares no enrichment entry.
@@ -46,9 +48,37 @@ impl HostEnricher for NoEnrichment {
     fn enrich(&self, _host: &str) -> EnrichmentFacts {
         EnrichmentFacts::NONE
     }
+}
 
-    fn recall(&self, _host: &str) -> EnrichmentFacts {
-        EnrichmentFacts::NONE
+/// How many host decisions the adapter keeps the facts of, because the workload chooses the hosts.
+const DECIDED_HOSTS: usize = 1024;
+
+/// The enrichment facts of the latest host decision on each host and port, oldest first.
+#[derive(Default)]
+struct DecidedHosts {
+    order: VecDeque<(String, u16)>,
+    facts: HashMap<(String, u16), EnrichmentFacts>,
+}
+
+impl DecidedHosts {
+    /// Keep `facts` as what the host decision on `host` and `port` read, dropping the oldest host
+    /// when full.
+    fn keep(&mut self, host: &str, port: u16, facts: EnrichmentFacts) {
+        let key = (host.to_string(), port);
+        if !self.facts.contains_key(&key) {
+            if self.order.len() >= DECIDED_HOSTS
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.facts.remove(&oldest);
+            }
+            self.order.push_back(key.clone());
+        }
+        self.facts.insert(key, facts);
+    }
+
+    /// What the latest host decision on `host` and `port` read, while it is kept.
+    fn read(&self, host: &str, port: u16) -> Option<EnrichmentFacts> {
+        self.facts.get(&(host.to_string(), port)).cloned()
     }
 }
 
@@ -73,8 +103,7 @@ impl EgressPolicyInterceptor {
 
     /// Construct the handle and track lazy remote MCP discovery in `catalogs`, calling
     /// `on_remote_finished` once every HTTP server there is terminal, and put what `enricher` says
-    /// about each destination host on its `net:connect`: `enrich` for the host decision, and
-    /// `recall` for each per-address decision.
+    /// about each destination host on its `net:connect`.
     pub fn into_handle_with_discovery(
         policy: Arc<PolicyEngine>,
         principal: Principal,
@@ -96,6 +125,7 @@ impl EgressPolicyInterceptor {
             catalogs,
             on_remote_finished,
             enricher,
+            decided: Mutex::new(DecidedHosts::default()),
         })
     }
 
@@ -115,14 +145,51 @@ impl EgressPolicyInterceptor {
         }
     }
 
-    /// What the declared entries say about a `net:connect` attempt's host, which the host decision
-    /// may ask a source and each per-address decision recalls, so one CONNECT asks at most once.
+    /// What the declared entries say about a `net:connect` attempt's host. The host decision asks,
+    /// and each address decision after it reads what the host decision read, asking again only
+    /// when no host decision on that host and port is kept.
     fn enrichment(&self, effect: &EgressEffectAttempt<'_>) -> EnrichmentFacts {
-        match effect {
-            EgressEffectAttempt::Resolve { host, .. } => self.enricher.enrich(host),
-            EgressEffectAttempt::Connect { host, .. } => self.enricher.recall(host),
-            _ => EnrichmentFacts::NONE,
+        let (host, port, address) = match effect {
+            EgressEffectAttempt::Resolve { host, port } => (*host, *port, None),
+            EgressEffectAttempt::Connect {
+                host,
+                port,
+                address,
+                ..
+            } => (*host, *port, Some(address.ip())),
+            _ => return EnrichmentFacts::NONE,
+        };
+        // With no entry read, no source is asked, so there is nothing to keep or to spare.
+        if self.policy.read_enrichment().is_empty() {
+            return self.enricher.enrich(host);
         }
+        let Some(ip) = address else {
+            let facts = self.asked(host, None, port);
+            if let Ok(mut decided) = self.decided.lock() {
+                decided.keep(host, port, facts.clone());
+            }
+            return facts;
+        };
+        self.decided
+            .lock()
+            .ok()
+            .and_then(|decided| decided.read(host, port))
+            .unwrap_or_else(|| self.asked(host, Some(ip), port))
+    }
+
+    /// What the enricher says about `host`, or every entry unanswered with no source asked when the
+    /// installed rules refuse this `net:connect` whatever a source says, so no source learns a
+    /// name that policy refuses anyway.
+    fn asked(&self, host: &str, ip: Option<IpAddr>, port: u16) -> EnrichmentFacts {
+        let request = Request::Connect {
+            host,
+            ip,
+            port,
+            enrichment: &EnrichmentFacts::NONE,
+        };
+        self.policy
+            .refused_whatever_answered(&self.principal, &request)
+            .unwrap_or_else(|| self.enricher.enrich(host))
     }
 
     /// Report the egress door finished once every remote server is terminal.

@@ -83,6 +83,9 @@ pub(crate) struct DogwoodEngine {
     tool_inputs: crate::mcp_input::ToolInputs,
     /// Outcome events the history refused, recorded before the next decision.
     pending_outcomes: Mutex<Vec<EventBuilder>>,
+    /// What the installed rules decide about a `net:connect` before any enrichment entry answers,
+    /// kept only once [`Self::screen_connects`] asks for it.
+    screen: Option<crate::enrichment::ConnectScreen>,
     #[cfg(test)]
     fixed_clock: Option<Arc<AtomicI64>>,
 }
@@ -345,6 +348,7 @@ impl DogwoodEngine {
                 tool_actions: effective_schema.tool_actions,
                 tool_inputs: effective_schema.tool_inputs,
                 pending_outcomes: Mutex::new(Vec::new()),
+                screen: None,
                 #[cfg(test)]
                 fixed_clock: None,
             },
@@ -420,6 +424,7 @@ impl DogwoodEngine {
             tool_actions,
             tool_inputs,
             pending_outcomes: Mutex::new(Vec::new()),
+            screen: None,
             #[cfg(test)]
             fixed_clock: None,
         })
@@ -511,6 +516,13 @@ impl DogwoodEngine {
         reconcile_staged_policy_set(&mut engine, canonical_policies, installed_schema)?;
         self.rule_ids = rule_ids(&engine);
         drop(engine);
+        if self.screen.is_some() {
+            self.screen = Some(crate::enrichment::ConnectScreen::of(
+                canonical_policies,
+                installed_schema,
+                &request_schema.cedar,
+            ));
+        }
         self.request_schema = request_schema.cedar;
         self.tool_actions = request_schema.tool_actions;
         self.tool_inputs = request_schema.tool_inputs;
@@ -568,6 +580,7 @@ impl DogwoodEngine {
             tool_actions: effective_schema.tool_actions,
             tool_inputs: effective_schema.tool_inputs,
             pending_outcomes: Mutex::new(Vec::new()),
+            screen: None,
             fixed_clock: None,
         })
     }
@@ -613,6 +626,7 @@ impl DogwoodEngine {
             tool_actions: effective_schema.tool_actions,
             tool_inputs: effective_schema.tool_inputs,
             pending_outcomes: Mutex::new(Vec::new()),
+            screen: None,
             fixed_clock: Some(now),
         })
     }
@@ -632,6 +646,28 @@ impl DogwoodEngine {
             let _guard = self.engine.lock().expect("scope is not yet poisoned");
             panic!("simulated Dogwood scope panic");
         }));
+    }
+
+    /// Keep, from the next install on, what the installed rules decide about a `net:connect` before
+    /// any enrichment entry answers, which a box whose rules read no entry never needs.
+    pub(crate) fn screen_connects(&mut self) {
+        self.screen = Some(crate::enrichment::ConnectScreen::default());
+    }
+
+    /// Whether the installed rules refuse the `net:connect` `request` whatever any enrichment entry
+    /// answers, decided with no history event.
+    #[cfg(feature = "egress-adapter")]
+    pub(crate) fn refuses_whatever_answered(
+        &self,
+        principal: &Principal,
+        request: &Request<'_>,
+    ) -> bool {
+        let Some(screen) = &self.screen else {
+            return false;
+        };
+        matches!(request, Request::Connect { .. })
+            && crate::schema::to_unbound_cedar_request(principal, request, &self.request_schema)
+                .is_ok_and(|request| screen.refuses(&request))
     }
 
     /// Decide one request at the current point in history.

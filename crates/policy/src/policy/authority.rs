@@ -23,8 +23,8 @@ use crate::schema::{
 };
 use crate::spelling::{Operator, PolicyWarning};
 use crate::{
-    Decision, EnrichmentFacts, Outcome, PendingToolResponse, PolicyError, PolicyStagingError,
-    Principal, Request, RequestId,
+    Decision, EnrichmentAnswer, EnrichmentFacts, Outcome, PendingToolResponse, PolicyError,
+    PolicyStagingError, Principal, Request, RequestId,
 };
 
 #[derive(Debug, Clone)]
@@ -86,6 +86,13 @@ pub(super) struct Authority {
     log_only: bool,
     /// The declared enrichment entries that some authored rule reads.
     read_enrichment: BTreeSet<String>,
+    /// Every declared enrichment entry unanswered: the facts of a `net:connect` whose answer
+    /// cannot change its decision.
+    #[cfg_attr(
+        not(feature = "egress-adapter"),
+        expect(dead_code, reason = "only the egress adapter screens a connect")
+    )]
+    unanswered: EnrichmentFacts,
 }
 
 impl Authority {
@@ -124,6 +131,7 @@ impl Authority {
             warnings,
             log_only: false,
             read_enrichment: BTreeSet::new(),
+            unanswered: EnrichmentFacts::NONE,
         })
     }
 
@@ -179,6 +187,15 @@ impl Authority {
             .map_err(Refused::into_error)?;
         let read_enrichment =
             read_entries(&complete, &proposal.base).map_err(Refused::into_error)?;
+        if !read_enrichment.is_empty() {
+            engine.screen_connects();
+        }
+        let unanswered = proposal
+            .base
+            .enrichment
+            .iter()
+            .map(|name| (name.to_string(), EnrichmentAnswer::unanswered()))
+            .collect();
         let (readiness, pending_tools, warnings) =
             match validate_canonical_policy_set(&complete, &proposal.base, &[], operator, &[]) {
                 Ok((effective_schema, warnings)) => {
@@ -235,6 +252,7 @@ impl Authority {
             warnings,
             log_only: false,
             read_enrichment,
+            unanswered,
         })
     }
 
@@ -244,6 +262,23 @@ impl Authority {
 
     pub(super) fn read_enrichment(&self) -> &BTreeSet<String> {
         &self.read_enrichment
+    }
+
+    /// Every declared entry unanswered when the installed rules refuse the `net:connect` `request`
+    /// whatever a read entry answers, and `None` when an answer can change the decision.
+    #[cfg(feature = "egress-adapter")]
+    pub(super) fn refused_whatever_answered(
+        &self,
+        principal: &Principal,
+        request: &Request<'_>,
+    ) -> Option<EnrichmentFacts> {
+        if self.read_enrichment.is_empty() {
+            return None;
+        }
+        let live = self.live.lock().ok()?;
+        live.engine
+            .refuses_whatever_answered(principal, request)
+            .then(|| self.unanswered.clone())
     }
 
     /// Re-install an authored policy set over the live engine, keeping this box's decision
@@ -708,6 +743,7 @@ impl Authority {
             warnings: Vec::new(),
             log_only: false,
             read_enrichment: BTreeSet::new(),
+            unanswered: EnrichmentFacts::NONE,
         })
     }
 
@@ -738,6 +774,7 @@ impl Authority {
             warnings: Vec::new(),
             log_only: false,
             read_enrichment: BTreeSet::new(),
+            unanswered: EnrichmentFacts::NONE,
         })
     }
 

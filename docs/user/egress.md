@@ -394,21 +394,28 @@ not upgrade `rust-lang.org`.
 
 To refuse a host by what an outside classifier says about it, declare the classifier as an
 [`[enrichment.<name>]`](config.md#enrichmentname) table and write rules on its answer. Before the
-gateway looks up the host's address, Box asks the source about the host's DNS name. The answer
-reaches that host's `net:connect` as `context.input.enrichment.<name>`, with `answered` and the
-`labels` the source gave, and policy decides. [Rules on a classification
-answer](policy.md#rules-on-a-classification-answer) shows the rules. A release build of Box
-implements no source `kind`, so it refuses every such table when `box.toml` loads.
+gateway looks up the host's address, Box asks the source about the host's DNS name, when the answer
+can change the decision. The answer reaches that host's `net:connect` as
+`context.input.enrichment.<name>`, with `answered` and the `labels` the source gave, and policy
+decides. [Rules on a classification answer](policy.md#rules-on-a-classification-answer) shows the
+rules. A release build of Box implements no source `kind`, so it refuses every such table when
+`box.toml` loads.
 
 What Box asks, and when:
 
 - **Box asks about the name in lowercase, with one trailing dot removed.** `Evil.Example.` and
   `evil.example` are one name.
-- **Box asks only a source that a rule reads.** A table that no rule reads gets no name, and its
-  entry reads `answered: false`. The startup line for each table says which it is.
+- **Box asks only a source that a rule reads**, in a condition or in a `when temporal` clause. A
+  table that no rule reads gets no name, and its entry reads `answered: false`. The startup line for
+  each table says which it is.
+- **Box asks only when the answer can change the decision.** It first decides the connection on
+  the rules that read no entry and have no `when temporal` clause. When one of them forbids it, or
+  none of them permits it and no other rule permits `net:connect`, the policy refuses the host
+  whatever a source answers. Box then asks no source, and every entry reads `answered: false`, so a
+  name the policy refuses anyway never leaves the box.
 - **Box asks only on the decision before DNS.** The gateway decides `net:connect` on the host, then
   again on each address it resolved. The decisions on the addresses read the answer that the first
-  decision got and ask nothing, so one connection asks each source at most once.
+  decision got and ask nothing.
 - **The first connection to a name waits for the answer**, for at most the table's `timeout`. When
   the source doesn't answer in time, fails, or refuses, the entry reads `answered: false` with no
   labels. Box enforces the `timeout` itself, so a source that hangs holds no connection longer, and
@@ -421,9 +428,10 @@ What Box asks, and when:
   source.**
 - **Only a label in `outputs`, at `min_confidence` or above, reaches policy.** Box drops the rest.
 
-Each `net:connect` decision record states what each table answered. [A
-decision](telemetry.md#a-decision) lists the keys.
+Each `net:connect` decision record states what each table answered. A refusal for which Box asked
+no source, as above, states no answer. [A decision](telemetry.md#a-decision) lists the keys.
 
+<a id="a-connection-to-an-ip-address"></a>
 ### A connection to an IP address
 
 Box asks no source about an IP address, because an address is not a DNS name. A connection to

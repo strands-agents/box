@@ -13,7 +13,7 @@ pub(crate) mod memory;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -55,13 +55,8 @@ const CACHE_CAPACITY: usize = 4096;
 /// this many threads.
 const IN_FLIGHT_CAPACITY: usize = 64;
 
-/// The number the next enricher takes, so a thread recalls only its own enricher's host decision.
-static NEXT_ENRICHER: AtomicU64 = AtomicU64::new(0);
-
 /// The enricher of one box: each declared entry, in name order.
 pub(crate) struct Enricher {
-    /// This enricher's number, which keys its host decision on each thread.
-    id: u64,
     entries: Vec<Entry>,
 }
 
@@ -96,58 +91,22 @@ impl Enricher {
                 Ok(Entry::new(name, entry, source))
             })
             .collect::<Result<_, ConfigError>>()?;
-        Ok(Self {
-            id: NEXT_ENRICHER.fetch_add(1, Ordering::Relaxed),
-            entries,
-        })
+        Ok(Self { entries })
     }
 }
 
 impl HostEnricher for Enricher {
-    /// Each entry's answer about `host`, asking its source on a cache miss, kept on this thread
-    /// for the address decisions that follow.
+    /// Each entry's answer about `host`, asking its source on a cache miss.
     fn enrich(&self, host: &str) -> EnrichmentFacts {
         let name = dns_name(host);
         let now = Instant::now();
-        let facts: EnrichmentFacts = self
-            .entries
-            .iter()
-            .map(|entry| (entry.name.clone(), entry.answer(name.as_deref(), now)))
-            .collect();
-        HOST_DECISION.with(|decision| {
-            *decision.borrow_mut() = Some(HostDecision {
-                enricher: self.id,
-                host: host.to_string(),
-                facts: facts.clone(),
-            });
-        });
-        returned(facts)
-    }
-
-    /// The facts this thread's latest host decision on `host` read, because the gateway decides a
-    /// connection's host and then each of its addresses on one thread; with none, no answer.
-    fn recall(&self, host: &str) -> EnrichmentFacts {
-        let decided = HOST_DECISION.with(|decision| {
-            decision
-                .borrow()
-                .as_ref()
-                .filter(|decided| decided.enricher == self.id && decided.host == host)
-                .map(|decided| decided.facts.clone())
-        });
-        returned(decided.unwrap_or_else(|| {
+        returned(
             self.entries
                 .iter()
-                .map(|entry| (entry.name.clone(), EnrichmentAnswer::unanswered()))
-                .collect()
-        }))
+                .map(|entry| (entry.name.clone(), entry.answer(name.as_deref(), now)))
+                .collect(),
+        )
     }
-}
-
-/// The facts one host decision read, which each address decision after it on its thread repeats.
-struct HostDecision {
-    enricher: u64,
-    host: String,
-    facts: EnrichmentFacts,
 }
 
 /// One declared entry, with its source when a rule reads it.
@@ -307,8 +266,6 @@ pub(crate) fn dns_name(host: &str) -> Option<String> {
 }
 
 thread_local! {
-    /// The facts this thread's latest host decision read.
-    static HOST_DECISION: RefCell<Option<HostDecision>> = const { RefCell::new(None) };
     /// The facts this thread's enricher last returned, while a [`FactsCapture`] is open.
     static RETURNED: RefCell<Option<EnrichmentFacts>> = const { RefCell::new(None) };
 }
@@ -379,10 +336,6 @@ mod tests {
         entry_of(&enricher.enrich(host))
     }
 
-    fn recalled(enricher: &Enricher, host: &str) -> EnrichmentAnswer {
-        entry_of(&enricher.recall(host))
-    }
-
     fn entry_of(facts: &EnrichmentFacts) -> EnrichmentAnswer {
         facts
             .iter()
@@ -420,36 +373,17 @@ mod tests {
         assert_eq!(source.calls(), 1, "every spelling is one cached name");
     }
 
-    /// A missing answer is not kept: the next host decision asks again, and a per-address decision
-    /// after it recalls nothing and asks nothing.
+    /// A missing answer is not kept, so the next host decision asks again.
     #[test]
-    fn a_missing_answer_is_asked_again_and_never_recalled() {
+    fn a_missing_answer_is_asked_again() {
         let source =
             Arc::new(InMemorySource::new(Duration::from_secs(300)).unanswering("slow.invalid"));
         let enricher = enricher(entry(&["malware"], Confidence::Low), &source, true);
 
         assert!(!threat(&enricher, "slow.invalid").is_answered());
-        assert!(!recalled(&enricher, "slow.invalid").is_answered());
-        assert_eq!(source.calls(), 1, "a per-address decision asks no source");
+        assert_eq!(source.calls(), 1);
         assert!(!threat(&enricher, "slow.invalid").is_answered());
         assert_eq!(source.calls(), 2, "the next host decision asks again");
-    }
-
-    /// A per-address decision reads what its host decision read and never asks a source itself.
-    #[test]
-    fn a_per_address_decision_recalls_and_never_asks() {
-        let source = Arc::new(InMemorySource::new(Duration::from_secs(300)).labelling(
-            "evil.example",
-            "malware",
-            Confidence::High,
-        ));
-        let enricher = enricher(entry(&["malware"], Confidence::Low), &source, true);
-
-        assert!(!recalled(&enricher, "evil.example").is_answered());
-        assert_eq!(source.calls(), 0);
-        let asked = threat(&enricher, "evil.example");
-        assert_eq!(recalled(&enricher, "evil.example"), asked);
-        assert_eq!(source.calls(), 1);
     }
 
     /// An entry no rule reads opens no source, so Box sends it no name and its fact is unanswered.

@@ -245,8 +245,9 @@ fn write_enrichment_disclosures(
             ::diagnostics::diag!(
                 into output,
                 B0215,
-                "[enrichment.{name}] sends each DNS name the workload connects to to its \
-                 classification source (kind {:?}) before policy decides the connection.",
+                "[enrichment.{name}] sends its classification source (kind {:?}) the DNS name of \
+                 each host the workload connects to, before policy decides the connection, \
+                 unless policy refuses the host whatever the source answers.",
                 entry.kind
             )?;
         } else {
@@ -907,9 +908,10 @@ mod tests {
 
         assert!(
             text.contains(
-                "note[B0215]: [enrichment.threat] sends each DNS name the workload connects to \
-                 to its classification source (kind \"in-memory\") before policy decides the \
-                 connection."
+                "note[B0215]: [enrichment.threat] sends its classification source (kind \
+                 \"in-memory\") the DNS name of each host the workload connects to, before \
+                 policy decides the connection, unless policy refuses the host whatever the \
+                 source answers."
             ),
             "{text}"
         );

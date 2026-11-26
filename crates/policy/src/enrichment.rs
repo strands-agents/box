@@ -174,10 +174,116 @@ impl FromIterator<(String, EnrichmentAnswer)> for EnrichmentFacts {
 pub trait HostEnricher: Send + Sync {
     /// The answer of every declared entry about `host`, which may ask each entry's source.
     fn enrich(&self, host: &str) -> EnrichmentFacts;
+}
 
-    /// The answers that the latest [`Self::enrich`] on this thread returned about `host`, asking no
-    /// source, since each address decision follows its host decision on one thread.
-    fn recall(&self, host: &str) -> EnrichmentFacts;
+/// What the installed rules decide about a `net:connect` before any entry answers, so the egress
+/// adapter asks a source only when its answer can change the decision.
+///
+/// The stateless rules that read no entry decide alike whatever an entry answers, so plain Cedar
+/// decides them here, with no history event. A rule with a temporal clause, or one that reads an
+/// entry, is left out, and only whether it may permit `net:connect` counts.
+#[derive(Default)]
+#[cfg_attr(
+    not(feature = "egress-adapter"),
+    expect(dead_code, reason = "only the egress adapter screens a connect")
+)]
+pub(crate) struct ConnectScreen {
+    /// The stateless rules that read no entry, with the entities a decision reads, or `None` when
+    /// the installed rules could not be sorted, so that every answer can matter.
+    fixed: Option<(cedar_policy::PolicySet, cedar_policy::Entities)>,
+    /// Whether a rule left out of `fixed` may permit `net:connect`.
+    other_permit: bool,
+}
+
+impl ConnectScreen {
+    /// Sort the installed rules `installed`, lowered against `installed_schema` as the engine
+    /// installs them, with the action entities of the `served` schema.
+    pub(crate) fn of(
+        installed: &[String],
+        installed_schema: &str,
+        served: &cedar_policy::Schema,
+    ) -> Self {
+        Self::sorted(installed, installed_schema, served).unwrap_or_default()
+    }
+
+    fn sorted(
+        installed: &[String],
+        installed_schema: &str,
+        served: &cedar_policy::Schema,
+    ) -> Option<Self> {
+        let service = crate::dogwood::service_schema().ok()?;
+        let parsed =
+            dogwood_language::ParsedPolicySet::parse(&installed.join("\n"), &service).ok()?;
+        let temporal: Vec<bool> = parsed
+            .policies()
+            .map(|policy| policy.uses_temporal())
+            .collect();
+        let lowered = parsed
+            .lower(&PolicySchema::from_cedarschema_str(installed_schema).ok()?)
+            .ok()?;
+        let mut fixed = cedar_policy::PolicySet::new();
+        let mut other_permit = false;
+        for policy in lowered.as_cedar().policies() {
+            let stateless = lowered
+                .rule_ref(policy.id().as_ref())
+                .and_then(|rule| temporal.get(rule.rule_index))
+                .is_some_and(|uses_temporal| !uses_temporal);
+            if stateless && !reads_enrichment(&policy.to_json().ok()?["conditions"]) {
+                fixed.add(policy.clone()).ok()?;
+            } else if policy.effect() == cedar_policy::Effect::Permit && decides_connect(&policy) {
+                other_permit = true;
+            }
+        }
+        let entities = served
+            .action_entities()
+            .ok()?
+            .add_entities(crate::schema::scope_entities().ok()?, None)
+            .ok()?;
+        Some(Self {
+            fixed: Some((fixed, entities)),
+            other_permit,
+        })
+    }
+
+    /// Whether the fixed rules refuse `request` whatever an entry answers: one of their `forbid`s
+    /// holds, or none of their `permit`s does and no other rule may permit `net:connect`.
+    #[cfg(feature = "egress-adapter")]
+    pub(crate) fn refuses(&self, request: &cedar_policy::Request) -> bool {
+        let Some((policies, entities)) = &self.fixed else {
+            return false;
+        };
+        let response = cedar_policy::Authorizer::new().is_authorized(request, policies, entities);
+        response.decision() == cedar_policy::Decision::Deny
+            && (response.diagnostics().reason().next().is_some() || !self.other_permit)
+    }
+}
+
+/// Whether a Cedar condition could see an entry: it reads `context`, `context.input`, or a path
+/// under `context.input.enrichment`, or tests one of them with `has`.
+fn reads_enrichment(node: &Value) -> bool {
+    let reaches = |path: &[String]| {
+        path.iter()
+            .zip(["input", ENRICHMENT])
+            .all(|(read, entry)| read == entry)
+    };
+    match node {
+        Value::Array(items) => items.iter().any(reads_enrichment),
+        Value::Object(fields) => {
+            if let Some(path) = context_path(node) {
+                return reaches(&path);
+            }
+            // A `has` test on a path from `context` sees only the attribute it tests, so
+            // `context.input has ip4` sees no entry and `context.input has enrichment` does.
+            if let Some(test) = fields.get("has")
+                && let Some(mut path) = test.get("left").and_then(context_path)
+            {
+                path.extend(test.get("attr").and_then(Value::as_str).map(str::to_string));
+                return reaches(&path);
+            }
+            fields.values().any(reads_enrichment)
+        }
+        _ => false,
+    }
 }
 
 /// Which part of one entry a rule reads.
@@ -363,15 +469,18 @@ fn undeclared_entry(name: Option<&str>, rules: &[usize], expanded: &[String]) ->
     Finding::new(text).with_rules(refs)
 }
 
-/// The finding for an entry whose labels `rules` read while no rule reads its answer.
+/// The finding for an entry whose labels `rules` read while no rule reads its answer, which says
+/// only what the load checks: some rule reads the answer, whatever it does with it.
 fn unanswered_labels(name: &str, rules: &[usize], expanded: &[String]) -> Finding {
     let (refs, named) = named_rules(rules, expanded);
     let verb = if rules.len() == 1 { "reads" } else { "read" };
     Finding::new(format!(
         "{named} {verb} context.input.{ENRICHMENT}.{name}.{LABELS}, but no rule reads \
-         context.input.{ENRICHMENT}.{name}.{ANSWERED}; an entry with no answer then reads like a \
-         host with no labels. Add a rule on {ANSWERED}, such as: forbid (principal, action == \
-         Box::Action::\"{connect}\", resource) unless {{ context.input.{ENRICHMENT}.{name}.{ANSWERED} }};",
+         context.input.{ENRICHMENT}.{name}.{ANSWERED}. A policy that reads an entry's {LABELS} \
+         must read its {ANSWERED} in some rule; the load does not check what that rule does with \
+         it. To refuse a host its source gave no answer about, add the documented require_answer \
+         rule: forbid (principal, action == Box::Action::\"{connect}\", resource) unless {{ \
+         context.input.{ENRICHMENT}.{name}.{ANSWERED} }};",
         connect = action::NET_CONNECT,
     ))
     .with_rules(refs)

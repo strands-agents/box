@@ -60,8 +60,8 @@ engine means one history, so a rule can make a network decision depend on someth
 read through Strands Shell. With two engines, that rule would load in both and match in neither.
 Every decision runs in-process, behind one lock, and the engine makes no network call. The one
 outside call is an `[enrichment.<name>]` classification source, which Box asks about a DNS name
-before the first `net:connect` decision on a host. Its answer reaches the engine as a fact on the
-request. See
+before the first `net:connect` decision on a host, when the answer can change that decision. Its
+answer reaches the engine as a fact on the request. See
 [every decision is local, and an enrichment source is the one outside
 call](decisions.md#every-decision-is-local-and-in-process). The engine itself is the
 published Dogwood engine, pinned to an exact version, and everything Box adds around it sits behind
@@ -363,7 +363,9 @@ refuses it as well, so a box with an MCP server, which validates before its tool
 refuses it at configuration too. The loader also refuses a policy in which a rule reads an entry's
 `labels` and no rule reads its `answered`, in a condition or in a `when temporal` clause. A host the
 source gave no answer about carries no labels, so a `forbid` on a label alone would let it through.
-The configuration check, the library's `check_policy`, and opening the engine refuse it alike. The
+The loader checks only that some rule reads `answered`, not what that rule does with it, so what an
+unanswered host means stays the operator's rule. The configuration check, the library's
+`check_policy`, and opening the engine refuse it alike. The
 set of entries the rules read decides which sources Box asks, and the startup disclosure names them,
 so a reload whose rules read a different set is refused and the box must restart to change it.
 

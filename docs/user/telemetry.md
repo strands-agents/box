@@ -239,7 +239,9 @@ A record whose cause is `internal_fault` also carries the key `error.type`, with
 The `strands.box.enrichment.*` keys state the answer the decision read. An entry whose source gave
 no answer carries `answered = false` and empty `labels`, and so does an entry that no rule reads. A
 `net:connect` decision in a box that declares no `[enrichment.<name>]` table carries neither key,
-and no other action carries them.
+and no other action carries them. Neither does a refusal for which Box asked no source, because the
+policy refuses the host whatever a source answers; [ask a classification source about each
+host](egress.md#ask-a-classification-source-about-each-host) states when that is.
 
 The action value carries the vocabulary term alone, so a reader sees `fs:read` rather than
 `Box::Action::"fs:read"`. Every other value is reported as the enforcement point holds it. A spawn

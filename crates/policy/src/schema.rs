@@ -840,6 +840,35 @@ pub(crate) fn to_cedar_request(
         .map_err(|e| PolicyError::Schema(format!("request does not conform to schema: {e}")))
 }
 
+/// Build a Cedar request from a [`Request`] that no schema binds, for an evaluation of rules that
+/// read no field the request leaves out.
+#[cfg(feature = "egress-adapter")]
+pub(crate) fn to_unbound_cedar_request(
+    principal: &Principal,
+    req: &Request<'_>,
+    schema: &Schema,
+) -> Result<CedarRequest, PolicyError> {
+    let action = ActionIdentity::for_request(req).cedar_uid()?;
+    let context = context_for(req, schema, &action)?;
+    CedarRequest::new(
+        principal_uid(principal)?,
+        action,
+        resource_uid()?,
+        context,
+        None,
+    )
+    .map_err(|error| PolicyError::Schema(format!("request does not build: {error}")))
+}
+
+/// The principal and resource every request names, as entities with no attributes, which is how
+/// the engine makes them present.
+pub(crate) fn scope_entities() -> Result<[cedar_policy::Entity; 2], PolicyError> {
+    Ok([
+        cedar_policy::Entity::with_uid(principal_uid(&Principal::agent())?),
+        cedar_policy::Entity::with_uid(resource_uid()?),
+    ])
+}
+
 /// Build a schema-bound Cedar authorization request whose `input` is the JSON record `input`.
 pub(crate) fn to_cedar_input_request(
     principal: &Principal,

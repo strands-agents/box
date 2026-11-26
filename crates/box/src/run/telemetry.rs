@@ -682,6 +682,20 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
             } => remote_mcp_decision(frame, refusal, &observations),
             _ => ordinary_egress_decision(&identity, refusal, &observations),
         };
+        // An address decision that read its host decision's answer asks the enricher nothing, so
+        // its record keeps the answer this connection's earlier decision captured.
+        let enrichment = match effect {
+            EgressEffectAttempt::Connect { .. } if enrichment.is_empty() => PENDING_EGRESS_DECISION
+                .with(|pending| {
+                    pending
+                        .borrow()
+                        .as_ref()
+                        .filter(|held| held.identity.is(&identity))
+                        .map(|held| held.effective.enrichment.clone())
+                })
+                .unwrap_or(enrichment),
+            _ => enrichment,
+        };
         let effective = match identity.leg {
             EgressLeg::Connection => effective.enriched(enrichment),
             EgressLeg::Request => effective,
@@ -1711,7 +1725,8 @@ mod tests {
     }
 
     /// A connection's decision record states what each enrichment entry answered about its
-    /// destination.
+    /// destination, whether its host decision refused it or each address decision read the answer
+    /// the host decision got and admitted it.
     #[tokio::test]
     async fn a_connection_decision_states_each_enrichment_answer() {
         use crate::run::enrichment::{Confidence, Enricher, Source, memory::InMemorySource};
@@ -1790,27 +1805,36 @@ mod tests {
         );
         let emitter = EgressDecisionRecorder::over(recorder);
 
-        assert!(
-            interceptor
-                .intercept(&EgressEffectAttempt::Resolve {
-                    host: "evil.example",
-                    port: 443,
-                })
-                .is_err()
-        );
-        emitter.emit(EgressDecision {
-            host: "evil.example".to_string(),
-            port: 443,
-            method: String::new(),
-            path: String::new(),
-            decision: AuditDecision::Deny,
-            reason: "policy denied".to_string(),
-            correlation: RequestId::new("connection"),
-        });
+        let resolve = |host| EgressEffectAttempt::Resolve { host, port: 443 };
+        let emit = |host: &str, decision| {
+            emitter.emit(EgressDecision {
+                host: host.to_string(),
+                port: 443,
+                method: String::new(),
+                path: String::new(),
+                decision,
+                reason: "policy decided".to_string(),
+                correlation: RequestId::new(host),
+            });
+        };
+        assert!(interceptor.intercept(&resolve("evil.example")).is_err());
+        emit("evil.example", AuditDecision::Deny);
+        interceptor
+            .intercept(&resolve("clean.example"))
+            .expect("the clean host is admitted");
+        interceptor
+            .intercept(&EgressEffectAttempt::Connect {
+                host: "clean.example",
+                port: 443,
+                address: "192.0.2.1:443".parse().expect("an address"),
+                http_visibility: false,
+            })
+            .expect("and so is its address");
+        emit("clean.example", AuditDecision::Allow);
         collector.drained().await;
 
         let text = std::fs::read_to_string(&records).expect("the records");
-        let attributes: Vec<serde_json::Value> = text
+        let decided: Vec<Vec<serde_json::Value>> = text
             .lines()
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .filter_map(|line| {
@@ -1818,23 +1842,41 @@ mod tests {
                     .and_then(serde_json::Value::as_array)
                     .cloned()
             })
-            .flatten()
             .collect();
-        let value = |key: &str| {
-            attributes
+        let value = |host: &str, key: &str| {
+            decided
                 .iter()
-                .find(|attribute| attribute["key"] == key)
+                .find(|attributes| {
+                    attributes.iter().any(|attribute| {
+                        attribute["key"] == "server.address"
+                            && attribute["value"] == serde_json::json!({"stringValue": host})
+                    })
+                })
+                .and_then(|attributes| attributes.iter().find(|attribute| attribute["key"] == key))
                 .map(|attribute| attribute["value"].clone())
-                .unwrap_or_else(|| panic!("{key} is on the decision: {text}"))
+                .unwrap_or_else(|| panic!("{key} is on the decision about {host}: {text}"))
         };
-        assert_eq!(
-            value("strands.box.enrichment.threat.answered"),
-            serde_json::json!({"boolValue": true})
-        );
-        assert_eq!(
-            value("strands.box.enrichment.threat.labels"),
-            serde_json::json!({"arrayValue": {"values": [{"stringValue": "malware"}]}})
-        );
+        for (host, labels) in [
+            (
+                "evil.example",
+                serde_json::json!([{"stringValue": "malware"}]),
+            ),
+            ("clean.example", serde_json::json!([])),
+        ] {
+            assert_eq!(
+                value(host, "strands.box.enrichment.threat.answered"),
+                serde_json::json!({"boolValue": true}),
+                "{host}"
+            );
+            assert_eq!(
+                value(host, "strands.box.enrichment.threat.labels")["arrayValue"]["values"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default(),
+                labels.as_array().cloned().unwrap_or_default(),
+                "{host}"
+            );
+        }
     }
 
     #[test]

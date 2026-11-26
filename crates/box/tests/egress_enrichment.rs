@@ -75,8 +75,9 @@ fn a_labelled_name_is_refused_by_policy_before_it_is_resolved() {
     );
     assert!(
         labelled.contains(
-            "note[B0215]: [enrichment.threat] sends each DNS name the workload connects to to \
-             its classification source (kind \"in-memory\") before policy decides the connection."
+            "note[B0215]: [enrichment.threat] sends its classification source (kind \
+             \"in-memory\") the DNS name of each host the workload connects to, before policy \
+             decides the connection, unless policy refuses the host whatever the source answers."
         ),
         "the run discloses what leaves the box: {labelled}"
     );

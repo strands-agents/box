@@ -459,7 +459,7 @@ A permit on the name doesn't admit `127.0.0.1:4259`, and a wildcard host permit 
 ## Rules on a classification answer
 
 A box with an [`[enrichment.<name>]`](config.md#enrichmentname) table asks an outside
-classification source about the DNS name of each host the workload connects to, and each
+classification source about the DNS name of a host the workload connects to, and each
 `net:connect` carries the answer as `context.input.enrichment.<name>`:
 
 - `answered` is `true` when the source answered about the host. It is `false` when the source gave
@@ -468,8 +468,7 @@ classification source about the DNS name of each host the workload connects to, 
   is `false`.
 
 [Ask a classification source about each host](egress.md#ask-a-classification-source-about-each-host)
-states when Box asks and what it keeps. Box asks a source only when a rule reads its entry, in a
-condition or in a `when temporal` clause.
+states when Box asks a source and what it keeps.
 
 Beside your `net:connect` permits, this pair refuses a host that the source labels `malware`, and a
 host it gave no answer about:
@@ -489,17 +488,21 @@ unless { context.input.enrichment.threat.answered };
 Write both. An unanswered host carries no labels, so `block_malware` alone lets it through. The load
 refuses a policy in which a rule reads an entry's `labels` and no rule reads its `answered`; see
 [a rule that reads an entry's labels and not its answer](#a-rule-that-reads-an-entrys-labels-and-not-its-answer).
-
-Box asks no source about an IP address, so a connection to an address reads `answered: false`, and
-`require_answer` refuses every direct connection to an address. To let one address through, put the
-exemption inside the `forbid`. A `permit` for the address doesn't help, because a `forbid` beats
-every `permit`:
+The load checks only that some rule reads `answered`, not what the rule does with it. This rule
+reads `answered`, so it loads without `require_answer`, and it lets through every host the source
+gave no answer about:
 
 ```text
-@id("require_answer")
+@id("block_malware")
 forbid (principal, action == Box::Action::"net:connect", resource)
-unless { context.input.enrichment.threat.answered || context.input.host == "203.0.113.7" };
+when { context.input.enrichment.threat.answered && context.input.enrichment.threat.labels.contains("malware") };
 ```
+
+Whether an outage of the source refuses a host is your rule to write, and `require_answer` is that
+rule.
+
+A connection to an IP address reads `answered: false`, so `require_answer` refuses it. [A connection
+to an IP address](egress.md#a-connection-to-an-ip-address) shows how to let one address through.
 
 A running box keeps the set of entries its rules read, because it opened a source for each one. A
 reload of the running box's policy whose rules read a different set of entries is refused, and the
@@ -747,7 +750,7 @@ Declare the table, or read the name it declares.
 
 A host the source gave no answer about carries no labels, so a rule on `labels` alone lets it
 through. The load refuses a policy in which a rule reads an entry's `labels` and no rule reads its
-`answered`:
+`answered`. It checks only that some rule reads `answered`, not what that rule does with it:
 
 ```text
 permit (principal, action == Box::Action::"net:connect", resource);
@@ -758,12 +761,13 @@ when { context.input.enrichment.threat.labels.contains("malware") };
 ```
 
 ```text
-policy fails schema validation: rule @id("block_malware") (rule 2) reads context.input.enrichment.threat.labels, but no rule reads context.input.enrichment.threat.answered; an entry with no answer then reads like a host with no labels. Add a rule on answered, such as: forbid (principal, action == Box::Action::"net:connect", resource) unless { context.input.enrichment.threat.answered };
+policy fails schema validation: rule @id("block_malware") (rule 2) reads context.input.enrichment.threat.labels, but no rule reads context.input.enrichment.threat.answered. A policy that reads an entry's labels must read its answered in some rule; the load does not check what that rule does with it. To refuse a host its source gave no answer about, add the documented require_answer rule: forbid (principal, action == Box::Action::"net:connect", resource) unless { context.input.enrichment.threat.answered };
 ```
 
-Add the rule the message suggests, as in [rules on a classification
-answer](#rules-on-a-classification-answer). A `when temporal` clause that reads
-`input.enrichment.threat.answered` also counts as a read.
+To refuse a host the source gave no answer about, add `require_answer`, as in [rules on a
+classification answer](#rules-on-a-classification-answer). A rule that reads `answered` in any other
+way also satisfies the load, including a `when temporal` clause that reads
+`input.enrichment.threat.answered`, and decides for itself what an unanswered host means.
 
 ### An optional field read without a guard
 
