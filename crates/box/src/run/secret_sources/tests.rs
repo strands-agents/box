@@ -225,6 +225,7 @@ fn record(text: &str) -> Record {
         mcp: Vec::new(),
         contained_mcp: BTreeMap::new(),
         telemetry: tables.telemetry,
+        enrichment: std::collections::BTreeMap::new(),
         secret_source: Default::default(),
     }
 }

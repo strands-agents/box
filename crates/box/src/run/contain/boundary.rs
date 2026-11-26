@@ -2208,6 +2208,7 @@ mod tests {
                 mcp,
                 contained_mcp: Default::default(),
                 telemetry: Default::default(),
+                enrichment: std::collections::BTreeMap::new(),
                 secret_source: Default::default(),
             };
             let attachment = Attachment {

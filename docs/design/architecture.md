@@ -285,7 +285,9 @@ interpreters are part of the code the operator must trust.
    and opens the collector to record the steps that follow. A read that fails here is on stderr
    alone.
 4. It installs the policy, in log-only mode when the `policy` table says so, and prints one line on
-   stderr naming what a log-only run exposes. Parsing or validation errors stop startup. Box also
+   stderr naming what a log-only run exposes. For each `[enrichment.<name>]` table, it prints one
+   line that says whether each DNS name the workload connects to goes to that classification source,
+   which happens only when a rule reads the table. Parsing or validation errors stop startup. Box also
    [rejects rules it can prove will never match](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns).
    It warns when it finds a rule that may never match but cannot prove it.
    Box then binds each experimental tool grammar to the program file of each `[tool]` it covers,
@@ -294,7 +296,8 @@ interpreters are part of the code the operator must trust.
    Rules for `shell:spawn` do not apply to a spawn of those programs by the bound name.
    Box also prints, for each bare name a `[tool]` answers to, the file the Shell runs for it.
 5. It runs the programs of the declared secret sources to read every other secret, and records
-   each read. It resolves bound secrets and starts the gateway with its own certificate authority.
+   each read. It resolves bound secrets and starts the gateway with its own certificate authority,
+   and with the classification source of each `[enrichment.<name>]` table that a rule reads.
    The gateway reads the host's trusted roots once, and Box prints how many it added on stderr.
    It refuses a write grant that covers a configured tool program or the program of a secret source.
    It checks each process specification's filesystem grants, then binds the broker socket.

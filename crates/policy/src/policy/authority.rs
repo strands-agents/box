@@ -15,14 +15,16 @@ use crate::dogwood::{
     DogwoodEngine, check_canonical_policy_set, expand_policy_source,
     refuse_input_reads_before_discovery, rule_conditions, validate_canonical_policy_set,
 };
+use crate::enrichment::{read_entries, refuse_changed_reads};
 use crate::request::ActionRequest;
 use crate::schema::{
-    ActionIdentity, GovernedBox, composed_action_schema, mcp_action_namespace, mcp_tool_action,
+    ActionIdentity, GovernedBox, SchemaBase, composed_action_schema, mcp_action_namespace,
+    mcp_tool_action,
 };
 use crate::spelling::{Operator, PolicyWarning};
 use crate::{
-    Decision, Outcome, PendingToolResponse, PolicyError, PolicyStagingError, Principal, Request,
-    RequestId,
+    Decision, EnrichmentFacts, Outcome, PendingToolResponse, PolicyError, PolicyStagingError,
+    Principal, Request, RequestId,
 };
 
 #[derive(Debug, Clone)]
@@ -39,7 +41,7 @@ struct CandidatePolicy {
 struct ProposalState {
     operator: Operator,
     candidates: Vec<CandidatePolicy>,
-    grammar_schemas: Vec<String>,
+    base: SchemaBase,
     schemas: BTreeMap<String, String>,
     ready: BTreeSet<usize>,
     pending: BTreeMap<usize, String>,
@@ -82,6 +84,8 @@ pub(super) struct Authority {
     warnings: Vec<PolicyWarning>,
     /// Whether a policy denial is recorded and let through instead of enforced.
     log_only: bool,
+    /// The declared enrichment entries that some authored rule reads.
+    read_enrichment: BTreeSet<String>,
 }
 
 impl Authority {
@@ -103,7 +107,7 @@ impl Authority {
     ) -> Result<Self, PolicyError> {
         let (engine, warnings) = DogwoodEngine::open_with_schemas(
             &authored(&sources),
-            grammar_schemas,
+            &SchemaBase::of_grammars(grammar_schemas.to_vec()),
             mcp_schemas,
             history,
             &Operator::unanchored(),
@@ -119,6 +123,7 @@ impl Authority {
             }),
             warnings,
             log_only: false,
+            read_enrichment: BTreeSet::new(),
         })
     }
 
@@ -131,23 +136,23 @@ impl Authority {
         Self::open_staged_with_engine(
             operator,
             sources,
-            Vec::new(),
+            SchemaBase::default(),
             DogwoodEngine::open_for_staging(history)?,
         )
     }
 
-    /// Opens a staging authority. Each schema set holds `grammar_schemas` below the MCP schemas.
+    /// Opens a staging authority. Each schema set holds `base` below the MCP schemas.
     pub(super) fn open_staged_file(
         operator: &Operator,
         sources: Vec<Policy>,
-        grammar_schemas: Vec<String>,
+        base: SchemaBase,
         history: File,
         label: std::path::PathBuf,
     ) -> Result<Self, PolicyStagingError> {
         Self::open_staged_with_engine(
             operator,
             sources,
-            grammar_schemas,
+            base,
             DogwoodEngine::open_for_staging_file(history, label)?,
         )
     }
@@ -155,14 +160,14 @@ impl Authority {
     fn open_staged_with_engine(
         operator: &Operator,
         sources: Vec<Policy>,
-        grammar_schemas: Vec<String>,
+        base: SchemaBase,
         mut engine: DogwoodEngine,
     ) -> Result<Self, PolicyStagingError> {
         let candidates = candidates(&authored(&sources)).map_err(Refused::into_error)?;
         let mut proposal = ProposalState {
             operator: operator.clone(),
             candidates,
-            grammar_schemas,
+            base,
             schemas: BTreeMap::new(),
             ready: BTreeSet::new(),
             pending: BTreeMap::new(),
@@ -170,55 +175,53 @@ impl Authority {
             retained: BTreeSet::new(),
         };
         let complete = proposal.complete_policy_set();
-        refuse_input_reads_before_discovery(&complete).map_err(Refused::into_error)?;
-        let (readiness, pending_tools, warnings) = match validate_canonical_policy_set(
-            &complete,
-            &proposal.grammar_schemas,
-            &[],
-            operator,
-            &[],
-        ) {
-            Ok((effective_schema, warnings)) => {
-                engine
-                    .commit_staged(&complete, effective_schema)
-                    .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
-                proposal.mark_all_ready();
-                (Readiness::Ready, BTreeSet::new(), warnings)
-            }
-            Err(inert) if is_inert(&inert) => {
-                return Err(inert.into());
-            }
-            Err(_) => {
-                proposal.classify(&[])?;
-                // Serve the schema-independent subset while typed schemas stage
-                // (`Discovering`), instead of denying every request. A per-tool rule that has
-                // not validated is not refused here; `finish_mcp_discovery` degrades the
-                // servers it waits for instead.
-                let subset = proposal.ready_policy_set();
-                let (effective_schema, warnings) = validate_canonical_policy_set(
-                    &subset,
-                    &proposal.grammar_schemas,
-                    &[],
-                    operator,
-                    &proposal.ready_positions(),
-                )?;
-                // The base is this build's Box actions and tool grammars, so an upgrade never
-                // lends this run a stale built-in declaration.
-                proposal.previous_schemas = composed_action_schema(&proposal.grammar_schemas, &[])
-                    .map(|base| engine.stored_mcp_schemas(&base.source))
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect();
-                let retaining = proposal.retaining_install(&engine.stored_statements(), &[]);
-                commit_discovering(&mut engine, retaining, &subset, effective_schema)
-                    .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
-                (
-                    Readiness::Discovering,
-                    pending_typed_tools(&proposal),
-                    warnings,
-                )
-            }
-        };
+        refuse_input_reads_before_discovery(&complete, &proposal.base)
+            .map_err(Refused::into_error)?;
+        let read_enrichment =
+            read_entries(&complete, &proposal.base).map_err(Refused::into_error)?;
+        let (readiness, pending_tools, warnings) =
+            match validate_canonical_policy_set(&complete, &proposal.base, &[], operator, &[]) {
+                Ok((effective_schema, warnings)) => {
+                    engine
+                        .commit_staged(&complete, effective_schema)
+                        .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
+                    proposal.mark_all_ready();
+                    (Readiness::Ready, BTreeSet::new(), warnings)
+                }
+                Err(inert) if is_inert(&inert) => {
+                    return Err(inert.into());
+                }
+                Err(_) => {
+                    proposal.classify(&[])?;
+                    // Serve the schema-independent subset while typed schemas stage
+                    // (`Discovering`), instead of denying every request. A per-tool rule that has
+                    // not validated is not refused here; `finish_mcp_discovery` degrades the
+                    // servers it waits for instead.
+                    let subset = proposal.ready_policy_set();
+                    let (effective_schema, warnings) = validate_canonical_policy_set(
+                        &subset,
+                        &proposal.base,
+                        &[],
+                        operator,
+                        &proposal.ready_positions(),
+                    )?;
+                    // The base is this build's Box actions and tool grammars, so an upgrade never
+                    // lends this run a stale built-in declaration.
+                    proposal.previous_schemas = composed_action_schema(&proposal.base, &[])
+                        .map(|base| engine.stored_mcp_schemas(&base.source))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect();
+                    let retaining = proposal.retaining_install(&engine.stored_statements(), &[]);
+                    commit_discovering(&mut engine, retaining, &subset, effective_schema)
+                        .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
+                    (
+                        Readiness::Discovering,
+                        pending_typed_tools(&proposal),
+                        warnings,
+                    )
+                }
+            };
 
         Ok(Self {
             proposal: Mutex::new(Some(proposal)),
@@ -231,11 +234,16 @@ impl Authority {
             }),
             warnings,
             log_only: false,
+            read_enrichment,
         })
     }
 
     pub(super) fn warnings(&self) -> &[PolicyWarning] {
         &self.warnings
+    }
+
+    pub(super) fn read_enrichment(&self) -> &BTreeSet<String> {
+        &self.read_enrichment
     }
 
     /// Re-install an authored policy set over the live engine, keeping this box's decision
@@ -267,9 +275,11 @@ impl Authority {
 
         let schemas = proposed.schema_sources();
         let complete = proposed.complete_policy_set();
+        let read = read_entries(&complete, &proposed.base).map_err(Refused::into_error)?;
+        refuse_changed_reads(&self.read_enrichment, &read)?;
         let (effective_schema, _) = validate_canonical_policy_set(
             &complete,
-            &proposed.grammar_schemas,
+            &proposed.base,
             &schemas,
             &proposed.operator,
             &[],
@@ -319,7 +329,7 @@ impl Authority {
 
         match validate_canonical_policy_set(
             &complete,
-            &proposed.grammar_schemas,
+            &proposed.base,
             &schemas,
             &proposed.operator,
             &[],
@@ -370,7 +380,7 @@ impl Authority {
                 let subset = proposed.ready_policy_set();
                 let (subset_schema, _) = validate_canonical_policy_set(
                     &subset,
-                    &proposed.grammar_schemas,
+                    &proposed.base,
                     &schemas,
                     &proposed.operator,
                     &proposed.ready_positions(),
@@ -434,7 +444,7 @@ impl Authority {
             let ready = proposal.ready_policy_set();
             let (ready_schema, _) = validate_canonical_policy_set(
                 &ready,
-                &proposal.grammar_schemas,
+                &proposal.base,
                 &proposal.schema_sources(),
                 &proposal.operator,
                 &proposal.ready_positions(),
@@ -560,21 +570,22 @@ impl Authority {
             .flush_history_for_timer()
     }
 
-    /// Records one outcome. The live authority always serves decisions (`Discovering` or `Ready`),
-    /// so no readiness state refuses a record.
+    /// Records one outcome, with the enrichment facts its decision read. The live authority always
+    /// serves decisions (`Discovering` or `Ready`), so no readiness state refuses a record.
     pub(super) fn record(
         &self,
         governed: &GovernedBox,
         principal: &Principal,
         request_id: &RequestId,
         outcome: &Outcome<'_>,
+        enrichment: &EnrichmentFacts,
     ) -> Result<(), PolicyError> {
         let live = self
             .live
             .lock()
             .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?;
         live.engine
-            .observe_outcome(governed, principal, request_id, outcome)
+            .observe_outcome(governed, principal, request_id, outcome, enrichment)
     }
 
     /// Records the `::response` of one completed action whose `input` is a JSON record.
@@ -696,6 +707,7 @@ impl Authority {
             }),
             warnings: Vec::new(),
             log_only: false,
+            read_enrichment: BTreeSet::new(),
         })
     }
 
@@ -725,6 +737,7 @@ impl Authority {
             }),
             warnings: Vec::new(),
             log_only: false,
+            read_enrichment: BTreeSet::new(),
         })
     }
 
@@ -795,7 +808,7 @@ impl ProposalState {
     fn validate_ready(&self, schemas: &[String]) -> Result<(), PolicyError> {
         validate_canonical_policy_set(
             &self.ready_policy_set(),
-            &self.grammar_schemas,
+            &self.base,
             schemas,
             &self.operator,
             &self.ready_positions(),
@@ -819,7 +832,7 @@ impl ProposalState {
                 let candidate = self.candidate_policy_set(ordinal);
                 match check_canonical_policy_set(
                     &candidate,
-                    &self.grammar_schemas,
+                    &self.base,
                     schemas,
                     &self.operator,
                     &self.candidate_positions(ordinal),
@@ -873,7 +886,7 @@ impl ProposalState {
         if named.is_empty() {
             return false;
         }
-        let Ok(schema) = composed_action_schema(&self.grammar_schemas, &[]) else {
+        let Ok(schema) = composed_action_schema(&self.base, &[]) else {
             return true;
         };
         named
@@ -956,7 +969,7 @@ impl ProposalState {
         let positions: Vec<usize> = self.ready.union(&self.retained).copied().collect();
         check_canonical_policy_set(
             &self.installed_policy_set(),
-            &self.grammar_schemas,
+            &self.base,
             schemas,
             &self.operator,
             &positions,
@@ -1293,13 +1306,13 @@ fn decoded_tool_action(namespace: &str, literal: &str) -> Option<(String, String
 pub(super) fn check_staged(
     operator: &Operator,
     sources: &[Policy],
-    grammar_schemas: Vec<String>,
+    base: SchemaBase,
 ) -> Result<(Vec<PolicyWarning>, Vec<RuleRef>), Vec<Finding>> {
     let candidates = candidates(&authored(sources)).map_err(|refused| refused.findings)?;
     let mut proposal = ProposalState {
         operator: operator.clone(),
         candidates,
-        grammar_schemas,
+        base,
         schemas: BTreeMap::new(),
         ready: BTreeSet::new(),
         pending: BTreeMap::new(),
@@ -1309,11 +1322,13 @@ pub(super) fn check_staged(
     let unlocated = |findings: Vec<Finding>| -> Vec<Finding> {
         findings.into_iter().map(Finding::without_span).collect()
     };
-    refuse_input_reads_before_discovery(&proposal.complete_policy_set())
+    refuse_input_reads_before_discovery(&proposal.complete_policy_set(), &proposal.base)
+        .map_err(|refused| unlocated(refused.findings))?;
+    read_entries(&proposal.complete_policy_set(), &proposal.base)
         .map_err(|refused| unlocated(refused.findings))?;
     match check_canonical_policy_set(
         &proposal.complete_policy_set(),
-        &proposal.grammar_schemas,
+        &proposal.base,
         &[],
         operator,
         &[],
@@ -1336,7 +1351,7 @@ pub(super) fn check_staged(
     }
     let (_, warnings) = check_canonical_policy_set(
         &proposal.ready_policy_set(),
-        &proposal.grammar_schemas,
+        &proposal.base,
         &[],
         operator,
         &proposal.ready_positions(),
@@ -1692,6 +1707,7 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
                 &Principal::agent(),
                 &request_id,
                 &http_outcome(),
+                &EnrichmentFacts::NONE,
             )
             .expect_err("a poisoned live-authority lock must refuse records");
         assert!(error.to_string().contains("authority lock poisoned"));
@@ -1720,6 +1736,7 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
                 &Principal::agent(),
                 &request_id,
                 &http_outcome(),
+                &EnrichmentFacts::NONE,
             )
             .expect_err("a poisoned Dogwood scope must refuse records");
         assert!(
@@ -2301,6 +2318,7 @@ permit(principal, action == alpha::Action::"read", resource);"#,
                 &Principal::agent(),
                 &request_id,
                 &http_outcome(),
+                &EnrichmentFacts::NONE,
             );
             let _ = recorded.send(result);
         });

@@ -10,7 +10,8 @@ use crate::error::{BoxError, McpSchemaError};
 use crate::record::config::CREDSD_SCHEME;
 use crate::record::config::egress::EgressSecret;
 use crate::record::config::{
-    read_mcp_servers, read_remote_mcp_servers, read_secret_sources, read_tool_grammars,
+    read_enrichment_names, read_mcp_servers, read_remote_mcp_servers, read_secret_sources,
+    read_tool_grammars,
 };
 use crate::record::layout::operator_home_directory;
 use crate::run::secret_sources::{SchemaSecrets, SecretSources};
@@ -26,6 +27,7 @@ pub(crate) async fn generate_schema(
         std::env::current_dir().map_err(|source| McpSchemaError::WorkingDirectory { source })?;
     let config = working.join(config);
     let grammars = read_tool_grammars(&config)?;
+    let enrichment = read_enrichment_names(&config)?;
     let servers = read_mcp_servers(&config)?;
     // Read the remote servers first: a re-routed one is refused here, so the whole run fails before
     // the stdio loop below spawns any server, rather than spawning them and discarding the result.
@@ -90,7 +92,7 @@ pub(crate) async fn generate_schema(
         .map(|(server, schema)| (server.as_str(), schema.as_str()))
         .collect::<Vec<_>>();
     let actions = grammars
-        .compose_action_schema(&schemas)
+        .compose_action_schema(&schemas, &enrichment)
         .map_err(McpSchemaError::from)?;
     let directory = working.join(output_dir);
     std::fs::create_dir_all(&directory).map_err(|source| McpSchemaError::Write {

@@ -217,6 +217,7 @@ log record's `event_name` field is `strands.box.policy.decision`, and the scope 
 | The governing rule | `strands.box.policy.rule`, `.description`, `.category`, and `.determining.ids`, which lists every policy that determined the decision |
 | Correlation | `strands.box.request.id` on an egress decision, `jsonrpc.request.id` on an MCP request, and `strands.box.trace.parent_span_id` on the log record |
 | What it was about | `server.address` and `server.port` on a network decision, `http.request.method` on a request, `file.path` on an `fs:*` decision, and `process.command`, `process.command_args`, and `process.working_directory` on a shell decision |
+| What a classification source answered | `strands.box.enrichment.<name>.answered` (a Bool) and `strands.box.enrichment.<name>.labels` (an array of strings) on a `net:connect` decision, one pair for each [`[enrichment.<name>]`](config.md#enrichmentname) table |
 
 `strands.box.policy.verdict` holds `deny` or `permit`. `strands.box.policy.cause` holds one of six
 values: `permitted`, `forbidden`, `no_match`, `policy_pending`, `internal_fault`, and `enforcement`.
@@ -234,6 +235,11 @@ blocks.
 
 A record whose cause is `internal_fault` also carries the key `error.type`, with the value
 `strands.box.policy.evaluation_error`.
+
+The `strands.box.enrichment.*` keys state the answer the decision read. An entry whose source gave
+no answer carries `answered = false` and empty `labels`, and so does an entry that no rule reads. A
+`net:connect` decision in a box that declares no `[enrichment.<name>]` table carries neither key,
+and no other action carries them.
 
 The action value carries the vocabulary term alone, so a reader sees `fs:read` rather than
 `Box::Action::"fs:read"`. Every other value is reported as the enforcement point holds it. A spawn

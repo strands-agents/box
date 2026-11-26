@@ -56,6 +56,12 @@ path, or resolved command. See [the policy attribute names are this product's
 own](decisions.md#the-policy-attribute-names-are-this-products-own). Box omits the full URL and full
 command line because both can contain credentials.
 
+A `net:connect` decision in a box that declares `[enrichment.<name>]` tables also states what each
+classification source answered about the destination, as `strands.box.enrichment.<name>.answered`
+and `strands.box.enrichment.<name>.labels`, so a reader sees the fact the policy decided on. The
+receiver removes these keys from a relayed payload as it removes every `strands.box.*` key, so the
+workload cannot forge an answer.
+
 A shell record redacts every argument that is not a plain flag. The shell receives arguments after
 expansion, so recording `echo $(cat secret.txt)` without this check would expose the file's
 contents. See [a shell record names an argument only when it is a plain
@@ -96,7 +102,8 @@ collector queues the record, so the caller sees the decision without reading a t
 is bounded and Box sends without waiting. When it is full, Box drops the copy, counts it on the
 receiver, and still records the decision. A slow caller therefore cannot delay a decision or remove
 it from the records. The channel is not a target: it has no file, no drain at shutdown, and no
-place in `include`.
+place in `include`. The copy carries the `strands.box.policy.*` values and no enrichment answer, so
+a caller that needs one reads the record.
 
 ### Receiver
 

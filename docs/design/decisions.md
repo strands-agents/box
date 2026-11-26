@@ -801,13 +801,21 @@ any policy you author. Closing this needs a deny-only floor beneath policy that 
 credential list that the sandbox uses, which is not built.
 
 <a id="every-decision-is-local-and-in-process"></a>
-### Every decision is local and in-process
+### Every decision is local, and an enrichment source is the one outside call
 
-The box's trusted process decides every governed request locally. No network call and no signature
-check sits on a decision path, because a remote call for each decision fails open during an outage
-and exceeds the latency budget. Box has no control plane for signed bundle distribution, signature
-verification, an organizational ceiling tier, quarantine pushes, or remote authorization. The
-operator distributes the policy file and handles fleet-wide changes or revocations outside the box.
+The box's trusted process decides every governed request locally, with no signature check and no
+remote authorization. The one outside call is an `[enrichment.<name>]` source. Before the first
+`net:connect` decision on a host, Box asks the source about the DNS name, and the answer becomes
+`context.input.enrichment.<name>`. The source grants nothing: the authored policy decides, including
+what an unanswered question means through `answered`, and Box asks only when a rule reads the entry.
+Box has no control plane for signed bundle distribution, an organizational ceiling tier, or
+quarantine pushes. The operator distributes the policy file.
+
+**Rejected.** A remote decision for each request: it fails open during an outage and exceeds the
+latency budget. A Dogwood provider call inside a rule: the engine decides with no input or output.
+
+**Cost.** Each DNS name the workload connects to leaves the box for that source, and Box discloses
+this at startup. The first connection to a name waits up to the entry's `timeout` for its answer.
 
 <a id="the-engine-is-dogwood"></a>
 ### The policy language is Dogwood, a superset of Cedar

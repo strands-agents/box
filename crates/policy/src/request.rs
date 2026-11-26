@@ -209,6 +209,9 @@ pub enum Request<'a> {
         ip: Option<IpAddr>,
         /// Destination port.
         port: u16,
+        /// What each declared enrichment entry answered about `host`, as
+        /// `context.input.enrichment` carries it; empty when the box declares no entry.
+        enrichment: &'a crate::EnrichmentFacts,
     },
     /// L7 HTTP request (`http:request`) — a cooperating-agent control on top of the L4
     /// floor.

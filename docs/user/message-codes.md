@@ -165,6 +165,7 @@ is what you intended.
 | `B0212` | warning | A process's write grant reaches the program it runs, so the process can replace that program. | Move the program out of the writable grant, or narrow the grant. See [what is refused](config.md#what-is-refused). |
 | `B0213` | note | The policy runs in log-only mode, so each denial is recorded and the action goes ahead. | Use log-only mode only to trial a policy where it is acceptable that the policy protects nothing. See [log-only mode](policy.md#log-only-mode). |
 | `B0214` | warning | A credsd route names no secret.type, so it signs with AWS credentials. | Set `secret.type = "aws"`, or `"token"` for a token. A later release requires the key. See [credential sources](egress.md#credential-sources). |
+| `B0215` | note | Box sends the DNS names the workload connects to to an outside classification source. | No action when that source may see each name. To send it none, remove the `[enrichment.<name>]` table and the rules that read it. A line that says the table is unused sends nothing. See [ask a classification source about each host](egress.md#ask-a-classification-source-about-each-host). |
 
 <a id="b03"></a>
 

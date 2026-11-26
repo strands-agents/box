@@ -359,6 +359,7 @@ fn each_native_authorization_leg_records_its_own_request_id() {
                 host,
                 ip: None,
                 port: 443,
+                enrichment: &policy::EnrichmentFacts::NONE,
             },
         );
         assert!(request_id.is_some(), "the probe request commits");

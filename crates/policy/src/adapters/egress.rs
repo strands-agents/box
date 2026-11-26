@@ -16,8 +16,8 @@ use crate::{
     CatalogRefusal, CatalogStage, DiscoveryFailure, ListPage, McpServerKind, ToolCatalogs,
 };
 use crate::{
-    Decision, Delivery, DenyReason, McpReply, Outcome, PendingToolResponse, PolicyEngine,
-    PolicyError, Principal, Request, RequestId,
+    Decision, Delivery, DenyReason, EnrichmentFacts, HostEnricher, McpReply, Outcome,
+    PendingToolResponse, PolicyEngine, PolicyError, Principal, Request, RequestId,
 };
 
 /// Binds one policy and egress principal to outbound effect interception.
@@ -35,6 +35,21 @@ pub struct EgressPolicyInterceptor {
     /// Reports the egress door finished to the box's discovery coordinator
     /// (docs/design/decisions.md#the-box-coordinates-discovery-completion).
     on_remote_finished: Arc<dyn Fn() + Send + Sync>,
+    /// What each declared enrichment entry says about a destination host.
+    enricher: Arc<dyn HostEnricher>,
+}
+
+/// The enricher of a box that declares no enrichment entry.
+struct NoEnrichment;
+
+impl HostEnricher for NoEnrichment {
+    fn enrich(&self, _host: &str) -> EnrichmentFacts {
+        EnrichmentFacts::NONE
+    }
+
+    fn recall(&self, _host: &str) -> EnrichmentFacts {
+        EnrichmentFacts::NONE
+    }
 }
 
 impl EgressPolicyInterceptor {
@@ -52,11 +67,14 @@ impl EgressPolicyInterceptor {
             Vec::new(),
             catalogs,
             Arc::new(|| {}),
+            Arc::new(NoEnrichment),
         )
     }
 
     /// Construct the handle and track lazy remote MCP discovery in `catalogs`, calling
-    /// `on_remote_finished` once every HTTP server there is terminal.
+    /// `on_remote_finished` once every HTTP server there is terminal, and put what `enricher` says
+    /// about each destination host on its `net:connect`: `enrich` for the host decision, and
+    /// `recall` for each per-address decision.
     pub fn into_handle_with_discovery(
         policy: Arc<PolicyEngine>,
         principal: Principal,
@@ -64,6 +82,7 @@ impl EgressPolicyInterceptor {
         remote_servers: Vec<(String, String)>,
         catalogs: Arc<ToolCatalogs>,
         on_remote_finished: Arc<dyn Fn() + Send + Sync>,
+        enricher: Arc<dyn HostEnricher>,
     ) -> Arc<dyn EgressEffectInterceptor> {
         let mcp_hosts: BTreeSet<String> = remote_servers
             .iter()
@@ -76,6 +95,7 @@ impl EgressPolicyInterceptor {
             mcp_hosts,
             catalogs,
             on_remote_finished,
+            enricher,
         })
     }
 
@@ -92,6 +112,16 @@ impl EgressPolicyInterceptor {
                 "mcp-catalog (server {:?}): {refusal}",
                 diagnostic_context(server)
             )),
+        }
+    }
+
+    /// What the declared entries say about a `net:connect` attempt's host, which the host decision
+    /// may ask a source and each per-address decision recalls, so one CONNECT asks at most once.
+    fn enrichment(&self, effect: &EgressEffectAttempt<'_>) -> EnrichmentFacts {
+        match effect {
+            EgressEffectAttempt::Resolve { host, .. } => self.enricher.enrich(host),
+            EgressEffectAttempt::Connect { host, .. } => self.enricher.recall(host),
+            _ => EnrichmentFacts::NONE,
         }
     }
 
@@ -175,6 +205,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
         &self,
         effect: &EgressEffectAttempt<'_>,
     ) -> io::Result<Box<dyn EgressEffectPermit>> {
+        let enrichment = self.enrichment(effect);
         let decision = match effect {
             // Name resolution records a request only; each address has its own connect attempt.
             EgressEffectAttempt::Resolve { host, port } => match self.policy.admit(
@@ -184,6 +215,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     host,
                     ip: None,
                     port: *port,
+                    enrichment: &enrichment,
                 },
             ) {
                 Ok(request_id) => Ok((Some(request_id), (None, None))),
@@ -206,6 +238,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     host,
                     ip: Some(address.ip()),
                     port: *port,
+                    enrichment: &enrichment,
                 },
             )
             .map(|request_id| (Some(request_id), (None, None))),
@@ -254,7 +287,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     policy: Arc::clone(&self.policy),
                     principal: self.principal.clone(),
                     governed: self.governed.clone(),
-                    attempt: AttemptIdentity::capture(effect),
+                    attempt: AttemptIdentity::capture(effect, enrichment),
                     request_id,
                     mcp_request_id,
                     tool_response,
@@ -364,6 +397,8 @@ enum AttemptIdentity {
         host: String,
         port: u16,
         address: SocketAddr,
+        /// The enrichment facts the decision read, which the outcome repeats.
+        enrichment: EnrichmentFacts,
     },
     Http {
         host: String,
@@ -383,7 +418,8 @@ enum AttemptIdentity {
 }
 
 impl AttemptIdentity {
-    fn capture(effect: &EgressEffectAttempt<'_>) -> Self {
+    /// The identity of `effect`, keeping the `enrichment` facts its decision read on a connect.
+    fn capture(effect: &EgressEffectAttempt<'_>, enrichment: EnrichmentFacts) -> Self {
         match effect {
             EgressEffectAttempt::Connect {
                 host,
@@ -394,6 +430,7 @@ impl AttemptIdentity {
                 host: (*host).to_string(),
                 port: *port,
                 address: *address,
+                enrichment,
             },
             EgressEffectAttempt::HttpRequest {
                 host,
@@ -729,9 +766,10 @@ impl LocalPolicyEffectPermit {
                     host,
                     port,
                     address,
+                    enrichment,
                 },
                 _,
-            ) => self.policy.record(
+            ) => self.policy.record_connect(
                 &self.governed,
                 &self.principal,
                 request_id,
@@ -744,6 +782,7 @@ impl LocalPolicyEffectPermit {
                     // a `response` and a rule capping connects still counts it.
                     connected: !matches!(outcome, EgressEffectOutcome::ConnectFailed(_)),
                 },
+                enrichment,
             ),
             (
                 AttemptIdentity::Http {
@@ -1313,6 +1352,7 @@ mod tests {
             vec![("mcp-fixture.demo".to_string(), "demo".to_string())],
             demo_catalogs(&policy),
             Arc::new(move || flag.store(true, std::sync::atomic::Ordering::SeqCst)),
+            Arc::new(NoEnrichment),
         );
         assert!(
             interceptor
@@ -1355,6 +1395,7 @@ mod tests {
             vec![("mcp-fixture.demo".to_string(), "demo".to_string())],
             Arc::clone(&catalogs),
             Arc::new(|| {}),
+            Arc::new(NoEnrichment),
         );
         (policy, catalogs, interceptor, history)
     }

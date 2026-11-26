@@ -12,7 +12,7 @@ use egress_gateway::{
     EffectInterceptor as EgressEffectInterceptor, EffectPermit as EgressEffectPermit,
     EgressDecision, Emitter, McpFrame,
 };
-use policy::{Decision, DecisionObserver, DenyReason, PolicyAttribution, RuleId};
+use policy::{Decision, DecisionObserver, DenyReason, EnrichmentFacts, PolicyAttribution, RuleId};
 use telemetry::{DecisionCause, DecisionRecord};
 
 use crate::error::BoxError;
@@ -56,6 +56,8 @@ pub(crate) struct EffectiveDecision {
     enforced: bool,
     /// Each rule log-only mode let through across the attempt's legs and gates.
     would_deny: Vec<String>,
+    /// What each enrichment entry answered about a connection's destination.
+    enrichment: EnrichmentFacts,
 }
 
 /// What determined an effective decision.
@@ -151,6 +153,7 @@ impl EffectiveDecision {
                 attribution: decision.attribution().to_vec(),
                 enforced: false,
                 would_deny: would_deny_ids([decision]),
+                enrichment: EnrichmentFacts::NONE,
             },
             Decision::Allow { rule, .. } => Self {
                 correlation: telemetry::Correlation::current(),
@@ -164,6 +167,7 @@ impl EffectiveDecision {
                 attribution: decision.attribution().to_vec(),
                 enforced: true,
                 would_deny: Vec::new(),
+                enrichment: EnrichmentFacts::NONE,
             },
             Decision::Deny { reason, rule, .. } => Self {
                 correlation: telemetry::Correlation::current(),
@@ -177,6 +181,7 @@ impl EffectiveDecision {
                 attribution: decision.attribution().to_vec(),
                 enforced: true,
                 would_deny: Vec::new(),
+                enrichment: EnrichmentFacts::NONE,
             },
         }
     }
@@ -199,6 +204,7 @@ impl EffectiveDecision {
             attribution: Vec::new(),
             enforced: true,
             would_deny: Vec::new(),
+            enrichment: EnrichmentFacts::NONE,
         }
     }
 
@@ -221,6 +227,7 @@ impl EffectiveDecision {
             attribution: Vec::new(),
             enforced: true,
             would_deny: Vec::new(),
+            enrichment: EnrichmentFacts::NONE,
         }
     }
 
@@ -308,7 +315,14 @@ impl EffectiveDecision {
             attribution: Vec::new(),
             enforced: true,
             would_deny: Vec::new(),
+            enrichment: self.enrichment,
         }
+    }
+
+    /// State what each enrichment entry answered about this connection's destination.
+    fn enriched(mut self, facts: EnrichmentFacts) -> Self {
+        self.enrichment = facts;
+        self
     }
 
     fn into_record(self) -> DecisionRecord {
@@ -339,6 +353,12 @@ impl EffectiveDecision {
         } else {
             record.with_would_deny(self.would_deny)
         };
+        let record = self
+            .enrichment
+            .iter()
+            .fold(record, |record, (name, answer)| {
+                record.enriched(name, answer.is_answered(), answer.labels().iter().cloned())
+            });
         record
             .correlated(self.correlation)
             .caused_by(self.cause)
@@ -646,7 +666,9 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
         };
 
         let capture = ObservationCapture::begin();
+        let facts = crate::run::enrichment::FactsCapture::begin();
         let result = self.inner.intercept(effect);
+        let enrichment = facts.finish();
         let observations = capture.finish();
         let verdict = if result.is_ok() {
             AuditDecision::Allow
@@ -659,6 +681,10 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
                 mcp: Some(frame), ..
             } => remote_mcp_decision(frame, refusal, &observations),
             _ => ordinary_egress_decision(&identity, refusal, &observations),
+        };
+        let effective = match identity.leg {
+            EgressLeg::Connection => effective.enriched(enrichment),
+            EgressLeg::Request => effective,
         };
         // Copy a call's arguments only when some target takes tool-call records, so a box whose
         // targets take none does no work for them on the enforcement path.
@@ -1318,6 +1344,13 @@ mod tests {
             vec![("mcp-fixture.demo".to_string(), "demo".to_string())],
             Arc::clone(&catalogs),
             Arc::new(|| {}),
+            Arc::new(
+                crate::run::enrichment::Enricher::open(
+                    &std::collections::BTreeMap::new(),
+                    &std::collections::BTreeSet::new(),
+                )
+                .expect("a box with no entry opens no source"),
+            ),
         );
         let interceptor = EgressDecisionInterceptor::over_reporting(
             inner,
@@ -1479,6 +1512,7 @@ mod tests {
                     host: "example.com",
                     ip: None,
                     port: 443,
+                    enrichment: &policy::EnrichmentFacts::NONE,
                 },
             )
             .0
@@ -1617,6 +1651,7 @@ mod tests {
                 host: "example.com",
                 ip: None,
                 port: 443,
+                enrichment: &policy::EnrichmentFacts::NONE,
             },
         );
         let Decision::Deny { rule, .. } = no_match else {
@@ -1672,6 +1707,133 @@ mod tests {
                 "server/tools/list",
                 "policy-pending-bootstrap",
             )
+        );
+    }
+
+    /// A connection's decision record states what each enrichment entry answered about its
+    /// destination.
+    #[tokio::test]
+    async fn a_connection_decision_states_each_enrichment_answer() {
+        use crate::run::enrichment::{Confidence, Enricher, Source, memory::InMemorySource};
+
+        let directory = tempfile::tempdir().expect("a directory");
+        let history = directory.path().join("dogwood.redb");
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&history)
+            .expect("the history opens");
+        let engine = PolicyEngine::open_staged_file_with_grammars(
+            &policy::Operator::unanchored(),
+            vec![Policy {
+                origin: PathBuf::from("policy.dw"),
+                text: r#"
+                    permit (principal, action, resource);
+                    @id("block_malware")
+                    forbid (principal, action == Box::Action::"net:connect", resource)
+                    when { context.input.enrichment.threat.labels.contains("malware") };
+                    forbid (principal, action == Box::Action::"net:connect", resource)
+                    unless { context.input.enrichment.threat.answered };
+                "#
+                .to_string(),
+            }],
+            policy::ToolGrammars::default(),
+            &policy::EnrichmentNames::new(["threat".to_string()]).expect("a name"),
+            file,
+            history.clone(),
+        )
+        .expect("the policy opens")
+        .observed_by(Arc::new(PolicyDecisionObserver));
+        let engine = Arc::new(engine);
+        let source: Arc<dyn Source> = Arc::new(
+            InMemorySource::new(std::time::Duration::from_secs(300)).labelling(
+                "evil.example",
+                "malware",
+                Confidence::High,
+            ),
+        );
+        let entry = toml::from_str(
+            "kind = \"in-memory\"\nendpoint = \"file:///unused.json\"\n\
+             outputs = [\"malware\"]\nmin_confidence = \"HIGH\"\n",
+        )
+        .expect("the entry parses");
+        let enricher = Enricher::opening(
+            &std::collections::BTreeMap::from([("threat".to_string(), entry)]),
+            engine.read_enrichment(),
+            |_| Ok(Arc::clone(&source)),
+        )
+        .expect("the enricher opens");
+        let records = directory.path().join("records.jsonl");
+        let collector = Arc::new(
+            ::telemetry::open(::telemetry::TelemetryConfig::for_box("codex").with_target(
+                ::telemetry::Target::new(::telemetry::TargetKind::File, records.to_string_lossy()),
+            ))
+            .expect("the collector opens"),
+        );
+        let recorder = DecisionRecorder::over(Arc::clone(&collector), None);
+        let interceptor = EgressDecisionInterceptor::over(
+            EgressPolicyInterceptor::into_handle_with_discovery(
+                Arc::clone(&engine),
+                Principal::agent(),
+                GovernedBox::assigned("test-box"),
+                Vec::new(),
+                Arc::new(policy::ToolCatalogs::new(
+                    Arc::clone(&engine),
+                    Vec::<(String, policy::McpServerKind)>::new(),
+                )),
+                Arc::new(|| {}),
+                Arc::new(enricher),
+            ),
+            Arc::clone(&recorder),
+        );
+        let emitter = EgressDecisionRecorder::over(recorder);
+
+        assert!(
+            interceptor
+                .intercept(&EgressEffectAttempt::Resolve {
+                    host: "evil.example",
+                    port: 443,
+                })
+                .is_err()
+        );
+        emitter.emit(EgressDecision {
+            host: "evil.example".to_string(),
+            port: 443,
+            method: String::new(),
+            path: String::new(),
+            decision: AuditDecision::Deny,
+            reason: "policy denied".to_string(),
+            correlation: RequestId::new("connection"),
+        });
+        collector.drained().await;
+
+        let text = std::fs::read_to_string(&records).expect("the records");
+        let attributes: Vec<serde_json::Value> = text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|line| {
+                line.pointer("/resourceLogs/0/scopeLogs/0/logRecords/0/attributes")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+            })
+            .flatten()
+            .collect();
+        let value = |key: &str| {
+            attributes
+                .iter()
+                .find(|attribute| attribute["key"] == key)
+                .map(|attribute| attribute["value"].clone())
+                .unwrap_or_else(|| panic!("{key} is on the decision: {text}"))
+        };
+        assert_eq!(
+            value("strands.box.enrichment.threat.answered"),
+            serde_json::json!({"boolValue": true})
+        );
+        assert_eq!(
+            value("strands.box.enrichment.threat.labels"),
+            serde_json::json!({"arrayValue": {"values": [{"stringValue": "malware"}]}})
         );
     }
 
@@ -2326,6 +2488,7 @@ forbid(principal, action == Box::Action::"websocket:connect", resource);"#
                         host,
                         ip: None,
                         port: 443,
+                        enrichment: &policy::EnrichmentFacts::NONE,
                     },
                 )
                 .0
@@ -2397,6 +2560,7 @@ forbid(principal, action == Box::Action::"websocket:connect", resource);"#
                     host: "api.example.com",
                     ip: None,
                     port,
+                    enrichment: &policy::EnrichmentFacts::NONE,
                 },
             );
             let [attribution] = decision.attribution() else {

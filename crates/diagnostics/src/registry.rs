@@ -129,6 +129,7 @@ codes! {
     B0212 => strands_box warning, "replaceable programs", "A process's write grant reaches the program it runs, so the process can replace that program.";
     B0213 => strands_box note, "log-only mode disclosures", "The policy runs in log-only mode, so each denial is recorded and the action goes ahead.";
     B0214 => strands_box warning, "untyped credsd routes", "A credsd route names no secret.type, so it signs with AWS credentials.";
+    B0215 => strands_box note, "enrichment disclosures", "Box sends the DNS names the workload connects to to an outside classification source.";
     // Box: lifecycle.
     B0301 => strands_box note, "box state changes", "The box was created, opened, or refreshed.";
     B0302 => strands_box note, "workload starts", "The box starts its workload.";

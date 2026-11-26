@@ -4,8 +4,8 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use policy::{
-    Operator, Policy, PolicyEngine, PolicyError, PolicyStagingError, SchemaStage, ToolGrammar,
-    ToolGrammars, generate_mcp_schema,
+    EnrichmentNames, Operator, Policy, PolicyEngine, PolicyError, PolicyStagingError, SchemaStage,
+    ToolGrammar, ToolGrammars, generate_mcp_schema,
 };
 
 const GIT_GRAMMAR: &str = concat!(
@@ -52,6 +52,7 @@ fn open(sources: Vec<Policy>, grammars: ToolGrammars) -> Result<PolicyEngine, Po
         &Operator::unanchored(),
         sources,
         grammars,
+        &EnrichmentNames::default(),
         file,
         path,
     )
@@ -133,13 +134,19 @@ fn an_mcp_schema_stages_over_the_grammar_schema() {
 fn validation_reads_the_grammar_schema() {
     let operator = Operator::unanchored();
 
-    PolicyEngine::validate_with_grammars(&operator, &source(FORBID_PUSH), &git())
-        .expect("the grammar declares the action");
+    PolicyEngine::validate_with_grammars(
+        &operator,
+        &source(FORBID_PUSH),
+        &git(),
+        &EnrichmentNames::default(),
+    )
+    .expect("the grammar declares the action");
     assert!(matches!(
         PolicyEngine::validate_with_grammars(
             &operator,
             &source(FORBID_PUSH),
-            &ToolGrammars::default()
+            &ToolGrammars::default(),
+            &EnrichmentNames::default(),
         ),
         Err(PolicyError::UnknownAction(_))
     ));
@@ -150,13 +157,19 @@ fn a_check_reads_the_grammar_schema_in_both_load_modes() {
     let operator = Operator::unanchored();
 
     for complete in [true, false] {
-        let with =
-            PolicyEngine::check_with_grammars(&operator, &source(FORBID_PUSH), complete, &git());
+        let with = PolicyEngine::check_with_grammars(
+            &operator,
+            &source(FORBID_PUSH),
+            complete,
+            &git(),
+            &EnrichmentNames::default(),
+        );
         let without = PolicyEngine::check_with_grammars(
             &operator,
             &source(FORBID_PUSH),
             complete,
             &ToolGrammars::default(),
+            &EnrichmentNames::default(),
         );
 
         assert!(with.errors().is_empty(), "{:?}", with.errors());
@@ -207,14 +220,14 @@ fn a_temporal_predicate_on_a_grammar_group_is_refused_when_its_mcp_schema_stages
 #[test]
 fn the_composed_schema_holds_the_actions_of_each_grammar() {
     let schema = inline_git()
-        .compose_action_schema(&[])
+        .compose_action_schema(&[], &EnrichmentNames::default())
         .expect("the schema composes");
 
     assert!(schema.contains("namespace Tool::git {"), "{schema}");
     assert!(schema.contains(r#"action "push" in ["*"]"#), "{schema}");
     assert!(
         !ToolGrammars::default()
-            .compose_action_schema(&[])
+            .compose_action_schema(&[], &EnrichmentNames::default())
             .expect("the canonical schema composes")
             .contains("Tool::"),
         "with no grammar, the schema holds no grammar action"
@@ -290,6 +303,7 @@ fn a_staged_check_reads_the_grammar_schema_while_an_mcp_rule_waits() {
         &source(&policy),
         false,
         &inline_git(),
+        &EnrichmentNames::default(),
     );
 
     assert!(check.errors().is_empty(), "{:?}", check.errors());

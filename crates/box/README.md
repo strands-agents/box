@@ -48,7 +48,9 @@ stops a box by ending the `run` process and deletes one by removing the director
 `policy generate-schema` reads the MCP servers that `--config` declares and requests each one's tool
 descriptions. It writes `actions.cedarschema`, with the Box action schema, the actions of each tool
 grammar the configuration installs, and each generated server schema, and `events.dwschema`, with the event kinds available to temporal policy, into
-`--output-dir`. A configuration with zero declared servers receives both canonical files. It starts
+`--output-dir`. When the configuration declares `[enrichment.<name>]` tables, the Box action schema
+in `actions.cedarschema` gives `net:connect` the `enrichment` record that a run's policy reads, with
+`answered` and `labels` for each table. A configuration with zero declared servers receives both canonical files. It starts
 each `stdio` server outside containment, from the trusted process, which `run` never does. Runtime
 policy staging uses live server discovery.
 
@@ -77,9 +79,10 @@ every harness's stored credentials, through an interpreter that runs outside con
 refusal tells the operator to make a directory for the workspace and to work there, and
 `the_operator_home_is_not_a_project` pins it.
 
-The config file's complete key set is **fourteen**: `name`, `box_dir`, `policy`, `[agent]`,
+The config file's complete key set is **fifteen**: `name`, `box_dir`, `policy`, `[agent]`,
 `[tool.<label>]`, `[egress.<name>]`, `[secret-source.<scheme>]`, `[mcp.<name>]`,
-`[telemetry.<kind>]`, `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.
+`[telemetry.<kind>]`, `[enrichment.<name>]`, `[experimental-features]`, `file-attributes`,
+`[limits]`, `[gateway]`, and `monty`.
 `name` and `box_dir` are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
 every removed spelling is refused by its own name with its replacement.
 `four_inputs.rs::the_config_record_carries_only_the_four_inputs` pins the set, and
@@ -105,6 +108,15 @@ the egress gateway decides and sends as `https://` on port 443. Policy still dec
 request, on port 443, so the key grants no reach a permit does not. An entry with a scheme, a port, a
 path, a wildcard, or an IP address is a load error. See
 [upgrade plain HTTP to HTTPS](../../docs/user/egress.md#upgrade-plain-http-to-https).
+
+`[enrichment.<name>]` declares an outside classification source that Box asks about each DNS
+name the workload connects to, before policy decides its `net:connect`. The answer reaches the
+rule as `context.input.enrichment.<name>`, with `answered` and `labels`, and the rule decides; the
+table grants nothing. `kind` must be one this build implements, and a release build implements
+none. `endpoint`, `outputs`, and `min_confidence` are required; `secret.ref`, `timeout`, and
+`max_age` are optional. A table stores the record at version 44. Box asks a source only when a rule
+reads its entry, and prints one `B0215` line for each table at startup. See
+[ask a classification source about each host](../../docs/user/egress.md#ask-a-classification-source-about-each-host).
 
 **`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the
 operator starts. A `[tool.<label>]` is a process the Shell runs for a request the policy already
@@ -730,6 +742,9 @@ Use `ReloadRefused::is_not_running()` to distinguish that case from a rejected p
 A rule for an MCP tool can reload only after Box loads that server's tool definitions.
 Without them, even reloading the unchanged policy is refused. If policy blocks discovery,
 waiting will not help. The current policy stays in place.
+A reload whose rules read a different set of `[enrichment.<name>]` entries than the running
+policy's is refused too, because the box opened a classification source only for each entry its
+rules read when it started. Restart the box to change that set.
 
 To generate policy schemas:
 
@@ -767,7 +782,9 @@ strands_box::run(config, workload, strands_box::RunOptions {
 
 A `PolicyDecision` holds the values that the decision's record states in its
 `strands.box.policy.*` attributes: the time, the verdict, the action and its category, the
-resource, the rule, the cause, and the reason. The channel reserves room for `capacity` decisions
+resource, the rule, the cause, and the reason. It carries no `strands.box.enrichment.*` value, so
+a caller that needs what a classification source answered about a `net:connect` reads the decision's
+record. The channel reserves room for `capacity` decisions
 when it is made. The box never waits for the reader. When the channel
 holds `capacity` unread decisions, the box drops the next one from the channel, and
 `PolicyDecisionReceiver::dropped` counts it. The records file and the telemetry targets still

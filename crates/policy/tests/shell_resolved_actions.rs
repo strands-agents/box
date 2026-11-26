@@ -499,6 +499,7 @@ fn credential_reads_enter_durable_temporal_history() {
         host: "api.example.com",
         ip: None,
         port: 443,
+        enrichment: &policy::EnrichmentFacts::NONE,
     };
     assert!(
         allows(&policy, &connect),

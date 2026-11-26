@@ -13,6 +13,7 @@
 //! | [`decisions`] | the channel that gives a library caller each policy decision as it is made |
 //! | [`events`] | the channel that tells a library caller what happened to its run |
 //! | [`contain`] | the ordered path from an argv to a contained process |
+//! | [`enrichment`] | the classification sources asked about each DNS name before it connects |
 //! | `descriptor_limit` | the box's raised open-file limit, and the limit each child starts with |
 //! | [`telemetry`] | this box's own collector and effective decision recorder |
 //! | `netns_relay` | splicing the workload's namespace-bound listeners to their sinks (Linux) |
@@ -26,6 +27,7 @@ pub(crate) mod decisions;
 pub(crate) mod descriptor_limit;
 #[cfg(unix)]
 pub(crate) mod diagnostics;
+pub(crate) mod enrichment;
 pub(crate) mod events;
 pub(crate) mod hardening;
 pub(crate) mod hosted;

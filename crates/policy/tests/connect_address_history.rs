@@ -84,6 +84,7 @@ fn probe(policy: &PolicyEngine, port: u16) -> bool {
                 host: HOST,
                 ip: None,
                 port,
+                enrichment: &policy::EnrichmentFacts::NONE,
             },
         )
         .0
@@ -98,6 +99,7 @@ fn admit(policy: &PolicyEngine, address: IpAddr) -> RequestId {
             host: HOST,
             ip: Some(address),
             port: 443,
+            enrichment: &policy::EnrichmentFacts::NONE,
         },
     );
     assert!(decision.is_allow(), "the permit grants the attempt");

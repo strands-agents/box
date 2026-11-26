@@ -522,6 +522,7 @@ fn one_principal_and_the_action_separates_the_boundaries() {
             host: "example.test",
             ip: None,
             port: 443,
+            enrichment: &policy::EnrichmentFacts::NONE,
         },
         Request::Http {
             host: "example.test",
@@ -554,6 +555,7 @@ fn one_principal_and_the_action_separates_the_boundaries() {
             host: "example.test",
             ip: None,
             port: 443,
+            enrichment: &policy::EnrichmentFacts::NONE,
         },
         Request::Http {
             host: "example.test",

@@ -389,6 +389,55 @@ scheme, a port, a path, a `*` wildcard, or an IP address when the configuration 
 The match ignores case and a trailing dot, and names one host: listing `static.rust-lang.org` does
 not upgrade `rust-lang.org`.
 
+<a id="ask-a-classification-source-about-each-host"></a>
+## Ask a classification source about each host
+
+To refuse a host by what an outside classifier says about it, declare the classifier as an
+[`[enrichment.<name>]`](config.md#enrichmentname) table and write rules on its answer. Before the
+gateway looks up the host's address, Box asks the source about the host's DNS name. The answer
+reaches that host's `net:connect` as `context.input.enrichment.<name>`, with `answered` and the
+`labels` the source gave, and policy decides. [Rules on a classification
+answer](policy.md#rules-on-a-classification-answer) shows the rules. A release build of Box
+implements no source `kind`, so it refuses every such table when `box.toml` loads.
+
+What Box asks, and when:
+
+- **Box asks about the name in lowercase, with one trailing dot removed.** `Evil.Example.` and
+  `evil.example` are one name.
+- **Box asks only a source that a rule reads.** A table that no rule reads gets no name, and its
+  entry reads `answered: false`. The startup line for each table says which it is.
+- **Box asks only on the decision before DNS.** The gateway decides `net:connect` on the host, then
+  again on each address it resolved. The decisions on the addresses read the answer that the first
+  decision got and ask nothing, so one connection asks each source at most once.
+- **The first connection to a name waits for the answer**, for at most the table's `timeout`. When
+  the source doesn't answer in time, fails, or refuses, the entry reads `answered: false` with no
+  labels. Box enforces the `timeout` itself, so a source that hangs holds no connection longer, and
+  while 64 questions to one source are still waiting, Box asks it nothing more and the entry reads
+  `answered: false`.
+- **Box keeps an answer, never its absence.** It keeps an answer for the time the source states, and
+  at most `max_age`, so a later connection to the name in that time asks nothing. It keeps no
+  missing answer, so the next connection to that name asks again.
+- **Two connections at the same moment to a name that Box holds no answer for can each ask the
+  source.**
+- **Only a label in `outputs`, at `min_confidence` or above, reaches policy.** Box drops the rest.
+
+Each `net:connect` decision record states what each table answered. [A
+decision](telemetry.md#a-decision) lists the keys.
+
+### A connection to an IP address
+
+Box asks no source about an IP address, because an address is not a DNS name. A connection to
+`203.0.113.7` or `[2001:db8::1]` reads `answered: false` on every entry, so a rule that refuses an
+unanswered host also refuses every direct connection to an address. To let one address through,
+put its exemption inside that `forbid`. A separate `permit` doesn't help, because a `forbid` beats
+every `permit`:
+
+```text
+@id("require_answer")
+forbid (principal, action == Box::Action::"net:connect", resource)
+unless { context.input.enrichment.threat.answered || context.input.host == "203.0.113.7" };
+```
+
 ## Errors and exit codes
 
 `box run` exits with an error before the agent starts when a route breaks a rule on this page.

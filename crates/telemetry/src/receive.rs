@@ -1043,6 +1043,7 @@ mod tests {
                             claimed("strands.box.policy.verdict"),
                             claimed("strands.box.policy.rule"),
                             claimed("strands.box.source"),
+                            claimed("strands.box.enrichment.threat.answered"),
                         ],
                         ..Default::default()
                     }],
@@ -1099,6 +1100,10 @@ mod tests {
         assert!(
             !relayed.contains("strands.box.policy."),
             "an agent-claimed policy attribute survived: {relayed}"
+        );
+        assert!(
+            !relayed.contains("strands.box.enrichment."),
+            "an agent-claimed enrichment attribute survived: {relayed}"
         );
         assert!(
             relayed.contains(r#""key":"strands.box.name""#)

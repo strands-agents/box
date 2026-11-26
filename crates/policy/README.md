@@ -18,7 +18,7 @@ enforcement point.
 
 ## Public Interface
 
-A standalone build of this package exports **63 names with `--all-features`, and 54 by default.**
+A standalone build of this package exports **70 names with `--all-features`, and 61 by default.**
 The adapter features add seven names. The `experimental-idle-flush` feature adds two timer types.
 The Box package enables these features in its own composition; it does not change this
 package's default feature set.
@@ -46,7 +46,8 @@ package's default feature set.
 | `generate_mcp_schema_with_omissions`, `OmittedTool` | MCP schema generation that leaves out each tool whose own schema does not generate or compose with the Box schema, and the tool it left out. `ToolCatalogs::take_omitted` returns the tools that staging left out, for the box to report. |
 | `event_schema_source` | The embedded Dogwood event schema text. |
 | `DecisionObserver` | A synchronous sink for each policy verdict. |
-| `ToolGrammar`, `ToolGrammars`, `ToolGrammarError` | One checked tool grammar from its `box.toml` table, the set a box installs with no two that share a name or a program, the action schema with their actions, and why one is refused. |
+| `EnrichmentNames`, `EnrichmentNameError`, `EnrichmentAnswer`, `EnrichmentFacts`, `HostEnricher` | The enrichment entries a box declares and why a name is refused, one entry's answer about a host, the answers one `net:connect` carries as `context.input.enrichment`, and what the egress adapter asks about each destination host. |
+| `ToolGrammar`, `ToolGrammars`, `ToolGrammarError` | One checked tool grammar from its `box.toml` table, the set a box installs with no two that share a name or a program, the action schema with their actions and the box's `EnrichmentNames` on the `net:connect` input, and why one is refused. |
 | `GrammarBindings`, `BindingRefusal` | The engine's tool grammars bound to each tool's opened program file and called name, which `PolicyEngine::bound_by` installs for the engine's life, and why declaring a tool or installing bindings from another engine is refused. |
 | `EgressPolicyInterceptor` and `ReplyReader` (`egress-adapter`), `ShellPolicyInterceptor` (`shell-adapter`), `ScriptPolicyInterceptor`, `ScriptPermit`, `ScriptRefusal`, and `RenameDestination` (`script-adapter`) | One adapter per enforcement point, each behind its own feature. `ReplyReader` reads one remote `tools/call` reply body, plain JSON or Server-Sent Events, as it grows, and finds the JSON-RPC reply to its request. |
 | `HistoryFlusher`, `HistoryFlushSnapshot` (`experimental-idle-flush`) | Own one timer and observe its completed flush calls. |
@@ -97,6 +98,15 @@ second `PolicyEngine` to find out. `open` and `validate` share one private compo
 so a validator that accepts text the authority would refuse is not expressible. Its
 caller is `strands-box`'s configuration step, which the `run` and `init` verbs both
 reach. A policy the engine cannot load is refused there, before the box stores it.
+
+`validate_with_grammars`, `check_with_grammars`, and `open_staged_file_with_grammars` also take the
+box's `EnrichmentNames`, and so does `validate_staged_with_grammars`, the staged validation a box
+with an MCP server runs before it stores its policy. With one or more, the `net:connect` input
+declares a required `enrichment` record with `answered: Bool` and `labels: Set<String>` for each
+name. All four refuse a policy in which a rule reads an entry no name declares, or reads an entry's
+`labels` while no rule reads its `answered`. With none, the composed schema is the shipped one.
+`PolicyEngine::read_enrichment` names the declared entries that some rule reads, and `reload`
+refuses a policy whose rules read a different set.
 
 `check` reports every finding of the same composition, and returns no authority. A finding
 names its rules by position (from 1) and `@id`, its line and column when the engine reports
@@ -222,7 +232,7 @@ load refuses an `operation` guard under no action.
 | Variant | Action | Fields |
 |---|---|---|
 | `Fs` | one `Box::Action` selected by `operation` | `path: &ApprovedPath`, `operation: FsOperation` |
-| `Connect` | `Box::Action::"net:connect"` | `host: &str`, `ip: Option<IpAddr>`, `port: u16` |
+| `Connect` | `Box::Action::"net:connect"` | `host: &str`, `ip: Option<IpAddr>`, `port: u16`, `enrichment: &EnrichmentFacts` |
 | `Http` | `Box::Action::"http:request"`, or `Box::Action::"websocket:connect"` when `websocket` | `host: &str`, `port: u16`, `method: &str`, `path: &str`, `body_bytes: usize`, `intercepted: bool`, `websocket: bool` |
 | `ShellExec` | `Box::Action::"shell:exec"` | `command`, `program`, `args`, `cwd` |
 | `ShellSpawn` | `Box::Action::"shell:spawn"` | the same, plus `program_path` |
@@ -619,7 +629,9 @@ this boundary serves. The interceptor holds all three and passes the box into ev
 `decide` and `record` it makes.
 
 The interceptor maps connect and HTTP request attempts to `Request::Connect` and
-`Request::Http`. A response release raises **no request and no decision**, and its permit
+`Request::Http`. `into_handle_with_discovery` also takes a `HostEnricher`. The host decision takes
+the host's `EnrichmentFacts` from `enrich`, which may ask a source, and each per-address decision
+takes them from `recall`, which asks none. `into_handle` puts `EnrichmentFacts::NONE` on each. A response release raises **no request and no decision**, and its permit
 records nothing. The gateway consumes the request permit when the exchange ends and records
 the matching HTTP outcome. An `http:request::response` event carries delivered request bytes
 and any reply status in `output.status`, which only a `when temporal { … }` rule reads.

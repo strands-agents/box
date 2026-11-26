@@ -753,6 +753,7 @@ impl HostedBox {
         operator: &policy::Operator,
         sources: Vec<policy::Policy>,
         grammars: policy::ToolGrammars,
+        enrichment: &policy::EnrichmentNames,
         enforcement: crate::record::config::Enforcement,
     ) -> Result<PolicyEngine, BoxError> {
         let database_path = root.dogwood_database();
@@ -761,6 +762,7 @@ impl HostedBox {
             operator,
             sources,
             grammars,
+            enrichment,
             database,
             database_path,
         )?
@@ -944,6 +946,10 @@ impl HostedBox {
                         .map(|(_, name)| (name.clone(), McpServerKind::Http)),
                 ),
         ));
+        let enricher = Arc::new(crate::run::enrichment::Enricher::open(
+            &record.enrichment,
+            policy.read_enrichment(),
+        )?);
         let egress_policy = EgressPolicyInterceptor::into_handle_with_discovery(
             Arc::clone(&policy),
             Principal::agent(),
@@ -955,6 +961,7 @@ impl HostedBox {
                 let coordinator = Arc::clone(&coordinator);
                 Arc::new(move || coordinator.report_finished(DiscoveryDoor::Egress))
             },
+            enricher,
         );
         let proxy = MitmInterceptor::start_with(
             MitmConfig {
@@ -1178,6 +1185,7 @@ impl HostedBox {
             &policy::Operator::unanchored(),
             sources,
             policy::ToolGrammars::default(),
+            &policy::EnrichmentNames::default(),
             crate::record::config::Enforcement::Enforce,
         )
         .map(Arc::new)
@@ -1456,6 +1464,7 @@ mod tests {
             mcp,
             contained_mcp: Default::default(),
             telemetry: Default::default(),
+            enrichment: std::collections::BTreeMap::new(),
             secret_source: Default::default(),
         }
     }
@@ -1511,6 +1520,7 @@ mod tests {
                 text: text.to_string(),
             }],
             grammars,
+            &policy::EnrichmentNames::default(),
             crate::record::config::Enforcement::Enforce,
         )
         .expect("the policy opens");
@@ -2243,6 +2253,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             &policy::Operator::unanchored(),
             sources,
             policy::ToolGrammars::default(),
+            &policy::EnrichmentNames::default(),
             crate::record::config::Enforcement::Enforce,
         )
         .map(Arc::new)
@@ -2641,6 +2652,7 @@ when temporal {
             &policy::Operator::unanchored(),
             Vec::new(),
             policy::ToolGrammars::default(),
+            &policy::EnrichmentNames::default(),
             crate::record::config::Enforcement::Enforce,
         )
         .map(Arc::new)
@@ -3666,6 +3678,7 @@ while :; do :; done"#
             mcp: Vec::new(),
             contained_mcp: Default::default(),
             telemetry: Default::default(),
+            enrichment: std::collections::BTreeMap::new(),
             secret_source: Default::default(),
         }
     }

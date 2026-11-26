@@ -8,9 +8,9 @@ use cedar_policy::{
     Schema,
 };
 
-use crate::Principal;
 use crate::error::PolicyError;
 use crate::request::{DEFAULT_PRINCIPAL_ID, FsOperation, Request};
+use crate::{EnrichmentFacts, EnrichmentNames, Principal};
 
 const BOX_NAMESPACE: &str = "Box";
 const FIXED_ACTION_TYPE: &str = "Box::Action";
@@ -27,22 +27,89 @@ pub(crate) struct ActionSchema {
     pub(crate) tool_inputs: crate::mcp_input::ToolInputs,
 }
 
-/// Compose the canonical schema with ordered MCP schema fragments.
-pub(crate) fn action_schema(mcp_schemas: &[String]) -> Result<ActionSchema, PolicyError> {
-    composed_action_schema(&[], mcp_schemas)
+/// The schema one box composes below its MCP fragments: its Box actions, then its tool grammars.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SchemaBase {
+    /// The enrichment entries the box declares, which its `net:connect` input carries.
+    pub(crate) enrichment: EnrichmentNames,
+    /// The schema fragment of each tool grammar, in order.
+    pub(crate) grammars: Vec<String>,
 }
 
-/// Compose the canonical schema with generated tool grammar fragments, then ordered MCP fragments.
+impl SchemaBase {
+    /// A base with the tool grammar fragments `grammars` and no enrichment entry.
+    pub(crate) fn of_grammars(grammars: Vec<String>) -> Self {
+        Self {
+            enrichment: EnrichmentNames::default(),
+            grammars,
+        }
+    }
+
+    /// The base of a box with the tool grammars `grammars` and the enrichment entries `enrichment`.
+    pub(crate) fn of_box(grammars: &crate::ToolGrammars, enrichment: &EnrichmentNames) -> Self {
+        Self {
+            enrichment: enrichment.clone(),
+            grammars: grammars.schemas(),
+        }
+    }
+
+    /// The Box action vocabulary of this box, which is the shipped one when it declares no entry.
+    pub(crate) fn actions(&self) -> Result<Cow<'static, str>, PolicyError> {
+        if self.enrichment.is_empty() {
+            return Ok(Cow::Borrowed(SCHEMA_SRC));
+        }
+        with_enrichment(SCHEMA_SRC, &self.enrichment).map(Cow::Owned)
+    }
+}
+
+/// The opening of the `net:connect` input declaration that enrichment extends.
+const CONNECT_INPUT: &str = "type NetworkConnectInput = {\n";
+
+/// `actions` with a required `enrichment` record of each name in `names` on the `net:connect` input.
+fn with_enrichment(actions: &str, names: &EnrichmentNames) -> Result<String, PolicyError> {
+    let mut found = actions.match_indices(CONNECT_INPUT).map(|(at, _)| at);
+    let (Some(at), None) = (found.next(), found.next()) else {
+        return Err(PolicyError::Schema(format!(
+            "the action schema does not declare `{}` exactly once, so enrichment cannot extend it",
+            CONNECT_INPUT.trim_end()
+        )));
+    };
+    let entries = names
+        .iter()
+        .map(|name| {
+            format!(
+                "{name}: {{ {}: Bool, {}: Set<String> }}",
+                crate::enrichment::ANSWERED,
+                crate::enrichment::LABELS
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let insert = at + CONNECT_INPUT.len();
+    Ok(format!(
+        "{}  {}: {{ {entries} }},\n{}",
+        &actions[..insert],
+        crate::enrichment::ENRICHMENT,
+        &actions[insert..]
+    ))
+}
+
+/// Compose the canonical schema with ordered MCP schema fragments.
+pub(crate) fn action_schema(mcp_schemas: &[String]) -> Result<ActionSchema, PolicyError> {
+    composed_action_schema(&SchemaBase::default(), mcp_schemas)
+}
+
+/// Compose one box's base schema with ordered MCP fragments.
 pub(crate) fn composed_action_schema(
-    grammar_schemas: &[String],
+    base: &SchemaBase,
     mcp_schemas: &[String],
 ) -> Result<ActionSchema, PolicyError> {
     for fragment in mcp_schemas {
         crate::mcp_schema::validate_unbound_mcp_schema(fragment)
             .map_err(|error| PolicyError::Schema(error.to_string()))?;
     }
-    let mut source = SCHEMA_SRC.to_string();
-    for fragment in grammar_schemas.iter().chain(mcp_schemas) {
+    let mut source = base.actions()?.into_owned();
+    for fragment in base.grammars.iter().chain(mcp_schemas) {
         let base = source.trim_end();
         source = format!("{base}\n{fragment}");
     }
@@ -557,7 +624,12 @@ fn context_for(
             fields.push((attr::OPERATION.to_string(), fs_operation_expr(*operation)?));
             fields
         }
-        Request::Connect { host, ip, port } => {
+        Request::Connect {
+            host,
+            ip,
+            port,
+            enrichment,
+        } => {
             let mut fields = vec![
                 (
                     attr::HOST.to_string(),
@@ -575,6 +647,7 @@ fn context_for(
                     fields.push((name.to_string(), RestrictedExpression::new_string(spelling)));
                 }
             }
+            fields.extend(enrichment_field(enrichment)?);
             fields
         }
         Request::Http {
@@ -708,6 +781,43 @@ fn context_for(
         .map_err(|e| PolicyError::Schema(format!("failed to build context: {e}")))
 }
 
+/// The `enrichment` record a box that declares entries puts on every `net:connect` input.
+fn enrichment_field(
+    facts: &EnrichmentFacts,
+) -> Result<Option<(String, RestrictedExpression)>, PolicyError> {
+    if facts.is_empty() {
+        return Ok(None);
+    }
+    let invalid = |error: cedar_policy::ExpressionConstructionError| {
+        PolicyError::Schema(format!("failed to build context.input.enrichment: {error}"))
+    };
+    let entries = facts
+        .iter()
+        .map(|(name, answer)| {
+            RestrictedExpression::new_record([
+                (
+                    crate::enrichment::ANSWERED.to_string(),
+                    RestrictedExpression::new_bool(answer.is_answered()),
+                ),
+                (
+                    crate::enrichment::LABELS.to_string(),
+                    RestrictedExpression::new_set(
+                        answer
+                            .labels()
+                            .iter()
+                            .cloned()
+                            .map(RestrictedExpression::new_string),
+                    ),
+                ),
+            ])
+            .map(|entry| (name.to_string(), entry))
+            .map_err(invalid)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let record = RestrictedExpression::new_record(entries).map_err(invalid)?;
+    Ok(Some((crate::enrichment::ENRICHMENT.to_string(), record)))
+}
+
 fn usize_to_cedar_long(value: usize) -> Result<i64, PolicyError> {
     i64::try_from(value)
         .map_err(|_| PolicyError::Schema("HTTP body length exceeds Cedar Long".to_string()))
@@ -758,6 +868,30 @@ mod tests {
     #[test]
     fn shipped_schema_parses() {
         assert!(schema().is_ok());
+    }
+
+    #[test]
+    fn enrichment_extends_the_connect_input_and_refuses_a_schema_without_one() {
+        let names = EnrichmentNames::new(["threat".to_string(), "reputation".to_string()])
+            .expect("the names are valid");
+        let base = SchemaBase {
+            enrichment: names.clone(),
+            grammars: Vec::new(),
+        };
+        let actions = base.actions().expect("the actions compose");
+        assert!(
+            actions.contains(
+                "type NetworkConnectInput = {\n  enrichment: { reputation: { answered: Bool, \
+                 labels: Set<String> }, threat: { answered: Bool, labels: Set<String> } },\n"
+            ),
+            "{actions}"
+        );
+        assert!(Schema::from_cedarschema_str(&actions).is_ok());
+
+        let renamed = SCHEMA_SRC.replace(CONNECT_INPUT, "type ConnectInput = {\n");
+        assert!(with_enrichment(&renamed, &names).is_err());
+        let twice = format!("{SCHEMA_SRC}\n{CONNECT_INPUT}}};");
+        assert!(with_enrichment(&twice, &names).is_err());
     }
 
     #[test]
@@ -828,6 +962,7 @@ mod tests {
                 host: "h",
                 ip: None,
                 port: 443,
+                enrichment: &EnrichmentFacts::NONE,
             },
             Request::Http {
                 host: "h",

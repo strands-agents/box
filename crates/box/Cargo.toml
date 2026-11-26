@@ -191,6 +191,13 @@ name = "credential_method_scope"
 path = "tests/credential_method_scope.rs"
 required-features = ["test-support"]
 
+# Drives the `in-memory` classification source, which only a `test-support` build implements, and
+# runs `box-egress-probe` as the workload.
+[[test]]
+name = "egress_enrichment"
+path = "tests/egress_enrichment.rs"
+required-features = ["test-support"]
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 ingress = { package = "strands-box-ingress", path = "../ingress" }

@@ -122,6 +122,7 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
                 host: "api.example.com",
                 ip: Some(ip),
                 port: 443,
+                enrichment: &policy::EnrichmentFacts::NONE,
             },
             Outcome::Connect {
                 host: "api.example.com",

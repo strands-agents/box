@@ -102,23 +102,27 @@ impl ToolGrammars {
         self.iter().map(|tool| tool.grammar.schema()).collect()
     }
 
-    /// The canonical action schema with the actions of each grammar and of each `(server,
-    /// schema)` pair in `generated`, as [`compose_action_schema`](crate::compose_action_schema)
-    /// composes it.
+    /// The canonical action schema with each entry of `enrichment` on the `net:connect` input, the
+    /// actions of each grammar, and those of each `(server, schema)` pair in `generated`, as
+    /// [`compose_action_schema`](crate::compose_action_schema) composes them.
     pub fn compose_action_schema(
         &self,
         generated: &[(&str, &str)],
+        enrichment: &crate::EnrichmentNames,
     ) -> Result<String, crate::McpSchemaError> {
         crate::mcp_schema::validate_mcp_schema_composition(generated)?;
         let fragments = generated
             .iter()
             .map(|(_, source)| (*source).to_string())
             .collect::<Vec<_>>();
-        crate::schema::composed_action_schema(&self.schemas(), &fragments)
-            .map(|schema| schema.source)
-            .map_err(|source| crate::McpSchemaError::Composition {
-                reason: source.to_string(),
-            })
+        crate::schema::composed_action_schema(
+            &crate::schema::SchemaBase::of_box(self, enrichment),
+            &fragments,
+        )
+        .map(|schema| schema.source)
+        .map_err(|source| crate::McpSchemaError::Composition {
+            reason: source.to_string(),
+        })
     }
 }
 

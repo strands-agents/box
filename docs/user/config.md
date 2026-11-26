@@ -72,7 +72,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries fourteen keys. `name` and `box_dir` are required.
+The file carries fifteen keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -85,13 +85,14 @@ The file carries fourteen keys. `name` and `box_dir` are required.
 | `[secret-source.<scheme>]` | tables | Experimental: the host program that reads the secret of a reference in `<scheme>://`. See [`[secret-source.<scheme>]`](#secret-sourcescheme). |
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
+| `[enrichment.<name>]` | tables | The outside classification sources Box asks about the DNS name of each host the workload connects to. See [`[enrichment.<name>]`](#enrichmentname). |
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
 | `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, ingress, and secret sources. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
 | `monty` | boolean | Whether a bare `python3` or `python` in the Shell runs Monty, Box's built-in Python subset. `true` by default. With `false`, both names resolve like any other program: a `[tool.python3]` or `[tool.python]`, else the host's `PATH`. |
 | `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
 
-The example uses five of the fourteen: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the fifteen: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -1591,6 +1592,87 @@ a different workload from the Strands CLI on this page.
 
 The record omits `url.full` and `process.command_line`.
 
+## `[enrichment.<name>]`
+
+Each table declares one classification source: an outside service that Box asks about the DNS name
+of each host the workload connects to, before policy decides the connection. The answer reaches the
+rule as `context.input.enrichment.<name>`, and the policy decides. The table itself permits and
+refuses nothing. [Ask a classification source about each
+host](egress.md#ask-a-classification-source-about-each-host) states when Box asks and how long it
+keeps an answer, and [rules on a classification answer](policy.md#rules-on-a-classification-answer)
+shows the rules.
+
+A release build of Box implements no `kind`, so it refuses every `[enrichment.<name>]` table when
+the file loads. The refusal is `B0101`, and its text reads:
+
+```text
+`[enrichment.threat]` names kind "<kind>", which this build of Box does not implement; this build implements no enrichment kind
+```
+
+`<name>` is a lowercase letter, then at most 31 lowercase letters, digits, or `_`, so a rule reads
+it with no quoting. It cannot be one of the words `true`, `false`, `if`, `then`, `else`, `in`, `is`,
+`like`, or `has`.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `kind` | string | required | The kind of source. It must be a kind this build implements. |
+| `endpoint` | string | required | Where the source answers, in the form its `kind` reads. Box never prints it, because it can hold a token. |
+| `secret.ref` | string | none | The credential the source needs, written as an [`[egress.<name>]` `secret.ref`](egress.md#credential-sources). Box checks the reference when the file loads, including against declared secret sources. `ref` is the only key `secret` takes. |
+| `outputs` | string array | required | The labels the source may give: from 1 to 64, each one nonempty and named once. Box drops every other label, so no other label reaches policy. |
+| `min_confidence` | string | required | `LOW`, `MEDIUM`, or `HIGH`, in uppercase: the least confidence of a label that reaches policy. Box drops a label the source is less sure of. |
+| `timeout` | string | `"500ms"` | How long Box waits for an answer. A whole number followed by `ms`, `s`, `m`, or `h`, from `1ms` to `10s`. A source that does not answer in time leaves the host unanswered. |
+| `max_age` | string | `"300s"` | The longest Box keeps an answer, from `1s` to `24h`, written as `timeout` is. Box keeps an answer for the time the source states, and never longer than `max_age`. |
+
+```toml
+[enrichment.threat]
+kind = "<kind>"                               # a kind this build implements
+endpoint = "https://classifier.example/v1"
+secret.ref = "env://CLASSIFIER_TOKEN"
+outputs = ["malware", "phishing"]
+min_confidence = "HIGH"
+timeout = "500ms"
+max_age = "300s"
+```
+
+`<kind>` stands in for a kind, because a release build implements none.
+
+Box asks a source only when a rule reads its entry. Before the workload starts, Box prints one line
+on stderr for each table. For a table that a rule reads:
+
+```text
+strands-box: note[B0215]: [enrichment.threat] sends each DNS name the workload connects to to its classification source (kind "<kind>") before policy decides the connection.
+```
+
+For a table that no rule reads:
+
+```text
+strands-box: note[B0215]: [enrichment.threat] is unused: no rule reads it, so Box sends it no DNS name.
+```
+
+### What is refused
+
+The file refuses each of these when it loads, before any box state exists. The refusal names the
+table.
+
+- A `<name>` outside the pattern above: ``is not a name a rule can read as
+  context.input.enrichment.<name>: use a lowercase letter, then at most 31 lowercase letters,
+  digits, or '_'``. A reserved word reads ``"if" is a Cedar reserved word`` instead.
+- A key the table does not take, or a key of `secret` other than `ref`.
+- A `kind` this build does not implement, or an `endpoint` that its kind cannot use.
+- A `secret.ref` that an `[egress.<name>]` route could not name, or that a declared secret source
+  does not allow.
+- An `outputs` list that is empty, holds more than 64 labels, holds an empty label, or names one
+  label twice.
+- A `min_confidence` other than `LOW`, `MEDIUM`, or `HIGH`. Lowercase is refused.
+- A `timeout` or `max_age` that is not a whole number and a unit, or that lies outside its range.
+  A bare number, such as `timeout = 500`, is refused as well. The message names the key:
+  ``timeout must be a whole number followed by ms, s, m, or h, from 1ms to 10s, such as "500ms";
+  found "1.5s"``.
+
+The policy load refuses two more, each as `B0103`: a rule that reads an entry no table declares, and
+a rule that reads an entry's `labels` when no rule reads its `answered`.
+[Troubleshooting load failures](policy.md#troubleshooting-load-failures) shows both.
+
 ## Errors
 
 A refusal of the file's shape happens at parse, before any box state exists: an unknown key, an
@@ -1599,7 +1681,8 @@ relative `workspace`, an `env` name the box owns, a relative `env.HOME` or `env.
 or relative `filesystem` path, a `filesystem` path carrying `..`, a duplicated `filesystem` path, an
 overlapping or all-hosts egress destination, a secretless egress entry, a literal egress secret,
 each [`[secret-source.<scheme>]`](#secret-sourcescheme) refusal,
-each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal, an `ingress` outside `[agent]`, an
+each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal,
+each [`[enrichment.<name>]`](#enrichmentname) refusal, an `ingress` outside `[agent]`, an
 `[[agent.ingress]]` while `ingress` is off in `[experimental-features]`, more than
 five `[[agent.ingress]]` entries, an `[[agent.ingress]] listen` that is not an IP address and port, a
 port of 0, two entries with one `listen` port or one `workload_port`, and on macOS a `listen` port

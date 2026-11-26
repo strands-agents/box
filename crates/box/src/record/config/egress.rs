@@ -1588,6 +1588,29 @@ impl EgressBackend {
     }
 }
 
+/// Refuse a secret reference that no `[egress.<name>]` `secret.ref` could name, or that the
+/// declared sources do not allow; `label` names the table in the refusal.
+pub(super) fn validate_reference(
+    reference: &str,
+    label: &str,
+    sources: &DeclaredSources,
+) -> Result<(), ConfigError> {
+    let secret = EgressSecret {
+        reference: reference.to_string(),
+        env: None,
+        header: None,
+        prefix: None,
+        placement: None,
+        param: None,
+        inject: None,
+        phantom_prefix: None,
+        kind: None,
+        aws: None,
+    };
+    validate_secret(&secret, label)?;
+    validate_against_sources(&secret, label, sources)
+}
+
 /// Reject a secret (a destination `secret` or a backend `auth`) this file may not express. `label`
 /// is the destination an entry-level refusal names.
 fn validate_secret(secret: &EgressSecret, label: &str) -> Result<(), ConfigError> {

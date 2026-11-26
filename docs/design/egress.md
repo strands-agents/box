@@ -8,6 +8,7 @@ this route unless the operator enables the network exception described below.
 | The gateway | What it does |
 |---|---|
 | Requests policy decisions | `net:connect` for each destination before DNS and again for each address it connects to; `http:request` for each request, or `websocket:connect` for a WebSocket handshake; `mcp:call` for MCP requests whose host matches a configured HTTP MCP server, except the protocol methods that pass without an MCP decision. |
+| Asks before the first `net:connect` | Each `[enrichment.<name>]` classification source that a rule reads, about the destination's DNS name. The answer is a fact on the request, and policy decides. |
 | Adds | The secret an `[egress.<name>]` route binds to the destination. |
 | Removes | A copy of that secret from the response, before the process sees it. |
 
@@ -136,6 +137,49 @@ must use that spelling. Box checks hostname literals in `when` clauses at load a
 required form when it refuses one. See [a rule that cannot fire is refused at
 load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns).
 Internationalized domains reach the gateway in punycode form, which rules must also use.
+
+### Classification before the host decision
+
+An `[enrichment.<name>]` table names an outside classification source. Before the first
+`net:connect` decision on a host, the gateway's policy adapter, in the box's trusted process, asks
+each source that some rule reads about the host's DNS name. It puts the answers on the request as
+`context.input.enrichment.<name>`, with `answered` and `labels`. The source grants nothing. It
+supplies a fact, and the authored policy decides, including what an unanswered question means. See
+[every decision is local, and an enrichment source is the one outside
+call](decisions.md#every-decision-is-local-and-in-process). A release build implements no source
+kind and refuses every table when the configuration loads, so in that build no name leaves the box
+this way.
+
+What leaves the box is the canonical name described above: lowercase, with one trailing dot removed.
+Box asks no source about an IP-literal host, because an address is not a DNS name, so each entry
+reads `answered: false` for it, and a rule that refuses an unanswered host refuses the address too.
+The operator exempts an address inside that `forbid`, because a `forbid` beats any `permit`. Box
+sends no name to a table that no rule reads, and gives its entry `answered: false`. Before the
+workload starts, Box prints one `B0215` line on stderr for each table, naming its kind and whether
+names leave the box for it, and never its endpoint, which can hold a token.
+
+Only the host decision asks. The gateway makes each per-address decision after DNS on the
+connection's own thread, and each reads exactly the answers the host decision read and asks nothing,
+so one `CONNECT` asks each source at most once and its decisions agree even when the answer expires
+between them. The host decision waits for the answer. Box hands the source the table's `timeout` as
+the time it has to answer, and a source that gives no answer, fails, or refuses leaves the entry
+unanswered. Box enforces the `timeout` too: it asks on a thread of its own and waits at most that
+long, so a late answer leaves the entry unanswered, and while 64 questions to one source still wait,
+Box asks it nothing more and the entry reads unanswered. Box keeps only the labels the table lists
+in `outputs`, at `min_confidence` or above.
+
+Each table keeps its answers by name until they expire, so a second connection to a name reads the
+kept answer and asks nothing. Box keeps no missing answer, so a source that failed is asked again on
+the next connection instead of its silence being remembered. We bound each table's store, because
+the workload chooses the names: when it is full, Box drops the expired names, then the name that
+expires first. Nothing holds a second connection while a first one asks, so two connections at the
+same moment to a name with no kept answer can each ask the source.
+
+The answer the decision read reaches history and telemetry too. All three `net:connect` events,
+`::request`, `::response`, and `::error`, carry the same `input.enrichment` record, and the
+connection's decision record states each table's `answered` and `labels`. Policy refuses at load a
+rule that reads an entry's `labels` when no rule reads its `answered`; [what refuses to
+load](policy.md#what-refuses-to-load) lists it.
 
 ### TLS and `http:request`
 
