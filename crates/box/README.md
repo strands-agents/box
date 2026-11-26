@@ -145,6 +145,11 @@ Listing a directory grants no access: the agent needs whole-directory read, writ
 grants; tools and servers need read and write grants under their existing execution rules.
 Box rejects intersecting denied or protected paths and incompatible native filesystem policy.
 
+The agent's approved canonical selections also extend the paths Strands Shell and Monty may access
+in the box's trusted process. Every operation still needs a policy permit and passes the existing
+protected-state and command checks. Tool and local-server selections do not extend these hosted
+paths. The operator home, agent home, and workspace remain available under their existing checks.
+
 Each selected directory must already be a dedicated mount point connected to an upstream publisher.
 Box verifies the approved directory identity and prepares the receiving connection before the process
 starts. Linux delivers later mounts directly. Future arrivals keep the trusted publisher's options;

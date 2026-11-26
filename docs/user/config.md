@@ -345,7 +345,8 @@ default.
 `secret.env` key of a route or a remote MCP server, which are experimental and off by default.
 
 The former `linux-storage-mounts` key is rejected even when its value is `false`.
-Remove that key; this build has no replacement that enables incoming mount forwarding.
+Remove that key. On Linux, use the per-process `filesystem.receive_mounts` setting described in
+[incoming mount declarations](#incoming-mount-declarations).
 
 ## `[agent]` and `[tool.<name>]`
 
@@ -697,6 +698,12 @@ Each process selects its own directories. Tools and local servers do not inherit
 entries. An empty or omitted array keeps ordinary, private mount behavior. Linux requires no
 experimental feature flag. On macOS, any `receive_mounts` key rejects configuration loading,
 including `receive_mounts = []`; omit the key to start Box.
+
+An agent selection also makes its approved canonical directory available to Strands Shell and
+Monty, the hosted Python interpreter, in the box's trusted process. Each file operation still
+requires a policy permit and passes the existing protected-state and command checks. A tool or
+local server selection does not extend hosted access. Omitting the agent selection does not remove
+the interpreters' existing access to the operator home, agent home, or workspace under policy.
 
 Listing a directory grants no access. The agent must separately grant the whole directory read,
 write, and execution access. Tools and local servers need whole-directory read and write grants;

@@ -32,3 +32,5 @@ For Box installation and configuration, follow [getting started](../docs/user/ge
 The samples include source, deployment commands, expected refusals, and tested-platform limits.
 
 For Linux environment requirements and deployment checks, read the [cloud deployment profiles](../docs/user/cloud-deployments.md).
+
+[Runtime storage](./cloud-deployments/agentcore-runtime/storage/): start Box before provider storage arrives, then compare real file operations inside and outside its sandbox.

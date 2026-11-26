@@ -19,9 +19,10 @@ shell](decisions.md#interpreters-are-vendored-not-the-host-shell).
 An alias is a small client program in the agent's sandbox, named `zsh`, `bash`, or `sh`, that
 forwards a command to the box's trusted process over a local socket. The broker is the part of that
 process that accepts the alias's connection and hands the command to the Shell. The reachable paths
-check is deny-only and runs after policy. It refuses a path outside the operator's home, the agent's
-home, and the workspace, a path inside the box directory, and the `box.toml` and policy this run
-loaded, whatever a `permit` says.
+check is deny-only and runs after policy. Its roots are the operator's home, the agent's home, the
+workspace, and the canonical directories approved from `[agent.filesystem] receive_mounts` in
+`box.toml`. It refuses paths outside those roots, the box directory, and the `box.toml` and policy
+this run loaded, whatever a `permit` says. Tool and local-server selections add no hosted roots.
 
 ## How a command reaches the Shell
 
@@ -39,11 +40,11 @@ not persist between requests, so a variable exported in one `zsh -c` is unset in
 
 The Shell starts each command in the workspace. When the alias sends another directory, the broker
 moves the Shell there through the same `fs:read` decision, with operation `change_dir`, that a `cd`
-gets. The broker also refuses a directory outside the operator's home, the agent's home, and the
-workspace, both as the alias spelled it and as the Shell resolved it. The Shell holds `/`, `/tmp`,
-and a few other directories only in memory, so a command run in one of them would read and write
-nothing on the host. If policy refuses, the directory is outside those three, or the path isn't a
-directory, the command doesn't run. The alias doesn't fall back to the workspace: when it can't
+gets. The broker also refuses a directory outside the hosted roots, both as the alias spelled it
+and as the Shell resolved it. The Shell holds `/`, `/tmp`, and a few other directories only in
+memory, so a command run in one of them would read and write nothing on the surrounding OS.
+If policy refuses, the directory is outside the hosted roots, or the path isn't a directory, the
+command doesn't run. The alias doesn't fall back to the workspace: when it can't
 tell which directory it was run from, it refuses to send the command.
 
 ## How the Shell decides a command
@@ -136,11 +137,12 @@ when { context.input.path like "~/src/project/*" };
 forbid (principal, action == Box::Action::"fs:write", resource)
 when { context.input.operation == Box::FsWriteOperation::"set_permissions" };
 ```
- Paths outside the operator's home, the agent's home, and the workspace are in memory. The Shell
-binds those three directories to their real paths, so writes there change files on disk. Every other
-path, such as `/tmp`, exists only in the Shell's own memory, and policy still decides each operation
-on it. That memory belongs to one command, so a file written to `/tmp` is gone after the command
-ends.
+The Shell binds each hosted root to its real path, so permitted writes there change files on disk.
+At an approved agent receiving directory, fresh operations see filesystems the trusted publisher
+mounts there, including nested mounts and replacements. Selecting the directory grants no policy
+permission. Every other path, such as `/tmp`, exists only in the Shell's own memory, and policy still
+decides each operation on it. That memory belongs to one command, so a file written to `/tmp` is gone
+after the command ends.
 
 The reachable paths check runs after policy, so a history rule still sees an attempt the check
 refuses, and the decision log records that refusal as the check's.

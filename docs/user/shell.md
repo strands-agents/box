@@ -66,11 +66,16 @@ the agent. So `curl -H "Authorization: Bearer $GITHUB_TOKEN" ...` sends the plac
 request to the route's destination that policy permits, the gateway puts the real token in its
 place.
 
+The hosted filesystem roots are the operator home, agent home, workspace, and, on Linux, canonical
+directories approved from `box.toml`'s `[agent.filesystem] receive_mounts` selection. Selecting a
+directory grants no policy permission. Tool and local-server selections add no hosted roots. See
+[incoming mount declarations](config.md#incoming-mount-declarations).
+
 The alias takes the directory it was run from from `PWD` when `PWD` names it, and otherwise asks
 the operating system. A directory other than the workspace takes the same `fs:read` decision, with
 operation `change_dir`, that `cd` takes. The command doesn't run, and the alias exits `126`, if
-policy refuses that decision, if the directory isn't a directory, or if it is outside the
-operator's home, the agent's home, and the workspace. The last case covers `/` and `/tmp`, which
+policy refuses that decision, if the directory isn't a directory, or if it is outside the hosted
+filesystem roots. The last case covers `/` and `/tmp`, which
 the Shell holds only in memory. If the alias can't tell which directory it was run from, or the
 directory's name isn't valid UTF-8, it exits `125` and runs nothing.
 
@@ -80,9 +85,9 @@ input: the command reads its input as empty.
 
 ## What runs where
 
-The reachable paths check is deny-only and runs after policy. It refuses a path outside the operator's home,
-the agent's home, and the workspace, a path inside the box directory, and the `box.toml` and
-`policy.dw` the run loaded, whatever a `permit` says.
+The reachable paths check is deny-only and runs after policy. It refuses a path outside the hosted
+filesystem roots, a path inside the box directory, and the `box.toml` and `policy.dw` the run loaded,
+whatever a `permit` says.
 
 Once the alias hands a command to the Shell, each command in it runs as follows:
 
@@ -109,7 +114,7 @@ The Shell implements these, each in place of a program of the same name on the `
   `program == "sh"`, and `lash FILE` and `/bin/lash FILE` as `program == "lash"`, so a rule meant
   for the Shell's script interpreter must name both. `.` and `source` also run a file.
 
-Paths outside the operator's home, the agent's home, and the workspace, such as `/tmp`, exist only
+Paths outside the hosted filesystem roots, such as `/tmp`, exist only
 in the Shell's memory, for one command. A file written to `/tmp` is gone when the command ends.
 
 ## `shell:exec`
@@ -382,7 +387,7 @@ its effect at the server stays.
 | `125` | The name of the directory the alias was run from isn't valid UTF-8. Run the command from another directory. | `strands-box-sock-alias: error[H0203]: the working directory is not valid UTF-8` |
 | `125` | The call exceeded the broker's backup deadline, five seconds after its finite Shell allowance. | `strands-box-sock-alias: error[H0105]: the call exceeded its deadline` |
 | `125` | The deadline exceeds the platform's clock range. Reduce `limits.shell.timeout`. | `strands-box-sock-alias: error[H0106]: the call deadline exceeds this platform's clock range` |
-| `126` | Policy refused the directory the alias was run from, it isn't a directory, or it is outside the operator's home, the agent's home, and the workspace. Nothing ran. | `strands-box: error[B1202]: cannot start in <directory>: <error>` |
+| `126` | Policy refused the directory the alias was run from, it isn't a directory, or it is outside the hosted filesystem roots. Nothing ran. | `strands-box: error[B1202]: cannot start in <directory>: <error>` |
 | `126` | Policy refused the command. | `strands-shell: effect denied: policy denied this operation on '<program>'`, then `[policy: <id>]` or `[default-deny]`. A tool grammar action reads the same way. |
 | `126` | A tool grammar binds the program file, and Box refused the spawn before any rule decided it. | `strands-shell: effect denied: policy denied this operation on '<program>' [tool-grammar]: <reason>. No policy can permit it.` |
 | `126` | Policy permitted a program that a `[tool.<name>]` table names, and its arguments match no table's fixed arguments. | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments`` |

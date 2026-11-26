@@ -2363,7 +2363,7 @@ forbid(principal, action == Box::Action::"fs:delete", resource);
         let kept = shared.join("ok.txt");
         std::fs::write(&kept, "kept").expect("a fixture file");
         let reach = crate::test_support::with_operator_home(&shared, || {
-            Reach::over_box(&shared, Some(&shared), Some(&shared), &box_root, &[])
+            Reach::over_box(&shared, Some(&shared), Some(&shared), &box_root, &[], &[])
                 .expect("the reachable set is usable")
         });
         std::fs::write(box_root.join("private/x"), "state").expect("a file in box state");

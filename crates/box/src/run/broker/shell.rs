@@ -1183,7 +1183,7 @@ mod tests {
             .expect("this box's private directory");
         std::fs::write(&refused, "secret").expect("the refused file");
         let reach = Arc::new(crate::test_support::with_operator_home(&shared, || {
-            Reach::over_box(&home, Some(&shared), Some(&shared), &box_root, &[])
+            Reach::over_box(&home, Some(&shared), Some(&shared), &box_root, &[], &[])
                 .expect("the reachable set is usable")
         }));
         let policy = Arc::new(
@@ -1256,7 +1256,7 @@ mod tests {
         let checked = shared.join("checked.txt");
         std::fs::write(&checked, "checked").expect("the checked file");
         let reach = Arc::new(crate::test_support::with_operator_home(&shared, || {
-            Reach::over_box(&shared, Some(&shared), Some(&shared), &box_root, &[])
+            Reach::over_box(&shared, Some(&shared), Some(&shared), &box_root, &[], &[])
                 .expect("the reachable set is usable")
         }));
         let policy = Arc::new(open_policy(vec![Policy {
@@ -1327,7 +1327,7 @@ mod tests {
     /// A floor over `shared` whose read of `~/gated.txt` needs an earlier `operation` response.
     fn precondition_floor(shared: &Path, box_root: &Path, operation: &str) -> ReachFloor {
         let reach = Arc::new(crate::test_support::with_operator_home(shared, || {
-            Reach::over_box(shared, Some(shared), Some(shared), box_root, &[])
+            Reach::over_box(shared, Some(shared), Some(shared), box_root, &[], &[])
                 .expect("the reachable set is usable")
         }));
         let policy = Arc::new(open_policy(vec![Policy {
@@ -1451,8 +1451,15 @@ mod tests {
         std::fs::create_dir_all(box_root.join("bin")).expect("the box directory's bin");
         std::fs::write(box_root.join("bin/tool"), "#!/bin/sh\n").expect("a planted candidate");
         let reach = Arc::new(crate::test_support::with_operator_home(&shared, || {
-            Reach::over_box(&shared, Some(&shared), Some(&workspace), &box_root, &[])
-                .expect("the reachable set is usable")
+            Reach::over_box(
+                &shared,
+                Some(&shared),
+                Some(&workspace),
+                &box_root,
+                &[],
+                &[],
+            )
+            .expect("the reachable set is usable")
         }));
         let permit = format!(
             r#"@id("workspace") permit(principal, action == Box::Action::"fs:read", resource)
@@ -1519,6 +1526,7 @@ mod tests {
                 Some(&workspace),
                 &box_root,
                 &sources,
+                &[],
             )
             .expect("the reachable set is usable")
         }));
