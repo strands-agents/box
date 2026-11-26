@@ -132,7 +132,7 @@ readiness separately before the workload uses it.
 
 | Setting | What it does |
 | --- | --- |
-| `receive_mounts` | Selects directories whose later mounts reach this process. It grants no access. Use `[agent.filesystem]`, `[tool.<name>.filesystem]`, or a local `type = "stdio"` server's `[mcp.<name>.filesystem]`. |
+| `receive_mounts` | Selects directories whose later mounts reach this process. It adds no native filesystem grant or policy permission. Use `[agent.filesystem]`, `[tool.<name>.filesystem]`, or a local `type = "stdio"` server's `[mcp.<name>.filesystem]`. |
 
 Give the agent whole-directory `read`, `write`, and `exec` access to each selected directory.
 A tool or local MCP server needs whole-directory `read` and `write` access; its existing
@@ -142,6 +142,12 @@ directories separately. Selection does not make configured programs, their files
 directories safe to write.
 Selections do not copy between the agent, tools, or servers. Each tool or server connects its
 own selection when that process starts, including a process started after storage arrives.
+
+The agent's selected directories also become host filesystem paths for the built-in Strands
+Shell and Monty interpreters. Each hosted file operation still needs policy permission and
+must pass Box's protected-path checks. A selection for a tool or server does not extend hosted
+access. Ordinary native `read`, `write`, or `exec` grants outside the home and workspace do not
+extend it either; those grants control the native process, not the hosted interpreters.
 
 Use absolute directory paths, `~/` paths, or [path placeholders](#paths). Selection entries
 are strings, not `{ path, optional }` entry tables. Box refuses `/`, overlapping selections,

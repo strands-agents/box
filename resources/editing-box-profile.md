@@ -334,9 +334,9 @@ message go away. Then do [Check a change](#check-a-change).
 ## Select incoming storage mounts
 
 In `profile.toml`, set `filesystem.receive_mounts` only for the agent, tool, or local stdio MCP
-server that needs incoming Linux mounts. The setting grants no access and does not inherit
-between processes. Give the agent whole-directory `read`, `write`, and `exec` access, or give
-a tool or server whole-directory `read` and `write` access. A covering parent `read` or `write`
+server that needs incoming Linux mounts. The setting adds no native filesystem grant or policy
+permission and does not inherit between processes. Give the agent whole-directory `read`,
+`write`, and `exec` access, or give a tool or server whole-directory `read` and `write` access. A covering parent `read` or `write`
 grant is enough, but the agent's `exec` entry must name the exact selected directory. Keep
 configured programs, their files, and `PATH` directories outside writable selections.
 
@@ -354,6 +354,11 @@ selections are not supported. Pack selections append within the same process and
 are removed; `[]` cannot remove a pack selection. Omission keeps the ordinary private view.
 On macOS the setting is refused even as `[]`, so guard it with `when = "linux"` for shared profiles.
 No experimental feature flag is required.
+
+The agent's selected directories also become host filesystem paths for Strands Shell and
+Monty. Hosted operations still need policy permission and must pass protected-path checks.
+Tool or server selections and ordinary native grants do not extend hosted access outside the
+home and workspace.
 
 Box connects mounts during each process's startup. It does not wait for data or report storage
 readiness. Later mounts keep the publisher's flags; Box adds no restrictions to each arrival.
