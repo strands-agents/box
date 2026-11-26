@@ -2698,12 +2698,12 @@ fn core_failure_code(received: &strands_box::RunEventReceiver) -> Option<&'stati
 #[cfg(test)]
 #[test]
 fn every_core_failure_code_fits_the_telemetry_schema_pattern() {
-    // The schema's `core_failure_code` pattern is `^([BHPT][0-9]{4}|uncoded)$`.
+    // The schema's `core_failure_code` pattern is `^([A-Z][0-9]{4}|uncoded)$`.
     for code in diagnostics::Code::ALL {
         let text = code.as_str();
         let (prefix, digits) = text.split_at(1);
         assert!(
-            "BHPT".contains(prefix)
+            prefix.bytes().all(|b| b.is_ascii_uppercase())
                 && digits.len() == 4
                 && digits.bytes().all(|b| b.is_ascii_digit()),
             "{text} does not fit the shutdown event's core_failure_code pattern"

@@ -6,8 +6,10 @@ The snapshot keeps what was collected before success or failure and stays unchan
 `strands-box-cli-telemetry` [owns collection and serialization](decisions.md#telemetry-owns-observation-and-payload-construction). The CLI passes loaded sources
 and resolved targets at the preparation steps. The fields follow the pinned schema, which the repository holds as
 [`crates/cli/telemetry/tests/fixtures/box.schema.json`](../../../crates/cli/telemetry/tests/fixtures/box.schema.json),
-copied from the telemetry service's `schema/box.schema.json` at revision `f8b2541` with one addition,
-the optional `shutdown` field `core_failure_code`, which the service must accept before a release sends it. The telemetry
+copied from the telemetry service's `schema/box.schema.json` as of
+[telemetry-service#29](https://github.com/strands-agents/telemetry-service/pull/29) at `c950b808`, which adds the
+optional `shutdown` field `core_failure_code`, with its descriptions reworded to name Box and the CLI.
+The service must accept that field before a release sends it. The telemetry
 tests check each payload against it.
 The schema describes startup latency from invocation start. The CLI uses the narrower
 launch-preparation boundary below; the schema's validation rules are unchanged.
