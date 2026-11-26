@@ -148,6 +148,8 @@ Shell and Monty interpreters. Each hosted file operation still needs policy perm
 must pass Box's protected-path checks. A selection for a tool or server does not extend hosted
 access. Ordinary native `read`, `write`, or `exec` grants outside the home and workspace do not
 extend it either; those grants control the native process, not the hosted interpreters.
+Use the [hosted path spelling](../user/config.md#hosted-filesystem-roots) in commands and policy,
+including when the profile selects storage through a symbolic link.
 
 Use absolute directory paths, `~/` paths, or [path placeholders](#paths). Selection entries
 are strings, not `{ path, optional }` entry tables. Box refuses `/`, overlapping selections,

@@ -359,6 +359,9 @@ The agent's selected directories also become host filesystem paths for Strands S
 Monty. Hosted operations still need policy permission and must pass protected-path checks.
 Tool or server selections and ordinary native grants do not extend hosted access outside the
 home and workspace.
+Hosted commands and policy use the canonical path after symbolic links are resolved. Policy names
+paths below the operator home as `~/<relative path>`. A rule naming a symbolic link does not
+restrict operations that name its canonical target.
 
 Box connects mounts during each process's startup. It does not wait for data or report storage
 readiness. Later mounts keep the publisher's flags; Box adds no restrictions to each arrival.
