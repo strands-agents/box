@@ -241,6 +241,8 @@ impl Network {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Filesystem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receive_mounts: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

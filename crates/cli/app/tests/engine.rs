@@ -1403,7 +1403,8 @@ fn a_run_refuses_an_entry_that_became_a_link_beneath_a_write_grant() {
     scene.profile(
         "notes",
         &format!(
-            "{PROBE}filesystem.read = [\"${{{{ home }}}}/notes/out\"]\n\
+            "{PROBE}filesystem.read = [\"${{{{ home }}}}/notes/out\", \
+             {{ path = \"${{{{ home }}}}/notes\", when = \"linux\" }}]\n\
              filesystem.write = [\"${{{{ home }}}}/notes\"]\n"
         ),
         PROBE_POLICY,
@@ -3770,10 +3771,14 @@ fn a_redirected_run_prints_the_startup_disclosure_on_stderr() {
     succeeded(&output);
     let text = stderr(&output);
     let workload = text.find("WORKLOAD_RAN").expect("the workload ran");
+    let shell = Path::new("/bin/bash")
+        .canonicalize()
+        .expect("the probe shell");
+    let command_exec = format!("\n  exec        {}", shell.display());
     for heading in [
         "strands-box: note[B0201]: [agent] runs ",
         "strands-box: note[B0201]: [agent] runtime minimum, added by Core:",
-        "\n  exec        /bin/bash",
+        command_exec.as_str(),
         "strands-box: note[B0201]: [agent] HOME=",
     ] {
         let at = text
@@ -5243,7 +5248,17 @@ fn fake_run(folder: &Path, workspace: &Path, parts: &[&str]) {
 
 #[test]
 fn each_part_of_a_run_folder_is_checked_before_a_box_id_is_reused() {
-    let scene = Scene::new();
+    let mut scene = Scene::new();
+    // This test moves a file outside the run; both fixture roots must use the same mount.
+    let outside = tempfile::Builder::new()
+        .prefix("bx")
+        .tempdir_in(scene.root.parent().expect("the fixture parent"))
+        .expect("an outside directory on the run's mount");
+    scene.outside = outside
+        .path()
+        .canonicalize()
+        .expect("a canonical directory");
+    scene._outside = outside;
     succeeded(&scene.probe(&scene.workspace(), "true"));
     let runs = scene.home().join(".strands/box/r");
     let workspace = scene.workspace();

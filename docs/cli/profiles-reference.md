@@ -90,7 +90,7 @@ agent pack's.
 | `command` | The agent's program and its arguments, as in [An agent pack's `[run]`](packs-reference.md#an-agent-packs-run). |
 | `dependency` | A list of other tables. It changes nothing about the run. |
 | `env` | The agent's variables, by name. A value is a string, a `{ value = ..., when = ... }` table, or a `{ from = "env:<NAME>" }` table ([A variable from the shell](#a-variable-from-the-shell)). |
-| `filesystem` | The paths the agent reaches, in the lists below. Each entry is a [path](#paths) or an [entry table](#entry-tables). |
+| `filesystem` | The access lists below and [incoming mount selections](#incoming-storage-mounts-on-linux). Access entries are [paths](#paths) or [entry tables](#entry-tables). |
 | `file-watching` | See [`file-watching`](#file-watching). |
 | `ingress` | Only in `[agent]`, so not in an agent pack. A port where the box takes callers and relays them to a server that the agent runs in the box, written as one `[[agent.ingress]]` table for each port, up to five. `listen` is the address that `box` binds, such as `"127.0.0.1:8080"`, and `workload_port` is the port of the agent's server, such as `8081`. A profile's tables add to the packs'. A profile table whose `when` holds replaces the packs' tables for its `workload_port`, such as to listen on `127.0.0.1` instead of `0.0.0.0`. The values hold no placeholder. Ingress is experimental in Box Core, so `box` turns it on for the run. Box's [`[[agent.ingress]]` reference](../user/config.md#agentingress) has the rules. |
 | `native-filesystem-policy` | Only in a profile. See [Experimental native filesystem policy](#experimental-native-filesystem-policy). |
@@ -111,6 +111,66 @@ Box's
 has the details of each list. The agent never gets your shell's environment, and `box` gives it
 read and write on its storage and, with [Project access](#project-access), your project. Add only
 what else the agent needs.
+
+### Incoming storage mounts on Linux
+
+To receive filesystems that a trusted storage process mounts later, select the receiving
+directory in that process's `filesystem.receive_mounts` list:
+
+```toml
+[agent.filesystem]
+read = ["/mnt/data"]
+write = ["/mnt/data"]
+exec = ["/mnt/data"]
+receive_mounts = ["/mnt/data"]
+```
+
+The selected directory must exist when the process starts. The storage process must prepare it
+for Linux mount propagation before Box starts. Box connects that directory during process
+startup; it does not wait for storage to arrive or signal that data is ready. Arrange data
+readiness separately before the workload uses it.
+
+| Setting | What it does |
+| --- | --- |
+| `receive_mounts` | Selects directories whose later mounts reach this process. It adds no native filesystem grant or policy permission. Use `[agent.filesystem]`, `[tool.<name>.filesystem]`, or a local `type = "stdio"` server's `[mcp.<name>.filesystem]`. |
+
+Give the agent whole-directory `read`, `write`, and `exec` access to each selected directory.
+A tool or local MCP server needs whole-directory `read` and `write` access; its existing
+execution rules still apply. A `read` or `write` grant on a covering parent also satisfies these requirements. In CLI
+profiles, the agent's `exec` entry must name the exact selected directory; list other executable
+directories separately. Selection does not make configured programs, their files, or `PATH`
+directories safe to write.
+Selections do not copy between the agent, tools, or servers. Each tool or server connects its
+own selection when that process starts, including a process started after storage arrives.
+
+The agent's selected directories also become host filesystem paths for the built-in Strands
+Shell and Monty interpreters. Each hosted file operation still needs policy permission and
+must pass Box's protected-path checks. A selection for a tool or server does not extend hosted
+access. Ordinary native `read`, `write`, or `exec` grants outside the home and workspace do not
+extend it either; those grants control the native process, not the hosted interpreters.
+Use the [hosted path spelling](../user/config.md#hosted-filesystem-roots) in commands and policy,
+including when the profile selects storage through a symbolic link.
+
+Use absolute directory paths, `~/` paths, or [path placeholders](#paths). Selection entries
+are strings, not `{ path, optional }` entry tables. Box refuses `/`, overlapping selections,
+wildcards, and selections that conflict with denied paths, protected programs or credentials,
+Box's state, or native filesystem policy. The [Core configuration reference](../user/config.md#incoming-mount-declarations)
+owns the complete startup checks.
+
+A pack's selections and a profile's selections add together within the same process. Duplicate
+paths are removed after expansion; `[]` does not clear a pack's selections. Omit the setting
+for the ordinary private mount view. Linux needs no experimental feature flag. On macOS,
+Box rejects the setting even when its list is empty. For a shared profile, guard the setting:
+
+```toml
+[agent.filesystem]
+receive_mounts = { value = ["/mnt/data"], when = "linux" }
+```
+
+Trust the storage process to publish only the intended filesystems. Later mounts retain that
+process's mount flags, including read-only or no-execution flags. Box does not add restrictions
+to each arriving mount. The connection carries mounts into the receiving process; it does
+not grant that process permission to publish mounts back.
 
 ### Entry tables
 

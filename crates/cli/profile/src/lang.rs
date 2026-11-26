@@ -190,6 +190,7 @@ const TOOL_TABLE_REFUSED_IN_TOOL: &[&str] = &["detect", "pack", EXTEND, INCLUDE,
 
 /// The keys of a `filesystem` table.
 const FILESYSTEM_KEYS: &[&str] = &[
+    "receive_mounts",
     "read",
     "write",
     "read_file",
@@ -1108,7 +1109,8 @@ fn check_profile_filesystem(table: &toml::Table) -> Result<(), Refusal> {
         ));
     };
     let Some(key) = filesystem.keys().find(|key| {
-        FILESYSTEM_LISTS.contains(&key.as_str()) && !PROFILE_LISTS.contains(&key.as_str())
+        (FILESYSTEM_LISTS.contains(&key.as_str()) || key.as_str() == "receive_mounts")
+            && !PROFILE_LISTS.contains(&key.as_str())
     }) else {
         return refuse_unknown_keys(
             table,
@@ -1116,7 +1118,9 @@ fn check_profile_filesystem(table: &toml::Table) -> Result<(), Refusal> {
             &["deny", "deny_write", "when"],
         );
     };
-    let tables = if matches!(key.as_str(), "exec" | "metadata") {
+    let tables = if key == "receive_mounts" {
+        "a process's `[agent.filesystem]`, `[tool.<name>.filesystem]`, or `[mcp.<name>.filesystem]` table".to_string()
+    } else if matches!(key.as_str(), "exec" | "metadata") {
         "`[agent.filesystem]`".to_string()
     } else {
         "`[agent.filesystem]` or a `[tool.<name>.filesystem]` table".to_string()
@@ -3575,6 +3579,7 @@ fn replace_pack_ingress(rows: &mut Vec<toml::Value>) {
 /// `[storage] directories`, or `[[storage.files]]`. Every other list is replaced, so `command` keeps its order.
 fn joins(at: &[String]) -> bool {
     is_filesystem_list(at)
+        || is_receive_mounts(at)
         || at.last().is_some_and(|key| key == "dependency")
         || at == ["storage", "directories"]
         || matches!(at, [tool, _, storage, list] if tool == "tool" && storage == "storage" && (list == "directories" || list == "files"))
@@ -5669,6 +5674,15 @@ impl<S: Sources> Resolver<'_, S> {
     fn walk(&mut self, value: &mut toml::Value, at: &mut Vec<String>) -> Result<(), String> {
         let here = at.join(".");
         self.tool = (at.len() >= 2 && at[0] == "tool").then(|| at[1].clone());
+        if is_receive_mounts(at) && self.inputs.os != "linux" {
+            return Err(format!(
+                "`{here}` is supported only on Linux; remove this key on {}",
+                self.inputs.os
+            ));
+        }
+        if is_receive_mounts(at) && !value.is_array() {
+            return Err(format!("`{here}` is a list of directory paths"));
+        }
         match value {
             toml::Value::String(text) => {
                 if !has_placeholder(text) {
@@ -5684,9 +5698,10 @@ impl<S: Sources> Resolver<'_, S> {
                          `file`"
                     ));
                 }
-                let path_field = is_command(at)
-                    && (is_command_head(at)
-                        || matches!(pieces(text).ok().as_deref(), Some([Piece::Name(first), ..]) if self.is_path_name(first)));
+                let path_field = is_receive_mounts(&at[..at.len().saturating_sub(1)])
+                    || (is_command(at)
+                        && (is_command_head(at)
+                            || matches!(pieces(text).ok().as_deref(), Some([Piece::Name(first), ..]) if self.is_path_name(first))));
                 self.routing = is_destination(at);
                 self.url_reach = if is_backend_url(at) {
                     Some("a route's backend url")
@@ -5842,6 +5857,20 @@ impl<S: Sources> Resolver<'_, S> {
                 }
             }
             _ => {}
+        }
+        if is_receive_mounts(at) {
+            let invalid = || format!("`{here}` is a list of directory paths");
+            let entries = value.as_array_mut().ok_or_else(invalid)?;
+            let mut selected = Vec::new();
+            for entry in entries.iter() {
+                let text = entry.as_str().ok_or_else(invalid)?.replace(WILDCARD, "*");
+                let path = crate::host::expand_home(self.inputs.home, Path::new(&text));
+                let path = toml::Value::String(utf8(&path).map_err(|error| error.to_string())?);
+                if !selected.contains(&path) {
+                    selected.push(path);
+                }
+            }
+            *entries = selected;
         }
         Ok(())
     }
@@ -6760,6 +6789,12 @@ fn refuse_unguarded_developer_dir(
     }
 }
 
+/// Whether `at` selects incoming mounts for one process rather than granting access.
+fn is_receive_mounts(at: &[String]) -> bool {
+    matches!(at, [agent, filesystem, key] if agent == "agent" && filesystem == "filesystem" && key == "receive_mounts")
+        || matches!(at, [section, _, filesystem, key] if (section == "tool" || section == "mcp") && filesystem == "filesystem" && key == "receive_mounts")
+}
+
 fn is_filesystem_list(at: &[String]) -> bool {
     match at {
         [filesystem, list] => {
@@ -6878,6 +6913,7 @@ fn takes_template(at: &[String], telemetry_kind: Option<&str>) -> bool {
         || (is_telemetry_setting(at)
             && !(is_telemetry_destination(at) && telemetry_kind == Some(FILE_TELEMETRY_KIND)))
         || is_filesystem_list(&at[..at.len().saturating_sub(1)])
+        || is_receive_mounts(&at[..at.len().saturating_sub(1)])
         || at.last().is_some_and(|key| key == "when")
         || is_env_value(at)
 }
@@ -8704,6 +8740,36 @@ mod tests {
             ),
             "{reason}"
         );
+    }
+
+    #[test]
+    fn incoming_mount_selections_join_packs_without_crossing_processes() {
+        let shelf = Shelf::new();
+        shelf.share(
+            "agent",
+            "[run]\ncommand = ['/bin/a']\n[filesystem]\nreceive_mounts = ['/mnt/agent']",
+        );
+        shelf.share(
+            "reader",
+            &test_tool_pack("reader", "[filesystem]\nreceive_mounts = ['/mnt/tool']"),
+        );
+        let merged = merge(&shelf.chain(
+            "packs = ['@box/agent', '@box/reader']\n[agent.filesystem]\nreceive_mounts = ['/mnt/agent', '/mnt/extra']\n[tool.reader.filesystem]\nreceive_mounts = []\n[mcp.local]\ntype = 'stdio'\ncommand = ['/bin/mcp']\nfilesystem.receive_mounts = ['/mnt/mcp']"
+        ).expect("pack chain")).expect("merge");
+        let selections = |process: &toml::Value| {
+            process["filesystem"]["receive_mounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry.as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            selections(&merged.table["agent"]),
+            ["/mnt/agent", "/mnt/extra"]
+        );
+        assert_eq!(selections(&merged.table["tool"]["reader"]), ["/mnt/tool"]);
+        assert_eq!(selections(&merged.table["mcp"]["local"]), ["/mnt/mcp"]);
     }
 
     #[test]

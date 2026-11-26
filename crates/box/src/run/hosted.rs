@@ -1134,6 +1134,7 @@ impl HostedBox {
             protected_sources,
             std::sync::Arc::clone(approved.commands()),
             std::sync::Arc::clone(approved.installation()),
+            approved.hosted_mount_roots(),
         )?;
         BoxLive::publish(root, proxy_port)?;
         let published = PublishedRecord(root.clone());

@@ -70,6 +70,9 @@ jobs:
               - 'crates/cli/**/!(*.md)'
               - 'resources/**'
               - 'test-corpus/**'
+              # CLI incoming-mount integration tests use this Core publisher fixture.
+              - 'crates/box/tests/support/incoming_mounts_probe.py'
+              - 'crates/box/tests/support/namespace_launcher.rs'
               # crates/cli/app/src/profile_tests.rs reads it.
               - 'docs/cli/troubleshooting.md'
               # crates/cli/app/src/explain.rs builds it into `box explain`.

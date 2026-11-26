@@ -1035,6 +1035,7 @@ struct Reach {
     command: Vec<String>,
     arguments: Vec<String>,
     exec: Vec<String>,
+    receive_mounts: Vec<String>,
     write: Vec<String>,
     /// The `deny_write` folders that the process's own write grants cannot change.
     write_protected: Vec<String>,
@@ -1050,6 +1051,11 @@ fn reaches(profile: &mut Resolved) -> Vec<Reach> {
             command: process.command.clone(),
             arguments: Vec::new(),
             exec: process.filesystem.exec.clone(),
+            receive_mounts: process
+                .filesystem
+                .receive_mounts
+                .clone()
+                .unwrap_or_default(),
             write: process
                 .filesystem
                 .write
@@ -1097,6 +1103,7 @@ fn reaches(profile: &mut Resolved) -> Vec<Reach> {
             command,
             arguments,
             exec: list("exec"),
+            receive_mounts: list("receive_mounts"),
             write: list("write")
                 .into_iter()
                 .chain(list("write_file"))
@@ -1125,6 +1132,7 @@ fn reaches(profile: &mut Resolved) -> Vec<Reach> {
             command,
             arguments: Vec::new(),
             exec: Vec::new(),
+            receive_mounts: Vec::new(),
             write: Vec::new(),
             write_protected: Vec::new(),
             search_path: None,
@@ -1297,7 +1305,23 @@ fn refuse_reach(profile: &Resolved, run: &Run<'_>) -> Result<(), Error> {
         }
     }
     for reach in &reaches {
+        let receiving: Vec<PathBuf> = reach
+            .receive_mounts
+            .iter()
+            .map(|entry| expand(entry))
+            .collect();
         for exec in reach.exec.iter().map(|entry| expand(entry)) {
+            // Selecting this directory explicitly accepts native read, write, and execute access.
+            if receiving.contains(&exec) {
+                continue;
+            }
+            if let Some(selected) = receiving.iter().find(|selected| within(selected, &exec)) {
+                return Err(Error::IncomingMountExecAncestor {
+                    table: reach.table.clone(),
+                    exec,
+                    selected: selected.clone(),
+                });
+            }
             if let Some(grant) = grants.iter().find(|grant| within(grant, &exec)) {
                 return Err(Error::WriteUnderExec {
                     exec,
@@ -1324,7 +1348,12 @@ fn refuse_reach(profile: &Resolved, run: &Run<'_>) -> Result<(), Error> {
                         || expand(program).is_file())
             })
             .map(|(_, program)| program)
-            .chain(&reach.exec)
+            .chain(
+                reach
+                    .exec
+                    .iter()
+                    .filter(|entry| !receiving.contains(&expand(entry))),
+            )
             .map(|entry| expand(entry))
             .chain(argument_files(&reach.arguments, run))
             .chain(

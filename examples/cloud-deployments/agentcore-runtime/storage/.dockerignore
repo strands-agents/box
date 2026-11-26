@@ -1,0 +1,6 @@
+*
+!bin/
+!bin/*
+!server.py
+!workload
+!binary-manifest.json

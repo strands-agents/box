@@ -43,7 +43,7 @@ pub(super) struct Reach {
     /// The canonical host identity that backs the home's visible spelling.
     home_source: String,
 
-    /// The one resolver over the agent's home, the operator home, and the workspace.
+    /// The one resolver over every hosted filesystem root.
     resolver: PathResolver,
 
     /// The deny floor: roots no path may resolve into, whatever policy says.
@@ -72,6 +72,9 @@ pub(super) struct Reach {
 
     /// The directory a relative path means: the workspace, when the box has one.
     working: Option<String>,
+
+    /// Canonical agent receiving roots retained from the run's filesystem approval.
+    receiving: Vec<String>,
 }
 
 impl Reach {
@@ -82,7 +85,7 @@ impl Reach {
         operator_home: Option<&Path>,
         working: Option<&Path>,
     ) -> io::Result<Self> {
-        Self::over_with_floor(home, operator_home, working, None, &[])
+        Self::over_with_floor(home, operator_home, working, None, &[], &[])
     }
 
     pub(super) fn over_box(
@@ -91,6 +94,7 @@ impl Reach {
         working: Option<&Path>,
         box_root: &Path,
         protected_sources: &[AuthoritySource],
+        receiving: &[PathBuf],
     ) -> io::Result<Self> {
         Self::over_with_floor(
             home,
@@ -98,6 +102,7 @@ impl Reach {
             working,
             Some(box_root),
             protected_sources,
+            receiving,
         )
     }
 
@@ -107,6 +112,7 @@ impl Reach {
         working: Option<&Path>,
         box_root: Option<&Path>,
         protected_sources: &[AuthoritySource],
+        receiving: &[PathBuf],
     ) -> io::Result<Self> {
         let home_text = utf8(home, "the agent's home")?;
 
@@ -116,6 +122,16 @@ impl Reach {
             ))
         })?;
         let home_source = utf8(&canonical_home, "the resolved home")?;
+
+        if home_text != home_source
+            && receiving
+                .iter()
+                .any(|root| canonical_home.starts_with(root) || root.starts_with(&canonical_home))
+        {
+            return Err(invalid_input(format!(
+                "the agent's home {home_text} resolves to {home_source} and overlaps a receiving directory; use the resolved home path"
+            )));
+        }
 
         let mut forbidden = forbidden_roots();
         if let Some(box_root) = box_root {
@@ -159,6 +175,17 @@ impl Reach {
             })?;
             if !roots.iter().any(|root| canonical.starts_with(root)) {
                 roots.push(canonical);
+            }
+        }
+        // These paths already passed the agent's receiving-root approval; preserve that spelling.
+        let receiving = receiving
+            .iter()
+            .map(|root| utf8(root, "an approved receiving directory"))
+            .collect::<io::Result<Vec<_>>>()?;
+        for root in &receiving {
+            let root = Path::new(root);
+            if !roots.iter().any(|existing| root.starts_with(existing)) {
+                roots.push(root.to_path_buf());
             }
         }
         let mut resolver = PathResolver::over(roots).map_err(|refusal| {
@@ -217,6 +244,7 @@ impl Reach {
                 .map(|home| utf8(&home, "the operator home"))
                 .transpose()?,
             working: working_text,
+            receiving,
         })
     }
 
@@ -314,7 +342,11 @@ impl Reach {
         ]
         .into_iter()
         .flatten()
-        {
+        .chain(
+            self.receiving
+                .iter()
+                .map(|root| (root.as_str(), root.as_str())),
+        ) {
             if roots
                 .iter()
                 .any(|(_, destination)| Path::new(candidate.1).starts_with(destination))
@@ -474,6 +506,7 @@ impl Reach {
         ]
         .into_iter()
         .flatten()
+        .chain(self.receiving.iter().map(String::as_str))
         .any(|root| named.starts_with(root))
     }
 }
@@ -792,6 +825,7 @@ mod tests {
                 None,
                 &resolved.join("boxes/codex"),
                 &[],
+                &[],
             )
             .expect("the reachable set is usable")
         });
@@ -852,7 +886,7 @@ mod tests {
 
         for target in [home.clone(), home.join("note.txt")] {
             let reach = crate::test_support::with_operator_home(&resolved, || {
-                Reach::over_box(&home, Some(&resolved), None, &box_root, &[])
+                Reach::over_box(&home, Some(&resolved), None, &box_root, &[], &[])
                     .expect("the reachable set is declarable")
             });
             let spelled = target.to_str().expect("UTF-8");
@@ -916,7 +950,7 @@ mod tests {
             Path::new("/System/Volumes/Data").join(box_directory.strip_prefix("/").unwrap());
 
         let reach = crate::test_support::with_operator_home(&resolved, || {
-            Reach::over_box(&resolved, Some(&resolved), None, &data_volume, &[])
+            Reach::over_box(&resolved, Some(&resolved), None, &data_volume, &[], &[])
                 .expect("the reachable set is declarable")
         });
         let spelled = target.to_str().expect("UTF-8");
@@ -989,6 +1023,7 @@ mod tests {
                 None,
                 &resolved.join("box"),
                 &[source],
+                &[],
             )
             .expect("the reachable set is usable")
         });
@@ -1037,6 +1072,7 @@ mod tests {
                 None,
                 &resolved.join("box"),
                 &[source],
+                &[],
             )
             .expect("the reachable set is usable")
         });
@@ -1068,6 +1104,7 @@ mod tests {
                 Some(&resolved.join("workspace")),
                 &resolved.join("box"),
                 &[source],
+                &[],
             )
             .expect("the reachable set is usable")
         });
@@ -1119,7 +1156,8 @@ mod private_tree_mutation_tests {
         let box_root = home.join("grandparent/parent/dummy-box");
         std::fs::create_dir_all(box_root.join("private/child")).expect("dummy directories");
         std::fs::create_dir_all(home.join("sibling")).expect("sibling directory");
-        let reach = Reach::over_box(&home, None, None, &box_root, &[]).expect("reachable fixture");
+        let reach =
+            Reach::over_box(&home, None, None, &box_root, &[], &[]).expect("reachable fixture");
         (temporary, reach, box_root)
     }
 
@@ -1485,5 +1523,109 @@ mod linked_command_mutation_tests {
             ),
         );
         mutation_refused_for(&reach, &home.join("tools"), "tools", CONFIGURED_COMMAND);
+    }
+}
+
+#[cfg(test)]
+mod receiving_tests {
+    use super::*;
+
+    #[test]
+    fn aliased_home_requires_canonical_spelling_for_overlapping_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let nested = home.join("storage");
+        let alias = root.join("alias");
+        let state = root.join("state");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(&state).unwrap();
+        std::os::unix::fs::symlink(&home, &alias).unwrap();
+        for selected in [&root, &home, &nested] {
+            let result = Reach::over_box(
+                &alias,
+                None,
+                None,
+                &state,
+                &[],
+                std::slice::from_ref(selected),
+            );
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("use the resolved home path")
+            );
+        }
+        assert!(Reach::over_box(&alias, None, None, &state, &[], &[]).is_ok());
+    }
+
+    /// A receiving root joins every hosted view without admitting adjacent paths or hiding floors.
+    #[test]
+    fn receiving_roots_join_the_resolver_membership_and_shell_binds() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let workspace = root.join("workspace");
+        let state = root.join("state");
+        let selected = root.join("selected");
+        let neighbor = root.join("selected-neighbor");
+        for path in [&home, &workspace, &state, &selected, &neighbor] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::write(path.join("value"), "fixture").unwrap();
+        }
+        let policy = workspace.join("policy.dw");
+        std::fs::write(&policy, "permit(principal, action, resource);").unwrap();
+        let (authority, _) = AuthoritySource::read(&policy, "policy").unwrap();
+        std::fs::hard_link(&policy, selected.join("authority-alias")).unwrap();
+        std::os::unix::fs::symlink(&neighbor, selected.join("escape")).unwrap();
+        std::os::unix::fs::symlink(&state, selected.join("state-alias")).unwrap();
+        let reach = Reach::over_box(
+            &home,
+            Some(&home),
+            Some(&workspace),
+            &state,
+            &[authority],
+            std::slice::from_ref(&selected),
+        )
+        .unwrap();
+        let value = selected.join("value");
+        assert!(reach.names_a_host_path(&value));
+        assert_eq!(reach.approve(&value, "value").unwrap(), value);
+        assert_eq!(reach.approve_mutation(&value, "value").unwrap(), value);
+        let selected_text = selected.to_str().unwrap();
+        assert!(
+            reach
+                .shell_binds()
+                .contains(&(selected_text, selected_text))
+        );
+        assert!(!reach.names_a_host_path(&neighbor));
+        for path in [
+            neighbor.join("value"),
+            selected.join("escape/value"),
+            selected.join("authority-alias"),
+            selected.join("state-alias/value"),
+        ] {
+            assert!(
+                reach.approve(&path, "refused").is_err(),
+                "{}",
+                path.display()
+            );
+            assert!(
+                reach.approve_mutation(&path, "refused").is_err(),
+                "{}",
+                path.display()
+            );
+        }
+        let ordinary =
+            Reach::over_box(&home, Some(&home), Some(&workspace), &state, &[], &[]).unwrap();
+        assert!(!ordinary.names_a_host_path(&value));
+        assert!(ordinary.approve(&value, "unselected").is_err());
+        assert!(
+            !ordinary
+                .shell_binds()
+                .contains(&(selected_text, selected_text))
+        );
     }
 }

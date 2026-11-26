@@ -1,3 +1,6 @@
+#[path = "receive_mounts_tests.rs"]
+mod receive_mounts_tests;
+
 #[path = "native_filesystem_policy_tests.rs"]
 mod native_filesystem_policy_tests;
 

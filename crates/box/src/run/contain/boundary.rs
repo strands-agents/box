@@ -60,6 +60,7 @@ pub(crate) struct Launch<'a> {
 #[derive(Debug)]
 pub(crate) struct ApprovedReach {
     tables: BTreeMap<String, DirectReach>,
+    hosted_mount_roots: Vec<PathBuf>,
     commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
     installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
 }
@@ -86,6 +87,7 @@ impl ApprovedReach {
         // The tables that the early check of a secret source program judges, so no table reaches
         // one judgement and not the other.
         let judged = stored.process_tables();
+        let mut hosted_mount_roots = Vec::new();
         let tables = judged
             .tables
             .iter()
@@ -93,7 +95,7 @@ impl ApprovedReach {
                 let mut reach = judge_lists(&table.spec, &table.name, &judged, protected_sources)?;
                 commands.validate_reach(&table.name, &reach)?;
                 installation.validate_reach(&table.name, &reach)?;
-                super::mounts::prepare(
+                let receiving = super::mounts::prepare(
                     &table.spec,
                     &table.name,
                     table.runtime_reach,
@@ -101,6 +103,13 @@ impl ApprovedReach {
                     &reach,
                     protected_sources,
                 )?;
+                if matches!(table.runtime_reach, RuntimeReach::Agent) {
+                    hosted_mount_roots.extend(
+                        receiving
+                            .iter()
+                            .map(|mount| mount.resolved_path().to_path_buf()),
+                    );
+                }
                 reach.installation = Some(std::sync::Arc::clone(&installation));
                 reach.command = commands.get(&table.name).cloned();
                 Ok((table.name.clone(), reach))
@@ -108,9 +117,15 @@ impl ApprovedReach {
             .collect::<Result<BTreeMap<_, _>, BoxError>>()?;
         Ok(Self {
             tables,
+            hosted_mount_roots,
             commands,
             installation,
         })
+    }
+
+    /// The agent's canonical receiving roots that hosted interpreters may access under policy.
+    pub(crate) fn hosted_mount_roots(&self) -> &[PathBuf] {
+        &self.hosted_mount_roots
     }
 
     pub(crate) fn commands(&self) -> &std::sync::Arc<crate::run::commands::ConfiguredCommands> {
@@ -6372,5 +6387,33 @@ write = ["/Users/example/box-demo/aws-tmp"]
                 .try_translate_full(&spec, table, role, EgressMode::Gateway)
                 .expect("ordinary read-only grants remain valid");
         }
+    }
+
+    /// Hosted roots retain the agent's approved canonical spelling and exclude leaf selections.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hosted_mount_roots_come_only_from_the_approved_agent() {
+        let mut fixture = Fixture::new();
+        fixture.record.mcp.clear();
+        let mut agent = fixture.spec();
+        let alias = fixture.path("selected-alias");
+        std::os::unix::fs::symlink(fixture.path("scratch"), &alias).unwrap();
+        agent.filesystem.receive_mounts = vec![alias];
+        agent.filesystem.exec.push(fixture.path("scratch"));
+        fixture.record.agent = Some(agent);
+        let mut leaf = fixture.spec();
+        leaf.filesystem.exec.clear();
+        leaf.filesystem.metadata.clear();
+        leaf.filesystem.receive_mounts = vec![fixture.path("scratch")];
+        fixture.record.tool.insert("reader".to_string(), leaf);
+        let operator_home = fixture.operator.path().to_path_buf();
+        let selected = fixture.path("scratch");
+        crate::test_support::with_operator_home(&operator_home, || {
+            let approved = ApprovedReach::judge(&fixture.record, &[]).unwrap();
+            assert_eq!(approved.hosted_mount_roots(), [selected]);
+            fixture.record.agent = None;
+            let leaf_only = ApprovedReach::judge(&fixture.record, &[]).unwrap();
+            assert!(leaf_only.hosted_mount_roots().is_empty());
+        });
     }
 }

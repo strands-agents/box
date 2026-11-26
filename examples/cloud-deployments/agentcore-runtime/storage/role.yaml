@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Runtime execution role for the Box storage example
+Parameters:
+  RepositoryArn:
+    Type: String
+    Description: ARN of the borrowed ECR repository containing the image
+  StorageType:
+    Type: String
+    Default: Managed
+    AllowedValues: [Managed, EFS, S3Files, Bucket]
+  FileSystemArn:
+    Type: String
+    Default: ""
+    Description: Existing EFS or S3 Files file system ARN; unused for Managed
+  AccessPointArn:
+    Type: String
+    Default: ""
+    Description: Existing access point ARN; unused for Managed
+  BucketName:
+    Type: String
+    Default: ""
+    Description: Existing S3 bucket name; used only for Bucket
+  BucketPrefix:
+    Type: String
+    Default: "box-example/"
+    AllowedPattern: "[^*?]+/"
+    Description: Object prefix ending in a slash; used only for Bucket
+Conditions:
+  UseBucket: !Equals [!Ref StorageType, Bucket]
+  UseEfs: !Equals [!Ref StorageType, EFS]
+  UseS3Files: !Equals [!Ref StorageType, S3Files]
+Resources:
+  RuntimeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/*"
+      Policies:
+        - PolicyName: RuntimeStorageExample
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability]
+                Resource: !Ref RepositoryArn
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:DescribeLogStreams, logs:PutLogEvents]
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*"
+              - !If
+                - UseEfs
+                - Effect: Allow
+                  Action: [elasticfilesystem:ClientMount, elasticfilesystem:ClientWrite]
+                  Resource: !Ref FileSystemArn
+                  Condition:
+                    ArnEquals:
+                      elasticfilesystem:AccessPointArn: !Ref AccessPointArn
+                - !Ref AWS::NoValue
+              - !If
+                - UseS3Files
+                - Effect: Allow
+                  Action: [s3files:ClientMount, s3files:ClientWrite, s3files:GetAccessPoint]
+                  Resource: !Ref FileSystemArn
+                  Condition:
+                    ArnEquals:
+                      s3files:AccessPointArn: !Ref AccessPointArn
+                - !Ref AWS::NoValue
+              - !If
+                - UseBucket
+                - Effect: Allow
+                  Action: s3:ListBucket
+                  Resource: !Sub "arn:${AWS::Partition}:s3:::${BucketName}"
+                  Condition:
+                    StringLike:
+                      s3:prefix: !Sub "${BucketPrefix}*"
+                - !Ref AWS::NoValue
+              - !If
+                - UseBucket
+                - Effect: Allow
+                  Action: [s3:GetObject, s3:PutObject, s3:AbortMultipartUpload]
+                  Resource: !Sub "arn:${AWS::Partition}:s3:::${BucketName}/${BucketPrefix}*"
+                - !Ref AWS::NoValue
+Outputs:
+  RoleArn:
+    Value: !GetAtt RuntimeRole.Arn

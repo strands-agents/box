@@ -103,6 +103,9 @@ and a path under the operator's home starts with `~/`.
 Each read or write on a handle from `open()` is decided again. `os.stat()` returns the real size
 and file type, with `st_uid` and `st_gid` set to `0` and `st_nlink` set to `1`.
 
+Monty accesses host files only within the [hosted filesystem roots](config.md#hosted-filesystem-roots).
+That section defines the selected storage paths and the spelling to use in commands and policy.
+
 These raise an error whatever the policy says:
 
 | Python | Raises | Use instead |
@@ -110,7 +113,7 @@ These raise an error whatever the policy says:
 | `Path.resolve()`, `Path.absolute()` | `RuntimeError: Path.resolve: not supported by this box's Python (Monty)` | The path as written |
 | `os.getenv()`, `os.environ` | `RuntimeError: 'os.getenv' is not supported in this environment` | A value in the script's source |
 | `Path.mkdir(parents=True)` | `PermissionError` | One `mkdir()` for each level |
-| A path outside the operator's home and the workspace | `PermissionError: <path>: outside this box's home and every declared bind` | A path under the operator's home or the workspace |
+| A path outside the hosted filesystem roots | `PermissionError: <path>: outside this box's home and every declared bind` | A path under one of the hosted filesystem roots |
 | A path that is a symbolic link, or has one in it | `PermissionError: <path>: resolves to a different path, so it is not the identity policy judged` | The path of the file the link points to |
 | The box directory, or the `box.toml` and `policy.dw` this run loaded | `PermissionError: <path>: resolves into trusted Box state, which no policy may open`, or `resolves to an authority source that this run loaded` | A path outside the box directory |
 | A write, deletion, or rename that reaches a configured tool command or its ancestor | `PermissionError` containing `is a configured tool command or its ancestor, which this run does not allow to change` | A path outside the command and its enclosing directories |
@@ -243,7 +246,7 @@ table](./egress.md#example).
 | `PermissionError: policy denied this operation on '<path>' [policy: <id>]` | The rule with that `@id` refused the operation. | Change the rule, or the path. |
 | `fetch()` returns status `403` with header `x-strands-box-egress: refused` | The gateway refused the request. The body says why. | Permit `net:connect` and `http:request` for the host. |
 | `strands-shell: effect denied: policy denied this operation on 'python'`, exit status `126` | No `shell:exec` permit names the command. | Permit `shell:exec` for `python` and `python3`. |
-| `strands-box: error[B1202]: cannot start in <directory>: ...`, exit status `126` | Policy refused `fs:read` with operation `change_dir` on the directory the alias was run from, or the directory is outside the operator's home, the agent's home, and the workspace, such as `/tmp`. | Permit `fs:read` on that directory, or run the script from the workspace. |
+| `strands-box: error[B1202]: cannot start in <directory>: ...`, exit status `126` | Policy refused `fs:read` with operation `change_dir` on the directory the alias was run from, or the directory is outside the hosted filesystem roots, such as `/tmp`. | Permit `fs:read` on that directory, or run the script from the workspace. |
 | `strands-box-sock-alias: error[H0203]: read the working directory: ...; set PWD to it`, exit status `125` | The alias could not read which directory it was run from. | Set `PWD` to that directory before running `python3`. |
 | `python3: -m is not supported by Monty, Box's built-in Python subset. ...`, or `ModuleNotFoundError` for a package | The script needs real Python, such as `-m pytest` or a package from a venv. | Have the operator set [`monty = false`](./config.md#monty), declare a `[tool]` whose command file is named `python3`, grant it `read` on the venv and Python's install, and permit `shell:spawn` on its file. The `monty` section has a working setup. |
 

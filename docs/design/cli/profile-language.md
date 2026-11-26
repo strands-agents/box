@@ -73,6 +73,25 @@ an input's value. A pack makes an agent run as it runs on the host, and never ex
 binds `${{ pack }}` in it to that file's folder. Then it merges the files and fills in every other
 placeholder.
 
+### Incoming mount selections
+
+`filesystem.receive_mounts` selects directories for one agent, tool, or local MCP server.
+`lang::is_receive_mounts` keeps this selection separate from access lists, so it never adds
+a read, write, or execute grant. Pack composition appends selections for the same process;
+resolution fills path placeholders, expands `~/`, and removes duplicate strings without
+resolving links or expanding wildcards. Box Core validates the selected directories and
+pins their identities when it prepares each process.
+
+`profile::Filesystem` stores an optional list so compilation preserves explicit `[]` separately
+from omission. After evaluating `when`, the resolver rejects a present selection on macOS,
+including an empty list. Compilation carries the selection to the same process in `box.toml`
+and adds no experimental feature switch or policy rule. The CLI accepts native read, write, and execute access only for an `exec` entry that exactly
+matches the same process's selected directory. A covering ancestor `exec` entry is refused with
+an instruction to name the selected directory and other executable directories separately.
+The exception applies only to generic executable-directory checks. Configured commands,
+command files, search-path directories, secret sources, and protected state keep their existing
+write protections, even when they overlap a selection. There is no deferred filesystem resolution.
+
 ## An example
 
 `box profile create claude --with bedrock --option bedrock.region=us-east-1 --policy open` writes

@@ -177,6 +177,12 @@ turns each server that the box can run into an `[mcp.<name>]` table (see [MCP se
 each launcher's cache, environment, and registry hosts. It reports each omitted automatic
 declaration and its reason. Each selected host entry remains in the configuration import.
 
+Incoming mount selections follow a separate path from access grants. The resolver expands
+`filesystem.receive_mounts` for each process without reading the selected directory's contents.
+The compiler preserves those selections in `box.toml`; Core validates their authority and
+connects incoming mounts during each process's startup. No storage watcher or data-readiness
+signal is part of CLI startup. See [incoming mount selections](profile-language.md#incoming-mount-selections).
+
 ### Compile
 
 `box` builds the run's `box.toml` and `policy.dw` (see
@@ -415,7 +421,7 @@ Compared with the merged profile and packs, `box run` made these changes:
 | --- | --- |
 | Set `name` and `box_dir` to the new instance, and `policy` to the run's own `policy.dw`. | Top level. |
 | Set `file-attributes` to the profile's value, or to `true` when `box` does not run as root ([decisions.md](decisions.md#file-times-follow-the-user-id)). | Top level. |
-| Replaced each placeholder with its value, each existing filesystem entry with its real path, dropped each `optional` entry that does not exist, dropped each entry, table, and `{ value, when }` value whose `when` does not hold, and put `value` in place of each other `{ value, when }` table. | Every template field. |
+| Replaced each placeholder with its value, each existing filesystem access entry with its real path, dropped each `optional` entry that does not exist, dropped each entry, table, and `{ value, when }` value whose `when` does not hold, and put `value` in place of each other `{ value, when }` table. | Every template field. |
 | Replaced `program`, `helpers`, and `hosts` with the real file as `command`, set the base `PATH` and `TMPDIR` that the table does not set (with read and write on the default `TMPDIR`, the tool's own folder `tool-tmp/<tool>` in the run's directory), added the interpreter's reads and deny entries and the helpers, added the variables, filesystem, and program folder of each kept tool that the tool's tool pack extends, left out each tool that only a tool pack's `extend` brings in, and put the workspace first in `read`, and in `write`, as far as `[project] access` allows. | Each `[tool.<name>]` that names a `program`. |
 | Set the workspace, put it first in `read` and `write` as far as `[project] access` allows, and added each storage directory. | `[agent]`, `[agent.filesystem]`. |
 | Added an `[mcp.<name>]` table for each server that the packs' `[[mcp-servers]]` rows name and the box can run. | `[mcp]`. |

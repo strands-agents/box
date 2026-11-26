@@ -63,6 +63,11 @@ a profile uses and each option they read, and `--full` shows everything they add
 | `file-watching` | See [`file-watching`](profiles-reference.md#file-watching). |
 | `when` | A condition that keeps the agent's `[agent]` table. See [`when`](profiles-reference.md#when). |
 
+A pack can select [incoming storage mounts](profiles-reference.md#incoming-storage-mounts-on-linux)
+in its process's `[filesystem] receive_mounts` list. These selections add to the profile's list
+for that process and grant no access. Guard the setting with `when = "linux"` when the pack
+also runs on macOS.
+
 ## `[pack]`
 
 | Key | What it does |

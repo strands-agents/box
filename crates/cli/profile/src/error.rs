@@ -370,6 +370,18 @@ pub enum Error {
         /// Whether the path is a folder that holds the grant, and does not lie under it.
         holds: bool,
     },
+    /// An incoming selection requires its own exact executable directory entry.
+    #[error(
+        "the `[{table}.filesystem] exec` folder {exec} contains incoming mount selection {selected}; replace that exec entry with the exact selected directory and list any other executable directories separately"
+    )]
+    IncomingMountExecAncestor {
+        /// The process table that selects the incoming directory.
+        table: String,
+        /// The executable ancestor that must retain its ordinary restrictions.
+        exec: PathBuf,
+        /// The selected directory that needs its own executable entry.
+        selected: PathBuf,
+    },
     /// An `exec` folder holds a write grant, where the workload can write a program and run it.
     #[error(
         "the `exec` folder {exec} holds the write grant {grant}, so the workload can run a file it writes"

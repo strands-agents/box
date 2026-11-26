@@ -331,6 +331,43 @@ by its `@id`, action, or field.
 Repair the cause in the file that owns it. Do not delete a rule or a grant only to make the
 message go away. Then do [Check a change](#check-a-change).
 
+## Select incoming storage mounts
+
+In `profile.toml`, set `filesystem.receive_mounts` only for the agent, tool, or local stdio MCP
+server that needs incoming Linux mounts. The setting adds no native filesystem grant or policy
+permission and does not inherit between processes. Give the agent whole-directory `read`,
+`write`, and `exec` access, or give a tool or server whole-directory `read` and `write` access. A covering parent `read` or `write`
+grant is enough, but the agent's `exec` entry must name the exact selected directory. Keep
+configured programs, their files, and `PATH` directories outside writable selections.
+
+```toml
+[agent.filesystem]
+read = ["/mnt/data"]
+write = ["/mnt/data"]
+exec = ["/mnt/data"]
+receive_mounts = { value = ["/mnt/data"], when = "linux" }
+```
+
+Use existing absolute directories prepared by the trusted storage process for Linux mount
+propagation. `~/` and path placeholders expand; entry tables, wildcards, and overlapping
+selections are not supported. Pack selections append within the same process and duplicates
+are removed; `[]` cannot remove a pack selection. Omission keeps the ordinary private view.
+On macOS the setting is refused even as `[]`, so guard it with `when = "linux"` for shared profiles.
+No experimental feature flag is required.
+
+The agent's selected directories also become host filesystem paths for Strands Shell and
+Monty. Hosted operations still need policy permission and must pass protected-path checks.
+Tool or server selections and ordinary native grants do not extend hosted access outside the
+home and workspace.
+Hosted commands and policy use the canonical path after symbolic links are resolved. Policy names
+paths below the operator home as `~/<relative path>`. A rule naming a symbolic link does not
+restrict operations that name its canonical target.
+
+Box connects mounts during each process's startup. It does not wait for data or report storage
+readiness. Later mounts keep the publisher's flags; Box adds no restrictions to each arrival.
+Keep selections separate from denied paths, protected programs or credentials, Box state, and
+native filesystem policy. Check the complete rules in the profile reference before adding one.
+
 ## File boundaries and merge rules
 
 In a profile, keep top-level TOML keys, such as `packs`, `policies`, and `agent-args`, before

@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 // `Arc` for the spec: each connection runs on its own thread, so the spec itself crosses
 // threads. (It was `Rc` while every Shell shared one `LocalSet`.)
 use std::sync::Arc;
@@ -170,6 +170,7 @@ impl BrokerHost {
         protected_sources: &[AuthoritySource],
         commands: Arc<crate::run::commands::ConfiguredCommands>,
         installation: Arc<crate::run::installation::TrustedInstallation>,
+        hosted_mount_roots: &[PathBuf],
     ) -> Result<Self, BoxError> {
         let host_programs = commands
             .bare_names(record, &crate::run::contain::executable::host_search_path())
@@ -183,6 +184,7 @@ impl BrokerHost {
                 Some(workspace),
                 layout.root(),
                 protected_sources,
+                hosted_mount_roots,
             )
             .map_err(|source| ShellError::Serve { source })?
             .with_commands(commands)
