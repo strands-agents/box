@@ -358,6 +358,20 @@ fn a_codex_run_imports_both_skill_roots_syncs_and_can_disable_imports() {
 
 #[test]
 fn codex_imports_host_preferences_preserves_saved_choices_and_supplies_no_defaults() {
+    let pack: toml::Value = toml::from_str(
+        &std::fs::read_to_string(resources().join("packs/codex/pack.toml")).unwrap(),
+    )
+    .unwrap();
+    let preferences = pack["storage"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["target"].as_str() == Some("home/config.toml"))
+        .unwrap();
+    assert_eq!(
+        preferences["warn-if-different"],
+        toml::toml! { keys = [["model"]] }["keys"]
+    );
     let host = FakeHost::new();
     host.profile()
         .with("codex")

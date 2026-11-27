@@ -292,6 +292,7 @@ optional = true
 | `kind` | `"json"` or `"toml"`. Required with `keep`, `set`, or `fill`, and refused without them. |
 | `keep` | The values to copy, as a list of key lists. Without it, the whole file is copied. See [Copy only part of a settings file](#copy-only-part-of-a-settings-file). |
 | `fill` | `true` adds each `keep` value that the copy lacks, on every run. See [Add missing values on every run](#add-missing-values-on-every-run). |
+| `warn-if-different` | Key paths to warn about, such as `[["theme"]]`. Needs `fill = true`, and each path must also appear in `keep`. The default is `[]`, which warns about nothing. |
 | `[[storage.files.set]]` | Rows of `key` and `value` that write a value into the copy on every run. See [Set a value in the copy on every run](#set-a-value-in-the-copy-on-every-run). |
 | `mode` | `"copy"`, the default. A tool's own storage also takes `"link"` and `"link-children"`. See [Give a tool its own storage](#give-a-tool-its-own-storage). |
 
@@ -376,6 +377,11 @@ A row with `fill` needs `keep` and `kind`, and has no `set` rows. It can share i
 `[[mcp-servers]]` row of the same format, as long as its `keep` paths do not overlap that row's
 `target-key`. `box profile show` prints a `fills` line with the names it would add. When the copy is
 a link, a hard link, or not a file, `box run` leaves it alone and prints a `did not copy` line.
+
+With `warn-if-different`, `box run` warns when a selected value exists in both files and differs.
+It keeps the saved value and names the key and both files, without printing their values. Equal
+or missing values produce no warning. Interactive runs save the warning in the run log.
+If Box keeps the log, it reminds you on exit.
 
 ### Set a value in the copy on every run
 

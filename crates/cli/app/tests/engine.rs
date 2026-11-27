@@ -606,6 +606,97 @@ fn spawn_at_terminal(mut command: Command) -> (Child, std::fs::File) {
     (command.spawn().unwrap(), std::fs::File::from(pair.master))
 }
 
+#[test]
+fn an_import_warning_precedes_the_agent_and_survives_in_the_terminal_log() {
+    use std::io::Read as _;
+
+    let scene = Scene::new();
+    scene.profile(
+        "probe",
+        &format!(
+            r#"{PROBE}
+[storage]
+directories = ["settings"]
+
+[[storage.files]]
+source = "${{{{ home }}}}/settings.toml"
+target = "settings/config.toml"
+kind = "toml"
+fill = true
+warn-if-different = [["model"]]
+keep = [["model"], ["theme"]]
+"#
+        ),
+        PROBE_POLICY,
+    );
+    std::fs::write(
+        scene.home().join("settings.toml"),
+        "model = 'host-private-model'\ntheme = 'light'\n",
+    )
+    .unwrap();
+    let relative = "storage/probe/default/agent/settings/config.toml";
+    let target = scene.home().join(".strands/box").join(relative);
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    let saved = "# saved choice\nmodel = 'saved-private-model'\ntheme = 'dark'\n";
+    std::fs::write(&target, saved).unwrap();
+    let check = |text: &str, target: &Path| {
+        let warning = text
+            .find("box: warning: Saved settings")
+            .expect("a warning");
+        assert!(warning < text.find("agent-started").expect("agent output"));
+        assert_eq!(text.matches("box: warning:").count(), 1);
+        assert!(text.contains("box profile reset probe"));
+        assert!(text.contains("deletes this profile's sessions and memory"));
+        assert!(text.contains("remove only the named keys"));
+        assert!(text.contains("If intentional, no action is needed."));
+        assert!(!text.contains("host-private-model"));
+        assert!(!text.contains("saved-private-model"));
+        assert_eq!(std::fs::read_to_string(target).unwrap(), saved);
+    };
+    let script = "printf 'agent-started\\n' >&2";
+    let output = scene.probe(&scene.workspace(), script);
+    succeeded(&output);
+    let text = String::from_utf8_lossy(&output.stderr);
+    check(&text, &target);
+    assert!(!text.contains("with the same BOX_HOME"));
+    assert!(!text.contains("startup reminder"));
+    let box_home = scene.home().join("box-home");
+    std::fs::rename(scene.home().join(".strands/box"), &box_home).unwrap();
+    let target = box_home.join(relative);
+    for display in ["--no-banner", "--banner"] {
+        let mut command =
+            scene.command_with(&scene.workspace(), "probe", &[display], &["-c", script]);
+        command.env("BOX_HOME", &box_home);
+        let (child, mut terminal) = spawn_at_terminal(command);
+        let reader = std::thread::spawn(move || {
+            let mut text = Vec::new();
+            let mut bytes = [0; 8192];
+            while let Ok(count) = terminal.read(&mut bytes) {
+                if count == 0 {
+                    break;
+                }
+                text.extend_from_slice(&bytes[..count]);
+            }
+            String::from_utf8_lossy(&text).into_owned()
+        });
+        let output = wait_for_output(child);
+        let text = reader.join().unwrap();
+        assert!(output.status.success(), "{}: {text}", output.status);
+        check(&text, &target);
+        assert!(text.contains("with the same BOX_HOME"));
+        assert!(text.contains("startup reminder: saved settings differed"));
+        let log = std::fs::read_dir(box_home.join("r"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_to_string(entry.path().join("box.log")).ok())
+            .find(|log| log.contains("box: warning: Saved settings"))
+            .expect("the warning survives in a retained run log");
+        assert!(log.contains("remove only the named keys"));
+        assert!(!log.contains("host-private-model"));
+        assert!(!log.contains("saved-private-model"));
+    }
+}
+
 /// Run `box run probe <flags> -- -c <script>` at a 40x200 pseudo-terminal with the banner on. Wait
 /// for each of `needles` in order on the screen, then send a line so the script can finish. Return
 /// the screen as it was when the last needle appeared.

@@ -7,19 +7,27 @@ For profiles in general, see [Profiles](../../../docs/cli/profiles.md).
 
 ## Make a profile
 
+For Bedrock Mantle in `us-east-1`, set a model that supports the Responses API in your Codex
+folder's `config.toml` before the first run, such as
+[GPT-6.2 Sol](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-2-sol.html):
+
+```toml
+model = "openai.gpt-6.2-sol"
+```
+
 Match the `model_provider` in your Codex folder's `config.toml`: use `bedrock` for
 `amazon-bedrock-runtime`, `bedrock-mantle` for `amazon-bedrock`, or `openai` for the OpenAI API:
 
 ```sh
 box profile create codex-runtime --with codex,bedrock
-box profile create codex-mantle --with codex,bedrock-mantle
+box profile create codex-mantle --with codex,bedrock-mantle --option bedrock.region=us-east-1
 box profile create codex-openai --with codex,openai
 ```
 
 If you run `box profile create codex` without naming a provider, Box asks which one to use, with
 the provider in your Codex folder's `config.toml` selected when it recognizes it. Otherwise, Mantle
 is the default. Without a terminal, Box uses that provider or the default. To choose a
-region, pass `--option bedrock.region=us-west-2`. Without it, the starter checks the selected
+region, pass `--option bedrock.region=us-east-1`. Without it, the starter checks the selected
 provider's `aws.region` in that file, then `AWS_REGION`.
 The starter also asks how the box signs in to Bedrock ([Sign in](../bedrock/README.md#sign-in)),
 whether to bring in your MCP servers and hooks, and which policy to use.
@@ -77,6 +85,16 @@ Trust saved for a repository root comes in when you run Box from that root.
 A choice saved in the box stays, even if you change the host setting. If neither has a model set,
 Codex uses its own default. Other settings, except `mcp_servers`, and your sessions stay outside
 the box.
+
+If both files set a model and the values differ, Box warns before each run and keeps the saved
+choice. If that difference is intentional, no action is needed. Interactive runs also keep the
+warning in the run log and show a reminder on exit.
+
+To change the saved choice, open Codex's `/model` picker inside Box and save a new default.
+To import the model from your Codex settings again, stop the profile's runs, remove only `model`
+from the saved `config.toml` named in the warning, and start a new run. This keeps the profile's
+sessions and memory. `box profile reset <profile>` also imports settings again, but deletes those sessions
+and memory ([Reset](../../../docs/cli/cli.md#box-profile-reset)).
 
 Your Codex folder's `agents/` folder comes into `home/agents`. Its `skills` and `~/.agents/skills` come into separate folders,
 `home/skills/codex` and `home/skills/agents`, so matching names stay separate.

@@ -1,5 +1,6 @@
 //! The parts of a JSON or TOML file that a `[[storage.files]]` copy keeps, and the values it sets.
 
+use serde::{Deserialize, de::IntoDeserializer};
 use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, InlineTable, Item, Table};
 
@@ -25,6 +26,8 @@ pub struct Edit {
     pub set: Vec<Setting>,
     /// Each run adds each `keep` value that the copy lacks.
     pub fill: bool,
+    /// The kept paths whose different saved and source values produce a warning.
+    pub warn_if_different: Vec<KeyPath>,
 }
 
 /// What `keep` takes from one host file, by key path.
@@ -33,6 +36,13 @@ pub struct Kept {
     pub kept: Vec<KeyPath>,
     pub dropped: Vec<KeyPath>,
     pub missing: Vec<KeyPath>,
+}
+
+/// A fill's optional replacement text and added paths, and the selected paths whose values differ.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Filled {
+    pub(crate) change: Option<(String, Vec<KeyPath>)>,
+    pub(crate) different: Vec<KeyPath>,
 }
 
 /// A `set` row that cannot apply: the path whose value is in the way, and what that value is.
@@ -68,30 +78,30 @@ impl Edit {
         Ok((document.text(), kept))
     }
 
-    /// `copy` with each `keep` value of `host` that it lacks, and the paths added, or `None` when
-    /// it lacks none. A value already in `copy` stays, and a path whose parent in `copy` is not a
-    /// table is not added.
-    pub(crate) fn fill(
-        &self,
-        copy: &str,
-        host: &str,
-    ) -> Result<Option<(String, Vec<KeyPath>)>, Failure> {
+    /// Fill missing kept paths without replacing saved values or non-table parents, and report selected differences.
+    pub(crate) fn fill(&self, copy: &str, host: &str) -> Result<Filled, Failure> {
         let mut copied = Document::parse(self.kind, copy)?;
+        let mut filled = Filled::default();
         let Some(keep) = &self.keep else {
-            return Ok(None);
+            return Ok(filled);
         };
         let mut host = Document::parse(self.kind, host)?;
         host.keep(keep);
+        for path in &self.warn_if_different {
+            if copied.differs_at(&host, path)? {
+                filled.different.push(path.clone());
+            }
+        }
         let mut added = Vec::new();
         for path in keep {
             if copied.add_from(&host, path) {
                 added.push(path.clone());
             }
         }
-        if added.is_empty() {
-            return Ok(None);
+        if !added.is_empty() {
+            filled.change = Some((copied.text(), added));
         }
-        Ok(Some((copied.text(), added)))
+        Ok(filled)
     }
 
     /// `copy` with each `set` row applied, or `None` when it already holds each value.
@@ -186,13 +196,36 @@ impl Document {
             (Self::Json(copy), Self::Json(Value::Object(source))) => {
                 json_at(source, path).is_some_and(|value| json_add(copy, path, value))
             }
-            (Self::Toml(copy), Self::Toml(source)) => {
-                let value = path
-                    .iter()
-                    .try_fold(source.as_item(), |item, key| item.get(key));
-                value.is_some_and(|value| toml_add(copy.as_item_mut(), path, value))
-            }
+            (Self::Toml(copy), Self::Toml(source)) => toml_at(source.as_item(), path)
+                .is_some_and(|value| toml_add(copy.as_item_mut(), path, value)),
             _ => false,
+        }
+    }
+
+    fn differs_at(&self, source: &Self, path: &[String]) -> Result<bool, Failure> {
+        match (self, source) {
+            (Self::Json(Value::Object(copy)), Self::Json(Value::Object(source))) => {
+                Ok(json_at(copy, path)
+                    .zip(json_at(source, path))
+                    .is_some_and(|(copy, source)| copy != source))
+            }
+            (Self::Toml(copy), Self::Toml(source)) => {
+                let Some((copy, source)) =
+                    toml_at(copy.as_item(), path).zip(toml_at(source.as_item(), path))
+                else {
+                    return Ok(false);
+                };
+                let value = |item: &Item| {
+                    let value = item
+                        .clone()
+                        .into_value()
+                        .map_err(|_| Failure::Parse("not a TOML value".into()))?;
+                    toml::Value::deserialize(value.into_deserializer())
+                        .map_err(|error| Failure::Parse(format!("not TOML: {error}")))
+                };
+                Ok(value(copy)? != value(source)?)
+            }
+            _ => Ok(false),
         }
     }
 
@@ -331,6 +364,10 @@ fn json_at<'a>(map: &'a Map<String, Value>, path: &[String]) -> Option<&'a Value
         map = map.get(key)?.as_object()?;
     }
     map.get(last)
+}
+
+fn toml_at<'a>(item: &'a Item, path: &[String]) -> Option<&'a Item> {
+    path.iter().try_fold(item, |item, key| item.get(key))
 }
 
 /// Add `value` at `path` in `document` when the path is absent, creating each missing table, and
@@ -555,6 +592,7 @@ mod tests {
                 })
                 .collect(),
             fill: false,
+            warn_if_different: Vec::new(),
         }
     }
 
@@ -727,6 +765,7 @@ mod tests {
                 })
                 .collect(),
             fill: false,
+            warn_if_different: Vec::new(),
         }
     }
 
@@ -1035,6 +1074,7 @@ mod tests {
         ])
         .fill(copy, host)
         .expect("a fill")
+        .change
         .expect("a change");
         assert_eq!(
             added,
@@ -1060,7 +1100,7 @@ mod tests {
         let host = r#"{"theme": "light", "projects": {"/w": {"hasTrustDialogAccepted": true}}}"#;
         let copy = r#"{"theme": "dark", "projects": "not a table"}"#;
         let fill = filling(&[&["theme"], &["projects", "/w", "hasTrustDialogAccepted"]]);
-        assert_eq!(fill.fill(copy, host), Ok(None));
+        assert_eq!(fill.fill(copy, host), Ok(Filled::default()));
         assert!(matches!(fill.fill("{", host), Err(Failure::Parse(_))));
         assert!(matches!(fill.fill(copy, "{"), Err(Failure::Parse(_))));
     }
@@ -1080,12 +1120,18 @@ mod tests {
             &[],
         );
         fill.fill = true;
+        fill.warn_if_different = [&["model"][..], &["absent", "new"], &["blocked", "new"]]
+            .into_iter()
+            .map(path)
+            .collect();
         let host = "model = \"host\"\nnested.new = \"added\" # secret comment\n\
                     nested.missing.deep = true\nabsent.new = true\n\
                     blocked.new = true\nextra = { list = [1, 2] }\n";
         let copy = "# keep this comment\nmodel = \"saved\" # keep this too\n\
                     nested = { old = true }\nblocked = false\n";
-        let (text, added) = fill.fill(copy, host).expect("a fill").expect("new keys");
+        let filled = fill.fill(copy, host).expect("a fill");
+        assert_eq!(filled.different, [path(&["model"])]);
+        let (text, added) = filled.change.expect("new keys");
         assert!(text.starts_with("# keep this comment\nmodel = \"saved\" # keep this too\n"));
         assert!(!text.contains("secret comment"));
         let parsed: toml::Table = text.parse().expect("TOML");
@@ -1104,6 +1150,41 @@ mod tests {
                 path(&["extra"])
             ]
         );
-        assert_eq!(fill.fill(&text, host), Ok(None));
+        let filled = fill.fill(&text, host).expect("a fill");
+        assert!(filled.change.is_none());
+        assert_eq!(filled.different, [path(&["model"])]);
+    }
+
+    #[test]
+    fn toml_fill_compares_values_without_losing_types_or_comparing_layout() {
+        let mut fill = edit(Format::Toml, Some(&[&["model"]]), &[]);
+        fill.fill = true;
+        fill.warn_if_different = vec![path(&["model"])];
+        for (copy, host, different) in [
+            ("model = 'same' # saved\n", "model = \"same\"\n", false),
+            ("model = 1_000\n", "model = 1000\n", false),
+            ("model = 1\n", "model = 1.0\n", true),
+            ("model = inf\n", "model = -inf\n", true),
+            ("model = 2026-11-27\n", "model = '2026-11-27'\n", true),
+            (
+                "[model]\na = 1\nb = 2\n",
+                "model = { b = 2, a = 1 }\n",
+                false,
+            ),
+            ("[[model]]\na = 1\n", "model = [{ a = 1 }]\n", false),
+            ("model = [1, true]\n", "model = [1, false]\n", true),
+        ] {
+            let filled = fill.fill(copy, host).expect("a fill");
+            assert!(filled.change.is_none(), "{copy}");
+            assert_eq!(
+                filled.different,
+                if different {
+                    vec![path(&["model"])]
+                } else {
+                    Vec::new()
+                },
+                "{copy} compared with {host}"
+            );
+        }
     }
 }

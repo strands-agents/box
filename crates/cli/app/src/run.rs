@@ -513,6 +513,7 @@ pub struct Launch {
     journal: PathBuf,
     not_copied: Vec<(String, String)>,
     synced: Vec<String>,
+    import_warnings: Vec<String>,
     mcp_unstarted: Vec<(String, String)>,
     mcp_servers: Vec<(String, String, String)>,
     mcp_imports: Vec<String>,
@@ -1230,8 +1231,11 @@ impl Launcher {
                 self.claim_name(name, file)?;
             }
             prepare_tool_scratch(&resolved, &instance.directory)?;
-            let Copied { not_copied, synced } =
-                copy_files(&compiled.storage, &instance.directory, home, base)?;
+            let Copied {
+                not_copied,
+                synced,
+                import_warnings,
+            } = copy_files(&compiled.storage, &instance.directory, home, base)?;
             let hooks = apply_hooks(&compiled.storage, &hooks, home)?;
             let mut mcp_imports = Vec::new();
             for config in &resolved.servers.configs {
@@ -1298,6 +1302,7 @@ impl Launcher {
                 skipped: resolved.tools.skipped,
                 not_copied,
                 synced,
+                import_warnings,
                 mcp_unstarted: compiled.unstarted,
                 mcp_servers: resolved.servers.detected_lines(home),
                 mcp_imports,
@@ -2644,7 +2649,32 @@ impl Launch {
         result
     }
 
+    fn import_warnings_text(&self) -> String {
+        if self.import_warnings.is_empty() {
+            return String::new();
+        }
+        let mut text: String = self
+            .import_warnings
+            .iter()
+            .map(|warning| format!("box: warning: {warning}\n"))
+            .collect();
+        let box_home = if self.box_home.is_some() {
+            " with the same BOX_HOME"
+        } else {
+            ""
+        };
+        text.push_str(&format!(
+            "box: To import those settings again, stop this profile's runs, remove only the named \
+             keys from the saved file, and run again. Keep the file valid JSON or TOML. \
+             Alternatively, `box profile reset {}`{box_home} also deletes this profile's sessions \
+             and memory.\n",
+            self.profile_name,
+        ));
+        text
+    }
+
     fn run_inner(&self, args: &[OsString]) -> Result<ExitCode, Error> {
+        eprint!("{}", self.import_warnings_text());
         let result = if terminal::attached() {
             terminal::run(self, |options| {
                 strands_box::run(self.config.clone(), args.to_vec(), options)
