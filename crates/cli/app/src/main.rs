@@ -740,11 +740,16 @@ fn show(name: &str, full: bool, format: OutputFormat, output: &mut dyn Write) ->
         "{}",
         styled(color, "32", "✓ Resolves for this directory")
     );
-    for (label, text) in preview.overview() {
+    let overview = preview.overview();
+    let width = overview
+        .iter()
+        .map(|(label, _)| label.len())
+        .fold(8, usize::max);
+    for (label, text) in overview {
         let _ = writeln!(
             output,
             "  {}  {text}",
-            styled(color, "2", &format!("{label:<8}"))
+            styled(color, "2", &format!("{label:<width$}"))
         );
     }
     if !preview.inputs.is_empty() {

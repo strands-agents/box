@@ -51,7 +51,7 @@ pub const EXTEND: &str = "extend";
 pub const INCLUDE: &str = "include";
 
 /// The sections that reach `box.toml` as a pack or a profile writes them.
-const BOX_KEYS: &[&str] = &["agent", "tool", "egress", "mcp", "telemetry"];
+const BOX_KEYS: &[&str] = &["agent", "tool", "egress", "mcp", "telemetry", "enrichment"];
 
 /// The keys of a tool pack, as the load reads it, that stay out of its tool table. Every other key
 /// moves into the tool table.
@@ -67,7 +67,7 @@ pub(crate) const TOOL_KEYS: &[&str] = &[
 ];
 
 /// The tables a tool pack cannot write, because it writes one tool.
-const NOT_IN_A_TOOL_PACK: &[&str] = &["agent", "egress", "mcp", "tool", "telemetry"];
+const NOT_IN_A_TOOL_PACK: &[&str] = &["agent", "egress", "mcp", "tool", "telemetry", "enrichment"];
 /// The profile key that fills the slot of `[agent] command`, and the name of that slot.
 const AGENT_ARGS: &str = "agent-args";
 
@@ -8980,7 +8980,7 @@ mod tests {
     #[test]
     fn a_tool_pack_writes_one_tool() {
         let shelf = Shelf::new();
-        for key in ["agent", "egress", "tool", "telemetry"] {
+        for key in ["agent", "egress", "tool", "telemetry", "enrichment"] {
             let reason = tool_pack_refusal(
                 &shelf,
                 key,

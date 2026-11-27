@@ -15830,6 +15830,7 @@ fn a_profile_header_holds_only_a_name() {
     );
 }
 
+mod enrichment;
 mod plugins;
 
 #[test]

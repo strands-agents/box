@@ -33,8 +33,8 @@ each file holds and refuses is in
 `[run]`, `[agent]`, each `[tool.<name>]`, their `filesystem` tables, and each `[tool.<name>.network]`, which only a profile writes and which takes no `when`. A refusal of a key names the file
 and the key's line, from the `toml_edit` spans. It suggests the one known key closest to it, when
 that key is at most one edit away for each three characters (and at least one edit). A swap of two
-neighbors is one edit, and a tie suggests nothing. `[egress]`, `[mcp]`, and `[telemetry]` keys go to Box Core as
-written, and Box Core checks them.
+neighbors is one edit, and a tie suggests nothing. `[egress]`, `[mcp]`, `[telemetry]`, and `[enrichment]` keys go to
+Box Core as written, and Box Core checks them.
 
 The profile's `[limits.shell]` table reaches Box Core with the keys the profile sets, and with
 `timeout = false` when the profile sets no `timeout`. Outside a box a shell has no per-command limit,

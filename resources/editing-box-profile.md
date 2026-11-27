@@ -339,9 +339,9 @@ has no top-level keys: every key is in a table, and the file starts with `[pack]
 
 | File | Accepted contents |
 | --- | --- |
-| Profile | `packs`, `plugins`, `policies`, `agent-args`, `file-attributes`; `[profile]`, `[requires]`, `[options]`, `[limits]`, `[project]`, `[filesystem]` with only `deny` and `deny_write`, `[banner]`, `[experimental-features]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[mcp.<name>]`, `[storage]`, `[telemetry]`, `[secret-source.<scheme>]` |
-| Agent pack | `[pack]`, `[requires]`, `[inputs.<name>]`, `[run]` with `command`, `dependency`, `file-watching`, and `when`, then `[env]` and `[filesystem]` for the agent, which `box` reads as `[agent]`, plus `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, and `[[mcp-servers]]`. It writes no `[agent]` table. |
-| Support pack | `[pack]`, `[requires]`, `[inputs.<name>]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, `[[mcp-servers]]`; `[mcp.<name>]` may add only `filesystem` and `network` grants. No `[run]`, `[env]`, or `[filesystem]`. |
+| Profile | `packs`, `plugins`, `policies`, `agent-args`, `file-attributes`; `[profile]`, `[requires]`, `[options]`, `[limits]`, `[project]`, `[filesystem]` with only `deny` and `deny_write`, `[banner]`, `[experimental-features]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[mcp.<name>]`, `[storage]`, `[telemetry]`, `[enrichment.<name>]`, `[secret-source.<scheme>]` |
+| Agent pack | `[pack]`, `[requires]`, `[inputs.<name>]`, `[run]` with `command`, `dependency`, `file-watching`, and `when`, then `[env]` and `[filesystem]` for the agent, which `box` reads as `[agent]`, plus `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, `[enrichment.<name>]`, and `[[mcp-servers]]`. It writes no `[agent]` table. |
+| Support pack | `[pack]`, `[requires]`, `[inputs.<name>]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, `[enrichment.<name>]`, `[[mcp-servers]]`; `[mcp.<name>]` may add only `filesystem` and `network` grants. No `[run]`, `[env]`, or `[filesystem]`. |
 | Tool pack | `[pack]`, `[requires]`, `[inputs.<name>]` with the program input, `[run]` with `command` and the tool's other keys, then the tool's tables, such as `[env]` and `[filesystem]`. See [Tools](#tools-and-program-trust). |
 | Plugin | `[plugin]` with `name`, `version`, `kind = "secret-source"`, and `scheme`; optional `[requires]`; `[inputs.<name>]`; `[run]` with `command` and optional `output`; `[env]`, where each entry is `NAME = { from = "env:NAME" }` and nothing else; `[protect]` with only `env`, a list of names of `[env]`, and `paths`, a list of path strings. Nothing else: no `[filesystem]` and no `[secret-source.<scheme>]` table. |
 
@@ -886,7 +886,7 @@ A layout adds nothing when it does not match. An omitted or empty list selects n
 the tool's own program. A custom tool pack can still declare runtime paths in `[filesystem]`.
 
 A tool pack cannot declare `workspace`, `[agent]`, `[tool]`, `[egress]`,
-`[mcp]`, or `[telemetry]`. Its `[storage]` is the tool's own (see `storage` above).
+`[mcp]`, `[telemetry]`, or `[enrichment]`. Its `[storage]` is the tool's own (see `storage` above).
 Put cross-tool settings in the profile or an ordinary pack.
 No pack can declare `[experimental-features]`; write that table in `profile.toml`.
 In an ordinary pack's explicit tool table, use `tool.<name>.root` rather than bare `root`.

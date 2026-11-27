@@ -26,6 +26,7 @@ of a pack is in a table, and the file starts with `[pack]`.
 | `[agent]` | Support packs. | Agent settings, as in [The `[agent]` table](profiles-reference.md#the-agent-table). |
 | `[tool.<name>]` | Agent and support packs. | A [tool table](profiles-reference.md#a-tool-table-in-the-full-form), or additions to a tool. |
 | `[egress.<name>]`, `[telemetry]` | Agent and support packs. | [Routes](profiles-reference.md#routes-and-other-hosts) and telemetry, with [placeholders](profiles-reference.md#placeholders) where a value depends on your machine. |
+| `[enrichment.<name>]` | Agent and support packs. | A [classification source](profiles-reference.md#what-a-profile-holds). The rules that read its answer go in the profile's `policy.dw`, because a pack adds no rules. |
 
 `[pack] kind` decides the rest:
 
