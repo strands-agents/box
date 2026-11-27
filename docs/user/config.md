@@ -1618,7 +1618,7 @@ it with no quoting. It cannot be one of the words `true`, `false`, `if`, `then`,
 | `kind` | string | required | The kind of source. It must be a kind this build implements. |
 | `endpoint` | string | required | Where the source answers, in the form its `kind` reads. Box never prints it, because it can hold a token. |
 | `secret.ref` | string | none | The credential the source needs, written as an [`[egress.<name>]` `secret.ref`](egress.md#credential-sources). Box checks the reference when the file loads, including against declared secret sources. `ref` is the only key `secret` takes. |
-| `outputs` | string array | required | The labels the source may give: from 1 to 64, each one nonempty and named once. Box drops every other label, so no other label reaches policy. |
+| `outputs` | string array | required | The labels the source may give: from 1 to 64, each one nonempty and named once. Box drops every other label, so no other label reaches policy, and a rule on a label that `outputs` does not name loads and never fires. |
 | `min_confidence` | string | required | `LOW`, `MEDIUM`, or `HIGH`, in uppercase: the least confidence of a label that reaches policy. Box drops a label the source is less sure of. |
 | `timeout` | string | `"500ms"` | How long Box waits for an answer. A whole number followed by `ms`, `s`, `m`, or `h`, from `1ms` to `10s`. A source that does not answer in time leaves the host unanswered. |
 | `max_age` | string | `"300s"` | The longest Box keeps an answer, from `1s` to `24h`, written as `timeout` is. Box keeps an answer for the time the source states, and never longer than `max_age`. |
@@ -1658,23 +1658,11 @@ strands-box: note[B0215]: Box cannot tell which hosts the installed rules refuse
 
 ### What is refused
 
-The file refuses each of these when it loads, before any box state exists. The refusal names the
-table.
-
-- A `<name>` outside the pattern above: ``is not a name a rule can read as
-  context.input.enrichment.<name>: use a lowercase letter, then at most 31 lowercase letters,
-  digits, or '_'``. A reserved word reads ``"if" is a Cedar reserved word`` instead.
-- A key the table does not take, or a key of `secret` other than `ref`.
-- A `kind` this build does not implement, or an `endpoint` that its kind cannot use.
-- A `secret.ref` that an `[egress.<name>]` route could not name, or that a declared secret source
-  does not allow.
-- An `outputs` list that is empty, holds more than 64 labels, holds an empty label, or names one
-  label twice.
-- A `min_confidence` other than `LOW`, `MEDIUM`, or `HIGH`. Lowercase is refused.
-- A `timeout` or `max_age` that is not a whole number and a unit, or that lies outside its range.
-  A bare number, such as `timeout = 500`, is refused as well. The message names the key:
-  ``timeout must be a whole number followed by ms, s, m, or h, from 1ms to 10s, such as "500ms";
-  found "1.5s"``.
+The file refuses a table that breaks a rule above when it loads, before any box state exists, and
+the refusal names the table. It also refuses a key the table does not take, a key of `secret` other
+than `ref`, and an `endpoint` that its kind cannot use. A `timeout` or `max_age` message names its
+key, and a bare number, such as `timeout = 500`, is refused too: ``timeout must be a whole number
+followed by ms, s, m, or h, from 1ms to 10s, such as "500ms"; found "1.5s"``.
 
 The policy load refuses two more, each as `B0103`: a rule that reads an entry no table declares, and
 a rule that reads an entry's `labels` when no rule reads its `answered`.

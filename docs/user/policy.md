@@ -485,12 +485,11 @@ forbid (principal, action == Box::Action::"net:connect", resource)
 unless { context.input.enrichment.threat.answered };
 ```
 
-Write both. An unanswered host carries no labels, so `block_malware` alone lets it through. The load
-refuses a policy in which a rule reads an entry's `labels` and no rule reads its `answered`; see
+Write both. An unanswered host carries no labels, so `block_malware` alone lets it through, and the
+load refuses a policy that reads an entry's `labels` with no rule on its `answered`; see
 [a rule that reads an entry's labels and not its answer](#a-rule-that-reads-an-entrys-labels-and-not-its-answer).
-The load checks only that some rule reads `answered`, not what the rule does with it. This rule
-reads `answered`, so it loads without `require_answer`, and it lets through every host the source
-gave no answer about:
+A rule that guards the label with `answered` loads without `require_answer`, and lets through every
+host the source gave no answer about:
 
 ```text
 @id("block_malware")

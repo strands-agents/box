@@ -140,17 +140,14 @@ Internationalized domains reach the gateway in punycode form, which rules must a
 
 ### Classification before the host decision
 
-An `[enrichment.<name>]` table names an outside classification source. Before the first
-`net:connect` decision on a host, the gateway's policy adapter, in the box's trusted process, can
-ask each source that some rule reads about the host's DNS name. It puts the answers on the request
-as `context.input.enrichment.<name>`, with `answered` and `labels`. The source grants nothing. It
-supplies a fact, and the authored policy decides, including what an unanswered question means. See
-[every decision is local, and an enrichment source is the one outside
-call](decisions.md#every-decision-is-local-and-in-process). A release build implements no source
-kind and refuses every table when the configuration loads, so in that build no name leaves the box
-this way. [Ask a classification source about each
-host](../user/egress.md#ask-a-classification-source-about-each-host) lists what Box asks, when, and
-what it keeps.
+Before the first `net:connect` decision on a host, the gateway's policy adapter, in the box's
+trusted process, can ask each `[enrichment.<name>]` source that some rule reads about the host's DNS
+name. The source grants nothing: its answer is a fact on the request, and the authored policy
+decides, including what an unanswered question means. See [every decision is local, and an
+enrichment source is the one outside call](decisions.md#every-decision-is-local-and-in-process).
+[Ask a classification source about each
+host](../user/egress.md#ask-a-classification-source-about-each-host) states what the request carries,
+what Box asks, when, and what it keeps.
 
 The adapter asks only when the answer can change the host decision. The host decision runs before
 DNS so that a workload cannot carry data out in the labels of a name the gateway refuses, and a
@@ -160,10 +157,10 @@ whatever a source answers. A rule that could see an entry is not among them: one
 `context`, `context.input`, or anything under `context.input.enrichment`, or tests one of them with
 `has`. A stateless `forbid` that reads an entry adds each top-level `||` branch of its lone `when`
 condition that reads none, as a `forbid` of its own, because that branch alone makes the whole
-`forbid` hold. Dogwood lowers `unless { X }` to `when { !(X) }`, which has no such branch. A rule with
-a temporal clause stays out, because history the screen does not read can change its result. Before
-it asks, the adapter decides the request on those rules alone, in plain Cedar, with no history
-event. When one of their `forbid`s holds, or none of their `permit`s does and no other rule
+`forbid` hold. Dogwood lowers `unless { X }` to `when { !(X) }`, which has no such branch. A rule
+with a temporal clause stays out, because history the screen does not read can change its result.
+Before it asks, the adapter decides the request on those rules alone, in plain Cedar, with no
+history event. When one of their `forbid`s holds, or none of their `permit`s does and no other rule
 can permit `net:connect`, the host is refused whatever the source says. The adapter then asks
 nothing, and the engine decides and records the request as usual, with every entry unanswered, so
 log-only mode still lets the denial through. When the engine cannot sort the rules, it prints a
@@ -175,9 +172,8 @@ connection's host decision and its per-address decisions on one thread, so the a
 answers by thread, host, and port, for the latest 1024 host decisions, and no decision reads another
 connection's answer. A per-address decision that finds none asks as a host decision would, so a
 change in how the gateway schedules connections can cost a question, never a decision on another
-connection's answer. Box also bounds how long a question waits,
-how many wait at once, and how many answers each table keeps, because a source can stall and the
-workload chooses the names.
+connection's answer. Box also bounds how long a question waits, how many wait at once, and how many
+answers each table keeps, because a source can stall and the workload chooses the names.
 
 The answer the decision read reaches history and telemetry too. All three `net:connect` events,
 `::request`, `::response`, and `::error`, carry the same `input.enrichment` record, and the
