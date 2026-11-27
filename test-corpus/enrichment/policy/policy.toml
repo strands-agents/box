@@ -1,5 +1,6 @@
 # A test policy starter for the enrichment pack beside it, as `box profile create --policy`
-# copies it from ~/.strands/box/policies/enrichment/.
+# copies it from ~/.strands/box/policies/enrichment/. `--policy` picks only a policy in the menu, so
+# ~/.strands/box/config.toml adds it: `[policy-starters] add = ["enrichment"]`.
 [policy]
 name = "enrichment"
 label = "Open, with classification"

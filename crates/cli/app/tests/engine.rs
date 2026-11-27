@@ -1280,6 +1280,11 @@ fn a_profile_from_the_enrichment_pack_refuses_a_labelled_host() {
     for (name, text) in ENRICHMENT_POLICY {
         std::fs::write(starter.join(name), text).expect("a policy starter file");
     }
+    std::fs::write(
+        scene.home().join(".strands/box/config.toml"),
+        "[policy-starters]\nadd = [\"enrichment\"]\n",
+    )
+    .expect("config.toml");
     let created = scene
         .process(Path::new(env!("CARGO_BIN_EXE_box")))
         .args([
@@ -1843,6 +1848,7 @@ fn show_format_json_prints_one_document_with_what_the_text_and_full_print() {
         "packs",
         "plugins",
         "sources",
+        "enrichment",
         "policies",
         "storage",
         "project",
