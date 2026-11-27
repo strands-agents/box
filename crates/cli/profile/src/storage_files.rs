@@ -15,7 +15,6 @@ use crate::files::{
     remove_if_present, rename_at, unlink_at,
 };
 use crate::host::{canonical, resolved, tilde, within};
-use crate::mcp::Format;
 use crate::storage_edit::{Edit, Failure, Kept, shown};
 use crate::storage_sync::{Entry, entry};
 
@@ -827,47 +826,8 @@ pub(crate) fn fill(file: &StorageFile, kept: &str) -> Result<(Option<String>, Ve
     let mut different = Vec::new();
     let skipped = edit_copy(file, true, |text| {
         let filled = edit.fill(text, kept).map_err(&failure)?;
-        if !edit.warn_if_different.is_empty() {
-            match edit.kind {
-                Format::Json => {
-                    let parse = |text| {
-                        serde_json::from_str::<serde_json::Value>(text)
-                            .map_err(|error| failure(Failure::Parse(error.to_string())))
-                    };
-                    let saved = parse(text)?;
-                    let source = parse(kept)?;
-                    for path in &edit.warn_if_different {
-                        let saved = path.iter().try_fold(&saved, |value, key| value.get(key));
-                        let source = path.iter().try_fold(&source, |value, key| value.get(key));
-                        if saved
-                            .zip(source)
-                            .is_some_and(|(saved, source)| saved != source)
-                        {
-                            different.push(shown(path));
-                        }
-                    }
-                }
-                Format::Toml => {
-                    let parse = |text| {
-                        toml::from_str::<toml::Value>(text)
-                            .map_err(|error| failure(Failure::Parse(error.to_string())))
-                    };
-                    let saved = parse(text)?;
-                    let source = parse(kept)?;
-                    for path in &edit.warn_if_different {
-                        let saved = path.iter().try_fold(&saved, |value, key| value.get(key));
-                        let source = path.iter().try_fold(&source, |value, key| value.get(key));
-                        if saved
-                            .zip(source)
-                            .is_some_and(|(saved, source)| saved != source)
-                        {
-                            different.push(shown(path));
-                        }
-                    }
-                }
-            }
-        }
-        Ok(filled.map(|(text, _)| text))
+        different = filled.different.iter().map(|path| shown(path)).collect();
+        Ok(filled.change.map(|(text, _)| text))
     })?;
     Ok((skipped, different))
 }
