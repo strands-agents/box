@@ -3234,58 +3234,72 @@ fn is_agent(table: &toml::Table) -> bool {
             .is_some()
 }
 
-/// The routes and the `env://` variables that the packs declare, each with the pack and route that
-/// declare it.
+/// The routes and classification sources, and the `env://` variables that they read, that the
+/// packs declare, each with the pack and the table that declare it.
 #[derive(Default)]
 struct RouteOwners {
-    routes: BTreeMap<String, String>,
+    tables: BTreeMap<String, String>,
     variables: BTreeMap<String, (String, String)>,
 }
 
-/// Refuse a pack that declares an `[egress.<name>]` route that an earlier pack declared, or a route
-/// whose `env://` variable a route of an earlier pack reads, and record what each pack declares.
+/// Refuse a pack that declares an `[egress.<name>]` route or an `[enrichment.<name>]` classification
+/// source that an earlier pack declared, or one whose `env://` variable a table of an earlier pack
+/// reads, and record what each pack declares.
 fn refuse_route_merge(
     owners: &mut RouteOwners,
     pack: &str,
     table: &toml::Table,
 ) -> Result<(), String> {
-    let Some(toml::Value::Table(egress)) = table.get("egress").map(unwrapped) else {
-        return Ok(());
-    };
-    for (name, route) in egress {
-        if let Some(first) = owners.routes.get(name) {
-            return Err(format!(
-                "`[egress.{name}]` is declared by both {first} and {pack}, and two packs cannot \
-                 declare one route"
-            ));
-        }
-        owners.routes.insert(name.clone(), pack.to_string());
-        let variable = unwrapped(route)
-            .get("secret")
-            .map(unwrapped)
-            .and_then(|secret| secret.get("ref"))
-            .map(unwrapped)
-            .and_then(toml::Value::as_str)
-            .and_then(|reference| reference.strip_prefix("env://"));
-        let Some(variable) = variable else {
+    for (section, what) in [("egress", "route"), ("enrichment", "classification source")] {
+        let Some(toml::Value::Table(entries)) = table.get(section).map(unwrapped) else {
             continue;
         };
-        match owners.variables.get(variable) {
-            Some((first, route)) if first != pack => {
-                return Err(format!(
-                    "`[egress.{name}]` in {pack} reads env://{variable}, which `[egress.{route}]` \
-                     in {first} reads, and two packs cannot read one key"
-                ));
-            }
-            Some(_) => {}
-            None => {
-                owners
-                    .variables
-                    .insert(variable.to_string(), (pack.to_string(), name.clone()));
-            }
+        for (name, entry) in entries {
+            refuse_table_merge(owners, pack, &format!("[{section}.{name}]"), what, entry)?;
         }
     }
     Ok(())
+}
+
+/// Refuse the table `label` of `pack`, `entry`, when an earlier pack declares it or reads its
+/// `env://` variable, and record it.
+fn refuse_table_merge(
+    owners: &mut RouteOwners,
+    pack: &str,
+    label: &str,
+    what: &str,
+    entry: &toml::Value,
+) -> Result<(), String> {
+    if let Some(first) = owners.tables.get(label) {
+        return Err(format!(
+            "`{label}` is declared by both {first} and {pack}, and two packs cannot declare one \
+             {what}"
+        ));
+    }
+    owners.tables.insert(label.to_string(), pack.to_string());
+    let variable = unwrapped(entry)
+        .get("secret")
+        .map(unwrapped)
+        .and_then(|secret| secret.get("ref"))
+        .map(unwrapped)
+        .and_then(toml::Value::as_str)
+        .and_then(|reference| reference.strip_prefix("env://"));
+    let Some(variable) = variable else {
+        return Ok(());
+    };
+    match owners.variables.get(variable) {
+        Some((first, other)) if first != pack => Err(format!(
+            "`{label}` in {pack} reads env://{variable}, which `{other}` in {first} reads, and two \
+             packs cannot read one key"
+        )),
+        Some(_) => Ok(()),
+        None => {
+            owners
+                .variables
+                .insert(variable.to_string(), (pack.to_string(), label.to_string()));
+            Ok(())
+        }
+    }
 }
 
 /// Refuse a grammar for a tool that an earlier file gave a grammar, and a grammar whose `name` or
@@ -8118,6 +8132,70 @@ mod tests {
         assert_eq!(
             merged.table["egress"]["model"]["destinations"][0].as_str(),
             Some("b.example.com")
+        );
+    }
+
+    /// A classification source of Box Core's `in-memory` test kind, which answers from `endpoint`.
+    fn classification_source(endpoint: &str, extra: &str) -> String {
+        format!(
+            "[enrichment.threat]\nkind = \"in-memory\"\nendpoint = \"file:///srv/{endpoint}.json\"\n\
+             outputs = [\"malware\"]\nmin_confidence = \"HIGH\"\n{extra}"
+        )
+    }
+
+    /// Two packs cannot declare one classification source, since one would take the other's
+    /// secret, kind, or labels, and the operator's own profile still changes a key of a pack's.
+    #[test]
+    fn two_packs_cannot_declare_one_classification_source() {
+        let shelf = Shelf::new();
+        shelf.share("a", &classification_source("a", ""));
+        shelf.share("b", &classification_source("b", ""));
+        let layers = shelf
+            .chain("packs = [\"@box/a\", \"@box/b\"]")
+            .expect("a chain");
+        let refused = reason(merge(&layers).err().expect("one source from two packs"));
+        assert!(
+            refused.contains(
+                "`[enrichment.threat]` is declared by both @box/a and @box/b, and two packs \
+                 cannot declare one classification source"
+            ),
+            "{refused}"
+        );
+        let layers = shelf
+            .chain(
+                "packs = [\"@box/a\"]\n[enrichment.threat]\nendpoint = \"file:///srv/mine.json\"",
+            )
+            .expect("a chain");
+        let merged = merge(&layers).expect("the operator's own profile changes a pack's source");
+        assert_eq!(
+            merged.table["enrichment"]["threat"]["endpoint"].as_str(),
+            Some("file:///srv/mine.json")
+        );
+    }
+
+    /// A pack's classification source cannot read an `env://` key that another pack's route reads,
+    /// so no pack hands another pack's credential to its own source.
+    #[test]
+    fn a_classification_source_cannot_read_a_key_that_another_packs_route_reads() {
+        let shelf = Shelf::new();
+        shelf.share(
+            "model",
+            "[egress.model]\ndestinations = [\"api.example.com\"]\nsecret.ref = \"env://KEY\"",
+        );
+        shelf.share(
+            "keyed",
+            &classification_source("keyed", "secret.ref = \"env://KEY\"\n"),
+        );
+        let layers = shelf
+            .chain("packs = [\"@box/model\", \"@box/keyed\"]")
+            .expect("a chain");
+        let refused = reason(merge(&layers).err().expect("one key from two packs"));
+        assert!(
+            refused.contains(
+                "`[enrichment.threat]` in @box/keyed reads env://KEY, which `[egress.model]` in \
+                 @box/model reads, and two packs cannot read one key"
+            ),
+            "{refused}"
         );
     }
 

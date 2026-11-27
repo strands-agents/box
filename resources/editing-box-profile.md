@@ -318,7 +318,8 @@ by its `@id`, action, or field.
 | `is not one of` | The `[options]` value is not in the input's `values` list. The message lists the values. |
 | ``no `<program>` that the box can run`` | The agent's program is not on this host, so the check cannot finish. Tell the operator. Do not edit the profile to remove the message. |
 | `two packs cannot declare one route` | Two packs declare a route with the same name. Remove the pack that was not intended. |
-| `two packs cannot read one key` | Two routes read the same credential. Remove the pack that was not intended. |
+| `two packs cannot declare one classification source` | Two packs declare one `[enrichment.<name>]`. Remove the pack that was not intended, or set the key in the profile. |
+| `two packs cannot read one key` | Two routes, or a route and a classification source, read the same credential. Remove the pack that was not intended. |
 | `does not exist` after a pack name | Correct the name in `packs`: `@box/<name>` ships with `box`, a plain name is a folder in `~/.strands/box/packs/`, and `@<scope>/<name>` is a folder in `~/.strands/box/external/<scope>/packs/`. |
 | `this pack needs box` | The pack needs a newer `box`. Remove the pack, or tell the operator to upgrade. |
 | ``a profile holds no `box_dir` ``, or `name`, or `workspace` | Delete the line. `box run` sets these values. |
