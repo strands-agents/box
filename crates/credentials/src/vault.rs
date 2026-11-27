@@ -1465,16 +1465,16 @@ mod tests {
                 .is_err()
         );
         assert_eq!(recorder.records().len(), 1);
-        // Each failure keeps its reason, and the next read waits 1, 2, 4, and so on, up to 30 seconds.
+        // Each failure keeps its reason, and the next read waits 1, 2, 4, 8, then at most 10 seconds.
         for (at, next, reason) in [
             (100, 101, "no usable bearer token"),
             (101, 103, "invalid expires_at"),
             (103, 107, "no expires_at"),
             (107, 115, "expired token"),
-            (115, 131, "has no credential"),
-            (131, 161, "`creds revalidate`"),
-            (161, 191, "provider is unavailable"),
-            (191, 221, "closed the connection"),
+            (115, 125, "has no credential"),
+            (125, 135, "`creds revalidate`"),
+            (135, 145, "provider is unavailable"),
+            (145, 155, "closed the connection"),
         ] {
             clock.set(at);
             let refusal = vault.attach_with_redactor(request).unwrap_err().to_string();
@@ -1490,7 +1490,7 @@ mod tests {
             }
         }
 
-        clock.set(221);
+        clock.set(155);
         let start = std::sync::Barrier::new(8);
         std::thread::scope(|scope| {
             for index in 0..8 {
@@ -1663,7 +1663,7 @@ mod tests {
         let vault = opened.into_vault();
         let rotating = rotating_token(&vault, "first.example.com");
         let request = token_request(&headers);
-        // Early reads fail at 80, 81, 83, 87, and 95; the fifth backoff, 16 s, would end past expiry
+        // Early reads fail at 80, 81, 83, 87, and 95; the fifth backoff, 10 s, would end past expiry
         // at 100.
         for at in [80, 81, 83, 87, 95] {
             clock.set(at);

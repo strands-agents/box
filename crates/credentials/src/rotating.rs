@@ -18,7 +18,7 @@ use crate::{CredentialError, RequestId, Secret};
 const REFRESH_RETRY: Duration = Duration::from_secs(1);
 
 /// The longest wait between two failed reads.
-const REFRESH_RETRY_MAX: Duration = Duration::from_secs(30);
+const REFRESH_RETRY_MAX: Duration = Duration::from_secs(10);
 
 /// The latest a refresh deadline falls before expiry.
 const REFRESH_MARGIN_MAX: Duration = Duration::from_secs(60);
