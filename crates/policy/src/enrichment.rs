@@ -184,8 +184,9 @@ pub trait HostEnricher: Send + Sync {
     expect(dead_code, reason = "only the egress adapter screens a connect")
 )]
 pub(crate) struct ConnectScreen {
-    /// The stateless rules that read no entry, with the entities a decision reads, or `None` when
-    /// the installed rules could not be sorted, so that every answer can matter.
+    /// The stateless rules and `forbid` branches that read no entry, with the entities a decision
+    /// reads, or `None` when the installed rules could not be sorted, so that every answer can
+    /// matter.
     fixed: Option<(cedar_policy::PolicySet, cedar_policy::Entities)>,
     /// Whether a rule left out of `fixed`, such as one with a temporal clause, may permit
     /// `net:connect`.
@@ -615,7 +616,7 @@ mod tests {
             .cedar;
         let mut output = Vec::new();
         ConnectScreen::of(
-            &[r#"permit (principal, action, resource);"#.to_string()],
+            &["permit (principal, action, resource);".to_string()],
             "not a schema",
             &served,
             &mut output,
