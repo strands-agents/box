@@ -1115,6 +1115,38 @@ class SandboxRefusals(unittest.TestCase):
         log = 'strands-box: error: `[tool.uvx]` filesystem entry "x" is refused: ...\n'
         self.assertEqual(len(rc.sandbox_refusals(log)), 1)
 
+    def test_a_coded_config_refusal_counts(self):
+        log = 'strands-box: error[B0102]: `[tool.uvx]` filesystem entry "x" is refused: ...\n'
+        self.assertEqual(len(rc.sandbox_refusals(log)), 1)
+
+    def test_an_alias_or_trampoline_refusal_counts(self):
+        for line in ("strands-box-sock-alias: error[H0302]: curl: Operation not permitted",
+                     "strands-box-contain-trampoline: error[H0401]: apply sandbox: Operation not permitted"):
+            with self.subTest(line=line):
+                self.assertEqual(rc.sandbox_refusals(line + "\n"), [line])
+
+    def test_a_coded_startup_note_does_not_count(self):
+        log = ("strands-box: note[B0201]: [agent] runs /bin/bash with no policy decision over these paths:\n"
+               "strands-box: warning[B0212]: [tool.x] write grant reaches its program\n")
+        self.assertEqual(rc.sandbox_refusals(log), [])
+
+    def test_a_coded_or_uncoded_startup_error_stops_the_run(self):
+        for line, stopped in (("strands-box: error[B0103]: policy load failed: x", True),
+                              ("strands-box: error: internal failure", True),
+                              ("box: error: no profile named x", True),
+                              ("strands-box: note[B0201]: [agent] runs /bin/bash", False),
+                              ("strands-box-sock-alias: error[H0301]: no ordinary executable for \"rg\"", False),
+                              ("strands-box-contain-trampoline: error[H0401]: apply sandbox: x", False),
+                              ("npm error: ENOENT", False)):
+            with self.subTest(line=line):
+                self.assertEqual(rc.startup_error("ok\n" + line + "\n"), line if stopped else "")
+
+    def test_the_error_reason_names_a_coded_line(self):
+        log = "npm notice\nstrands-box: error[B0102]: `[tool.python3]` filesystem entry \"/usr\" is refused\n"
+        self.assertEqual(rc.first_error(log), 'strands-box: error[B0102]: `[tool.python3]` filesystem entry "/usr" is refused')
+        self.assertEqual(rc.first_error("x\nnpm ERR! error: ENOENT\n"), "npm ERR! error: ENOENT")
+        self.assertEqual(rc.first_error("all good\n"), "")
+
     def test_the_agents_own_prose_does_not_count(self):
         # The agent narrating a refusal is not a box-authored line; the verdict must not read it.
         log = ("The box doesn't allow writes to that folder, so the tool failed with EPERM.\n"

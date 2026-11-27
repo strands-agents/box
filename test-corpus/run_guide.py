@@ -179,10 +179,15 @@ def run_cell(cell, box, agent, resources, env, out, timeout):
     cell_env.update(HOME=str(home), BOX_TELEMETRY="0", CLAUDE_CODE_USE_BEDROCK="1",
                     AWS_BEARER_TOKEN_BEDROCK=credential(env),
                     PATH=f"{Path(box).parent}{os.pathsep}{env.get('PATH', '')}")
+    shipped = None
     try:
         prepare(cell, home)
         prompt = prompt_for(cell, home)
         before, shipped = snapshot(home, AGENT_STATE), snapshot(resources)
+        # A copy of the shipped files, put back after the cell when the agent changed them, so the
+        # next cell reads the guide that ships.
+        backup = root / "resources"
+        shutil.copytree(resources, backup, symlinks=True)
         log = out / cell["id"]
         log.mkdir(parents=True, exist_ok=True)
         try:
@@ -192,13 +197,32 @@ def run_cell(cell, box, agent, resources, env, out, timeout):
                                           stdin=subprocess.DEVNULL, timeout=timeout).returncode
         except subprocess.TimeoutExpired:
             return ERROR, [f"the agent did not finish in {timeout} s"]
+        finally:
+            # The log is uploaded, so the model key the agent holds must not be in it.
+            key = cell_env["AWS_BEARER_TOKEN_BEDROCK"]
+            if key and (log / "agent.log").is_file():
+                text = (log / "agent.log").read_text(errors="replace")
+                (log / "agent.log").write_text(text.replace(key, "***"))
         show = subprocess.run([box, "profile", "show", "--full", cell.get("profile", "test")],
                               cwd=home / "project", env=cell_env, capture_output=True, text=True)
         (log / "show.txt").write_text(show.stdout + show.stderr)
         return grade(cell, agent_rc, show, changed(before, snapshot(home, AGENT_STATE)),
                      changed(shipped, snapshot(resources)))
     finally:
+        if shipped is not None and changed(shipped, snapshot(resources)):
+            restore(resources, root / "resources")
         shutil.rmtree(root, ignore_errors=True)
+
+
+def restore(resources, backup):
+    """Put the shipped files back as the backup holds them, in place, so the folder stays where
+    the box under test reads it."""
+    for entry in list(resources.iterdir()):
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+    shutil.copytree(backup, resources, symlinks=True, dirs_exist_ok=True)
 
 
 def credential(env):

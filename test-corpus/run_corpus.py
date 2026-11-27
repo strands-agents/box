@@ -248,6 +248,28 @@ def journal_path(log):
     m = re.search(r"\(records: (.+?)\)\s*$", log, re.M)
     return Path(m.group(1)) if m else None
 
+# The sources whose lines can report a sandbox refusal: Box Core's, apart from the policy engine and
+# telemetry, and the Shell's.
+SANDBOX_SOURCES = "(" + "|".join(map(re.escape, [s for s in judge.CORE_SOURCES
+                                                if s not in ("policy", "telemetry")]
+                                                + ["strands-shell"])) + ")"
+# A line where `box` or Box Core stops before the run starts: `<source>: error:`, or a coded
+# `strands-box: error[B0103]:`. An alias or trampoline error is about one request in a run that
+# went ahead, so it does not count.
+STARTUP_ERROR = re.compile(r"(strands-box|box): error(\[B[0-9]{4}\])?:")
+
+def startup_error(log):
+    """The first line where `box` or Box Core reports an error, or ''."""
+    return next((l.strip() for l in log.splitlines() if STARTUP_ERROR.match(l)), "")
+
+def first_error(log):
+    """The line that best says why a run did not happen: the first startup error, or else the first
+    line that holds `error:` or a coded `error[...]:`, or ''."""
+    stop = startup_error(log)
+    if stop:
+        return stop
+    return next((l.strip() for l in log.splitlines() if re.search(r"error(\[[A-Z][0-9]{4}\])?:", l, re.I)), "")
+
 def sandbox_refusals(log):
     """Box-authored refusal lines in a run's output, which the policy journal does not record.
 
@@ -271,10 +293,10 @@ def sandbox_refusals(log):
     prints plain text (Codex, or the bash agent) has no such split, so quoting a box line at the
     start of a line in its prose can trip the scan; an indented quote does not count.
     """
-    pattern = re.compile(r"^(strands-shell|strands-box):.*"
+    pattern = re.compile(rf"^{SANDBOX_SOURCES}:.*"
                          r"(Operation not permitted|EPERM|EACCES|Permission denied|"
                          r"is refused|denied by policy)")
-    tool_pattern = re.compile(r"^(strands-shell|strands-box):.*"
+    tool_pattern = re.compile(rf"^{SANDBOX_SOURCES}:.*"
                               r"(Operation not permitted|EPERM|is refused|denied by policy)")
     events, lines = judge.parse_stream(log or "")
     found = [line.strip() for line in lines if pattern.match(line)]
@@ -1037,13 +1059,13 @@ def feature_run(check, home, workspace, env, token, kiro, timeout, scrub):
     decisions = parse_journal(journal) if journal else []
     # The box copies the host's files and writes its journal before it starts the agent. So a box
     # that then fails to start the agent has a journal and a filled storage, and is not a run.
-    stopped = next((l.strip() for l in log.splitlines() if re.match(r"(strands-)?box[\w-]*: error:", l)), "")
+    stopped = startup_error(log)
     ran = bool(journal) and journal.exists() and not stopped
     storage = home / ".strands" / "box" / "storage" / FEATURE_PROFILE / "default" / "agent"
     failure = feature_failure(check, log, storage, workspace, home) if ran and not timed_out else ""
     verdict, reason = feature_verdict(ran, timed_out, failure)
     if verdict == "ERROR" and not ran:
-        first_err = stopped or next((l for l in log.splitlines() if "error:" in l.lower()), "")
+        first_err = stopped or first_error(log)
         reason = f"{reason}: {first_err.strip()[:160]}" if first_err else reason
     denials = [line.replace(str(home), "~") for line in deny_lines(decisions, workspace)]
     return dict(verdict=verdict, reason=reason, denials=denials, seconds=round(time.time() - t0),
@@ -1291,7 +1313,7 @@ def main():
         if verdict == "RED" and not denies and sandbox:
             why = (why + "; " if why else "") + f"sandbox refusal: {sandbox[0][:120]}"
         if verdict == "ERROR" and not decisions:
-            first_err = next((l for l in log.splitlines() if "error:" in l.lower()), "")
+            first_err = first_error(log)
             why = f"{why}: {first_err.strip()[:160]}" if first_err else why
         return dict(id=cid, verdict=verdict, reason=why, denies=len(denies), permits=permits,
                     seconds=secs, rules=sorted({r for (r, _) in denies}),
