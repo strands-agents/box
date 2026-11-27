@@ -83,6 +83,7 @@ fn a_catch_all_permit_loads_and_grants_what_it_says() {
                     host: "api.example.com",
                     ip: None,
                     port: 443,
+                    enrichment: &policy::EnrichmentFacts::NONE,
                 },
             )
             .0

@@ -2194,6 +2194,7 @@ done"#;
                 text: policy.to_string(),
             }],
             grammars,
+            &policy::EnrichmentNames::default(),
             file,
             database,
         )

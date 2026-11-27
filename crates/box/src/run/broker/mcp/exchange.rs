@@ -1582,6 +1582,7 @@ done"#
                     host: "probe.example",
                     ip: None,
                     port: 443,
+                    enrichment: &policy::EnrichmentFacts::NONE,
                 },
             );
             assert!(before_alpha.is_allow(), "beta must not complete alpha: {before_alpha:?}");

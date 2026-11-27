@@ -109,15 +109,27 @@ Each outbound call is two decisions, both of which must permit.
 | `port` | Long | The destination port. |
 | `ip4?` | String | The IPv4 address the gateway connects to, as a dotted quad, such as `"203.0.113.7"`. Present for an IPv4 destination, and for an IPv6 destination that carries an IPv4 address in a wrapping Box recognises. |
 | `ip6?` | String | The IPv6 address the gateway connects to, as text, compressed and in lowercase, such as `"64:ff9b::cb00:7107"`. Present for every IPv6 destination, and absent for an IPv4 one. |
+| `enrichment` | Record | What each classification source answered about `host`: one entry for each [`[enrichment.<name>]`](../config.md#enrichmentname) table, as `enrichment.<name>`. Present only in a box that declares a table, and then on every `net:connect`. |
+| `enrichment.<name>.answered` | Bool | `true` when the source answered about the host. `false` when it gave no answer in time or failed, and when Box did not ask it, as for an IP address. [Ask a classification source about each host](../egress.md#ask-a-classification-source-about-each-host) lists when Box asks. |
+| `enrichment.<name>.labels` | Set of String | The labels the source gave, from the table's `outputs`, each at `min_confidence` or above. Empty when `answered` is `false`. |
 
-Both are absent before resolution, on the decision for the host. A destination that arrives wrapped
-carries both: dialling `64:ff9b::cb00:7107` gives `ip4 = "203.0.113.7"` and
+`ip4` and `ip6` are absent before resolution, on the decision for the host. A destination that
+arrives wrapped carries both: dialling `64:ff9b::cb00:7107` gives `ip4 = "203.0.113.7"` and
 `ip6 = "64:ff9b::cb00:7107"`. A plain IPv4 destination carries `ip4` alone, because one IPv4 address
 has many IPv6 encodings and there is no single IPv6 form to report.
 
 Compare either as a String behind its own guard, as
 `context.input has ip4 && context.input.ip4 == "203.0.113.7"`. An `ipaddr` comparison refuses to load
 with `expected ipaddr but saw String`.
+
+`enrichment` holds the same answer on the decision for the host and on the decision for each
+address. A rule reads an entry
+as `context.input.enrichment.threat.labels.contains("malware")` or
+`context.input.enrichment.threat.answered`, with no guard. A rule that reads an entry no table
+declares refuses to load, and so does a policy in which a rule reads an entry's `labels` and no rule
+reads its `answered`. [Rules on a classification answer](../policy.md#rules-on-a-classification-answer)
+shows the rule pair. `policy generate-schema` writes `enrichment` into the `net:connect` input of
+`actions.cedarschema`, with one entry for each table its `--config` declares.
 
 **`http:request`**, once per request inside the connection, after TLS on an HTTPS connection:
 
@@ -304,6 +316,11 @@ A `when temporal { … }` clause reads recorded events. The box records three ev
 | `A::request` | Every submitted decision, permitted or denied | `requestId` and the action's `input` fields |
 | `A::response` | The operation ended, or its end is `indeterminate` | `requestId`, the `input` fields, and `output` when available |
 | `A::error` | The operation did not happen | `requestId` and the `input` fields |
+
+In a box that declares an [`[enrichment.<name>]`](../config.md#enrichmentname) table, each
+`net:connect` event carries `enrichment` among its `input` fields, on `::request`, `::response`,
+and `::error` alike. A predicate matches an unanswered host as
+`Box::Action::"net:connect"::request{ input.enrichment.threat.answered: false }`.
 
 `requestId` is a nonempty string that identifies one policy request within this box's history.
 Its recorded response or error carries the same identifier. Separate requests receive separate identifiers, even when their inputs are identical.

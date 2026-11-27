@@ -293,6 +293,7 @@ fn an_absent_policy_still_denies_in_log_only_mode() {
         host: "169.254.169.254",
         ip: None,
         port: 80,
+        enrichment: &policy::EnrichmentFacts::NONE,
     };
     let (decision, _) = engine.decide(
         &GovernedBox::assigned("test-box"),
@@ -332,6 +333,7 @@ fn a_reload_to_no_policy_stops_letting_denials_through() {
         host: "example.com",
         ip: None,
         port: 443,
+        enrichment: &policy::EnrichmentFacts::NONE,
     };
     let governed = GovernedBox::assigned("test-box");
     let (before, _) = engine.decide(&governed, &Principal::agent(), &connect);

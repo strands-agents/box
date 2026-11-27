@@ -25,8 +25,10 @@ use crate::check::{Finding, Refused, RuleRef, annotated_id};
 use crate::error::{PolicyError, PolicyStagingError};
 use crate::outcome::Delivery;
 use crate::request::{ActionRequest, Principal, Request, RequestId};
+#[cfg(test)]
+use crate::schema::SCHEMA_SRC;
 use crate::schema::{
-    AGENT_TYPE, ActionIdentity, ActionSchema, GovernedBox, RESOURCE_TYPE, SCHEMA_SRC,
+    AGENT_TYPE, ActionIdentity, ActionSchema, GovernedBox, RESOURCE_TYPE, SchemaBase,
     UNUSED_RESOURCE_ID, action, action_schema, attr, composed_action_schema, mcp_tool_action,
 };
 use crate::spelling::{Operator, PolicyWarning};
@@ -81,6 +83,9 @@ pub(crate) struct DogwoodEngine {
     tool_inputs: crate::mcp_input::ToolInputs,
     /// Outcome events the history refused, recorded before the next decision.
     pending_outcomes: Mutex<Vec<EventBuilder>>,
+    /// What the installed rules decide about a `net:connect` before any enrichment entry answers,
+    /// kept only once [`Self::screen_connects`] asks for it.
+    screen: Option<crate::enrichment::ConnectScreen>,
     #[cfg(test)]
     fixed_clock: Option<Arc<AtomicI64>>,
 }
@@ -304,27 +309,33 @@ impl DogwoodEngine {
         history: &Path,
         operator: &Operator,
     ) -> Result<(Self, Vec<PolicyWarning>), PolicyError> {
-        Self::open_with_schemas(source, &[], mcp_schemas, history, operator)
+        Self::open_with_schemas(
+            source,
+            &SchemaBase::default(),
+            mcp_schemas,
+            history,
+            operator,
+        )
     }
 
-    /// Open durable history and install sources against canonical, tool grammar, and MCP schemas.
+    /// Open durable history and install sources against one box's base and MCP schemas.
     pub(crate) fn open_with_schemas(
         source: &str,
-        grammar_schemas: &[String],
+        base: &SchemaBase,
         mcp_schemas: &[String],
         history: &Path,
         operator: &Operator,
     ) -> Result<(Self, Vec<PolicyWarning>), PolicyError> {
-        let effective_schema = composed_action_schema(grammar_schemas, mcp_schemas)?;
+        let effective_schema = composed_action_schema(base, mcp_schemas)?;
         let (canonical_policies, effective_schema, warnings) =
             check_against(source, effective_schema, operator, true, &[])
                 .map_err(Refused::into_error)?;
-        let fragments: Vec<String> = grammar_schemas.iter().chain(mcp_schemas).cloned().collect();
         let mut engine = open_history(history, durable_config()).map_err(durable_history_error)?;
         reconcile_policy_set(
             &mut engine,
             &canonical_policies,
-            &fragments,
+            base,
+            mcp_schemas,
             &effective_schema.source,
         )?;
 
@@ -337,6 +348,7 @@ impl DogwoodEngine {
                 tool_actions: effective_schema.tool_actions,
                 tool_inputs: effective_schema.tool_inputs,
                 pending_outcomes: Mutex::new(Vec::new()),
+                screen: None,
                 #[cfg(test)]
                 fixed_clock: None,
             },
@@ -412,6 +424,7 @@ impl DogwoodEngine {
             tool_actions,
             tool_inputs,
             pending_outcomes: Mutex::new(Vec::new()),
+            screen: None,
             #[cfg(test)]
             fixed_clock: None,
         })
@@ -503,6 +516,14 @@ impl DogwoodEngine {
         reconcile_staged_policy_set(&mut engine, canonical_policies, installed_schema)?;
         self.rule_ids = rule_ids(&engine);
         drop(engine);
+        if self.screen.is_some() {
+            self.screen = Some(crate::enrichment::ConnectScreen::of(
+                canonical_policies,
+                installed_schema,
+                &request_schema.cedar,
+                diagnostics::stderr(),
+            ));
+        }
         self.request_schema = request_schema.cedar;
         self.tool_actions = request_schema.tool_actions;
         self.tool_inputs = request_schema.tool_inputs;
@@ -547,6 +568,7 @@ impl DogwoodEngine {
         reconcile_policy_set(
             &mut engine,
             &canonical_policies,
+            &SchemaBase::default(),
             &[],
             &effective_schema.source,
         )?;
@@ -559,6 +581,7 @@ impl DogwoodEngine {
             tool_actions: effective_schema.tool_actions,
             tool_inputs: effective_schema.tool_inputs,
             pending_outcomes: Mutex::new(Vec::new()),
+            screen: None,
             fixed_clock: None,
         })
     }
@@ -591,6 +614,7 @@ impl DogwoodEngine {
         reconcile_policy_set(
             &mut engine,
             &canonical_policies,
+            &SchemaBase::default(),
             mcp_schemas,
             &effective_schema.source,
         )?;
@@ -603,6 +627,7 @@ impl DogwoodEngine {
             tool_actions: effective_schema.tool_actions,
             tool_inputs: effective_schema.tool_inputs,
             pending_outcomes: Mutex::new(Vec::new()),
+            screen: None,
             fixed_clock: Some(now),
         })
     }
@@ -622,6 +647,28 @@ impl DogwoodEngine {
             let _guard = self.engine.lock().expect("scope is not yet poisoned");
             panic!("simulated Dogwood scope panic");
         }));
+    }
+
+    /// Keep, from the next install on, what the installed rules decide about a `net:connect` before
+    /// any enrichment entry answers, which a box whose rules read no entry never needs.
+    pub(crate) fn screen_connects(&mut self) {
+        self.screen = Some(crate::enrichment::ConnectScreen::default());
+    }
+
+    /// Whether the installed rules refuse the `net:connect` `request` whatever any enrichment entry
+    /// answers, decided with no history event.
+    #[cfg(feature = "egress-adapter")]
+    pub(crate) fn refuses_whatever_answered(
+        &self,
+        principal: &Principal,
+        request: &Request<'_>,
+    ) -> bool {
+        let Some(screen) = &self.screen else {
+            return false;
+        };
+        matches!(request, Request::Connect { .. })
+            && crate::schema::to_unbound_cedar_request(principal, request, &self.request_schema)
+                .is_ok_and(|request| screen.refuses(&request))
     }
 
     /// Decide one request at the current point in history.
@@ -750,9 +797,28 @@ impl DogwoodEngine {
         request_id: &RequestId,
         outcome: &Outcome<'_>,
     ) -> Result<(), PolicyError> {
+        self.observe_connect_outcome(
+            governed,
+            principal,
+            request_id,
+            outcome,
+            &crate::EnrichmentFacts::NONE,
+        )
+    }
+
+    /// Submit one completed effect as history, with the enrichment facts a `net:connect` decision
+    /// read.
+    pub(crate) fn observe_connect_outcome(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request_id: &RequestId,
+        outcome: &Outcome<'_>,
+        enrichment: &crate::EnrichmentFacts,
+    ) -> Result<(), PolicyError> {
         self.verify_request_id(request_id)?;
         self.record_outcome(with_request_id(
-            outcome_event(governed, principal, outcome),
+            outcome_event(governed, principal, outcome, enrichment),
             request_id,
         ))
     }
@@ -1056,11 +1122,14 @@ fn decides_only_tools(scope: &dogwood_language::PolicyScope) -> bool {
     }
 }
 
-/// Parse and macro-expand a source bundle, and run each check on a read of `context.input` that
-/// needs no MCP action schema.
-pub(crate) fn validate_staged_source(source: &str) -> Result<(), PolicyError> {
+/// Parse and macro-expand a source bundle, and run each check against `base` that needs no MCP
+/// action schema: the reads of `context.input`, and the reads of each enrichment entry.
+pub(crate) fn validate_staged_source(source: &str, base: &SchemaBase) -> Result<(), PolicyError> {
     let expanded = parse_policy_source(source)?;
-    refuse_input_reads_before_discovery(&expanded).map_err(Refused::into_error)
+    refuse_input_reads_before_discovery(&expanded, base).map_err(Refused::into_error)?;
+    crate::enrichment::read_entries(&expanded, base)
+        .map(drop)
+        .map_err(Refused::into_error)
 }
 
 /// The conditions of one macro-expanded rule, as the engine's own parsed tree rather than its
@@ -1107,9 +1176,13 @@ pub(crate) fn rule_conditions(expanded: &str) -> Vec<serde_json::Value> {
 /// for a tool schema, must not hide another rule's refusal. A rule whose own condition does not
 /// lower still has its action list judged, because the list needs only the head, and a rule whose
 /// head cannot be read is refused.
-pub(crate) fn refuse_input_reads_before_discovery(expanded: &[String]) -> Result<(), Refused> {
-    let policy_schema = PolicySchema::from_cedarschema_str(&action_schema(&[])?.source)
-        .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
+pub(crate) fn refuse_input_reads_before_discovery(
+    expanded: &[String],
+    base: &SchemaBase,
+) -> Result<(), Refused> {
+    let policy_schema =
+        PolicySchema::from_cedarschema_str(&composed_action_schema(base, &[])?.source)
+            .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
     let service = service_schema()?;
     let lower = |text: &str| {
         dogwood_language::ParsedPolicySet::parse(text, &service)
@@ -1201,7 +1274,7 @@ fn rule_head(rendered: &str) -> Option<String> {
 }
 
 /// A rendered rule with each `temporal { … }` expression replaced by `true`.
-fn without_temporal(rendered: &str) -> String {
+pub(crate) fn without_temporal(rendered: &str) -> String {
     const KEYWORD: &str = "temporal";
     let bytes = rendered.as_bytes();
     let mut out = String::with_capacity(rendered.len());
@@ -1282,51 +1355,40 @@ fn block_end(bytes: &[u8], open: usize) -> Option<usize> {
 /// are the authored rules in order.
 pub(crate) fn validate_canonical_policy_set(
     canonical_policies: &[String],
-    grammar_schemas: &[String],
+    base: &SchemaBase,
     mcp_schemas: &[String],
     operator: &Operator,
     positions: &[usize],
 ) -> Result<(ActionSchema, Vec<PolicyWarning>), PolicyError> {
-    check_canonical_policy_set(
-        canonical_policies,
-        grammar_schemas,
-        mcp_schemas,
-        operator,
-        positions,
-    )
-    .map_err(Refused::into_error)
+    check_canonical_policy_set(canonical_policies, base, mcp_schemas, operator, positions)
+        .map_err(Refused::into_error)
 }
 
 /// Strict-validate canonical policy statements, keeping the findings of a refusal.
 pub(crate) fn check_canonical_policy_set(
     canonical_policies: &[String],
-    grammar_schemas: &[String],
+    base: &SchemaBase,
     mcp_schemas: &[String],
     operator: &Operator,
     positions: &[usize],
 ) -> Result<(ActionSchema, Vec<PolicyWarning>), Refused> {
     let source = canonical_policies.join("\n");
-    check_and_expand(
-        &source,
-        grammar_schemas,
-        mcp_schemas,
-        operator,
-        false,
-        positions,
-    )
-    .map(|(_, schema, warnings)| (schema, warnings))
+    check_and_expand(&source, base, mcp_schemas, operator, false, positions)
+        .map(|(_, schema, warnings)| (schema, warnings))
 }
 
-/// Strict-validate authored `source` against the canonical, tool grammar, and MCP schemas.
+/// Strict-validate authored `source` against one box's base and MCP schemas, and refuse a read of
+/// an entry's labels that no rule pairs with a read of its answer.
 pub(crate) fn validate_with_schemas(
     source: &str,
-    grammar_schemas: &[String],
+    base: &SchemaBase,
     mcp_schemas: &[String],
     operator: &Operator,
 ) -> Result<Vec<PolicyWarning>, PolicyError> {
-    check_and_expand(source, grammar_schemas, mcp_schemas, operator, true, &[])
-        .map(|(_, _, warnings)| warnings)
-        .map_err(Refused::into_error)
+    let (expanded, _, warnings) = check_and_expand(source, base, mcp_schemas, operator, true, &[])
+        .map_err(Refused::into_error)?;
+    crate::enrichment::read_entries(&expanded, base).map_err(Refused::into_error)?;
+    Ok(warnings)
 }
 
 /// Parse and validate a bundle before the durable engine installs it.
@@ -1335,13 +1397,21 @@ fn validate_and_expand(
     mcp_schemas: &[String],
     operator: &Operator,
 ) -> Result<(Vec<String>, crate::schema::ActionSchema, Vec<PolicyWarning>), PolicyError> {
-    check_and_expand(source, &[], mcp_schemas, operator, true, &[]).map_err(Refused::into_error)
+    check_and_expand(
+        source,
+        &SchemaBase::default(),
+        mcp_schemas,
+        operator,
+        true,
+        &[],
+    )
+    .map_err(Refused::into_error)
 }
 
 /// Parse and validate a bundle, keeping the findings of a refusal, located when `source` is authored.
 pub(crate) fn check_and_expand(
     source: &str,
-    grammar_schemas: &[String],
+    base: &SchemaBase,
     mcp_schemas: &[String],
     operator: &Operator,
     authored: bool,
@@ -1352,7 +1422,7 @@ pub(crate) fn check_and_expand(
     // filesystem call ~1.5ms of schema parsing. Startup is where blocking work
     // belongs; a parse fault also becomes a load error rather than a first-request
     // deny.
-    let effective_schema = composed_action_schema(grammar_schemas, mcp_schemas)?;
+    let effective_schema = composed_action_schema(base, mcp_schemas)?;
     check_against(source, effective_schema, operator, authored, positions)
 }
 
@@ -1511,19 +1581,16 @@ fn refuse_unrecorded_mcp_errors(
 ) -> Result<(), Refused> {
     let mut findings = Vec::new();
     for policy in parsed.policies() {
-        let mut predicates = Vec::new();
+        let mut named: Vec<String> = Vec::new();
         for condition in policy.temporal_conditions() {
-            predicate_events(condition, &mut predicates);
+            visit_predicates(condition, &mut |predicate| {
+                let (namespace, action, kind) =
+                    (&predicate.namespace, &predicate.action, &predicate.kind);
+                if kind == KIND_ERROR && is_mcp_event(namespace, action) {
+                    named.push(format!("{}::{action:?}::{kind}", namespace.join("::")));
+                }
+            });
         }
-        let mut named: Vec<String> = predicates
-            .into_iter()
-            .filter(|(namespace, action, kind)| {
-                kind == KIND_ERROR && is_mcp_event(namespace, action)
-            })
-            .map(|(namespace, action, kind)| {
-                format!("{}::{action:?}::{kind}", namespace.join("::"))
-            })
-            .collect();
         named.dedup();
         if named.is_empty() {
             continue;
@@ -1556,7 +1623,7 @@ fn refuse_unrecorded_mcp_errors(
 }
 
 /// A parsed rule's name as `spelling::rule_name` spells it, read from its canonical source.
-fn parsed_rule_name(source: &str, id: Option<&str>) -> String {
+pub(crate) fn parsed_rule_name(source: &str, id: Option<&str>) -> String {
     if let Some(id) = id {
         return format!("rule @id(\"{id}\")");
     }
@@ -1681,21 +1748,25 @@ fn is_mcp_event(namespace: &[String], action: &str) -> bool {
     }
 }
 
-/// Collect the namespace, action, and kind of every predicate in a temporal condition.
-fn predicate_events(
+/// Call `visit` with every predicate in a temporal condition, including each one inside an
+/// aggregate.
+pub(crate) fn visit_predicates<Visit: FnMut(&dogwood_language::temporal_ast::Predicate)>(
     condition: &dogwood_language::temporal_ast::Condition,
-    out: &mut Vec<(Vec<String>, String, String)>,
+    visit: &mut Visit,
 ) {
     use dogwood_language::temporal_ast::{AggExprKind, ConditionKind, Term};
-    fn term_events(term: &Term, out: &mut Vec<(Vec<String>, String, String)>) {
+    fn term_events<Visit: FnMut(&dogwood_language::temporal_ast::Predicate)>(
+        term: &Term,
+        visit: &mut Visit,
+    ) {
         match term {
             Term::Agg(aggregate) => match &aggregate.kind {
                 AggExprKind::Sum { body, .. } | AggExprKind::Count { body, .. } => {
-                    predicate_events(body, out);
+                    visit_predicates(body, visit);
                 }
                 AggExprKind::Call(_) => {}
             },
-            Term::Array(items) => items.iter().for_each(|item| term_events(item, out)),
+            Term::Array(items) => items.iter().for_each(|item| term_events(item, visit)),
             _ => {}
         }
     }
@@ -1703,27 +1774,23 @@ fn predicate_events(
         ConditionKind::And { left, right }
         | ConditionKind::Or { left, right }
         | ConditionKind::Since { left, right, .. } => {
-            predicate_events(left, out);
-            predicate_events(right, out);
+            visit_predicates(left, visit);
+            visit_predicates(right, visit);
         }
         ConditionKind::Not { inner: body }
         | ConditionKind::Formerly { body, .. }
         | ConditionKind::Previous { body, .. }
         | ConditionKind::Exists { body, .. }
-        | ConditionKind::Refine { base: body, .. } => predicate_events(body, out),
+        | ConditionKind::Refine { base: body, .. } => visit_predicates(body, visit),
         ConditionKind::Predicate(predicate) => {
-            out.push((
-                predicate.namespace.clone(),
-                predicate.action.clone(),
-                predicate.kind.clone(),
-            ));
+            visit(predicate);
             for argument in &predicate.args {
-                term_events(&argument.value, out);
+                term_events(&argument.value, visit);
             }
         }
         ConditionKind::Comparison { left, right, .. } => {
-            term_events(left, out);
-            term_events(right, out);
+            term_events(left, visit);
+            term_events(right, visit);
         }
         ConditionKind::Tp { .. } | ConditionKind::Call(_) | ConditionKind::SigilRef { .. } => {}
     }
@@ -2045,13 +2112,15 @@ const EMPTY_POLICY_SOURCE: &str = "";
 fn reconcile_policy_set(
     engine: &mut DurableTemporalEngine,
     canonical_policies: &[String],
+    base: &SchemaBase,
     mcp_schemas: &[String],
     effective_schema: &str,
 ) -> Result<(), PolicyError> {
+    let actions = base.actions()?;
     let installed = !engine.has_policy();
     if installed {
         engine
-            .install(EMPTY_POLICY_SOURCE, SCHEMA_SRC, Some(EVENTS_DWSCHEMA), None)
+            .install(EMPTY_POLICY_SOURCE, &actions, Some(EVENTS_DWSCHEMA), None)
             .map_err(durable_history_error)?;
     }
 
@@ -2065,12 +2134,13 @@ fn reconcile_policy_set(
     if engine.action_schema().as_deref() != Some(effective_schema) {
         if !installed {
             changes.push(Verb::SetActionSchema {
-                action_schema: SCHEMA_SRC.to_string(),
+                action_schema: actions.into_owned(),
             });
         }
         changes.extend(
-            mcp_schemas
+            base.grammars
                 .iter()
+                .chain(mcp_schemas)
                 .cloned()
                 .map(|fragment| Verb::AppendActionSchema { fragment }),
         );
@@ -2241,10 +2311,16 @@ fn outcome_event(
     governed: &GovernedBox,
     principal: &Principal,
     outcome: &Outcome<'_>,
+    enrichment: &crate::EnrichmentFacts,
 ) -> EventBuilder {
     let action = outcome_action_id(outcome);
     let builder = Event::builder_for(FIXED_ACTION_NAMESPACE, action, outcome_kind(outcome));
-    let builder = with_fields(builder, governed, principal, outcome_fields(outcome));
+    let builder = with_fields(
+        builder,
+        governed,
+        principal,
+        outcome_fields(outcome, enrichment),
+    );
     with_output_fields(builder, output_fields(outcome))
 }
 
@@ -2354,7 +2430,12 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
                 (attr::OPERATION, fs_operation_value(*operation)),
             ]
         }
-        Request::Connect { host, ip, port } => {
+        Request::Connect {
+            host,
+            ip,
+            port,
+            enrichment,
+        } => {
             let mut fields = vec![
                 (attr::HOST, Value::String((*host).to_string())),
                 (attr::PORT, Value::Int(i64::from(*port))),
@@ -2362,6 +2443,7 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
             if let Some(ip) = ip {
                 fields.extend(address_fields(*ip));
             }
+            fields.extend(enrichment_field(enrichment));
             fields
         }
         Request::Http {
@@ -2439,6 +2521,30 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
     }
 }
 
+/// The `enrichment` record of a box that declares entries, mirroring [`crate::schema`]'s Cedar
+/// mapping.
+fn enrichment_field(facts: &crate::EnrichmentFacts) -> Option<(&'static str, Value)> {
+    (!facts.is_empty()).then(|| {
+        let entries = facts
+            .iter()
+            .map(|(name, answer)| {
+                let entry = BTreeMap::from([
+                    (
+                        crate::enrichment::ANSWERED.to_string(),
+                        Value::Bool(answer.is_answered()),
+                    ),
+                    (
+                        crate::enrichment::LABELS.to_string(),
+                        Value::Array(answer.labels().iter().cloned().map(Value::String).collect()),
+                    ),
+                ]);
+                (name.to_string(), Value::Object(entry))
+            })
+            .collect();
+        (crate::enrichment::ENRICHMENT, Value::Object(entries))
+    })
+}
+
 /// The address fields of one pinned destination, mirroring [`crate::schema`]'s Cedar mapping.
 ///
 /// Both legs of a `net:connect` go through it, so a rule on `ip4` or `ip6` reads the same set on
@@ -2478,8 +2584,11 @@ fn credential_read_fields(paths: &[String]) -> Vec<(&'static str, Value)> {
     }
 }
 
-/// The `input` fields of a response or error event.
-fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
+/// The `input` fields of a response or error event, and a connect's `enrichment` facts.
+fn outcome_fields(
+    outcome: &Outcome<'_>,
+    enrichment: &crate::EnrichmentFacts,
+) -> Vec<(&'static str, Value)> {
     match outcome {
         // Whether the socket opened is carried by the event KIND (`response` vs `error`).
         Outcome::Connect {
@@ -2493,6 +2602,7 @@ fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
                 (attr::PORT, Value::Int(i64::from(*port))),
             ];
             fields.extend(address_fields(address.ip()));
+            fields.extend(enrichment_field(enrichment));
             fields
         }
         Outcome::Http {
@@ -2697,7 +2807,7 @@ when temporal {
         let history = tempfile::tempdir().expect("history directory");
         let (engine, _) = DogwoodEngine::open_with_schemas(
             "permit (principal, action, resource);",
-            &[grammar.schema()],
+            &SchemaBase::of_grammars(vec![grammar.schema()]),
             &[],
             &history.path().join("dogwood.redb"),
             &Operator::unanchored(),
@@ -2808,7 +2918,7 @@ when temporal {
         let open = |fragment: &str, path: &Path| {
             DogwoodEngine::open_with_schemas(
                 source,
-                &[fragment.to_string()],
+                &SchemaBase::of_grammars(vec![fragment.to_string()]),
                 &[],
                 path,
                 &Operator::unanchored(),
@@ -4361,11 +4471,13 @@ when temporal {{
 
         faults.arm(FaultPoint::CheckpointBeforePrune);
         let worker = std::thread::spawn(move || {
-            let result = reconcile_policy_set(&mut engine, &policies, &[], &schema.source)
+            let base = SchemaBase::default();
+            let result = reconcile_policy_set(&mut engine, &policies, &base, &[], &schema.source)
                 .and_then(|()| {
                     reconcile_policy_set(
                         &mut engine,
                         &changed_policies,
+                        &base,
                         &[],
                         &changed_schema.source,
                     )
@@ -4374,6 +4486,7 @@ when temporal {{
                     reconcile_policy_set(
                         &mut engine,
                         &changed_policies,
+                        &base,
                         &[],
                         &changed_schema.source,
                     )
@@ -4575,9 +4688,13 @@ mod authored_positions {
             r#"@id("x") permit (principal, action == Box::Action::"fs:write", resource);"#
                 .to_string(),
         ];
-        let Err(refused) =
-            check_canonical_policy_set(&subset, &[], &[], &Operator::unanchored(), &[3, 7])
-        else {
+        let Err(refused) = check_canonical_policy_set(
+            &subset,
+            &SchemaBase::default(),
+            &[],
+            &Operator::unanchored(),
+            &[3, 7],
+        ) else {
             panic!("one @id on two rules must refuse");
         };
         assert!(
@@ -4603,8 +4720,11 @@ mod rule_heads {
 
     #[test]
     fn a_rule_whose_head_cannot_be_read_is_refused_not_skipped() {
-        let error = refuse_input_reads_before_discovery(&["not a rule".to_string()])
-            .expect_err("a rule with no readable head must be refused");
+        let error = refuse_input_reads_before_discovery(
+            &["not a rule".to_string()],
+            &SchemaBase::default(),
+        )
+        .expect_err("a rule with no readable head must be refused");
         let message = error.into_error().to_string();
         assert!(
             message.contains("rule 1 cannot be inspected at load"),
@@ -4615,8 +4735,9 @@ mod rule_heads {
     #[test]
     fn a_rule_whose_condition_alone_does_not_lower_keeps_its_head() {
         let rule = r#"@id("r") forbid(principal, action in [Box::Action::"fs:read", svc::Action::"x"], resource) when { context.input.x.unsupported() };"#;
-        let error = refuse_input_reads_before_discovery(&[rule.to_string()])
-            .expect_err("the mixed list is refused from the head");
+        let error =
+            refuse_input_reads_before_discovery(&[rule.to_string()], &SchemaBase::default())
+                .expect_err("the mixed list is refused from the head");
         assert!(matches!(
             error.into_error(),
             PolicyError::MixedActionNamespaces(_)

@@ -25,11 +25,15 @@ fn open(source: &str) -> Result<PolicyEngine, PolicyError> {
     }])
 }
 
+/// The facts of a box that declares no enrichment entry.
+static NO_ENRICHMENT: policy::EnrichmentFacts = policy::EnrichmentFacts::NONE;
+
 fn connect() -> Request<'static> {
     Request::Connect {
         host: "example.com",
         ip: None,
         port: 443,
+        enrichment: &NO_ENRICHMENT,
     }
 }
 

@@ -58,8 +58,12 @@ Each box runs exactly one policy engine, inside its own trusted process, and eve
 engine. See [a box has exactly one policy engine](decisions.md#one-policy-engine-per-box). One
 engine means one history, so a rule can make a network decision depend on something the workload
 read through Strands Shell. With two engines, that rule would load in both and match in neither.
-Every decision runs in-process, behind one lock, with no network call. See [every decision is local
-and in-process](decisions.md#every-decision-is-local-and-in-process). The engine itself is the
+Every decision runs in-process, behind one lock, and the engine makes no network call. The one
+outside call is an `[enrichment.<name>]` classification source, which Box asks about a DNS name
+before the first `net:connect` decision on a host, when the answer can change that decision. Its
+answer reaches the engine as a fact on the request. See
+[every decision is local, and an enrichment source is the one outside
+call](decisions.md#every-decision-is-local-and-in-process). The engine itself is the
 published Dogwood engine, pinned to an exact version, and everything Box adds around it sits behind
 one facade. See [the policy crate exposes one
 facade](decisions.md#the-policy-crate-exposes-one-facade).
@@ -211,7 +215,10 @@ leave the other two out. A shell response carries the command's exit status as `
 a command that a signal killed records 128 plus the signal number, so a rule can require a passing
 test before it permits a commit. A connect that definitely failed is a `::error`, and one that may
 have opened a socket is a `::response`, so a rule can count failed connects, and a cap on connects
-still counts the uncertain ones.
+still counts the uncertain ones. In a box that declares `[enrichment.<name>]` tables, all three
+`net:connect` events carry the `input.enrichment` record that the decision read, so a history rule
+can count unanswered hosts on any of them. See [classification before the host
+decision](egress.md#classification-before-the-host-decision).
 
 For an HTTP request, the gateway records accepted request bytes and any received status when the
 upstream response completes, fails, or reaches its deadline. HTTP MCP calls record their outcome at
@@ -348,6 +355,19 @@ of mixed types, so the rule would stay pending until discovery finishes and then
 other arms would go unenforced. It also
 refuses a temporal predicate on `mcp:call::error` or a per-tool `::error`, because an MCP call records only
 `::response`.
+
+A box that declares `[enrichment.<name>]` tables gives `net:connect` a required `enrichment` record
+with one entry for each table, and a box that declares none composes the shipped schema unchanged.
+Strict validation therefore refuses a rule that reads an entry no table declares, and the loader
+refuses it as well, so a box with an MCP server, which validates before its tool schemas arrive,
+refuses it at configuration too. The loader also refuses a policy in which a rule reads an entry's
+`labels` and no rule reads its `answered`, in a condition or in a `when temporal` clause. A host the
+source gave no answer about carries no labels, so a `forbid` on a label alone would let it through.
+The loader checks only that some rule reads `answered`, not what that rule does with it, so what an
+unanswered host means stays the operator's rule. The configuration check, the library's
+`check_policy`, and opening the engine refuse it alike. The
+set of entries the rules read decides which sources Box asks, and the startup disclosure names them,
+so a reload whose rules read a different set is refused and the box must restart to change it.
 
 The `run` verb validates the policy before it writes any box state. A box with no local MCP server
 validates against the complete action schema. Passing this check confirms the policy text;

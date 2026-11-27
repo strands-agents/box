@@ -178,6 +178,7 @@ impl ConfigError {
             | Self::ToolSelection { .. }
             | Self::Mcp { .. }
             | Self::Telemetry { .. }
+            | Self::Enrichment { .. }
             | Self::Workspace { .. }
             | Self::Read { .. }
             | Self::Parse { .. }
@@ -462,6 +463,11 @@ pub(crate) enum ConfigError {
     /// silently drops records is worse than one an operator knows is absent.
     #[error("invalid `[telemetry.{name}]` target: {reason}")]
     Telemetry { name: String, reason: String },
+
+    /// Refused before any DNS name leaves the box: when the table loads, or when `run` opens its
+    /// source after the box record exists.
+    #[error("`[enrichment.{name}]` {reason}")]
+    Enrichment { name: String, reason: String },
 
     #[error("cannot settle the project this box belongs to: {reason}")]
     Workspace { reason: String },

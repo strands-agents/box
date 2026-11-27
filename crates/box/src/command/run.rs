@@ -233,6 +233,34 @@ fn write_log_only_disclosure(
     Ok(())
 }
 
+/// Disclose each declared enrichment entry: which DNS names leave the box for its source, or that
+/// none do because no rule reads it.
+fn write_enrichment_disclosures(
+    record: &Record,
+    read: &std::collections::BTreeSet<String>,
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    for (name, entry) in &record.enrichment {
+        if read.contains(name) {
+            ::diagnostics::diag!(
+                into output,
+                B0215,
+                "[enrichment.{name}] sends its classification source (kind {:?}) the DNS name of \
+                 each host the workload connects to, before policy decides the connection, \
+                 unless policy refuses the host whatever the source answers.",
+                entry.kind
+            )?;
+        } else {
+            ::diagnostics::diag!(
+                into output,
+                B0215,
+                "[enrichment.{name}] is unused: no rule reads it, so Box sends it no DNS name."
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Disclose each telemetry target that receives MCP tool-call values in clear text.
 fn write_tool_call_disclosures(
     record: &Record,
@@ -406,6 +434,7 @@ async fn hosted(
         &operator,
         sources,
         locked.grammars,
+        &locked.record.enrichment_names()?,
         enforcement,
     ) {
         Ok(engine) => {
@@ -490,6 +519,12 @@ async fn hosted(
         .map_err(|source| ConfigError::Disclosure { source })?;
     write_log_only_disclosure(enforcement, ::diagnostics::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;
+    write_enrichment_disclosures(
+        &locked.record,
+        policy.read_enrichment(),
+        ::diagnostics::stderr().lock(),
+    )
+    .map_err(|source| ConfigError::Disclosure { source })?;
     ::diagnostics::diag!(B0302, "starting workload");
     let control = Arc::clone(&collector);
     let hosted = HostedBox::open(
@@ -784,6 +819,7 @@ mod tests {
             mcp: Vec::new(),
             contained_mcp: BTreeMap::new(),
             telemetry: BTreeMap::new(),
+            enrichment: std::collections::BTreeMap::new(),
             secret_source: Default::default(),
         }
     }
@@ -845,6 +881,48 @@ mod tests {
         ] {
             assert!(text.contains(named), "{named}: {text}");
         }
+    }
+
+    /// Each declared entry is disclosed: a read one names its kind and never its endpoint, and an
+    /// unread one says it is unused and Box sends it nothing.
+    #[test]
+    fn each_enrichment_entry_is_disclosed() {
+        let mut record = record_with(None, BTreeMap::new());
+        let entry: crate::record::config::enrichment::EnrichmentEntry = toml::from_str(
+            "kind = \"in-memory\"\nendpoint = \"file:///srv/token-in-path.json\"\n\
+             outputs = [\"malware\"]\nmin_confidence = \"HIGH\"\n",
+        )
+        .expect("the entry parses");
+        record.enrichment = BTreeMap::from([
+            ("threat".to_string(), entry.clone()),
+            ("unused".to_string(), entry),
+        ]);
+        let mut output = Vec::new();
+        write_enrichment_disclosures(
+            &record,
+            &std::collections::BTreeSet::from(["threat".to_string()]),
+            &mut output,
+        )
+        .expect("writes");
+        let text = String::from_utf8(output).expect("UTF-8");
+
+        assert!(
+            text.contains(
+                "note[B0215]: [enrichment.threat] sends its classification source (kind \
+                 \"in-memory\") the DNS name of each host the workload connects to, before \
+                 policy decides the connection, unless policy refuses the host whatever the \
+                 source answers."
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "note[B0215]: [enrichment.unused] is unused: no rule reads it, so Box sends it \
+                 no DNS name."
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("token-in-path"), "{text}");
     }
 
     /// Only a target that names `mcp_tool_calls` is disclosed, because only it receives the values.

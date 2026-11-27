@@ -8,6 +8,7 @@ this route unless the operator enables the network exception described below.
 | The gateway | What it does |
 |---|---|
 | Requests policy decisions | `net:connect` for each destination before DNS and again for each address it connects to; `http:request` for each request, or `websocket:connect` for a WebSocket handshake; `mcp:call` for MCP requests whose host matches a configured HTTP MCP server, except the protocol methods that pass without an MCP decision. |
+| Asks before the first `net:connect` | Each `[enrichment.<name>]` classification source that a rule reads, about the destination's DNS name, when the answer can change the decision. The answer is a fact on the request, and policy decides. |
 | Adds | The secret an `[egress.<name>]` route binds to the destination. |
 | Removes | A copy of that secret from the response, before the process sees it. |
 
@@ -136,6 +137,49 @@ must use that spelling. Box checks hostname literals in `when` clauses at load a
 required form when it refuses one. See [a rule that cannot fire is refused at
 load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns).
 Internationalized domains reach the gateway in punycode form, which rules must also use.
+
+### Classification before the host decision
+
+Before the first `net:connect` decision on a host, the gateway's policy adapter, in the box's
+trusted process, can ask each `[enrichment.<name>]` source that some rule reads about the host's DNS
+name. The source grants nothing: its answer is a fact on the request, and the authored policy
+decides, including what an unanswered question means. See [every decision is local, and an
+enrichment source is the one outside call](decisions.md#every-decision-is-local-and-in-process).
+[Ask a classification source about each
+host](../user/egress.md#ask-a-classification-source-about-each-host) states what the request carries,
+what Box asks, when, and what it keeps.
+
+The adapter asks only when the answer can change the host decision. The host decision runs before
+DNS so that a workload cannot carry data out in the labels of a name the gateway refuses, and a
+question to a source about such a name would carry those labels out anyway. So each time the engine
+installs rules, it also sets apart the stateless rules that read no entry, which decide alike
+whatever a source answers. A rule that could see an entry is not among them: one that reads
+`context`, `context.input`, or anything under `context.input.enrichment`, or tests one of them with
+`has`. A stateless `forbid` that reads an entry adds each top-level `||` branch of its lone `when`
+condition that reads none, as a `forbid` of its own, because that branch alone makes the whole
+`forbid` hold. Dogwood lowers `unless { X }` to `when { !(X) }`, which has no such branch. A rule
+with a temporal clause stays out, because history the screen does not read can change its result.
+Before it asks, the adapter decides the request on those rules alone, in plain Cedar, with no
+history event. When one of their `forbid`s holds, or none of their `permit`s does and no other rule
+can permit `net:connect`, the host is refused whatever the source says. The adapter then asks
+nothing, and the engine decides and records the request as usual, with every entry unanswered, so
+log-only mode still lets the denial through. When the engine cannot sort the rules, it prints a
+`B0215` note, and the adapter asks about every name.
+
+Each per-address decision reads the answers its host decision read and asks nothing, so the
+decisions of one connection agree even when the answer expires between them. The gateway makes one
+connection's host decision and its per-address decisions on one thread, so the adapter keeps those
+answers by thread, host, and port, for the latest 1024 host decisions, and no decision reads another
+connection's answer. A per-address decision that finds none asks as a host decision would, so a
+change in how the gateway schedules connections can cost a question, never a decision on another
+connection's answer. Box also bounds how long a question waits, how many wait at once, and how many
+answers each table keeps, because a source can stall and the workload chooses the names.
+
+The answer the decision read reaches history and telemetry too. All three `net:connect` events,
+`::request`, `::response`, and `::error`, carry the same `input.enrichment` record, and the
+connection's decision record states each table's `answered` and `labels` whenever Box asked.
+Policy refuses at load a rule that reads an entry's `labels` when no rule reads its `answered`;
+[what refuses to load](policy.md#what-refuses-to-load) lists it.
 
 ### TLS and `http:request`
 

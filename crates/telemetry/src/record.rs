@@ -515,7 +515,17 @@ pub struct DecisionRecord {
     first_flip: bool,
     /// Each rule that would have denied the action in log-only mode, across all its legs and gates.
     would_deny: Vec<String>,
+    /// What each enrichment entry answered about the destination, by entry name.
+    enrichment: Vec<EnrichmentAttribute>,
     unix_nanos: u128,
+}
+
+/// One enrichment entry's answer about a destination, as a decision record states it.
+#[derive(Debug, Clone)]
+struct EnrichmentAttribute {
+    name: String,
+    answered: bool,
+    labels: Vec<String>,
 }
 
 impl DecisionRecord {
@@ -620,6 +630,42 @@ impl DecisionRecord {
     #[must_use]
     pub fn would_deny(&self) -> &[String] {
         &self.would_deny
+    }
+
+    /// State what the enrichment entry `name` answered about the destination, as
+    /// `strands.box.enrichment.<name>.answered` and `strands.box.enrichment.<name>.labels`.
+    #[must_use]
+    pub fn enriched(
+        mut self,
+        name: &str,
+        answered: bool,
+        labels: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.enrichment.push(EnrichmentAttribute {
+            name: bounded(name),
+            answered,
+            labels: labels.into_iter().map(|label| bounded(&label)).collect(),
+        });
+        self
+    }
+
+    /// The enrichment attributes, whose keys carry each entry's name.
+    pub(crate) fn enrichment_attributes(&self) -> Vec<(String, AnyValue)> {
+        self.enrichment
+            .iter()
+            .flat_map(|entry| {
+                [
+                    (
+                        format!("{ENRICHMENT_PREFIX}{}.answered", entry.name),
+                        AnyValue::Boolean(entry.answered),
+                    ),
+                    (
+                        format!("{ENRICHMENT_PREFIX}{}.labels", entry.name),
+                        text_list(entry.labels.iter().cloned()),
+                    ),
+                ]
+            })
+            .collect()
     }
 
     /// Name every policy that determined this decision. The first one governs, so it supplies
@@ -810,6 +856,7 @@ impl DecisionRecord {
             enforced: true,
             first_flip: false,
             would_deny: Vec::new(),
+            enrichment: Vec::new(),
             unix_nanos: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| since.as_nanos()),
@@ -821,6 +868,9 @@ impl DecisionRecord {
 const DETERMINING_IDS: &str = "strands.box.policy.determining.ids";
 /// Each rule that would have denied an action log-only mode let through.
 const WOULD_DENY_IDS: &str = "strands.box.policy.would_deny.ids";
+
+/// The prefix of each enrichment entry's attributes.
+const ENRICHMENT_PREFIX: &str = "strands.box.enrichment.";
 
 /// The rule that decided, by the identifier the operator authored.
 const RULE: &str = "strands.box.policy.rule";

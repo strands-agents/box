@@ -13,6 +13,7 @@
 //! |---|---|
 //! | [`process`] | `[agent]` and `[tool.<name>]`: one `ProcessSpec` each |
 //! | [`egress`] | `[egress.a]`: which secret attaches to which request |
+//! | [`enrichment`] | `[enrichment.<name>]`: which outside source classifies each DNS name |
 //! | [`filesystem`] | the translation of a `ProcessSpec`'s eight lists into containment cells |
 //! | [`gateway`] | `[gateway]`: the hosts whose plain HTTP the egress gateway upgrades to HTTPS |
 //! | [`grammar`] | `[tool.<name>.grammar]`: the tool grammars a box installs |
@@ -28,6 +29,7 @@
 //! reconciliation of the inputs.
 
 pub(crate) mod egress;
+pub(crate) mod enrichment;
 pub(crate) mod env;
 pub(crate) mod filesystem;
 pub(crate) mod gateway;
@@ -46,7 +48,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use policy::{Policy, PolicyEngine, ToolGrammars};
+use policy::{EnrichmentNames, Policy, PolicyEngine, ToolGrammars};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{BoxError, ConfigError};
@@ -117,6 +119,12 @@ pub(crate) fn read_mcp_servers(path: &Path) -> Result<Vec<mcp::McpServer>, BoxEr
 pub(crate) fn read_tool_grammars(path: &Path) -> Result<ToolGrammars, BoxError> {
     let file = ConfigFile::read(path)?;
     Ok(grammar::tool_grammars(&file.tool)?)
+}
+
+/// Read the names of the `[enrichment.<name>]` tables in one workspace config.
+pub(crate) fn read_enrichment_names(path: &Path) -> Result<EnrichmentNames, BoxError> {
+    let file = ConfigFile::read(path)?;
+    Ok(enrichment::names(&file.enrichment)?)
 }
 
 /// A remote MCP server: an `[egress.<name>]` entry speaking `mcp`, resolved to a discovery URL.
@@ -554,6 +562,7 @@ impl RunContract {
             mcp_servers.is_empty() && http_mcp.is_empty(),
             &policy_operator()?,
             &self.grammars,
+            &enrichment::names(&self.file.enrichment)?,
         )?;
         if let Some(source) = &policy_source
             && crate::record::layout::lies_within(source.path(), root.root())
@@ -626,6 +635,7 @@ impl RunContract {
                         .as_ref()
                         .map_or(Enforcement::Enforce, |key| key.enforcement),
                     egress::holds_secret_type(&egress, &remote_mcp),
+                    !self.file.enrichment.is_empty(),
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 file_attributes: self.file.file_attributes,
@@ -649,6 +659,7 @@ impl RunContract {
                 mcp: mcp_servers,
                 contained_mcp,
                 telemetry,
+                enrichment: self.file.enrichment.clone(),
             },
             policy,
             grammars: self.grammars,
@@ -776,6 +787,10 @@ pub(crate) struct Record {
     /// stands for.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) telemetry: BTreeMap<String, telemetry::TelemetryEntry>,
+
+    /// The classification sources this box asks about each DNS name its workload connects to.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) enrichment: BTreeMap<String, enrichment::EnrichmentEntry>,
 }
 
 /// The ordinary record format; native enforcement uses version 22. Version 28 adds `backends` to an
@@ -857,6 +872,9 @@ const MOUNTS_RECORD_VERSION: u32 = 42;
 /// The record version of a record whose egress or remote MCP secret names a `secret.type`, so an
 /// older build refuses the box rather than signing a token route's reference as AWS.
 const SECRET_TYPE_RECORD_VERSION: u32 = 43;
+/// The record version of a record that declares an `[enrichment.<name>]` table, so an older build
+/// refuses the box rather than deciding its connections without the facts its rules read.
+const ENRICHMENT_RECORD_VERSION: u32 = 44;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -924,9 +942,12 @@ fn record_version<'a>(
     secret_source_keys: bool,
     enforcement: Enforcement,
     secret_type: bool,
+    enriched: bool,
 ) -> u32 {
     let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
-    if secret_type {
+    if enriched {
+        ENRICHMENT_RECORD_VERSION
+    } else if secret_type {
         SECRET_TYPE_RECORD_VERSION
     } else if specs
         .clone()
@@ -1278,6 +1299,7 @@ impl Record {
             LOG_ONLY_RECORD_VERSION,
             MOUNTS_RECORD_VERSION,
             SECRET_TYPE_RECORD_VERSION,
+            ENRICHMENT_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1315,6 +1337,7 @@ impl Record {
             holds_secret_source_keys(&record.secret_source, &record.egress, &record.remote_mcp),
             record.enforcement,
             egress::holds_secret_type(&record.egress, &record.remote_mcp),
+            !record.enrichment.is_empty(),
         );
         if record.version != expected {
             return Err(ConfigError::RecordVersion {
@@ -1325,8 +1348,14 @@ impl Record {
         BoxName::parse(&record.name)?;
         record.gateway.validate()?;
         record.validate_processes()?;
-        record.declared_sources()?;
+        let sources = record.declared_sources()?;
+        enrichment::validate(&record.enrichment, &sources)?;
         Ok(record)
+    }
+
+    /// The validated names of the stored `[enrichment.<name>]` tables.
+    pub(crate) fn enrichment_names(&self) -> Result<EnrichmentNames, ConfigError> {
+        enrichment::names(&self.enrichment)
     }
 
     /// Every process table, judged on its own shape.
@@ -1517,10 +1546,10 @@ fn identity_digits(digits: &str) -> bool {
 }
 
 /// The policy that the configuration at `path` selects, read as `run` reads it, whether `run`
-/// validates it completely, and the tool grammars it validates against.
+/// validates it completely, and the tool grammars and enrichment entries it validates against.
 pub(crate) fn read_checked_policy(
     path: &Path,
-) -> Result<(Option<Policy>, bool, ToolGrammars), BoxError> {
+) -> Result<(Option<Policy>, bool, ToolGrammars, EnrichmentNames), BoxError> {
     let (source, text) = AuthoritySource::read(path, "configuration")?;
     let file = ConfigFile::parse(&text, source.path())?;
     let grammars = grammar::tool_grammars(&file.tool)?;
@@ -1539,6 +1568,7 @@ pub(crate) fn read_checked_policy(
         policy,
         mcp_servers.is_empty() && http_mcp.is_empty(),
         grammars,
+        enrichment::names(&file.enrichment)?,
     ))
 }
 
@@ -1554,6 +1584,7 @@ fn read_authored_policy(
     validate_complete_schema: bool,
     operator: &policy::Operator,
     grammars: &ToolGrammars,
+    enrichment: &EnrichmentNames,
 ) -> Result<(Option<Policy>, Option<AuthoritySource>), BoxError> {
     let Some(path) = path else {
         return Ok((None, None));
@@ -1564,9 +1595,18 @@ fn read_authored_policy(
         text,
     };
     let validation = if validate_complete_schema {
-        PolicyEngine::validate_with_grammars(operator, std::slice::from_ref(&source), grammars)
+        PolicyEngine::validate_with_grammars(
+            operator,
+            std::slice::from_ref(&source),
+            grammars,
+            enrichment,
+        )
     } else {
-        PolicyEngine::validate_staged(std::slice::from_ref(&source))
+        PolicyEngine::validate_staged_with_grammars(
+            std::slice::from_ref(&source),
+            grammars,
+            enrichment,
+        )
     };
     if let Err(source) = validation {
         return Err(ConfigError::PolicyInvalid {
@@ -1620,7 +1660,7 @@ pub(crate) fn unbindable_host_name(host: &str) -> Option<&'static str> {
 }
 
 /// Whether the last label of the lowercase `host` is decimal digits, or `0x` and hexadecimal digits.
-fn ends_in_a_number(host: &str) -> bool {
+pub(crate) fn ends_in_a_number(host: &str) -> bool {
     let last = host.rsplit('.').next().unwrap_or(host);
     !last.is_empty()
         && (last.bytes().all(|byte| byte.is_ascii_digit())
@@ -1818,6 +1858,10 @@ struct ConfigFile {
     /// Where this box's decision records and its agent's own spans go.
     #[serde(default)]
     telemetry: BTreeMap<String, telemetry::TelemetryEntry>,
+
+    /// The classification sources Box asks about each DNS name the workload connects to.
+    #[serde(default)]
+    enrichment: BTreeMap<String, enrichment::EnrichmentEntry>,
 }
 
 impl ConfigFile {
@@ -1942,6 +1986,7 @@ impl ConfigFile {
             agent_ingress(self.agent.as_ref()),
         )?;
         validate_egress(&self.egress, &self.declared_sources()?)?;
+        enrichment::validate(&self.enrichment, &self.declared_sources()?)?;
         Ok(())
     }
 
@@ -2024,6 +2069,7 @@ mod tests {
                             false,
                             Enforcement::Enforce,
                             false,
+                            false,
                         ),
                         expected_version
                     );
@@ -2081,6 +2127,7 @@ mod tests {
                 &stored.telemetry,
                 false,
                 Enforcement::Enforce,
+                false,
                 false,
             ),
             MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
@@ -2315,6 +2362,7 @@ mod tests {
             mcp: Vec::new(),
             contained_mcp: BTreeMap::new(),
             telemetry: std::collections::BTreeMap::new(),
+            enrichment: std::collections::BTreeMap::new(),
             secret_source: Default::default(),
         }
     }
@@ -2466,6 +2514,90 @@ native-filesystem-policy = false
         }
     }
 
+    /// Configure refuses the enrichment reads that opening the engine refuses, labels with no rule
+    /// on the answer and an entry no table declares, for a box with an MCP server, which validates
+    /// before tool schemas arrive, as for one without.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn configure_refuses_the_enrichment_reads_run_refuses_with_an_mcp_server_too() {
+        use enrichment::tests::TABLE;
+        const LABELS_ONLY: &str = "permit (principal, action == Box::Action::\"net:connect\", \
+            resource);\nforbid (principal, action == Box::Action::\"net:connect\", resource)\n\
+            when { context.input.enrichment.threat.labels.contains(\"malware\") };\n";
+        const UNDECLARED: &str = "forbid (principal, action == Box::Action::\"net:connect\", \
+            resource)\nunless { context.input.enrichment.reputation.answered };\n";
+        for server in [
+            "",
+            "[mcp.web]\ntype = \"http\"\ndestinations = [\"api.example.com\"]\n",
+        ] {
+            for (text, says) in [
+                (
+                    LABELS_ONLY,
+                    "no rule reads context.input.enrichment.threat.answered",
+                ),
+                (UNDECLARED, "enrichment.reputation"),
+            ] {
+                let error = record_from_policy(
+                    "policy = \"policy.dw\"\n",
+                    text,
+                    &format!("{TABLE}{server}"),
+                )
+                .expect_err("configure refuses the policy");
+                assert_eq!(
+                    error.code(),
+                    ::diagnostics::Code::B0103.into(),
+                    "{server}{text}: {error}"
+                );
+                assert!(error.to_string().contains(says), "{server}{text}: {error}");
+            }
+        }
+    }
+
+    /// Opening a box validates its stored tables again, so a stored table this build cannot honor,
+    /// such as one a test build wrote, is refused.
+    #[test]
+    fn a_stored_table_this_build_cannot_honor_is_refused_when_the_box_opens() {
+        let mut stored = pinned_record("");
+        stored.enrichment = BTreeMap::from([(
+            "threat".to_string(),
+            toml::from_str(
+                "kind = \"x\"\nendpoint = \"file:///srv/fixture.json\"\n\
+                 outputs = [\"malware\"]\nmin_confidence = \"HIGH\"\n",
+            )
+            .expect("the entry parses"),
+        )]);
+        stored.version = ENRICHMENT_RECORD_VERSION;
+
+        let error = Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml"))
+            .expect_err("the stored table is refused");
+        assert!(
+            matches!(error, ConfigError::Enrichment { .. })
+                && error.to_string().contains("names kind \"x\""),
+            "{error}"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn an_enrichment_table_requires_its_record_version() {
+        let mut stored = pinned_record(enrichment::tests::TABLE);
+        assert_eq!(stored.version, ENRICHMENT_RECORD_VERSION);
+        assert_eq!(ENRICHMENT_RECORD_VERSION, 44);
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.version = SECRET_TYPE_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: 43,
+                expected: 44
+            })
+        ));
+        assert_eq!(pinned_record("").version, RECORD_VERSION);
+    }
+
     #[test]
     fn shell_limits_round_trip_in_the_required_record_version() {
         for (limits, timeout, explicit) in [
@@ -2565,6 +2697,7 @@ native-filesystem-policy = false
                                     &BTreeMap::new(),
                                     false,
                                     Enforcement::Enforce,
+                                    false,
                                     false,
                                 ),
                                 27
@@ -3707,6 +3840,7 @@ env = {}
                 false,
                 Enforcement::Enforce,
                 false,
+                false,
             )
         };
         assert_eq!(version(true), TOOL_CALLS_RECORD_VERSION);
@@ -3716,7 +3850,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, SECRET_TYPE_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, ENRICHMENT_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -4509,6 +4643,19 @@ env = {}
 
     /// [`record_from_config`] with `policy` as the configuration's `policy` key.
     fn record_from_config_with(policy: &str, body: &str) -> Result<Record, crate::error::BoxError> {
+        record_from_policy(
+            policy,
+            "permit (principal, action == Box::Action::\"net:connect\", resource);\n",
+            body,
+        )
+    }
+
+    /// [`record_from_config_with`], with `text` as the policy file.
+    fn record_from_policy(
+        policy: &str,
+        text: &str,
+        body: &str,
+    ) -> Result<Record, crate::error::BoxError> {
         let directory = tempfile::tempdir().expect("configuration directory");
         crate::test_support::with_operator_home(directory.path(), || {
             let workspace = directory.path().join("workspace");
@@ -4522,11 +4669,7 @@ env = {}
                     .expect("private box directory");
             }
             let policy_path = directory.path().join("policy.dw");
-            std::fs::write(
-                &policy_path,
-                "permit (principal, action == Box::Action::\"net:connect\", resource);\n",
-            )
-            .expect("write policy");
+            std::fs::write(&policy_path, text).expect("write policy");
             let config_path = directory.path().join("box.toml");
             std::fs::write(
                 &config_path,

@@ -64,6 +64,7 @@ fn minimal_example() -> Result<(), PolicyError> {
             host: "api.github.com",
             ip: None,
             port: 443,
+            enrichment: &policy::EnrichmentFacts::NONE,
         },
     );
     assert!(matches!(decision, Decision::Allow { .. }));

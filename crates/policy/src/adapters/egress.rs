@@ -1,9 +1,10 @@
 //! Adapters from the policy facade to egress effect interception.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
+use std::thread::ThreadId;
 
 use egress_gateway::{
     EffectAttempt as EgressEffectAttempt, EffectInterceptor as EgressEffectInterceptor,
@@ -16,8 +17,8 @@ use crate::{
     CatalogRefusal, CatalogStage, DiscoveryFailure, ListPage, McpServerKind, ToolCatalogs,
 };
 use crate::{
-    Decision, Delivery, DenyReason, McpReply, Outcome, PendingToolResponse, PolicyEngine,
-    PolicyError, Principal, Request, RequestId,
+    Decision, Delivery, DenyReason, EnrichmentFacts, HostEnricher, McpReply, Outcome,
+    PendingToolResponse, PolicyEngine, PolicyError, Principal, Request, RequestId,
 };
 
 /// Binds one policy and egress principal to outbound effect interception.
@@ -35,6 +36,57 @@ pub struct EgressPolicyInterceptor {
     /// Reports the egress door finished to the box's discovery coordinator
     /// (docs/design/decisions.md#the-box-coordinates-discovery-completion).
     on_remote_finished: Arc<dyn Fn() + Send + Sync>,
+    /// What each declared enrichment entry says about a destination host.
+    enricher: Arc<dyn HostEnricher>,
+    /// The facts each recent connection's host decision read, which its address decisions read.
+    decided: Mutex<DecidedHosts>,
+}
+
+/// The enricher of a box that declares no enrichment entry.
+struct NoEnrichment;
+
+impl HostEnricher for NoEnrichment {
+    fn enrich(&self, _host: &str) -> EnrichmentFacts {
+        EnrichmentFacts::NONE
+    }
+}
+
+/// How many host decisions the adapter keeps the facts of, because the workload chooses the hosts.
+const DECIDED_HOSTS: usize = 1024;
+
+/// One connection, by the thread, host, and port of its decisions, since the gateway makes a
+/// connection's host decision and its address decisions on one thread.
+type Connection = (ThreadId, String, u16);
+
+/// The enrichment facts of the latest host decision of each connection, oldest first.
+#[derive(Default)]
+struct DecidedHosts {
+    order: VecDeque<Connection>,
+    facts: HashMap<Connection, EnrichmentFacts>,
+}
+
+impl DecidedHosts {
+    /// Keep `facts` as what this thread's host decision on `host` and `port` read, dropping the
+    /// oldest connection when full.
+    fn keep(&mut self, host: &str, port: u16, facts: EnrichmentFacts) {
+        let key = (std::thread::current().id(), host.to_string(), port);
+        if !self.facts.contains_key(&key) {
+            if self.order.len() >= DECIDED_HOSTS
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.facts.remove(&oldest);
+            }
+            self.order.push_back(key.clone());
+        }
+        self.facts.insert(key, facts);
+    }
+
+    /// What this thread's latest host decision on `host` and `port` read, while it is kept.
+    fn read(&self, host: &str, port: u16) -> Option<EnrichmentFacts> {
+        self.facts
+            .get(&(std::thread::current().id(), host.to_string(), port))
+            .cloned()
+    }
 }
 
 impl EgressPolicyInterceptor {
@@ -52,11 +104,13 @@ impl EgressPolicyInterceptor {
             Vec::new(),
             catalogs,
             Arc::new(|| {}),
+            Arc::new(NoEnrichment),
         )
     }
 
     /// Construct the handle and track lazy remote MCP discovery in `catalogs`, calling
-    /// `on_remote_finished` once every HTTP server there is terminal.
+    /// `on_remote_finished` once every HTTP server there is terminal, and put what `enricher` says
+    /// about each destination host on its `net:connect`.
     pub fn into_handle_with_discovery(
         policy: Arc<PolicyEngine>,
         principal: Principal,
@@ -64,6 +118,7 @@ impl EgressPolicyInterceptor {
         remote_servers: Vec<(String, String)>,
         catalogs: Arc<ToolCatalogs>,
         on_remote_finished: Arc<dyn Fn() + Send + Sync>,
+        enricher: Arc<dyn HostEnricher>,
     ) -> Arc<dyn EgressEffectInterceptor> {
         let mcp_hosts: BTreeSet<String> = remote_servers
             .iter()
@@ -76,6 +131,8 @@ impl EgressPolicyInterceptor {
             mcp_hosts,
             catalogs,
             on_remote_finished,
+            enricher,
+            decided: Mutex::new(DecidedHosts::default()),
         })
     }
 
@@ -93,6 +150,53 @@ impl EgressPolicyInterceptor {
                 diagnostic_context(server)
             )),
         }
+    }
+
+    /// What the declared entries say about a `net:connect` attempt's host. The host decision asks,
+    /// and each address decision of its connection reads what it read, asking again only when no
+    /// host decision of that connection is kept.
+    fn enrichment(&self, effect: &EgressEffectAttempt<'_>) -> EnrichmentFacts {
+        let (host, port, address) = match effect {
+            EgressEffectAttempt::Resolve { host, port } => (*host, *port, None),
+            EgressEffectAttempt::Connect {
+                host,
+                port,
+                address,
+                ..
+            } => (*host, *port, Some(address.ip())),
+            _ => return EnrichmentFacts::NONE,
+        };
+        // With no entry read, no source is asked, so there is nothing to keep or to spare.
+        if self.policy.read_enrichment().is_empty() {
+            return self.enricher.enrich(host);
+        }
+        let Some(ip) = address else {
+            let facts = self.asked(host, None, port);
+            if let Ok(mut decided) = self.decided.lock() {
+                decided.keep(host, port, facts.clone());
+            }
+            return facts;
+        };
+        self.decided
+            .lock()
+            .ok()
+            .and_then(|decided| decided.read(host, port))
+            .unwrap_or_else(|| self.asked(host, Some(ip), port))
+    }
+
+    /// What the enricher says about `host`, or every entry unanswered with no source asked when the
+    /// installed rules refuse this `net:connect` whatever a source says, so no source learns a
+    /// name that policy refuses anyway.
+    fn asked(&self, host: &str, ip: Option<IpAddr>, port: u16) -> EnrichmentFacts {
+        let request = Request::Connect {
+            host,
+            ip,
+            port,
+            enrichment: &EnrichmentFacts::NONE,
+        };
+        self.policy
+            .refused_whatever_answered(&self.principal, &request)
+            .unwrap_or_else(|| self.enricher.enrich(host))
     }
 
     /// Report the egress door finished once every remote server is terminal.
@@ -175,6 +279,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
         &self,
         effect: &EgressEffectAttempt<'_>,
     ) -> io::Result<Box<dyn EgressEffectPermit>> {
+        let enrichment = self.enrichment(effect);
         let decision = match effect {
             // Name resolution records a request only; each address has its own connect attempt.
             EgressEffectAttempt::Resolve { host, port } => match self.policy.admit(
@@ -184,6 +289,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     host,
                     ip: None,
                     port: *port,
+                    enrichment: &enrichment,
                 },
             ) {
                 Ok(request_id) => Ok((Some(request_id), (None, None))),
@@ -206,6 +312,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     host,
                     ip: Some(address.ip()),
                     port: *port,
+                    enrichment: &enrichment,
                 },
             )
             .map(|request_id| (Some(request_id), (None, None))),
@@ -254,7 +361,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     policy: Arc::clone(&self.policy),
                     principal: self.principal.clone(),
                     governed: self.governed.clone(),
-                    attempt: AttemptIdentity::capture(effect),
+                    attempt: AttemptIdentity::capture(effect, enrichment),
                     request_id,
                     mcp_request_id,
                     tool_response,
@@ -364,6 +471,8 @@ enum AttemptIdentity {
         host: String,
         port: u16,
         address: SocketAddr,
+        /// The enrichment facts the decision read, which the outcome repeats.
+        enrichment: EnrichmentFacts,
     },
     Http {
         host: String,
@@ -383,7 +492,8 @@ enum AttemptIdentity {
 }
 
 impl AttemptIdentity {
-    fn capture(effect: &EgressEffectAttempt<'_>) -> Self {
+    /// The identity of `effect`, keeping the `enrichment` facts its decision read on a connect.
+    fn capture(effect: &EgressEffectAttempt<'_>, enrichment: EnrichmentFacts) -> Self {
         match effect {
             EgressEffectAttempt::Connect {
                 host,
@@ -394,6 +504,7 @@ impl AttemptIdentity {
                 host: (*host).to_string(),
                 port: *port,
                 address: *address,
+                enrichment,
             },
             EgressEffectAttempt::HttpRequest {
                 host,
@@ -729,9 +840,10 @@ impl LocalPolicyEffectPermit {
                     host,
                     port,
                     address,
+                    enrichment,
                 },
                 _,
-            ) => self.policy.record(
+            ) => self.policy.record_connect(
                 &self.governed,
                 &self.principal,
                 request_id,
@@ -744,6 +856,7 @@ impl LocalPolicyEffectPermit {
                     // a `response` and a rule capping connects still counts it.
                     connected: !matches!(outcome, EgressEffectOutcome::ConnectFailed(_)),
                 },
+                enrichment,
             ),
             (
                 AttemptIdentity::Http {
@@ -1313,6 +1426,7 @@ mod tests {
             vec![("mcp-fixture.demo".to_string(), "demo".to_string())],
             demo_catalogs(&policy),
             Arc::new(move || flag.store(true, std::sync::atomic::Ordering::SeqCst)),
+            Arc::new(NoEnrichment),
         );
         assert!(
             interceptor
@@ -1355,6 +1469,7 @@ mod tests {
             vec![("mcp-fixture.demo".to_string(), "demo".to_string())],
             Arc::clone(&catalogs),
             Arc::new(|| {}),
+            Arc::new(NoEnrichment),
         );
         (policy, catalogs, interceptor, history)
     }

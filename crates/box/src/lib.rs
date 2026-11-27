@@ -116,7 +116,7 @@ impl std::error::Error for ReloadRefused {}
 
 /// Check the policy that a Box configuration selects, as a box checks it when it opens.
 pub fn check_policy(config: PathBuf) -> Result<PolicyCheck, CheckFailed> {
-    let (source, complete, grammars) =
+    let (source, complete, grammars, enrichment) =
         record::config::read_checked_policy(&config).map_err(CheckFailed)?;
     let operator = record::config::policy_operator().map_err(CheckFailed)?;
     Ok(policy::PolicyEngine::check_with_grammars(
@@ -124,6 +124,7 @@ pub fn check_policy(config: PathBuf) -> Result<PolicyCheck, CheckFailed> {
         source.as_slice(),
         complete,
         &grammars,
+        &enrichment,
     ))
 }
 

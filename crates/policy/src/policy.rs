@@ -9,10 +9,10 @@ mod authority;
 use crate::check::{Finding, PolicyCheck};
 use crate::dogwood::{DogwoodEngine, check_and_expand, validate_staged_source};
 use crate::request::ActionRequest;
-use crate::schema::GovernedBox;
+use crate::schema::{GovernedBox, SchemaBase};
 use crate::{
-    Decision, GrammarBindings, Operator, Outcome, PolicyError, PolicyStagingError, PolicyWarning,
-    Principal, Request, RequestId, ToolGrammars,
+    Decision, EnrichmentNames, GrammarBindings, Operator, Outcome, PolicyError, PolicyStagingError,
+    PolicyWarning, Principal, Request, RequestId, ToolGrammars,
 };
 use authority::Authority;
 
@@ -190,18 +190,21 @@ impl PolicyEngine {
             operator,
             sources,
             ToolGrammars::default(),
+            &EnrichmentNames::default(),
             history,
             label,
         )
     }
 
     /// Open durable history through an already-open file with the schema of each tool grammar in
-    /// `grammars`, and stage runtime MCP schemas over them. The engine owns `grammars`, and
+    /// `grammars` and the `net:connect` input of each entry in `enrichment`, and stage runtime MCP
+    /// schemas over them. The engine owns `grammars`, and
     /// [`grammar_bindings`](Self::grammar_bindings) gives out bindings for exactly those.
     pub fn open_staged_file_with_grammars(
         operator: &Operator,
         sources: Vec<Policy>,
         grammars: ToolGrammars,
+        enrichment: &EnrichmentNames,
         history: File,
         label: PathBuf,
     ) -> Result<Self, PolicyStagingError> {
@@ -209,8 +212,13 @@ impl PolicyEngine {
             engine: ENGINE_ID,
             policy_id: effective_policy_id(&sources),
         };
-        let authority =
-            Authority::open_staged_file(operator, sources, grammars.schemas(), history, label)?;
+        let authority = Authority::open_staged_file(
+            operator,
+            sources,
+            SchemaBase::of_box(&grammars, enrichment),
+            history,
+            label,
+        )?;
         Ok(Self::assemble(authority, grammars, effective))
     }
 
@@ -373,15 +381,17 @@ impl PolicyEngine {
         Self::validate_with_mcp_schemas(operator, sources, &[])
     }
 
-    /// Strict-validate candidate sources against the schema of each tool grammar in `grammars`.
+    /// Strict-validate candidate sources against the schema of each tool grammar in `grammars` and
+    /// the `net:connect` input of each entry in `enrichment`.
     pub fn validate_with_grammars(
         operator: &Operator,
         sources: &[Policy],
         grammars: &ToolGrammars,
+        enrichment: &EnrichmentNames,
     ) -> Result<(), PolicyError> {
         crate::dogwood::validate_with_schemas(
             &authored(sources),
-            &grammars.schemas(),
+            &SchemaBase::of_box(grammars, enrichment),
             &[],
             operator,
         )
@@ -400,17 +410,26 @@ impl PolicyEngine {
 
     /// Return every finding in `sources`, as `open` (`complete`) or `open_staged` would load them.
     pub fn check(operator: &Operator, sources: &[Policy], complete: bool) -> PolicyCheck {
-        Self::check_with_grammars(operator, sources, complete, &ToolGrammars::default())
+        Self::check_with_grammars(
+            operator,
+            sources,
+            complete,
+            &ToolGrammars::default(),
+            &EnrichmentNames::default(),
+        )
     }
 
-    /// Return every finding in `sources`, as the opener with `grammars` would load them.
+    /// Return every finding in `sources`, as the opener with `grammars` and `enrichment` would load
+    /// them.
     pub fn check_with_grammars(
         operator: &Operator,
         sources: &[Policy],
         complete: bool,
         grammars: &ToolGrammars,
+        enrichment: &EnrichmentNames,
     ) -> PolicyCheck {
         let text = authored(sources);
+        let base = SchemaBase::of_box(grammars, enrichment);
         let warning = |warning: PolicyWarning| Finding::new(warning.to_string());
         let placed = |findings: Vec<Finding>| {
             findings
@@ -425,8 +444,13 @@ impl PolicyEngine {
                 .collect::<Vec<_>>()
         };
         if complete {
-            return match check_and_expand(&text, &grammars.schemas(), &[], operator, true, &[]) {
-                Ok((_, _, warnings)) => PolicyCheck::new(
+            let checked = check_and_expand(&text, &base, &[], operator, true, &[]).and_then(
+                |(expanded, _, warnings)| {
+                    crate::enrichment::read_entries(&expanded, &base).map(|_| warnings)
+                },
+            );
+            return match checked {
+                Ok(warnings) => PolicyCheck::new(
                     Vec::new(),
                     warnings.into_iter().map(warning).collect(),
                     Vec::new(),
@@ -434,7 +458,7 @@ impl PolicyEngine {
                 Err(refused) => PolicyCheck::new(placed(refused.findings), Vec::new(), Vec::new()),
             };
         }
-        match authority::check_staged(operator, sources, grammars.schemas()) {
+        match authority::check_staged(operator, sources, base) {
             Ok((warnings, unchecked)) => PolicyCheck::new(
                 Vec::new(),
                 warnings.into_iter().map(warning).collect(),
@@ -451,7 +475,25 @@ impl PolicyEngine {
     /// it loads, and `finish_mcp_discovery` degrades that one server at run rather than blocking
     /// the whole box.
     pub fn validate_staged(sources: &[Policy]) -> Result<(), PolicyError> {
-        validate_staged_source(&authored(sources))
+        Self::validate_staged_with_grammars(
+            sources,
+            &ToolGrammars::default(),
+            &EnrichmentNames::default(),
+        )
+    }
+
+    /// [`Self::validate_staged`] against the schema of each tool grammar in `grammars` and the
+    /// `net:connect` input of each entry in `enrichment`, refusing the enrichment reads that the
+    /// opener with them refuses.
+    pub fn validate_staged_with_grammars(
+        sources: &[Policy],
+        grammars: &ToolGrammars,
+        enrichment: &EnrichmentNames,
+    ) -> Result<(), PolicyError> {
+        validate_staged_source(
+            &authored(sources),
+            &SchemaBase::of_box(grammars, enrichment),
+        )
     }
 
     /// Propose one generated MCP action-schema fragment.
@@ -482,6 +524,8 @@ impl PolicyEngine {
     /// The caller owns the question of *who* may ask for this. Nothing here authenticates a
     /// request: the contained agent must never reach a reload, and the only thing that keeps
     /// it out is where the trigger lives.
+    ///
+    /// A reload whose rules read other enrichment entries than [`Self::read_enrichment`] is refused.
     pub fn reload(&self, sources: &[Policy]) -> Result<(), PolicyStagingError> {
         self.authority.reload(sources)
     }
@@ -617,6 +661,20 @@ impl PolicyEngine {
             .record(governed, principal, request_id, outcome)
     }
 
+    /// Record one `net:connect` outcome with the enrichment facts its decision read.
+    #[cfg(feature = "egress-adapter")]
+    pub(crate) fn record_connect(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request_id: &RequestId,
+        outcome: &Outcome<'_>,
+        enrichment: &crate::EnrichmentFacts,
+    ) -> Result<(), PolicyError> {
+        self.authority
+            .record_connect(governed, principal, request_id, outcome, enrichment)
+    }
+
     /// Return the loaded engine and source identity.
     #[must_use]
     pub fn effective(&self) -> &EffectivePolicy {
@@ -627,6 +685,24 @@ impl PolicyEngine {
     #[must_use]
     pub fn warnings(&self) -> &[PolicyWarning] {
         self.authority.warnings()
+    }
+
+    /// The declared enrichment entries that some rule of the opened policy reads, computed once at
+    /// open and kept by every reload.
+    #[must_use]
+    pub fn read_enrichment(&self) -> &std::collections::BTreeSet<String> {
+        self.authority.read_enrichment()
+    }
+
+    /// Every declared enrichment entry unanswered when the installed rules refuse the `net:connect`
+    /// `request` whatever a read entry answers, and `None` when an answer can change the decision.
+    #[cfg(feature = "egress-adapter")]
+    pub(crate) fn refused_whatever_answered(
+        &self,
+        principal: &Principal,
+        request: &Request<'_>,
+    ) -> Option<crate::EnrichmentFacts> {
+        self.authority.refused_whatever_answered(principal, request)
     }
 
     /// The per-tool refinement for one `tools/call`, and the `::response` an allowed call owes.
@@ -1965,6 +2041,7 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
                 host: "example.com",
                 ip: None,
                 port: 443,
+                enrichment: &crate::EnrichmentFacts::NONE,
             },
         );
         assert!(

@@ -100,6 +100,7 @@ fn connects(engine: &PolicyEngine, host: &str) -> bool {
                 host,
                 ip: None,
                 port: 443,
+                enrichment: &policy::EnrichmentFacts::NONE,
             },
         )
         .0
@@ -115,6 +116,7 @@ fn connects_to(engine: &PolicyEngine, address: &str) -> bool {
                 host: "metadata.example",
                 ip: Some(address.parse().expect("an address")),
                 port: 443,
+                enrichment: &policy::EnrichmentFacts::NONE,
             },
         )
         .0

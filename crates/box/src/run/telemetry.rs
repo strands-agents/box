@@ -12,7 +12,7 @@ use egress_gateway::{
     EffectInterceptor as EgressEffectInterceptor, EffectPermit as EgressEffectPermit,
     EgressDecision, Emitter, McpFrame,
 };
-use policy::{Decision, DecisionObserver, DenyReason, PolicyAttribution, RuleId};
+use policy::{Decision, DecisionObserver, DenyReason, EnrichmentFacts, PolicyAttribution, RuleId};
 use telemetry::{DecisionCause, DecisionRecord};
 
 use crate::error::BoxError;
@@ -56,6 +56,8 @@ pub(crate) struct EffectiveDecision {
     enforced: bool,
     /// Each rule log-only mode let through across the attempt's legs and gates.
     would_deny: Vec<String>,
+    /// What each enrichment entry answered about a connection's destination.
+    enrichment: EnrichmentFacts,
 }
 
 /// What determined an effective decision.
@@ -151,6 +153,7 @@ impl EffectiveDecision {
                 attribution: decision.attribution().to_vec(),
                 enforced: false,
                 would_deny: would_deny_ids([decision]),
+                enrichment: EnrichmentFacts::NONE,
             },
             Decision::Allow { rule, .. } => Self {
                 correlation: telemetry::Correlation::current(),
@@ -164,6 +167,7 @@ impl EffectiveDecision {
                 attribution: decision.attribution().to_vec(),
                 enforced: true,
                 would_deny: Vec::new(),
+                enrichment: EnrichmentFacts::NONE,
             },
             Decision::Deny { reason, rule, .. } => Self {
                 correlation: telemetry::Correlation::current(),
@@ -177,6 +181,7 @@ impl EffectiveDecision {
                 attribution: decision.attribution().to_vec(),
                 enforced: true,
                 would_deny: Vec::new(),
+                enrichment: EnrichmentFacts::NONE,
             },
         }
     }
@@ -199,6 +204,7 @@ impl EffectiveDecision {
             attribution: Vec::new(),
             enforced: true,
             would_deny: Vec::new(),
+            enrichment: EnrichmentFacts::NONE,
         }
     }
 
@@ -221,6 +227,7 @@ impl EffectiveDecision {
             attribution: Vec::new(),
             enforced: true,
             would_deny: Vec::new(),
+            enrichment: EnrichmentFacts::NONE,
         }
     }
 
@@ -308,7 +315,14 @@ impl EffectiveDecision {
             attribution: Vec::new(),
             enforced: true,
             would_deny: Vec::new(),
+            enrichment: self.enrichment,
         }
+    }
+
+    /// State what each enrichment entry answered about this connection's destination.
+    fn enriched(mut self, facts: EnrichmentFacts) -> Self {
+        self.enrichment = facts;
+        self
     }
 
     fn into_record(self) -> DecisionRecord {
@@ -339,6 +353,12 @@ impl EffectiveDecision {
         } else {
             record.with_would_deny(self.would_deny)
         };
+        let record = self
+            .enrichment
+            .iter()
+            .fold(record, |record, (name, answer)| {
+                record.enriched(name, answer.is_answered(), answer.labels().iter().cloned())
+            });
         record
             .correlated(self.correlation)
             .caused_by(self.cause)
@@ -646,7 +666,9 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
         };
 
         let capture = ObservationCapture::begin();
+        let facts = crate::run::enrichment::FactsCapture::begin();
         let result = self.inner.intercept(effect);
+        let enrichment = facts.finish();
         let observations = capture.finish();
         let verdict = if result.is_ok() {
             AuditDecision::Allow
@@ -659,6 +681,24 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
                 mcp: Some(frame), ..
             } => remote_mcp_decision(frame, refusal, &observations),
             _ => ordinary_egress_decision(&identity, refusal, &observations),
+        };
+        // An address decision that read its host decision's answer asks the enricher nothing, so
+        // its record keeps the answer this connection's earlier decision captured.
+        let enrichment = match effect {
+            EgressEffectAttempt::Connect { .. } if enrichment.is_empty() => PENDING_EGRESS_DECISION
+                .with(|pending| {
+                    pending
+                        .borrow()
+                        .as_ref()
+                        .filter(|held| held.identity.is(&identity))
+                        .map(|held| held.effective.enrichment.clone())
+                })
+                .unwrap_or(enrichment),
+            _ => enrichment,
+        };
+        let effective = match identity.leg {
+            EgressLeg::Connection => effective.enriched(enrichment),
+            EgressLeg::Request => effective,
         };
         // Copy a call's arguments only when some target takes tool-call records, so a box whose
         // targets take none does no work for them on the enforcement path.
@@ -1318,6 +1358,13 @@ mod tests {
             vec![("mcp-fixture.demo".to_string(), "demo".to_string())],
             Arc::clone(&catalogs),
             Arc::new(|| {}),
+            Arc::new(
+                crate::run::enrichment::Enricher::open(
+                    &std::collections::BTreeMap::new(),
+                    &std::collections::BTreeSet::new(),
+                )
+                .expect("a box with no entry opens no source"),
+            ),
         );
         let interceptor = EgressDecisionInterceptor::over_reporting(
             inner,
@@ -1479,6 +1526,7 @@ mod tests {
                     host: "example.com",
                     ip: None,
                     port: 443,
+                    enrichment: &policy::EnrichmentFacts::NONE,
                 },
             )
             .0
@@ -1617,6 +1665,7 @@ mod tests {
                 host: "example.com",
                 ip: None,
                 port: 443,
+                enrichment: &policy::EnrichmentFacts::NONE,
             },
         );
         let Decision::Deny { rule, .. } = no_match else {
@@ -1672,6 +1721,86 @@ mod tests {
                 "server/tools/list",
                 "policy-pending-bootstrap",
             )
+        );
+    }
+
+    /// A connection's decision states what each enrichment entry answered about its destination,
+    /// whether its host decision refused it or an address decision that asked nothing admitted it.
+    #[test]
+    fn a_connection_decision_states_each_enrichment_answer() {
+        use crate::run::enrichment::{Confidence, memory::InMemorySource};
+
+        let source = Arc::new(
+            InMemorySource::new(std::time::Duration::from_secs(300)).labelling(
+                "evil.example",
+                "malware",
+                Confidence::High,
+            ),
+        );
+        let (inner, _history) = crate::test_support::enrichment_interceptor(
+            r#"
+                permit (principal, action, resource);
+                forbid (principal, action == Box::Action::"net:connect", resource)
+                when { context.input.enrichment.threat.labels.contains("malware") };
+                forbid (principal, action == Box::Action::"net:connect", resource)
+                unless { context.input.enrichment.threat.answered };
+            "#,
+            &source,
+        );
+        let recorder = DecisionRecorder::discarding();
+        let interceptor = EgressDecisionInterceptor::over(inner, Arc::clone(&recorder));
+        let emitter = EgressDecisionRecorder::over(Arc::clone(&recorder));
+        let resolve = |host| EgressEffectAttempt::Resolve { host, port: 443 };
+        let emit = |host: &str, decision| {
+            emitter.emit(EgressDecision {
+                host: host.to_string(),
+                port: 443,
+                method: String::new(),
+                path: String::new(),
+                decision,
+                reason: "policy decided".to_string(),
+                correlation: RequestId::new(host),
+            });
+        };
+
+        assert!(interceptor.intercept(&resolve("evil.example")).is_err());
+        emit("evil.example", AuditDecision::Deny);
+        interceptor
+            .intercept(&resolve("clean.example"))
+            .expect("the clean host is admitted");
+        interceptor
+            .intercept(&EgressEffectAttempt::Connect {
+                host: "clean.example",
+                port: 443,
+                address: "192.0.2.1:443".parse().expect("an address"),
+                http_visibility: false,
+            })
+            .expect("and so is its address");
+        emit("clean.example", AuditDecision::Allow);
+
+        let stated: Vec<(String, bool, Vec<String>)> = recorder
+            .recorded()
+            .iter()
+            .flat_map(|decision| {
+                decision.enrichment.iter().map(|(name, answer)| {
+                    (
+                        format!("{} {name}", decision.parts().1),
+                        answer.is_answered(),
+                        answer.labels().iter().cloned().collect(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            stated,
+            [
+                (
+                    "evil.example:443 threat".to_string(),
+                    true,
+                    vec!["malware".to_string()]
+                ),
+                ("clean.example:443 threat".to_string(), true, Vec::new()),
+            ]
         );
     }
 
@@ -2326,6 +2455,7 @@ forbid(principal, action == Box::Action::"websocket:connect", resource);"#
                         host,
                         ip: None,
                         port: 443,
+                        enrichment: &policy::EnrichmentFacts::NONE,
                     },
                 )
                 .0
@@ -2397,6 +2527,7 @@ forbid(principal, action == Box::Action::"websocket:connect", resource);"#
                     host: "api.example.com",
                     ip: None,
                     port,
+                    enrichment: &policy::EnrichmentFacts::NONE,
                 },
             );
             let [attribution] = decision.attribution() else {

@@ -91,7 +91,10 @@ pub(crate) fn grammar_action_schema(
     mcp_schemas: &[String],
 ) -> Result<ActionSchema, PolicyError> {
     let fragments: Vec<String> = grammars.iter().map(Grammar::schema).collect();
-    composed_action_schema(&fragments, mcp_schemas)
+    composed_action_schema(
+        &crate::schema::SchemaBase::of_grammars(fragments),
+        mcp_schemas,
+    )
 }
 
 /// Strict-validate `source` against the canonical schema, `grammars`, and `mcp_schemas`.

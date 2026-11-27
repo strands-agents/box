@@ -453,6 +453,9 @@ impl Collector {
         for (key, value) in record.attributes() {
             emitted.add_attribute(key, value);
         }
+        for (key, value) in record.enrichment_attributes() {
+            emitted.add_attribute(key, value);
+        }
         self.logger.emit(emitted);
     }
 
@@ -1260,6 +1263,57 @@ mod tests {
         assert!(
             text.contains(SOURCE_BOX),
             "the record names its producer: {text}"
+        );
+    }
+
+    /// A connection's decision states what each enrichment entry answered about its destination.
+    #[tokio::test]
+    async fn a_decision_states_each_enrichment_answer() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("records.jsonl");
+        let collector = Collector::start(file_config(&path)).expect("open");
+
+        collector.record(
+            DecisionRecord::deny(
+                r#"Box::Action::"net:connect""#,
+                "evil.example:443",
+                "block_malware",
+                "a forbid rule matched",
+            )
+            .enriched("threat", true, ["malware".to_string()])
+            .enriched("reputation", false, []),
+        );
+        collector.drained().await;
+
+        let text = std::fs::read_to_string(&path).expect("the records");
+        let record: serde_json::Value = text
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("one JSON line"))
+            .find(|line| line.to_string().contains("block_malware"))
+            .expect("the decision");
+        let attribute = |key: &str| {
+            record
+                .pointer("/resourceLogs/0/scopeLogs/0/logRecords/0/attributes")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|attributes| {
+                    attributes
+                        .iter()
+                        .find(|attribute| attribute["key"] == key)
+                        .map(|attribute| attribute["value"].clone())
+                })
+                .unwrap_or_else(|| panic!("{key} is on the record: {text}"))
+        };
+        assert_eq!(
+            attribute("strands.box.enrichment.threat.answered"),
+            serde_json::json!({"boolValue": true})
+        );
+        assert_eq!(
+            attribute("strands.box.enrichment.threat.labels"),
+            serde_json::json!({"arrayValue": {"values": [{"stringValue": "malware"}]}})
+        );
+        assert_eq!(
+            attribute("strands.box.enrichment.reputation.answered"),
+            serde_json::json!({"boolValue": false})
         );
     }
 

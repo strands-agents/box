@@ -173,6 +173,7 @@ fn a_non_temporal_request_is_unaffected_by_the_budget() {
         host: "api.example.com",
         ip: None,
         port: 443,
+        enrichment: &policy::EnrichmentFacts::NONE,
     };
     // No `permit` covers `net:connect`, so this denies by default — not by budget.
     assert!(matches!(

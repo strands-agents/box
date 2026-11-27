@@ -128,6 +128,7 @@ usage = "git push [<remote>]"
             &policy::Operator::unanchored(),
             &[policy],
             &grammars,
+            &policy::EnrichmentNames::default(),
         )
         .expect("the grammar declares its action");
     }
