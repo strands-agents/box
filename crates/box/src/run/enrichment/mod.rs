@@ -302,21 +302,10 @@ impl Drop for FactsCapture {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::memory::InMemorySource;
     use super::*;
-
-    fn entry(outputs: &[&str], min_confidence: Confidence) -> EnrichmentEntry {
-        EnrichmentEntry {
-            kind: "in-memory".to_string(),
-            endpoint: "file:///unused.json".to_string(),
-            secret: None,
-            outputs: outputs.iter().map(|label| (*label).to_string()).collect(),
-            min_confidence,
-            timeout: Duration::from_millis(500),
-            max_age: Duration::from_secs(300),
-        }
-    }
+    use crate::test_support::{enrichment_entry as entry, enrichment_interceptor as interceptor};
 
     /// An enricher whose one `threat` entry asks `source` when `read`.
     fn enricher(declared: EnrichmentEntry, source: &Arc<InMemorySource>, read: bool) -> Enricher {
@@ -398,59 +387,6 @@ pub(crate) mod tests {
 
         assert!(!threat(&enricher, "evil.example").is_answered());
         assert_eq!(source.calls(), 0);
-    }
-
-    /// The egress interceptor of a box whose policy is `text` and whose one `threat` entry asks
-    /// `source`, with the directory that holds its history.
-    pub(crate) fn interceptor(
-        text: &str,
-        source: &Arc<InMemorySource>,
-    ) -> (
-        Arc<dyn egress_gateway::EffectInterceptor>,
-        tempfile::TempDir,
-    ) {
-        let directory = tempfile::tempdir().expect("a directory");
-        let history = directory.path().join("dogwood.redb");
-        let file = std::fs::File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&history)
-            .expect("the history opens");
-        let engine = Arc::new(
-            policy::PolicyEngine::open_staged_file_with_grammars(
-                &policy::Operator::unanchored(),
-                vec![policy::Policy {
-                    origin: std::path::PathBuf::from("policy.dw"),
-                    text: text.to_string(),
-                }],
-                policy::ToolGrammars::default(),
-                &policy::EnrichmentNames::new(["threat".to_string()]).expect("a name"),
-                file,
-                history,
-            )
-            .expect("the policy opens"),
-        );
-        let declared =
-            BTreeMap::from([("threat".to_string(), entry(&["malware"], Confidence::Low))]);
-        let enricher = Enricher::opening(&declared, engine.read_enrichment(), |_| {
-            Ok(Arc::clone(source) as Arc<dyn Source>)
-        })
-        .expect("the enricher opens");
-        let interceptor = policy::EgressPolicyInterceptor::into_handle_with_discovery(
-            Arc::clone(&engine),
-            policy::Principal::agent(),
-            policy::GovernedBox::assigned("test-box"),
-            Vec::new(),
-            Arc::new(policy::ToolCatalogs::new(
-                Arc::clone(&engine),
-                Vec::<(String, policy::McpServerKind)>::new(),
-            )),
-            Arc::new(|| {}),
-            Arc::new(enricher),
-        );
-        (interceptor, directory)
     }
 
     /// An IP-literal host is not a DNS name: through the egress adapter no source is asked, the

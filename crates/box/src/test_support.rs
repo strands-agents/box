@@ -31,6 +31,81 @@ pub(crate) fn open_policy_with_mcp_schemas(
     policy
 }
 
+/// A `threat` entry of the `in-memory` kind that keeps `outputs` at `min_confidence`.
+pub(crate) fn enrichment_entry(
+    outputs: &[&str],
+    min_confidence: crate::run::enrichment::Confidence,
+) -> crate::record::config::enrichment::EnrichmentEntry {
+    crate::record::config::enrichment::EnrichmentEntry {
+        kind: "in-memory".to_string(),
+        endpoint: "file:///unused.json".to_string(),
+        secret: None,
+        outputs: outputs.iter().map(|label| (*label).to_string()).collect(),
+        min_confidence,
+        timeout: std::time::Duration::from_millis(500),
+        max_age: std::time::Duration::from_secs(300),
+    }
+}
+
+/// The egress interceptor of a box whose policy is `text` and whose one `threat` entry asks
+/// `source`, with the directory that holds its history.
+pub(crate) fn enrichment_interceptor(
+    text: &str,
+    source: &std::sync::Arc<crate::run::enrichment::memory::InMemorySource>,
+) -> (
+    std::sync::Arc<dyn egress_gateway::EffectInterceptor>,
+    TempDir,
+) {
+    use std::sync::Arc;
+
+    use crate::run::enrichment::{Confidence, Enricher, Source};
+
+    let directory = tempfile::tempdir().expect("a directory");
+    let history = directory.path().join("dogwood.redb");
+    let file = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&history)
+        .expect("the history opens");
+    let engine = Arc::new(
+        PolicyEngine::open_staged_file_with_grammars(
+            &policy::Operator::unanchored(),
+            vec![Policy {
+                origin: std::path::PathBuf::from("policy.dw"),
+                text: text.to_string(),
+            }],
+            policy::ToolGrammars::default(),
+            &policy::EnrichmentNames::new(["threat".to_string()]).expect("a name"),
+            file,
+            history,
+        )
+        .expect("the policy opens"),
+    );
+    let declared = std::collections::BTreeMap::from([(
+        "threat".to_string(),
+        enrichment_entry(&["malware"], Confidence::Low),
+    )]);
+    let enricher = Enricher::opening(&declared, engine.read_enrichment(), |_| {
+        Ok(Arc::clone(source) as Arc<dyn Source>)
+    })
+    .expect("the enricher opens");
+    let interceptor = policy::EgressPolicyInterceptor::into_handle_with_discovery(
+        Arc::clone(&engine),
+        policy::Principal::agent(),
+        policy::GovernedBox::assigned("test-box"),
+        Vec::new(),
+        Arc::new(policy::ToolCatalogs::new(
+            Arc::clone(&engine),
+            Vec::<(String, policy::McpServerKind)>::new(),
+        )),
+        Arc::new(|| {}),
+        Arc::new(enricher),
+    );
+    (interceptor, directory)
+}
+
 // One lock over `HOME` for every test in this module tree.
 
 use std::path::Path;

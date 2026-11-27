@@ -1737,7 +1737,7 @@ mod tests {
                 Confidence::High,
             ),
         );
-        let (inner, _history) = crate::run::enrichment::tests::interceptor(
+        let (inner, _history) = crate::test_support::enrichment_interceptor(
             r#"
                 permit (principal, action, resource);
                 forbid (principal, action == Box::Action::"net:connect", resource)
