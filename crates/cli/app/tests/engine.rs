@@ -1269,8 +1269,9 @@ fn a_run_without_a_profile_asks_the_starter_and_without_a_terminal_creates_nothi
 }
 
 /// **A profile made with the enrichment test pack and policy refuses a host its classification
-/// source labels**: the run prints Box Core's `B0215` line, and `block_malware` refuses the
-/// workload's `curl` before any DNS query, with no other rule.
+/// source labels**: the run prints Box Core's `B0215` line, and `block_malware` alone refuses the
+/// workload's `curl` with a `403`. A `.invalid` name never resolves, so a policy refusal of it was
+/// decided before any DNS query.
 #[test]
 fn a_profile_from_the_enrichment_pack_refuses_a_labelled_host() {
     let scene = Scene::new();
@@ -1328,6 +1329,10 @@ fn a_profile_from_the_enrichment_pack_refuses_a_labelled_host() {
         .expect("box runs");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("403"),
+        "the gateway refuses the CONNECT: {stderr}"
+    );
     assert!(
         stderr.contains(
             "strands-box: note[B0215]: [enrichment.threat] sends its classification source (kind \

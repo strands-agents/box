@@ -218,7 +218,7 @@ box profile show <profile> [--full] [--format <text|json>]
 | Flag | What it does |
 | --- | --- |
 | `<profile>` | The profile to check: a name, or the path of a profile file. |
-| `--full` | Also print the whole configuration and policy the run gets. It includes any key your profile passes to an MCP server, so be careful where you paste it. |
+| `--full` | Also print the whole configuration and policy the run gets. It includes any key your profile passes to an MCP server, and the `endpoint` of each `[enrichment.<name>]`, which can hold a token, so be careful where you paste it. |
 | `--format <text\|json>` | Print the text report, or the same report as one JSON document ([JSON output](#json-output)). |
 
 Example output, shortened:
@@ -244,7 +244,7 @@ Options
 A line that starts with `!` is a note: the run goes on without what it names, and the note says
 why. Each option shows its source: `your profile`, `default`, `env:<NAME>` for a variable in your
 shell, or `search` for a program `box` found. A profile that lists a
-[plugin](plugins.md) also gets a `plugins` line. Each secret source, from a plugin or the profile, gets a `source` line: its scheme, such as `op://`, the program that runs on your machine, outside the box, and the plugin that declares it, or `your profile`. Each [classification source](profiles-reference.md#what-a-profile-holds) gets an `enrichment` line, such as `threat (kind "in-memory")`: the name of its `[enrichment.<name>]` table and the source's kind. When a rule reads that table, Box sends the source the DNS name of each host a program in the box connects to, and the run's startup disclosure says so in a `B0215` line. A `copy` line is a file of yours that comes into the
+[plugin](plugins.md) also gets a `plugins` line. Each secret source, from a plugin or the profile, gets a `source` line: its scheme, such as `op://`, the program that runs on your machine, outside the box, and the plugin that declares it, or `your profile`. Each [classification source](profiles-reference.md#what-a-profile-holds) gets an `enrichment` line, such as `threat (kind "<kind>")`: the name of its `[enrichment.<name>]` table and the source's kind. [Ask a classification source about each host](../user/egress.md#ask-a-classification-source-about-each-host) says which DNS names Box sends it, and when. A `copy` line is a file of yours that comes into the
 profile's storage, and [Copy status](packs-reference.md#copy-status) explains each status.
 
 ### JSON output

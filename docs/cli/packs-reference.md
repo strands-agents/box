@@ -507,7 +507,7 @@ name and the box finds it on the agent's `PATH`. Leave out `search`, or write ex
 `[options]`. Another pack that needs the program's folder uses `${{ tool.git.root }}`.
 
 A tool pack writes one tool, so `box` refuses `program` in `[run]`, `workspace`, and the
-`[agent]`, `[tool]`, `[egress]`, `[mcp]`, `[telemetry]`, and `[experimental-features]` tables. Put
+`[agent]`, `[tool]`, `[egress]`, `[mcp]`, `[telemetry]`, `[enrichment]`, and `[experimental-features]` tables. Put
 those in another pack. No pack can change how a tool connects: only a profile holds
 `[tool.<name>.network]`.
 

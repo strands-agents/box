@@ -47,8 +47,9 @@ vt100 = "0.16"
 
 [features]
 native-filesystem-policy = ["strands-box/native-filesystem-policy"]
-# Exposes fake host state so tests do not read the developer's own toolchains, and Box Core's
-# `in-memory` classification source, which a release build does not implement.
+# Exposes fake host state so tests do not read the developer's own toolchains, and builds Box Core's
+# whole test support: the `in-memory` classification source the enrichment tests run, and Box Core's
+# own test probes and harness lines. A release `box` is built without it, so none of them ships.
 test-support = ["strands-box-cli-profile/test-support", "strands-box/test-support"]
 # Restricts telemetry delivery to a local receiver for automated checks.
 test-transport = ["strands-box-cli-telemetry/test-transport"]

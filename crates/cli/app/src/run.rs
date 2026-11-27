@@ -1763,8 +1763,8 @@ impl Preview {
     }
 
     /// The lines that `box profile show` prints first, as `(label, text)`: the packs, the
-    /// plugins, each declared secret source and the program it runs, the policies, storage, and
-    /// project access.
+    /// plugins, each declared secret source and the program it runs, each classification source
+    /// and its kind, the policies, storage, and project access.
     pub fn overview(&self) -> Vec<(&'static str, String)> {
         let mut lines = vec![("packs", self.pack_list())];
         if !self.plugins.is_empty() {
