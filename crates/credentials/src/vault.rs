@@ -1,13 +1,12 @@
 //! The tenant-keyed [`Vault`] for credential attachment and response redaction.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::sync::Arc;
 
 use crate::attach::{Attachment, Inbound, Outbound, Redactions};
 use crate::config::MissingRoutePolicy;
 use crate::model::RouteKind;
+use crate::rotating::{CachedToken, Clock, RotatingToken, TokenSource};
 
 use crate::sources::{
     AmbientFallbackPolicy, AwsCredentialProvider, CREDSD_SCHEME, CredsdClient, credsd_access_token,
@@ -35,78 +34,9 @@ enum BoundSecret {
     Rotating(Arc<RotatingToken>),
 }
 
-struct RotatingToken {
-    credential: String,
-    current: Mutex<Option<CachedToken>>,
-    failures: AtomicU64,
-}
-
-struct CachedToken {
-    secret: Arc<Secret>,
-    refresh_at: SystemTime,
-    expires_at: SystemTime,
-}
-
-impl CachedToken {
-    fn new(credential: &str, secret: Secret, expires_at: &str) -> Result<Self> {
-        let expiry = parse_expiry(credential, expires_at)?;
-        Ok(Self {
-            secret: Arc::new(secret),
-            refresh_at: refresh_before(credential, expiry, token_now())?,
-            expires_at: expiry,
-        })
-    }
-}
-
-/// How long a still-valid token is served after a failed early refresh before the next attempt.
-const REFRESH_RETRY: Duration = Duration::from_secs(5);
-
-impl RotatingToken {
-    fn acquire(&self, vault: &Vault) -> Result<Arc<Secret>> {
-        // A waiter shares a failed acquisition even if a later retry succeeds before it resumes.
-        let failures = self.failures.load(Ordering::Acquire);
-        #[cfg(test)]
-        if let Some(wait) = BEFORE_TOKEN_LOCK.take() {
-            wait();
-        }
-        let mut current = self
-            .current
-            .lock()
-            .map_err(|_| CredentialError::Credential("credsd token lock poisoned".into()))?;
-        if self.failures.load(Ordering::Relaxed) != failures {
-            return Err(CredentialError::Credential(format!(
-                "credsd refresh failed for credential {:?}",
-                self.credential
-            )));
-        }
-        if let Some(cached) = current.as_ref()
-            && token_now() < cached.refresh_at
-        {
-            return Ok(Arc::clone(&cached.secret));
-        }
-        match vault.refresh_credsd_token(&self.credential) {
-            Ok(next) => Ok(Arc::clone(&current.insert(next).secret)),
-            // An early refresh is advisory: a still-valid token keeps serving, and the next attempt waits.
-            Err(_)
-                if let Some(cached) = current.as_mut()
-                    && token_now() < cached.expires_at =>
-            {
-                cached.refresh_at = (token_now() + REFRESH_RETRY).min(cached.expires_at);
-                Ok(Arc::clone(&cached.secret))
-            }
-            Err(error) => {
-                *current = None;
-                self.failures.fetch_add(1, Ordering::Release);
-                Err(error)
-            }
-        }
-    }
-}
-
 impl BoundSecret {
     fn attach(
         &self,
-        vault: &Vault,
         inject: &InjectMode,
         attachment: &mut Attachment,
         paired: bool,
@@ -120,56 +50,23 @@ impl BoundSecret {
                 ));
             }
             Self::Rotating(token) => {
-                acquired = token.acquire(vault)?;
+                acquired = token.acquire()?;
                 acquired.as_ref()
             }
         };
-        crate::legs::attach_secret(inject, secret.as_str(), attachment);
-        Ok(paired.then(|| ResponseRedactor::new(secret)))
+        Ok(attach_fixed(secret, inject, attachment, paired))
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    static TOKEN_CLOCK: std::cell::Cell<Option<SystemTime>> = const { std::cell::Cell::new(None) };
-    static BEFORE_TOKEN_LOCK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-fn token_now() -> SystemTime {
-    #[cfg(test)]
-    if let Some(now) = TOKEN_CLOCK.get() {
-        return now;
-    }
-    SystemTime::now()
-}
-
-/// Refresh in the last fifth of the remaining lifetime, at most a minute before expiry.
-#[cfg(test)]
-fn refresh_at(credential: &str, expires_at: &str, now: SystemTime) -> Result<SystemTime> {
-    refresh_before(credential, parse_expiry(credential, expires_at)?, now)
-}
-
-/// Parse the daemon's RFC 3339 `expires_at`.
-fn parse_expiry(credential: &str, expires_at: &str) -> Result<SystemTime> {
-    Ok(chrono::DateTime::parse_from_rfc3339(expires_at)
-        .map_err(|_| {
-            CredentialError::Credential(format!(
-                "credsd credential {credential:?} has an invalid expires_at"
-            ))
-        })?
-        .into())
-}
-
-/// Refresh in the last fifth of the remaining lifetime, at most a minute before `expiry`.
-fn refresh_before(credential: &str, expiry: SystemTime, now: SystemTime) -> Result<SystemTime> {
-    let remaining = expiry.duration_since(now).unwrap_or_default();
-    if remaining.is_zero() {
-        return Err(CredentialError::Credential(format!(
-            "credsd returned an expired token for credential {credential:?}"
-        )));
-    }
-    Ok(expiry - (remaining / 5).min(Duration::from_secs(60)))
+/// Attach `secret`, with a scrubber for it when the caller keeps one.
+fn attach_fixed(
+    secret: &Secret,
+    inject: &InjectMode,
+    attachment: &mut Attachment,
+    paired: bool,
+) -> Option<ResponseRedactor> {
+    crate::legs::attach_secret(inject, secret.as_str(), attachment);
+    paired.then(|| ResponseRedactor::new(secret))
 }
 
 /// One resolved opaque binding: the secret, how it attaches, and the phantom standing in for it.
@@ -190,11 +87,10 @@ pub(crate) struct OpaqueBinding {
 impl OpaqueBinding {
     pub(crate) fn attach(
         &self,
-        vault: &Vault,
         attachment: &mut Attachment,
         paired: bool,
     ) -> Result<Option<ResponseRedactor>> {
-        self.secret.attach(vault, &self.inject, attachment, paired)
+        self.secret.attach(&self.inject, attachment, paired)
     }
 
     /// Where the harness placed the phantom, so it can be recognised and stripped.
@@ -232,8 +128,9 @@ impl std::fmt::Debug for OpaqueBinding {
 struct BoxOwnedBinding {
     /// How the real secret attaches to the outbound request.
     inject: InjectMode,
-    /// The resolved secret, wiped on drop and validated at construction.
-    secret: BoundSecret,
+    /// The resolved secret, wiped on drop and validated at construction. A box-owned route never
+    /// reads a credsd token, so it holds a fixed secret.
+    secret: Secret,
 }
 
 impl std::fmt::Debug for BoxOwnedBinding {
@@ -290,7 +187,7 @@ pub struct Vault {
     aws_provider: Arc<dyn AwsCredentialProvider>,
     /// The acquisition-audit sink. Every resolve emits one record through it, success or
     /// failure; the default discards, since the shared L2 lane does not exist yet.
-    emitter: Box<dyn crate::Emitter>,
+    emitter: Arc<dyn crate::Emitter>,
     /// The resolved absolute `credsd` socket a `credsd://` route connects to, retained because the
     /// resolve happens per request. `Some` only when a `credsd://` route was declared.
     credsd_socket: Option<PathBuf>,
@@ -345,7 +242,7 @@ impl Vault {
             backend,
             ambient_policy,
             aws_provider,
-            emitter,
+            emitter: Arc::from(emitter),
             credsd_socket: None,
         };
         // A `credsd://` route needs a socket, resolved and validated absolute once here — a relative
@@ -518,12 +415,12 @@ impl Vault {
     /// Classify a secret resolution: `Ok(Some)` is a resolved secret, `Ok(None)` a soft miss under
     /// the skip policy (recorded in `skipped`), and `Err` a hard failure. Shared by the opaque and
     /// box-owned routes, which both resolve a real secret.
-    fn classify_resolve(
-        result: Result<BoundSecret>,
+    fn classify_resolve<T>(
+        result: Result<T>,
         route: &RouteSpec,
         missing: MissingRoutePolicy,
         skipped: &mut Vec<Skipped>,
-    ) -> Result<Option<BoundSecret>> {
+    ) -> Result<Option<T>> {
         match result {
             Ok(secret) => Ok(Some(secret)),
             // A genuinely absent secret is the one soft failure — unless the caller asked for no soft
@@ -591,11 +488,24 @@ impl Vault {
                 let credential = crate::legs::credsd_credential(locator)?;
                 let (secret, expires_at) = self.read_credsd_token(credential)?;
                 let binding = match expires_at {
-                    Some(expiry) => BoundSecret::Rotating(Arc::new(RotatingToken {
-                        credential: credential.to_owned(),
-                        current: Mutex::new(Some(CachedToken::new(credential, secret, &expiry)?)),
-                        failures: AtomicU64::new(0),
-                    })),
+                    Some(expiry) => {
+                        let source = TokenSource {
+                            credential: credential.to_owned(),
+                            socket: self.credsd_socket().map(Path::to_path_buf).ok_or_else(|| {
+                                CredentialError::KeystoreAccess(format!(
+                                    "no credsd socket was resolved for credential {credential:?}"
+                                ))
+                            })?,
+                            tenant: self.tenant.clone(),
+                            emitter: Arc::clone(&self.emitter),
+                            clock: Clock::current(),
+                            read_wait: crate::rotating::read_wait_limit(),
+                        };
+                        let first = CachedToken::new(secret, &expiry, source.clock.now()).map_err(
+                            |failure| CredentialError::Credential(failure.message(credential)),
+                        )?;
+                        BoundSecret::Rotating(RotatingToken::new(source, first))
+                    }
                     None => BoundSecret::Fixed(secret),
                 };
                 read.push((locator.clone(), binding.clone()));
@@ -606,7 +516,7 @@ impl Vault {
 
     /// Resolve one route's secret through the backend, auditing the attempt. The backend has no
     /// credsd source, so a box-owned `credsd://` route is refused here.
-    fn resolve_secret(&self, route: &RouteSpec) -> Result<BoundSecret> {
+    fn resolve_secret(&self, route: &RouteSpec) -> Result<Secret> {
         let locator = route.credential_ref();
         crate::audit_resolve(
             self.emitter.as_ref(),
@@ -614,31 +524,7 @@ impl Vault {
             locator.scheme(),
             &route.reference_display(),
             &RequestId::new(LOAD_CORRELATION),
-            || self.backend.resolve_secret(locator).map(BoundSecret::Fixed),
-        )
-    }
-
-    fn refresh_credsd_token(&self, credential: &str) -> Result<CachedToken> {
-        crate::audit_resolve(
-            self.emitter.as_ref(),
-            &self.tenant,
-            CREDSD_SCHEME,
-            &format!("{CREDSD_SCHEME}://{credential}"),
-            &RequestId::new("credential-store-refresh"),
-            || {
-                // Gateway refusals must not echo daemon-supplied material or type labels.
-                let (secret, expiry) = self.read_credsd_token(credential).map_err(|_| {
-                    CredentialError::Credential(format!(
-                        "credsd refresh failed for credential {credential:?}"
-                    ))
-                })?;
-                let expiry = expiry.ok_or_else(|| {
-                    CredentialError::Credential(format!(
-                        "credsd refresh for credential {credential:?} returned no expires_at"
-                    ))
-                })?;
-                CachedToken::new(credential, secret, &expiry)
-            },
+            || self.backend.resolve_secret(locator),
         )
     }
 
@@ -683,11 +569,7 @@ impl Vault {
 
     /// Report a non-fatal operator-facing condition.
     pub(crate) fn warn(&self, message: &str) {
-        diagnostics::diag!(
-            B0602,
-            "credentials [{tenant}]: {message}",
-            tenant = self.tenant
-        );
+        warn_operator(&self.tenant, message);
         #[cfg(test)]
         CAPTURED_WARNINGS.with(|warnings| warnings.borrow_mut().push(message.to_string()));
     }
@@ -742,14 +624,9 @@ impl Vault {
             if let Some(binding) = strip {
                 crate::legs::strip_phantom(binding, &mut attachment)?;
             }
-            let redactor = match box_owned {
-                Some(binding) => {
-                    binding
-                        .secret
-                        .attach(self, &binding.inject, &mut attachment, paired)?
-                }
-                None => None,
-            };
+            let redactor = box_owned.and_then(|binding| {
+                attach_fixed(&binding.secret, &binding.inject, &mut attachment, paired)
+            });
             return Ok(Some((attachment, redactor)));
         }
         match self.resolve_opaque(&req.destination)? {
@@ -769,11 +646,10 @@ impl Vault {
     }
 
     fn response_secret(&self, destination: &Destination<'_>) -> Option<&Secret> {
-        let binding = match Self::first_match(&self.box_owned, destination) {
-            Some(owner) => &owner.secret,
-            None => &self.resolve_opaque(destination).ok()??.secret,
-        };
-        match binding {
+        if let Some(owner) = Self::first_match(&self.box_owned, destination) {
+            return Some(&owner.secret);
+        }
+        match &self.resolve_opaque(destination).ok()??.secret {
             BoundSecret::Fixed(secret) => Some(secret),
             BoundSecret::Rotating(_) => None,
         }
@@ -813,6 +689,21 @@ impl Vault {
     }
 }
 
+/// Report a non-fatal condition to the operator, naming the vault's tenant.
+pub(crate) fn warn_operator(tenant: &str, message: &str) {
+    diagnostics::diag!(B0602, "credentials [{tenant}]: {message}");
+    #[cfg(test)]
+    CAPTURED_OPERATOR_WARNINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((tenant.to_string(), message.to_string()));
+}
+
+/// Every operator warning this test process reported, with its tenant, from any thread.
+#[cfg(test)]
+pub(crate) static CAPTURED_OPERATOR_WARNINGS: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// Whether `line` is the first time this process prints it.
 fn first_warning(line: &str) -> bool {
     static PRINTED: std::sync::Mutex<std::collections::BTreeSet<String>> =
@@ -841,6 +732,7 @@ pub(crate) fn drain_captured_warnings() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::time::Duration;
 
     use super::*;
     use crate::sources::SecretSource;
@@ -1483,35 +1375,55 @@ mod tests {
         );
     }
 
-    #[test]
-    fn refresh_window_scales_with_lifetime_and_does_not_extend_expiry() {
-        let at = |seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
-        let expiry = "1970-01-01T01:00:00Z";
-        assert_eq!(refresh_at("name", expiry, at(0)).unwrap(), at(3540));
-        // A daemon may still return the same credential in the early refresh window.
-        assert_eq!(refresh_at("name", expiry, at(3540)).unwrap(), at(3588));
-        assert!(refresh_at("name", expiry, at(3600)).is_err());
-        assert!(refresh_at("name", expiry, at(3601)).is_err());
-        assert_eq!(
-            refresh_at("name", "1970-01-01T01:00:00.500+01:00", at(0)).unwrap(),
-            at(0) + Duration::from_millis(400)
-        );
+    /// A JSON-RPC error reply carrying the credsd domain `code`.
+    fn error_reply(code: &str) -> String {
+        format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{{\"code\":-32000,\"message\":\"sensitive\",\"data\":{{\"code\":\"{code}\"}}}}}}\n"
+        )
+    }
+
+    /// The token-route binding a vault holds for `host`.
+    fn rotating_token(vault: &Vault, host: &str) -> Arc<RotatingToken> {
+        match &vault
+            .resolve_opaque(&dest(host, 443, "/"))
+            .unwrap()
+            .unwrap()
+            .secret
+        {
+            BoundSecret::Rotating(token) => Arc::clone(token),
+            BoundSecret::Fixed(_) => panic!("an expiring token rotates"),
+        }
+    }
+
+    fn attached(vault: &Vault, request: Outbound<'_>) -> String {
+        let (attachment, _) = vault.attach_with_redactor(request).unwrap().unwrap();
+        attachment
+            .set_headers()
+            .next()
+            .unwrap()
+            .1
+            .as_str()
+            .to_owned()
     }
 
     #[test]
-    fn credsd_refresh_is_shared_audited_and_pins_each_response() {
-        TOKEN_CLOCK.set(Some(SystemTime::UNIX_EPOCH));
-        let first = token_reply(r#""1970-01-01T00:01:40Z""#);
+    fn credsd_refresh_is_shared_audited_backed_off_and_pins_each_response() {
+        let clock = crate::rotating::tests::ManualClock::install();
         let second =
             token_reply(r#""2099-01-01T00:00:00Z""#).replace("ghp_vault_example", "second-token");
         let socket = credsd_answering(
             "rotate",
             [
-                first,
+                token_reply(r#""1970-01-01T00:01:40Z""#),
                 token_reply("null").replace("Bearer", "sensitive-token-type"),
                 token_reply(r#""invalid-sensitive-expiry""#),
                 token_reply("null"),
                 token_reply(r#""1970-01-01T00:00:00Z""#),
+                error_reply("CREDENTIAL_NOT_FOUND"),
+                error_reply("CONFIG_DRIFTED"),
+                error_reply("PROVIDER_UNAVAILABLE"),
+                // The daemon closes the connection with no answer.
+                String::new(),
                 second,
             ],
         );
@@ -1534,7 +1446,7 @@ mod tests {
             "Bearer ghp_vault_example"
         );
         // Past the first token's expiry, so each failed refresh refuses rather than serving it.
-        TOKEN_CLOCK.set(Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100)));
+        clock.set(100);
         assert!(
             vault
                 .attach_for(request)
@@ -1554,19 +1466,32 @@ mod tests {
                 .is_err()
         );
         assert_eq!(recorder.records().len(), 1);
-        for reason in [
-            "credsd refresh failed",
-            "invalid expires_at",
-            "no expires_at",
-            "expired token",
+        // Each failure keeps its reason, and the next read waits 1, 2, 4, 8, then at most 10 seconds.
+        for (at, next, reason) in [
+            (100, 101, "no usable bearer token"),
+            (101, 103, "invalid expires_at"),
+            (103, 107, "no expires_at"),
+            (107, 115, "expired token"),
+            (115, 125, "has no credential"),
+            (125, 135, "`creds revalidate`"),
+            (135, 145, "provider is unavailable"),
+            (145, 155, "closed the connection"),
         ] {
+            clock.set(at);
             let refusal = vault.attach_with_redactor(request).unwrap_err().to_string();
-            assert!(refusal.contains(reason), "{refusal}");
+            assert!(refusal.contains(reason), "at {at}: {refusal}");
             assert!(!refusal.contains("ghp_vault_example"));
-            assert!(!refusal.contains("sensitive"));
+            assert!(!refusal.contains("sensitive"), "{refusal}");
+            let reads = recorder.records().len();
+            // Until the wait ends, a request is refused without reaching the daemon.
+            for during in [at, next - 1] {
+                clock.set(during);
+                assert!(vault.attach_with_redactor(request).is_err());
+                assert_eq!(recorder.records().len(), reads, "backed off at {during}");
+            }
         }
 
-        TOKEN_CLOCK.set(None);
+        clock.set(155);
         let start = std::sync::Barrier::new(8);
         std::thread::scope(|scope| {
             for index in 0..8 {
@@ -1597,7 +1522,9 @@ mod tests {
         let records = recorder.records();
         assert_eq!(
             records.iter().map(|r| r.ok).collect::<Vec<_>>(),
-            [true, false, false, false, false, true]
+            [
+                true, false, false, false, false, false, false, false, false, true
+            ]
         );
         assert!(
             records
@@ -1619,17 +1546,11 @@ mod tests {
         std::fs::remove_file(&socket).unwrap();
     }
 
+    /// An early refresh runs off the request path: a request in the refresh window attaches the
+    /// still-valid token while the read is outstanding, and a failed read only delays the next one.
     #[test]
-    fn early_credsd_refresh_failure_keeps_serving_the_still_valid_token() {
+    fn early_credsd_refresh_runs_in_the_background_and_keeps_serving() {
         use std::sync::mpsc::channel;
-
-        struct Restore(PathBuf);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                TOKEN_CLOCK.set(None);
-                let _ = std::fs::remove_file(&self.0);
-            }
-        }
 
         let timeout = Duration::from_secs(5);
         let (refresh_started, refresh_seen) = channel();
@@ -1638,7 +1559,7 @@ mod tests {
             "refresh-overlap",
             [
                 token_reply(r#""1970-01-01T01:00:00Z""#),
-                token_reply("null").replace("Bearer", "unsupported"),
+                error_reply("PROVIDER_UNAVAILABLE"),
                 token_reply(r#""1970-01-01T02:00:00Z""#)
                     .replace("ghp_vault_example", "replacement-token"),
             ],
@@ -1651,13 +1572,11 @@ mod tests {
                 }
             },
         );
-        let _restore = Restore(socket.clone());
-        let start = SystemTime::UNIX_EPOCH;
-        TOKEN_CLOCK.set(Some(start));
+        let clock = crate::rotating::tests::ManualClock::install();
         let recorder = Recorder::new();
         let opened = Vault::open_with_emitter(
             VaultConfig::new(Backend::local(), "t")
-                .credsd_socket(socket)
+                .credsd_socket(socket.clone())
                 .route(credsd_token_route("first.example.com")),
             Box::new(recorder.clone()),
         )
@@ -1667,69 +1586,35 @@ mod tests {
             format!("Bearer {}", opened.phantoms()[0].token()),
         )];
         let vault = opened.into_vault();
-        let vault = &vault;
+        let token = rotating_token(&vault, "first.example.com");
         let request = token_request(&headers);
-        let early_refresh = start + Duration::from_secs(3540);
-        TOKEN_CLOCK.set(Some(early_refresh - Duration::from_secs(1)));
-        let (cached, _) = vault.attach_with_redactor(request).unwrap().unwrap();
-        assert_eq!(
-            cached.set_headers().next().unwrap().1.as_str(),
-            "Bearer ghp_vault_example"
-        );
+        clock.set(3539);
+        assert_eq!(attached(&vault, request), "Bearer ghp_vault_example");
+        assert_eq!(recorder.records().len(), 1, "no read before the window");
 
-        std::thread::scope(|scope| {
-            let failed = scope.spawn(|| {
-                TOKEN_CLOCK.set(Some(early_refresh));
-                vault.attach_with_redactor(request)
-            });
-            refresh_seen
-                .recv_timeout(timeout)
-                .expect("refresh reaches daemon");
+        // The first request in the window starts the read and still attaches at once.
+        clock.set(3540);
+        assert_eq!(attached(&vault, request), "Bearer ghp_vault_example");
+        refresh_seen
+            .recv_timeout(timeout)
+            .expect("refresh reaches daemon");
+        // While the daemon has not answered, another request attaches without waiting on it.
+        assert_eq!(attached(&vault, request), "Bearer ghp_vault_example");
+        reply_to_refresh.send(()).unwrap();
+        token.wait_settled();
+        assert_eq!(recorder.records().len(), 2);
 
-            let (waiter_observed_epoch, waiter_seen) = channel();
-            let (release_waiter, await_release) = channel();
-            let waiter = scope.spawn(move || {
-                TOKEN_CLOCK.set(Some(early_refresh));
-                BEFORE_TOKEN_LOCK.set(Some(Box::new(move || {
-                    waiter_observed_epoch.send(()).unwrap();
-                    await_release.recv_timeout(timeout).expect("release waiter");
-                })));
-                vault.attach_with_redactor(request)
-            });
-            waiter_seen
-                .recv_timeout(timeout)
-                .expect("waiter observes epoch");
-            reply_to_refresh.send(()).unwrap();
-            // The failed refresh is advisory: the original token has a minute left and still attaches.
-            let (kept, _) = failed.join().unwrap().unwrap().unwrap();
-            assert_eq!(
-                kept.set_headers().next().unwrap().1.as_str(),
-                "Bearer ghp_vault_example"
-            );
+        // Within the retry delay the original token serves with no daemon read.
+        clock.set(3540);
+        assert_eq!(attached(&vault, request), "Bearer ghp_vault_example");
+        token.wait_settled();
+        assert_eq!(recorder.records().len(), 2);
 
-            // Within the retry delay the original token serves with no daemon read.
-            TOKEN_CLOCK.set(Some(early_refresh + Duration::from_secs(4)));
-            let (cached, _) = vault.attach_with_redactor(request).unwrap().unwrap();
-            assert_eq!(
-                cached.set_headers().next().unwrap().1.as_str(),
-                "Bearer ghp_vault_example"
-            );
-
-            // After it, the next request retries and gets the replacement.
-            TOKEN_CLOCK.set(Some(early_refresh + REFRESH_RETRY));
-            let (replacement, _) = vault.attach_with_redactor(request).unwrap().unwrap();
-            assert_eq!(
-                replacement.set_headers().next().unwrap().1.as_str(),
-                "Bearer replacement-token"
-            );
-            // The overtaken waiter shares no failure, and takes the replacement.
-            release_waiter.send(()).unwrap();
-            let (waited, _) = waiter.join().unwrap().unwrap().unwrap();
-            assert_eq!(
-                waited.set_headers().next().unwrap().1.as_str(),
-                "Bearer replacement-token"
-            );
-        });
+        // After it, the next request starts another read and gets the replacement once it lands.
+        clock.set(3541);
+        assert_eq!(attached(&vault, request), "Bearer ghp_vault_example");
+        token.wait_settled();
+        assert_eq!(attached(&vault, request), "Bearer replacement-token");
         assert_eq!(
             recorder
                 .records()
@@ -1738,6 +1623,220 @@ mod tests {
                 .collect::<Vec<_>>(),
             [true, false, true]
         );
+        drop(clock);
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    /// Every request with no valid token, including the one that starts the read, waits for it only
+    /// up to its limit, so a daemon that never answers hangs no request.
+    #[test]
+    fn a_request_waiting_on_a_stuck_read_is_refused_at_its_limit() {
+        use std::sync::mpsc::channel;
+
+        let timeout = Duration::from_secs(5);
+        let (read_started, read_seen) = channel();
+        let (release_read, await_release) = channel::<()>();
+        let socket = credsd_answering_with(
+            "stuck-read",
+            [
+                token_reply(r#""1970-01-01T00:01:40Z""#),
+                token_reply(r#""2099-01-01T00:00:00Z""#).replace("ghp_vault_example", "late-token"),
+            ],
+            move |index| {
+                if index == 1 {
+                    read_started.send(()).unwrap();
+                    let _ = await_release.recv_timeout(timeout);
+                }
+            },
+        );
+        let clock = crate::rotating::tests::ManualClock::install();
+        crate::rotating::tests::TEST_READ_WAIT.set(Some(Duration::from_millis(200)));
+        let opened = Vault::open(
+            VaultConfig::new(Backend::local(), "t")
+                .credsd_socket(socket.clone())
+                .route(credsd_token_route("first.example.com")),
+        )
+        .unwrap();
+        crate::rotating::tests::TEST_READ_WAIT.set(None);
+        let headers = [(
+            "authorization".into(),
+            format!("Bearer {}", opened.phantoms()[0].token()),
+        )];
+        let vault = opened.into_vault();
+        let request = token_request(&headers);
+        clock.set(100);
+        let shared = &vault;
+        let rotating = rotating_token(&vault, "first.example.com");
+        std::thread::scope(|scope| {
+            let (answered, answer) = channel();
+            // The first request after expiry starts the read; it and a second request that joins it
+            // are both refused at the limit while credsd holds the read.
+            for _ in 0..2 {
+                let answered = answered.clone();
+                scope.spawn(move || {
+                    let _ = answered.send(shared.attach_with_redactor(request).map(|_| ()));
+                });
+            }
+            read_seen
+                .recv_timeout(timeout)
+                .expect("the read reaches credsd");
+            for _ in 0..2 {
+                let refusal = answer
+                    .recv_timeout(timeout)
+                    .expect("each request is answered at its limit")
+                    .unwrap_err()
+                    .to_string();
+                assert!(refusal.contains("did not answer"), "{refusal}");
+            }
+            release_read.send(()).unwrap();
+        });
+        rotating.wait_settled();
+        assert_eq!(attached(&vault, request), "Bearer late-token");
+        drop(clock);
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    /// A failed read is retried no later than the token's expiry, however long the backoff has
+    /// grown, and a success restarts the backoff at its first wait.
+    #[test]
+    fn a_failed_read_is_due_by_expiry_and_backoff_restarts_after_success() {
+        let clock = crate::rotating::tests::ManualClock::install();
+        let token = |expires_at: &str, value: &str| {
+            token_reply(&format!("\"{expires_at}\"")).replace("ghp_vault_example", value)
+        };
+        let socket = credsd_answering(
+            "retry-by-expiry",
+            [
+                token("1970-01-01T00:01:40Z", "first-token"),
+                error_reply("PROVIDER_UNAVAILABLE"),
+                error_reply("PROVIDER_UNAVAILABLE"),
+                error_reply("PROVIDER_UNAVAILABLE"),
+                error_reply("PROVIDER_UNAVAILABLE"),
+                error_reply("PROVIDER_UNAVAILABLE"),
+                token("1970-01-01T00:16:40Z", "second-token"),
+                error_reply("PROVIDER_UNAVAILABLE"),
+                token("2099-01-01T00:00:00Z", "third-token"),
+            ],
+        );
+        let recorder = Recorder::new();
+        let opened = Vault::open_with_emitter(
+            VaultConfig::new(Backend::local(), "t")
+                .credsd_socket(socket.clone())
+                .route(credsd_token_route("first.example.com")),
+            Box::new(recorder.clone()),
+        )
+        .unwrap();
+        let headers = [(
+            "authorization".into(),
+            format!("Bearer {}", opened.phantoms()[0].token()),
+        )];
+        let vault = opened.into_vault();
+        let rotating = rotating_token(&vault, "first.example.com");
+        let request = token_request(&headers);
+        // Early reads fail at 80, 81, 83, 87, and 95; the fifth backoff, 10 s, would end past expiry
+        // at 100.
+        for at in [80, 81, 83, 87, 95] {
+            clock.set(at);
+            assert_eq!(attached(&vault, request), "Bearer first-token");
+            rotating.wait_settled();
+        }
+        assert_eq!(recorder.records().len(), 6);
+        clock.set(100);
+        assert_eq!(attached(&vault, request), "Bearer second-token");
+        // The next failure waits the first 1 s again, not the grown backoff.
+        clock.set(1000);
+        assert!(vault.attach_with_redactor(request).is_err());
+        clock.set(1001);
+        assert_eq!(attached(&vault, request), "Bearer third-token");
+        assert_eq!(recorder.records().len(), 9);
+        drop(clock);
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    /// A daemon that needs the operator to sign in again is reported once for each run of failed
+    /// reads, and each refusal names the remedy.
+    #[test]
+    fn credsd_reauthentication_is_reported_once_per_failure_run() {
+        let clock = crate::rotating::tests::ManualClock::install();
+        let socket = credsd_answering(
+            "reauth",
+            [
+                token_reply(r#""1970-01-01T00:01:40Z""#),
+                error_reply("REAUTH_REQUIRED"),
+                error_reply("REAUTH_REQUIRED"),
+                token_reply(r#""1970-01-01T00:16:40Z""#),
+                error_reply("REAUTH_REQUIRED"),
+            ],
+        );
+        let tenant = "reauth-tenant";
+        let opened = Vault::open(
+            VaultConfig::new(Backend::local(), tenant)
+                .credsd_socket(socket.clone())
+                .route(credsd_token_route("first.example.com")),
+        )
+        .unwrap();
+        let headers = [(
+            "authorization".into(),
+            format!("Bearer {}", opened.phantoms()[0].token()),
+        )];
+        let vault = opened.into_vault();
+        let rotating = rotating_token(&vault, "first.example.com");
+        let request = token_request(&headers);
+        let reports = || {
+            CAPTURED_OPERATOR_WARNINGS
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(from, message)| from == tenant && message.contains("re-authentication"))
+                .count()
+        };
+
+        // While the first report is blocked on stderr, another request is still answered.
+        clock.set(100);
+        let (report_started, report_seen) = std::sync::mpsc::channel();
+        let (release_report, await_release) = std::sync::mpsc::channel::<()>();
+        let shared = &vault;
+        *crate::rotating::tests::BEFORE_REPORT.lock().unwrap() = Some((
+            tenant.to_string(),
+            Box::new(move || {
+                report_started.send(()).unwrap();
+                let _ = await_release.recv_timeout(Duration::from_secs(5));
+            }),
+        ));
+        std::thread::scope(|scope| {
+            let reporting = scope.spawn(move || shared.attach_with_redactor(request).map(|_| ()));
+            report_seen
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the re-authentication report starts");
+            let (answered, answer) = std::sync::mpsc::channel();
+            scope.spawn(move || answered.send(shared.attach_with_redactor(request).is_err()));
+            assert_eq!(
+                answer.recv_timeout(Duration::from_secs(2)),
+                Ok(true),
+                "a request waits on no report"
+            );
+            release_report.send(()).unwrap();
+            assert!(reporting.join().unwrap().is_err());
+        });
+        for (at, reported) in [(100, 1), (105, 1)] {
+            clock.set(at);
+            let refusal = vault.attach_with_redactor(request).unwrap_err().to_string();
+            assert!(
+                refusal.contains("`creds login --credential github`"),
+                "{refusal}"
+            );
+            rotating.wait_settled();
+            assert_eq!(reports(), reported, "at {at}");
+        }
+        clock.set(115);
+        assert_eq!(attached(&vault, request), "Bearer ghp_vault_example");
+        // A success ends the run, so the next failure is reported again.
+        clock.set(1000);
+        assert!(vault.attach_with_redactor(request).is_err());
+        rotating.wait_settled();
+        assert_eq!(reports(), 2);
+        drop(clock);
+        let _ = std::fs::remove_file(&socket);
     }
 
     /// A token with no expiry opens with no warning.

@@ -43,6 +43,10 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// request hot path across many under-timeout reads.
 const RESPONSE_DEADLINE: Duration = Duration::from_secs(10);
 
+/// The longest one read can take once it is connected: the overall deadline plus one last blocked
+/// socket read.
+pub(crate) const LONGEST_READ: Duration = RESPONSE_DEADLINE.saturating_add(RESPONSE_TIMEOUT);
+
 /// The URI scheme a `credsd://<credential>` reference carries.
 pub(crate) const CREDSD_SCHEME: &str = "credsd";
 
@@ -145,12 +149,21 @@ impl CredsdClient {
     ///
     /// Sends only the `credential` field. Every error names the credential and never the material.
     pub(crate) fn get(&self, credential: &str) -> Result<CredentialResult> {
+        self.get_classified(credential).map_err(|(_, error)| error)
+    }
+
+    /// [`get`](Self::get), with the [`GetFailure`] class of a failure beside its error.
+    fn get_classified(
+        &self,
+        credential: &str,
+    ) -> std::result::Result<CredentialResult, (GetFailure, CredentialError)> {
         let subject = Subject::Credential(credential);
         let context = subject.to_string();
         let request = build_credential_request(GET_METHOD, credential);
-        let stream = self.send(&request, &context)?;
-        let line = read_response(&stream, &context)?;
-        parse_response(&line, subject)
+        let other = |error| (GetFailure::Other, error);
+        let stream = self.send(&request, &context).map_err(other)?;
+        let line = read_response(&stream, &context).map_err(other)?;
+        parse_classified(&line, subject)
     }
 
     /// Send `system/health` and return the daemon's protocol version.
@@ -249,8 +262,13 @@ fn build_request(method: &str, params: serde_json::Value) -> String {
 /// caps the total at `MAX_RESPONSE_BYTES`; the read stops at the first newline, and an EOF before a
 /// newline is a dropped line rather than a complete response, so it is refused.
 fn read_response(stream: &UnixStream, context: &str) -> Result<Zeroizing<Vec<u8>>> {
+    read_line(stream, context)
+}
+
+/// [`read_response`] over any reader, so a test can drive an interrupted read.
+fn read_line(source: impl Read, context: &str) -> Result<Zeroizing<Vec<u8>>> {
     let deadline = Instant::now() + RESPONSE_DEADLINE;
-    let mut reader = stream.take(MAX_RESPONSE_BYTES);
+    let mut reader = source.take(MAX_RESPONSE_BYTES);
     // Reserve the whole cap up front so the buffer never reallocates, whatever the response size:
     // a grown `Vec` frees its old allocation — holding credential bytes — without wiping it.
     // The 1 MiB reservation is lazily paged, so only the bytes actually read become resident.
@@ -264,11 +282,15 @@ fn read_response(stream: &UnixStream, context: &str) -> Result<Zeroizing<Vec<u8>
                 seconds = RESPONSE_DEADLINE.as_secs()
             )));
         }
-        let read = reader.read(&mut chunk[..]).map_err(|source| {
-            CredentialError::KeystoreAccess(format!(
-                "the credsd daemon did not answer for {context}: {source}"
-            ))
-        })?;
+        let read = match reader.read(&mut chunk[..]) {
+            // A signal interrupted the read before any byte arrived; the deadline still bounds it.
+            Err(source) if source.kind() == std::io::ErrorKind::Interrupted => continue,
+            read => read.map_err(|source| {
+                CredentialError::KeystoreAccess(format!(
+                    "the credsd daemon did not answer for {context}: {source}"
+                ))
+            })?,
+        };
         if read == 0 {
             // `take` returns 0 once the byte cap is exhausted, the same signal as EOF. A buffer at
             // the cap with no newline is a truncated line: refuse it rather than parse a partial
@@ -316,9 +338,18 @@ fn parse_response<R: serde::de::DeserializeOwned>(
     buffer: &[u8],
     subject: Subject<'_>,
 ) -> Result<R> {
+    parse_classified(buffer, subject).map_err(|(_, error)| error)
+}
+
+/// [`parse_response`], with the [`GetFailure`] class of a failure beside its error.
+fn parse_classified<R: serde::de::DeserializeOwned>(
+    buffer: &[u8],
+    subject: Subject<'_>,
+) -> std::result::Result<R, (GetFailure, CredentialError)> {
+    let refused = |message: String| (GetFailure::Other, CredentialError::Credential(message));
     let response: RpcResponse<R> =
         serde_json::from_slice(first_line(buffer)).map_err(|_source| {
-            CredentialError::Credential(format!(
+            refused(format!(
                 "credsd returned a malformed response for {subject}"
             ))
         })?;
@@ -328,15 +359,25 @@ fn parse_response<R: serde::de::DeserializeOwned>(
     // A result carries credentials, so its id must match the request we sent. A crossed or
     // mismatched response must never sign with another credential's material.
     if response.id != Some(REQUEST_ID) {
-        return Err(CredentialError::Credential(format!(
+        return Err(refused(format!(
             "credsd returned a response with an unexpected id for {subject}"
         )));
     }
     response.result.ok_or_else(|| {
-        CredentialError::Credential(format!(
+        refused(format!(
             "credsd returned neither a result nor an error for {subject}"
         ))
     })
+}
+
+/// Whether a failed `credential/get` needs the operator to sign in again, which the refresh path
+/// reports once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GetFailure {
+    /// The daemon needs the operator to sign in to the credential again.
+    ReauthRequired,
+    /// Any other failure; its message says which.
+    Other,
 }
 
 /// Parse one `system/health` line into the reported protocol version. Every failure is a
@@ -363,10 +404,15 @@ fn parse_health(buffer: &[u8]) -> Result<u32> {
 }
 
 /// Map a JSON-RPC error to a keystore-access or credential failure by its `error.data.code`, naming
-/// `subject` and never `error.message`.
-fn map_error(error: &RpcError, subject: Subject<'_>) -> CredentialError {
+/// `subject` and never `error.message`. This is the one table of what each code means.
+fn map_error(error: &RpcError, subject: Subject<'_>) -> (GetFailure, CredentialError) {
     let code = error.data.as_ref().and_then(|data| data.code.as_deref());
-    match (code, subject) {
+    let class = if code == Some("REAUTH_REQUIRED") {
+        GetFailure::ReauthRequired
+    } else {
+        GetFailure::Other
+    };
+    let mapped = match (code, subject) {
         (Some("CREDENTIAL_NOT_FOUND"), Subject::Credential(name)) => CredentialError::Credential(
             format!("credsd has no credential {name:?}, or this box is not authorized for it"),
         ),
@@ -414,7 +460,8 @@ fn map_error(error: &RpcError, subject: Subject<'_>) -> CredentialError {
             "credsd rejected the request for {subject} (protocol code {code})",
             code = error.code
         )),
-    }
+    };
+    (class, mapped)
 }
 
 /// One `credential/get` result. The material and its expiry are read here; `credential` and
@@ -461,6 +508,23 @@ impl std::fmt::Debug for AccessToken {
 /// credential failure that names the credential and never the material.
 pub(crate) fn credsd_access_token(client: &CredsdClient, credential: &str) -> Result<AccessToken> {
     access_token_from(client.get(credential)?, credential)
+}
+
+/// [`credsd_access_token`] for a refresh: a failure keeps its [`GetFailure`] class and message, except
+/// that an unusable reply gets fixed text, because its message names daemon-supplied labels.
+pub(crate) fn credsd_access_token_class(
+    client: &CredsdClient,
+    credential: &str,
+) -> std::result::Result<AccessToken, (GetFailure, CredentialError)> {
+    let result = client.get_classified(credential)?;
+    access_token_from(result, credential).map_err(|_| {
+        (
+            GetFailure::Other,
+            CredentialError::Credential(format!(
+                "credsd returned no usable bearer token for credential {credential:?}"
+            )),
+        )
+    })
 }
 
 /// Map a `credsd` result onto an [`AccessToken`], asserting the material tag and the token type.
@@ -619,6 +683,27 @@ struct RpcErrorData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A signal that interrupts a read before any byte arrives is retried, not reported as a
+    /// daemon that did not answer.
+    #[test]
+    fn an_interrupted_read_is_retried() {
+        struct InterruptedOnce(bool, &'static [u8]);
+        impl Read for InterruptedOnce {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                if std::mem::replace(&mut self.0, false) {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                let n = self.1.len().min(out.len());
+                out[..n].copy_from_slice(&self.1[..n]);
+                self.1 = &self.1[n..];
+                Ok(n)
+            }
+        }
+        let line = read_line(InterruptedOnce(true, b"{}\n"), "credential \"t\"")
+            .expect("the interrupted read is retried");
+        assert_eq!(line.as_slice(), b"{}\n");
+    }
     use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixListener;
     use std::sync::atomic::{AtomicU32, Ordering};

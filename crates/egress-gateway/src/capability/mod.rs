@@ -191,6 +191,8 @@ impl CapabilitySet {
         for mutation in fold(outcomes)? {
             mutation.apply(&mut req.headers, &mut req.target);
         }
+        // Each attachment forces `accept-encoding`, so a second one collides in the fold above and
+        // at most one advisory note reaches here.
         if advisory.is_some() {
             req.advisory_note = advisory;
         }
@@ -523,6 +525,41 @@ mod tests {
         assert_eq!(res.body, b"[REDACTED]");
     }
 
+    /// Two controls in one set that both attach to a request refuse it as a collision, so neither
+    /// edits the request and neither advisory note survives to overwrite the other. The controls set
+    /// different headers, so they collide only on the `accept-encoding` each attachment forces.
+    #[test]
+    fn two_attaching_controls_in_one_set_collide_and_record_no_note() {
+        let advisory = |host: &str, header: &str| {
+            let route = RouteSpec::opaque(
+                DestinationPattern::parse(host).unwrap(),
+                env_locator("secret"),
+                InjectMode::header("{}", Some(header.to_string())).unwrap(),
+            )
+            .phantom_check(credentials::PhantomCheck::Advisory);
+            let vault = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(route))
+                .unwrap()
+                .into_vault();
+            CredentialCapability::new(DestinationPattern::parse(host).unwrap(), Arc::new(vault))
+        };
+        let set = CapabilitySet::new(vec![
+            advisory("*.example.com", "X-First"),
+            advisory("api.example.com", "X-Second"),
+        ]);
+        set.validate().unwrap();
+        let mut req = request("api.example.com", HeaderMap::new());
+        let refusal = set.apply_to_request(&mut req).unwrap_err();
+        assert!(refusal.starts_with("mutation collision:"), "{refusal}");
+        assert!(req.headers.is_empty(), "a refused request carries no edit");
+        assert!(req.advisory_note.is_none());
+        #[cfg(feature = "tls-intercept")]
+        {
+            let refusal = set.apply_exchange_request(&mut req).err().unwrap();
+            assert!(refusal.starts_with("mutation collision:"), "{refusal}");
+            assert!(req.advisory_note.is_none());
+        }
+    }
+
     #[test]
     fn validate_refuses_two_credentials_on_one_pattern() {
         let one = || header_capability("*.example.com", "secret").0;
@@ -544,8 +581,9 @@ mod tests {
         use super::*;
         use crate::capability::credential::tests::advisory_header_capability;
 
-        // Build the response state independently of the request edit fold to exercise two
-        // overlapping scrubbers, whose request edits would conflict on Accept-Encoding.
+        // Build the response state without the request fold, which refuses two attachments as a
+        // collision (`two_attaching_controls_in_one_set_collide_and_record_no_note`). The gateway
+        // never reaches this state; these tests pin `controls` for more than one scrubber.
         fn overlapping_response(set: &CapabilitySet, target: &Target) -> ExchangeResponse {
             let req = request(&target.host, HeaderMap::new());
             let mut response = ExchangeResponse::Unmatched;

@@ -16,6 +16,7 @@ mod model;
 mod opened;
 mod preflight;
 mod redaction;
+mod rotating;
 mod sources;
 mod vault;
 

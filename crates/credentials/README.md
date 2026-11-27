@@ -112,7 +112,7 @@ through one. See [Declared secret sources](#declared-secret-sources).
 | `aws://` (no profile) | Structured AWS session credentials from the AWS SDK default credential provider chain (the host's ambient identity), driven on a worker thread and cached. Not a single secret, so `Backend::resolve` rejects it. | hard |
 | `SCHEME://NAME` or `SCHEME://NAME#FIELD`, for a declared `SCHEME` | The stdout of the declared program, or one string field of it. Only `Backend::declared` resolves it. | hard: a program cannot signal "absent" |
 | `credsd://credential` on `RouteSpec::signed_aws` | Structured AWS session credentials from one `credential/get` of that credential to the credsd daemon, on each request. Not a single secret, so `Backend::resolve` rejects it. | hard |
-| `credsd://credential` on `RouteSpec::opaque` | Box reads the `access_token` when the vault opens. Requests near expiry share a fresh `credential/get`. The daemon must return a usable bearer token. Tokens without an expiry are read only at startup. | hard |
+| `credsd://credential` on `RouteSpec::opaque` | Box reads the `access_token` when the vault opens. Near expiry, one background `credential/get` replaces it; after expiry, requests wait for a shared one, and are refused while a failed one waits to retry. The daemon must return a usable bearer token. Tokens without an expiry are read only at startup. | hard |
 
 `credsd_preflight(socket, signed, tokens)` checks the daemon before a workload starts: its
 protocol version, and with one `credential/list`, that each named credential exists and is

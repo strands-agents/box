@@ -2744,7 +2744,8 @@ Fetching the token on each request: it puts the daemon on every request's path.
 **Cost.** Redaction must follow a changing value, so each response is scrubbed with the token its
 request carried, and a library caller with an expiring token must attach through
 `Vault::attach_with_redactor`. A failed refresh serves the old token until it expires, and after that refuses
-requests until a later refresh succeeds.
+requests until a later refresh succeeds. Refreshes after a failure back off, so a daemon that has
+just recovered can wait up to 10 seconds for the next read.
 
 ## Telemetry
 

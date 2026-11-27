@@ -64,7 +64,8 @@ pub(crate) use aws::{
 };
 pub(crate) use command::CommandSource;
 pub(crate) use credsd::{
-    ACCESS_TOKEN_TYPE, CREDSD_SCHEME, CredsdClient, SESSION_CREDENTIALS_TYPE, credsd_access_token,
+    ACCESS_TOKEN_TYPE, CREDSD_SCHEME, CredsdClient, GetFailure, LONGEST_READ,
+    SESSION_CREDENTIALS_TYPE, credsd_access_token, credsd_access_token_class,
     resolve_credsd_socket,
 };
 pub(crate) use env::{EnvSource, SCHEME as ENV_SCHEME};
