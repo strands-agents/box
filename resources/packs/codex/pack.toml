@@ -1,4 +1,4 @@
-# Codex in a box, tested with codex 0.170.0 on macOS.
+# Codex in a box, tested with codex 0.171.0 on macOS.
 [pack]
 name = "@box/codex"
 version = 1
@@ -27,6 +27,9 @@ command = [
     'sandbox_mode="danger-full-access"',
     "-c",
     "check_for_update_on_startup=false",
+    # Shell snapshots source startup files such as ~/.zshrc, which Box policy may refuse.
+    "-c",
+    "features.shell_snapshot=false",
     { value = "-c", when = { variable = "inputs.agent.skip-permissions", equals = "true" } },
     { value = 'approval_policy="never"', when = { variable = "inputs.agent.skip-permissions", equals = "true" } },
     # What the box does, and the profile to change (docs/design/cli/decisions.md#an-agent-pack-tells-its-agent-about-the-box).
