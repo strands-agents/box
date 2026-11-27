@@ -40,6 +40,17 @@ impl CredentialError {
         matches!(self, CredentialError::SecretNotFound(_))
     }
 
+    /// The reason this error carries, without its variant's prefix.
+    pub(crate) fn detail(&self) -> &str {
+        match self {
+            Self::Credential(detail)
+            | Self::SecretNotFound(detail)
+            | Self::KeystoreAccess(detail)
+            | Self::Ambiguous(detail)
+            | Self::UnsupportedInjectType(detail) => detail,
+        }
+    }
+
     /// The severity the diagnostic for this error carries: soft failures are a warning (the route is
     /// skipped), hard failures an error.
     pub(crate) fn severity(&self) -> Severity {

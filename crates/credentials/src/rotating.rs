@@ -15,7 +15,7 @@ use crate::sources::{CREDSD_SCHEME, CredsdClient, GetFailure, credsd_access_toke
 use crate::{CredentialError, RequestId, Secret};
 
 /// The wait after a first failed read before the next one; each further failure doubles it.
-const REFRESH_RETRY: Duration = Duration::from_secs(5);
+const REFRESH_RETRY: Duration = Duration::from_secs(1);
 
 /// The longest wait between two failed reads.
 const REFRESH_RETRY_MAX: Duration = Duration::from_secs(30);
@@ -94,35 +94,24 @@ impl Clock {
 }
 
 /// Why a token read failed, carrying no daemon-supplied text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TokenFailure {
-    Get(GetFailure),
+    /// The daemon read failed, with its class and its operator-facing reason.
+    Get(GetFailure, String),
     NoExpiry,
     InvalidExpiry,
     Expired,
 }
 
 impl TokenFailure {
+    fn get(class: GetFailure, error: &CredentialError) -> Self {
+        Self::Get(class, error.detail().to_owned())
+    }
+
     /// The operator-facing reason, which names the credential and nothing the daemon wrote.
-    pub(crate) fn message(self, credential: &str) -> String {
+    pub(crate) fn message(&self, credential: &str) -> String {
         match self {
-            Self::Get(GetFailure::ReauthRequired) => format!(
-                "credsd needs re-authentication for credential {credential:?}; run \
-                 `creds login --credential {credential}`"
-            ),
-            Self::Get(GetFailure::NotFound) => format!(
-                "credsd has no credential {credential:?}, or this box is not authorized for it"
-            ),
-            Self::Get(GetFailure::Unavailable) => {
-                format!("credsd is unavailable for credential {credential:?}")
-            }
-            Self::Get(GetFailure::NeedsRepair) => format!(
-                "credsd refused credential {credential:?} because its configuration or integrity \
-                 record needs attention; run `creds revalidate`, or repair it and restart the daemon"
-            ),
-            Self::Get(GetFailure::Refused) => format!(
-                "credsd refused credential {credential:?} or returned no usable bearer token"
-            ),
+            Self::Get(_, message) => message.clone(),
             Self::NoExpiry => {
                 format!("credsd returned no expires_at for credential {credential:?}")
             }
@@ -189,24 +178,34 @@ impl TokenSource {
             || {
                 let client = CredsdClient::new(self.socket.clone());
                 credsd_access_token_class(&client, &self.credential)
-                    .map_err(TokenFailure::Get)
+                    .map_err(|(class, error)| TokenFailure::get(class, &error))
                     .and_then(|token| {
                         let expiry = token.expires_at.ok_or(TokenFailure::NoExpiry)?;
                         CachedToken::new(token.token, &expiry, self.clock.now())
                     })
                     .map_err(|cause| {
+                        let error = CredentialError::Credential(cause.message(&self.credential));
                         failure = Some(cause);
-                        CredentialError::Credential(cause.message(&self.credential))
+                        error
                     })
             },
         );
-        read.map_err(|_| failure.unwrap_or(TokenFailure::Get(GetFailure::Unavailable)))
+        read.map_err(|error| {
+            failure.unwrap_or_else(|| TokenFailure::get(GetFailure::Other, &error))
+        })
     }
 
-    /// [`read`](Self::read), with a panic counted as an unavailable daemon so no read stays running.
+    fn stopped(&self, what: &str) -> TokenFailure {
+        TokenFailure::Get(
+            GetFailure::Other,
+            format!("{what} for credsd credential {:?}", self.credential),
+        )
+    }
+
+    /// [`read`](Self::read), with a panic counted as a failed read so no read stays running.
     fn read_guarded(&self) -> Result<CachedToken, TokenFailure> {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.read()))
-            .unwrap_or(Err(TokenFailure::Get(GetFailure::Unavailable)))
+            .unwrap_or_else(|_| Err(self.stopped("the token read stopped unexpectedly")))
     }
 
     fn report(&self, message: &str) {
@@ -306,7 +305,7 @@ impl RotatingToken {
                 drop(token.settle(read));
             });
         if spawned.is_err() {
-            drop(self.settle(Err(TokenFailure::Get(GetFailure::Unavailable))));
+            drop(self.settle(Err(self.source.stopped("Box could not start a token read"))));
         }
     }
 
@@ -335,8 +334,7 @@ impl RotatingToken {
                 }
                 state.retry = Some(retry);
                 state.backoff = (state.backoff * 2).min(REFRESH_RETRY_MAX);
-                state.failure = Some(failure);
-                if failure == TokenFailure::Get(GetFailure::ReauthRequired)
+                if matches!(failure, TokenFailure::Get(GetFailure::ReauthRequired, _))
                     && !state.reauth_reported
                 {
                     state.reauth_reported = true;
@@ -346,6 +344,7 @@ impl RotatingToken {
                         failure.message(&self.source.credential)
                     ));
                 }
+                state.failure = Some(failure);
             }
         }
         self.settled.notify_all();
@@ -361,7 +360,7 @@ impl RotatingToken {
 
     fn refusal(&self, state: &TokenState) -> CredentialError {
         let credential = &self.source.credential;
-        CredentialError::Credential(match state.failure {
+        CredentialError::Credential(match &state.failure {
             Some(failure) => format!("credsd refresh failed: {}", failure.message(credential)),
             None => format!("credsd holds no valid token for credential {credential:?}"),
         })

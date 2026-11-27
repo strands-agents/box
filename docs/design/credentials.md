@@ -157,7 +157,7 @@ with no expiry is held for the run, as a declared secret source holds its secret
 ([a credsd token is read at startup and again near its expiry](./decisions.md#a-credsd-token-is-read-at-startup-and-near-its-expiry)).
 A refresh before expiry runs in the background while requests keep the old token; after expiry,
 concurrent requests wait for one shared refresh. A failed refresh keeps serving the old token until
-it expires, and only then refuses the request. Box waits longer after each failed refresh, from 5
+it expires, and only then refuses the request. Box waits longer after each failed refresh, from 1
 to 30 seconds, so a failing daemon is not called on every request. Each response is
 scrubbed with the token its request carried, even after another request has refreshed it. Two
 routes can read one token under two placeholder variables, with one read for each variable. A

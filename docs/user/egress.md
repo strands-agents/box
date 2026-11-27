@@ -216,7 +216,7 @@ Box checks expiry when it attaches a token. It keeps the workload's placeholder 
 the daemon for a token during the last fifth of the remaining lifetime measured at acquisition,
 up to 60 seconds before expiry. Before the token expires, the read runs in the background, and no
 request waits for it. After the token expires, a request waits for the read, and concurrent
-requests share it. After a failed read, Box waits 5 seconds before it reads again, and doubles the
+requests share it. After a failed read, Box waits 1 second before it reads again, and doubles the
 wait after each further failure, up to 30 seconds. During the wait, a request that has no valid
 token is refused without asking the daemon. Box counts time on both the system clock and a clock
 that a clock change can't move, and treats a token as expired when either clock says so. Once a
@@ -422,7 +422,7 @@ not upgrade `rust-lang.org`.
 | A credsd token route has no `secret.env` and no `secret.inject = "always"` | Set `secret.inject = "always"`, or name the placeholder variable with `secret.env`. |
 | At startup, `credsd credential "<name>" is "<kind>", but a route that reads it expects "<kind>"` | On an egress or MCP route, set `secret.type` to the credential's kind in `creds list`: `aws` for `session_credentials`, `token` for `access_token`. A telemetry target always signs, so name a `session_credentials` credential there. |
 | At startup, a credsd token route reads a token whose type is not `Bearer` | Use a bearer token. The box can't make the proof that a DPoP token needs. |
-| An expiring credsd token fails to load or refresh | The refusal says why: the daemon needs re-authentication, has no such credential, is unavailable, needs its configuration repaired, or refused the request or returned no usable token or expiry. For re-authentication, run the `creds login` command in the message; the box warns on stderr once, and again only after a read succeeds and later fails for that reason. Each replacement must include a future RFC 3339 `expires_at`. Box reads again within 30 seconds after the source recovers. |
+| An expiring credsd token fails to load or refresh | The refusal gives the same reason and remedy as a failure at startup, such as the `creds login` or `creds revalidate` command to run. For re-authentication, the box warns on stderr once, and again only after a read succeeds and later fails for that reason. Each replacement must include a future RFC 3339 `expires_at`. Box reads again within 30 seconds after the source recovers. |
 | A `credsd://` route has no `secret.type`, at startup (a warning) | Set `secret.type = "aws"`, or `"token"` for a token. A later release requires the key. |
 | `secret.env` on an `env://NAME` route is not `NAME`, or an `aws://` route sets `secret.env` | Remove `secret.env`. |
 | Two entries hold a placeholder in one variable and name different secrets | Give one of them another variable. One placeholder variable holds one secret. |

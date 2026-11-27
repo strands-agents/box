@@ -1465,16 +1465,16 @@ mod tests {
                 .is_err()
         );
         assert_eq!(recorder.records().len(), 1);
-        // Each failure keeps its kind, and the next read waits 5, 10, 20, then at most 30 seconds.
+        // Each failure keeps its reason, and the next read waits 1, 2, 4, and so on, up to 30 seconds.
         for (at, next, reason) in [
-            (100, 105, "no usable bearer token"),
-            (105, 115, "invalid expires_at"),
-            (115, 135, "no expires_at"),
-            (135, 165, "expired token"),
-            (165, 195, "has no credential"),
-            (195, 225, "`creds revalidate`"),
-            (225, 255, "is unavailable"),
-            (255, 285, "is unavailable"),
+            (100, 101, "no usable bearer token"),
+            (101, 103, "invalid expires_at"),
+            (103, 107, "no expires_at"),
+            (107, 115, "expired token"),
+            (115, 131, "has no credential"),
+            (131, 161, "`creds revalidate`"),
+            (161, 191, "provider is unavailable"),
+            (191, 221, "closed the connection"),
         ] {
             clock.set(at);
             let refusal = vault.attach_with_redactor(request).unwrap_err().to_string();
@@ -1490,7 +1490,7 @@ mod tests {
             }
         }
 
-        clock.set(285);
+        clock.set(221);
         let start = std::sync::Barrier::new(8);
         std::thread::scope(|scope| {
             for index in 0..8 {
@@ -1604,13 +1604,13 @@ mod tests {
         assert_eq!(recorder.records().len(), 2);
 
         // Within the retry delay the original token serves with no daemon read.
-        clock.set(3544);
+        clock.set(3540);
         assert_eq!(attached(&vault, request), "Bearer ghp_vault_example");
         token.wait_settled();
         assert_eq!(recorder.records().len(), 2);
 
         // After it, the next request starts another read and gets the replacement once it lands.
-        clock.set(3545);
+        clock.set(3541);
         assert_eq!(attached(&vault, request), "Bearer ghp_vault_example");
         token.wait_settled();
         assert_eq!(attached(&vault, request), "Bearer replacement-token");
@@ -1641,6 +1641,8 @@ mod tests {
                 error_reply("PROVIDER_UNAVAILABLE"),
                 error_reply("PROVIDER_UNAVAILABLE"),
                 error_reply("PROVIDER_UNAVAILABLE"),
+                error_reply("PROVIDER_UNAVAILABLE"),
+                error_reply("PROVIDER_UNAVAILABLE"),
                 token("1970-01-01T00:16:40Z", "second-token"),
                 error_reply("PROVIDER_UNAVAILABLE"),
                 token("2099-01-01T00:00:00Z", "third-token"),
@@ -1661,21 +1663,22 @@ mod tests {
         let vault = opened.into_vault();
         let rotating = rotating_token(&vault, "first.example.com");
         let request = token_request(&headers);
-        // Early reads at 80, 85, and 95 fail; the third backoff, 20 s, would end past expiry at 100.
-        for at in [80, 85, 95] {
+        // Early reads fail at 80, 81, 83, 87, and 95; the fifth backoff, 16 s, would end past expiry
+        // at 100.
+        for at in [80, 81, 83, 87, 95] {
             clock.set(at);
             assert_eq!(attached(&vault, request), "Bearer first-token");
             rotating.wait_settled();
         }
-        assert_eq!(recorder.records().len(), 4);
+        assert_eq!(recorder.records().len(), 6);
         clock.set(100);
         assert_eq!(attached(&vault, request), "Bearer second-token");
-        // The next failure waits the first 5 s again, not the grown backoff.
+        // The next failure waits the first 1 s again, not the grown backoff.
         clock.set(1000);
         assert!(vault.attach_with_redactor(request).is_err());
-        clock.set(1005);
+        clock.set(1001);
         assert_eq!(attached(&vault, request), "Bearer third-token");
-        assert_eq!(recorder.records().len(), 7);
+        assert_eq!(recorder.records().len(), 9);
         drop(clock);
         let _ = std::fs::remove_file(&socket);
     }

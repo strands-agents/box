@@ -58,8 +58,9 @@ request edits, never a credential accessor or an authorization. Keep backend pro
   `credsd_preflight` checks each listed credential's kind against the list it gets.
 - A token's deadlines sit on both `Instant` and `SystemTime`, and pass when either clock reaches
   them. `Instant` alone ignores wall-clock steps but stops while the host sleeps on macOS and Linux,
-  so it would keep an expired token after a laptop wakes. A refresh error keeps only its
-  `GetFailure` class: credsd material and type labels never reach a gateway refusal.
+  so it would keep an expired token after a laptop wakes. `map_error` is the one table of
+  what each credsd error code means, and a refresh refusal reuses its message. Only an unusable
+  reply gets fixed text, because `access_token_from` names the daemon's material and type labels.
 
 ## Declared source programs
 
