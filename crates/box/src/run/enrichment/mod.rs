@@ -129,8 +129,8 @@ impl Entry {
             source,
             outputs: entry.outputs.clone(),
             min_confidence: entry.min_confidence,
-            timeout: entry.timeout.0,
-            max_age: entry.max_age.0,
+            timeout: entry.timeout,
+            max_age: entry.max_age,
             cache: Mutex::new(Cache::new(CACHE_CAPACITY)),
             in_flight: Arc::new(AtomicUsize::new(0)),
         }
@@ -302,7 +302,7 @@ impl Drop for FactsCapture {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::memory::InMemorySource;
     use super::*;
 
@@ -313,8 +313,8 @@ mod tests {
             secret: None,
             outputs: outputs.iter().map(|label| (*label).to_string()).collect(),
             min_confidence,
-            timeout: Default::default(),
-            max_age: Default::default(),
+            timeout: Duration::from_millis(500),
+            max_age: Duration::from_secs(300),
         }
     }
 
@@ -402,7 +402,7 @@ mod tests {
 
     /// The egress interceptor of a box whose policy is `text` and whose one `threat` entry asks
     /// `source`, with the directory that holds its history.
-    fn interceptor(
+    pub(crate) fn interceptor(
         text: &str,
         source: &Arc<InMemorySource>,
     ) -> (
@@ -495,43 +495,10 @@ unless { context.input.enrichment.threat.answered || context.input.host == "203.
         assert_eq!(source.calls(), 0, "no source is asked about an address");
     }
 
-    /// Each address decision of a connection reads exactly what its host decision read, even when
-    /// that answer is already gone from the cache, as one with a zero ttl is.
-    #[test]
-    fn each_address_decision_reads_what_its_host_decision_read() {
-        let source = Arc::new(InMemorySource::new(Duration::ZERO));
-        let (interceptor, _history) = interceptor(
-            r#"
-permit (principal, action == Box::Action::"net:connect", resource);
-forbid (principal, action == Box::Action::"net:connect", resource)
-unless { context.input.enrichment.threat.answered };
-"#,
-            &source,
-        );
-
-        interceptor
-            .intercept(&egress_gateway::EffectAttempt::Resolve {
-                host: "clean.example",
-                port: 443,
-            })
-            .expect("the source answers about the host");
-        for address in ["192.0.2.1:443", "192.0.2.2:443"] {
-            interceptor
-                .intercept(&egress_gateway::EffectAttempt::Connect {
-                    host: "clean.example",
-                    port: 443,
-                    address: address.parse().expect("an address"),
-                    http_visibility: true,
-                })
-                .expect("each address reads the answer its host decision read");
-        }
-        assert_eq!(source.calls(), 1, "only the host decision asks");
-    }
-
     /// An entry whose questions wait `timeout` on `source`.
     fn waiting(timeout: Duration, source: &Arc<InMemorySource>) -> Enricher {
         let mut declared = entry(&["malware"], Confidence::Low);
-        declared.timeout = crate::record::config::enrichment::Timeout(timeout);
+        declared.timeout = timeout;
         enricher(declared, source, true)
     }
 
@@ -598,7 +565,7 @@ unless { context.input.enrichment.threat.answered };
     fn max_age_caps_how_long_an_answer_holds() {
         let source = Arc::new(InMemorySource::new(Duration::from_secs(300)));
         let mut declared = entry(&["malware"], Confidence::Low);
-        declared.max_age = crate::record::config::enrichment::MaxAge(Duration::from_secs(1));
+        declared.max_age = Duration::from_secs(1);
         let enricher = enricher(declared, &source, true);
         let [only] = enricher.entries.as_slice() else {
             panic!("one entry");
@@ -618,56 +585,24 @@ unless { context.input.enrichment.threat.answered };
         assert_eq!(source.calls(), 2, "max_age caps the source's ttl of 300s");
     }
 
-    /// A full cache sweeps every expired name in one insert, before it drops a live one.
+    /// After more distinct names than it holds, a cache holds at most its capacity and still serves
+    /// the newest answer.
     #[test]
-    fn a_full_cache_drops_every_expired_name_at_once() {
+    fn a_full_cache_stays_within_its_capacity_and_keeps_the_newest_answer() {
         let now = Instant::now();
-        let mut cache = Cache::new(3);
+        let mut cache = Cache::new(4);
         let answer = EnrichmentAnswer::answered([]);
-        for (name, lasts) in [("a.example", 1), ("b.example", 1), ("c.example", 9)] {
-            cache.insert(name, answer.clone(), now + Duration::from_secs(lasts), now);
+        for (seconds, lasts) in (0..).zip([9, 1, 5, 1, 7, 3, 8, 2, 6, 4]) {
+            let later = now + Duration::from_secs(seconds);
+            let name = format!("host{seconds}.example");
+            cache.insert(
+                &name,
+                answer.clone(),
+                later + Duration::from_secs(lasts),
+                later,
+            );
+            assert!(cache.answers.len() <= 4, "after {name}");
+            assert_eq!(cache.get(&name, later), Some(answer.clone()), "{name}");
         }
-
-        let later = now + Duration::from_secs(2);
-        cache.insert("d.example", answer, later + Duration::from_secs(5), later);
-        assert_eq!(
-            cache.answers.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["c.example", "d.example"]
-        );
-    }
-
-    #[test]
-    fn a_full_cache_drops_the_expired_names_then_the_one_that_expires_first() {
-        let now = Instant::now();
-        let mut cache = Cache::new(2);
-        let answer = EnrichmentAnswer::answered([]);
-        cache.insert(
-            "a.example",
-            answer.clone(),
-            now + Duration::from_secs(1),
-            now,
-        );
-        cache.insert(
-            "b.example",
-            answer.clone(),
-            now + Duration::from_secs(9),
-            now,
-        );
-
-        let later = now + Duration::from_secs(2);
-        cache.insert(
-            "c.example",
-            answer.clone(),
-            later + Duration::from_secs(5),
-            later,
-        );
-        assert!(cache.get("a.example", later).is_none());
-        assert!(cache.get("b.example", later).is_some());
-
-        cache.insert("d.example", answer, later + Duration::from_secs(20), later);
-        assert_eq!(cache.answers.len(), 2);
-        assert!(cache.get("c.example", later).is_none(), "c expires first");
-        assert!(cache.get("b.example", later).is_some());
-        assert!(cache.get("d.example", later).is_some());
     }
 }

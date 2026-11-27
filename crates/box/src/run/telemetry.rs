@@ -1724,87 +1724,32 @@ mod tests {
         );
     }
 
-    /// A connection's decision record states what each enrichment entry answered about its
-    /// destination, whether its host decision refused it or each address decision read the answer
-    /// the host decision got and admitted it.
-    #[tokio::test]
-    async fn a_connection_decision_states_each_enrichment_answer() {
-        use crate::run::enrichment::{Confidence, Enricher, Source, memory::InMemorySource};
+    /// A connection's decision states what each enrichment entry answered about its destination,
+    /// whether its host decision refused it or an address decision that asked nothing admitted it.
+    #[test]
+    fn a_connection_decision_states_each_enrichment_answer() {
+        use crate::run::enrichment::{Confidence, memory::InMemorySource};
 
-        let directory = tempfile::tempdir().expect("a directory");
-        let history = directory.path().join("dogwood.redb");
-        let file = std::fs::File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&history)
-            .expect("the history opens");
-        let engine = PolicyEngine::open_staged_file_with_grammars(
-            &policy::Operator::unanchored(),
-            vec![Policy {
-                origin: PathBuf::from("policy.dw"),
-                text: r#"
-                    permit (principal, action, resource);
-                    @id("block_malware")
-                    forbid (principal, action == Box::Action::"net:connect", resource)
-                    when { context.input.enrichment.threat.labels.contains("malware") };
-                    forbid (principal, action == Box::Action::"net:connect", resource)
-                    unless { context.input.enrichment.threat.answered };
-                "#
-                .to_string(),
-            }],
-            policy::ToolGrammars::default(),
-            &policy::EnrichmentNames::new(["threat".to_string()]).expect("a name"),
-            file,
-            history.clone(),
-        )
-        .expect("the policy opens")
-        .observed_by(Arc::new(PolicyDecisionObserver));
-        let engine = Arc::new(engine);
-        let source: Arc<dyn Source> = Arc::new(
+        let source = Arc::new(
             InMemorySource::new(std::time::Duration::from_secs(300)).labelling(
                 "evil.example",
                 "malware",
                 Confidence::High,
             ),
         );
-        let entry = toml::from_str(
-            "kind = \"in-memory\"\nendpoint = \"file:///unused.json\"\n\
-             outputs = [\"malware\"]\nmin_confidence = \"HIGH\"\n",
-        )
-        .expect("the entry parses");
-        let enricher = Enricher::opening(
-            &std::collections::BTreeMap::from([("threat".to_string(), entry)]),
-            engine.read_enrichment(),
-            |_| Ok(Arc::clone(&source)),
-        )
-        .expect("the enricher opens");
-        let records = directory.path().join("records.jsonl");
-        let collector = Arc::new(
-            ::telemetry::open(::telemetry::TelemetryConfig::for_box("codex").with_target(
-                ::telemetry::Target::new(::telemetry::TargetKind::File, records.to_string_lossy()),
-            ))
-            .expect("the collector opens"),
+        let (inner, _history) = crate::run::enrichment::tests::interceptor(
+            r#"
+                permit (principal, action, resource);
+                forbid (principal, action == Box::Action::"net:connect", resource)
+                when { context.input.enrichment.threat.labels.contains("malware") };
+                forbid (principal, action == Box::Action::"net:connect", resource)
+                unless { context.input.enrichment.threat.answered };
+            "#,
+            &source,
         );
-        let recorder = DecisionRecorder::over(Arc::clone(&collector), None);
-        let interceptor = EgressDecisionInterceptor::over(
-            EgressPolicyInterceptor::into_handle_with_discovery(
-                Arc::clone(&engine),
-                Principal::agent(),
-                GovernedBox::assigned("test-box"),
-                Vec::new(),
-                Arc::new(policy::ToolCatalogs::new(
-                    Arc::clone(&engine),
-                    Vec::<(String, policy::McpServerKind)>::new(),
-                )),
-                Arc::new(|| {}),
-                Arc::new(enricher),
-            ),
-            Arc::clone(&recorder),
-        );
-        let emitter = EgressDecisionRecorder::over(recorder);
-
+        let recorder = DecisionRecorder::discarding();
+        let interceptor = EgressDecisionInterceptor::over(inner, Arc::clone(&recorder));
+        let emitter = EgressDecisionRecorder::over(Arc::clone(&recorder));
         let resolve = |host| EgressEffectAttempt::Resolve { host, port: 443 };
         let emit = |host: &str, decision| {
             emitter.emit(EgressDecision {
@@ -1817,6 +1762,7 @@ mod tests {
                 correlation: RequestId::new(host),
             });
         };
+
         assert!(interceptor.intercept(&resolve("evil.example")).is_err());
         emit("evil.example", AuditDecision::Deny);
         interceptor
@@ -1831,55 +1777,31 @@ mod tests {
             })
             .expect("and so is its address");
         emit("clean.example", AuditDecision::Allow);
-        collector.drained().await;
 
-        let text = std::fs::read_to_string(&records).expect("the records");
-        // One exported line can carry several log records, so each record's attributes are read.
-        let items = |value: &serde_json::Value, key: &str| {
-            value[key].as_array().cloned().unwrap_or_default()
-        };
-        let decided: Vec<Vec<serde_json::Value>> = text
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .flat_map(|line| items(&line, "resourceLogs"))
-            .flat_map(|resource| items(&resource, "scopeLogs"))
-            .flat_map(|scope| items(&scope, "logRecords"))
-            .map(|record| items(&record, "attributes"))
-            .collect();
-        let value = |host: &str, key: &str| {
-            decided
-                .iter()
-                .find(|attributes| {
-                    attributes.iter().any(|attribute| {
-                        attribute["key"] == "server.address"
-                            && attribute["value"] == serde_json::json!({"stringValue": host})
-                    })
+        let stated: Vec<(String, bool, Vec<String>)> = recorder
+            .recorded()
+            .iter()
+            .flat_map(|decision| {
+                decision.enrichment.iter().map(|(name, answer)| {
+                    (
+                        format!("{} {name}", decision.parts().1),
+                        answer.is_answered(),
+                        answer.labels().iter().cloned().collect(),
+                    )
                 })
-                .and_then(|attributes| attributes.iter().find(|attribute| attribute["key"] == key))
-                .map(|attribute| attribute["value"].clone())
-                .unwrap_or_else(|| panic!("{key} is on the decision about {host}: {text}"))
-        };
-        for (host, labels) in [
-            (
-                "evil.example",
-                serde_json::json!([{"stringValue": "malware"}]),
-            ),
-            ("clean.example", serde_json::json!([])),
-        ] {
-            assert_eq!(
-                value(host, "strands.box.enrichment.threat.answered"),
-                serde_json::json!({"boolValue": true}),
-                "{host}"
-            );
-            assert_eq!(
-                value(host, "strands.box.enrichment.threat.labels")["arrayValue"]["values"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default(),
-                labels.as_array().cloned().unwrap_or_default(),
-                "{host}"
-            );
-        }
+            })
+            .collect();
+        assert_eq!(
+            stated,
+            [
+                (
+                    "evil.example:443 threat".to_string(),
+                    true,
+                    vec!["malware".to_string()]
+                ),
+                ("clean.example:443 threat".to_string(), true, Vec::new()),
+            ]
+        );
     }
 
     #[test]

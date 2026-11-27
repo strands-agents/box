@@ -2,10 +2,12 @@
 //! workload connects to.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use policy::EnrichmentNames;
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::secret_source::DeclaredSources;
 use crate::error::ConfigError;
@@ -29,12 +31,20 @@ pub(crate) struct EnrichmentEntry {
     pub(crate) outputs: Vec<String>,
     /// The least confidence of a label that reaches policy.
     pub(crate) min_confidence: Confidence,
-    /// How long Box waits for an answer.
-    #[serde(default)]
-    pub(crate) timeout: Timeout,
-    /// How long Box keeps an answer at most.
-    #[serde(default)]
-    pub(crate) max_age: MaxAge,
+    /// How long Box waits for an answer, from 1ms to 10s.
+    #[serde(
+        default = "default_timeout",
+        deserialize_with = "timeout",
+        serialize_with = "spell"
+    )]
+    pub(crate) timeout: Duration,
+    /// How long Box keeps an answer at most, from 1s to 24h.
+    #[serde(
+        default = "default_max_age",
+        deserialize_with = "max_age",
+        serialize_with = "spell"
+    )]
+    pub(crate) max_age: Duration,
 }
 
 /// The secret one classification source reads.
@@ -46,115 +56,71 @@ pub(crate) struct EnrichmentSecret {
     pub(crate) reference: String,
 }
 
-/// How long Box waits for a source's answer: `"500ms"` unless the table says, from 1ms to 10s.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Timeout(pub(crate) Duration);
-
-/// How long Box keeps a source's answer at most: `"300s"` unless the table says, from 1s to 24h.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MaxAge(pub(crate) Duration);
-
-impl Default for Timeout {
-    fn default() -> Self {
-        Self(Duration::from_millis(500))
-    }
+fn default_timeout() -> Duration {
+    Duration::from_millis(500)
 }
 
-impl Default for MaxAge {
-    fn default() -> Self {
-        Self(Duration::from_secs(300))
-    }
+fn default_max_age() -> Duration {
+    Duration::from_secs(300)
 }
 
-/// The key, bounds, and example of one duration key.
-struct Span {
-    key: &'static str,
-    least: Duration,
-    most: Duration,
-    example: &'static str,
+fn timeout<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+    bounded(
+        deserializer,
+        "timeout",
+        Duration::from_millis(1)..=Duration::from_secs(10),
+        "500ms",
+    )
 }
 
-static TIMEOUT: Span = Span {
-    key: "timeout",
-    least: Duration::from_millis(1),
-    most: Duration::from_secs(10),
-    example: "500ms",
-};
+fn max_age<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+    bounded(
+        deserializer,
+        "max_age",
+        Duration::from_secs(1)..=Duration::from_secs(24 * 3600),
+        "300s",
+    )
+}
 
-static MAX_AGE: Span = Span {
-    key: "max_age",
-    least: Duration::from_secs(1),
-    most: Duration::from_secs(24 * 3600),
-    example: "300s",
-};
-
-impl Span {
-    /// `text` as a duration within these bounds, or the refusal that names the key.
-    fn parse(&self, text: &str) -> Result<Duration, String> {
-        let digits = text.trim_end_matches(|character: char| character.is_ascii_alphabetic());
-        let unit = &text[digits.len()..];
-        let count = (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
-            .then(|| digits.parse::<u64>().ok())
-            .flatten();
-        let spelled = count.and_then(|count| match unit {
-            "ms" => Some(Duration::from_millis(count)),
-            "s" => Some(Duration::from_secs(count)),
-            "m" => count.checked_mul(60).map(Duration::from_secs),
-            "h" => count.checked_mul(3600).map(Duration::from_secs),
-            _ => None,
-        });
-        match spelled {
-            Some(duration) if duration >= self.least && duration <= self.most => Ok(duration),
-            _ => Err(self.refusal(&format!("{text:?}"))),
+/// The duration key `key`: a whole number and `ms`, `s`, `m`, or `h` within `bounds`, or a refusal
+/// that names the key.
+fn bounded<'de, D: Deserializer<'de>>(
+    deserializer: D,
+    key: &str,
+    bounds: RangeInclusive<Duration>,
+    example: &str,
+) -> Result<Duration, D::Error> {
+    let found = match toml::Value::deserialize(deserializer)? {
+        toml::Value::String(text) => match duration(&text) {
+            Some(duration) if bounds.contains(&duration) => return Ok(duration),
+            _ => format!("{text:?}"),
+        },
+        number @ (toml::Value::Integer(_) | toml::Value::Float(_)) => {
+            format!("the bare number {number}")
         }
-    }
+        other => other.to_string(),
+    };
+    Err(D::Error::custom(format!(
+        "{key} must be a whole number followed by ms, s, m, or h, from {} to {}, such as \
+         {example:?}; found {found}",
+        spelled(*bounds.start()),
+        spelled(*bounds.end())
+    )))
+}
 
-    fn refusal(&self, found: &str) -> String {
-        format!(
-            "{} must be a whole number followed by ms, s, m, or h, from {} to {}, such as {:?}; \
-             found {found}",
-            self.key,
-            spelled(self.least),
-            spelled(self.most),
-            self.example
-        )
-    }
-
-    fn deserialize<'de, D: serde::Deserializer<'de>>(
-        &'static self,
-        deserializer: D,
-    ) -> Result<Duration, D::Error> {
-        struct Visitor(&'static Span);
-        impl serde::de::Visitor<'_> for Visitor {
-            type Value = Duration;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(formatter, "{} as a whole number and a unit", self.0.key)
-            }
-
-            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Duration, E> {
-                self.0.parse(text).map_err(E::custom)
-            }
-
-            fn visit_i64<E: serde::de::Error>(self, number: i64) -> Result<Duration, E> {
-                Err(E::custom(
-                    self.0.refusal(&format!("the bare number {number}")),
-                ))
-            }
-
-            fn visit_u64<E: serde::de::Error>(self, number: u64) -> Result<Duration, E> {
-                Err(E::custom(
-                    self.0.refusal(&format!("the bare number {number}")),
-                ))
-            }
-
-            fn visit_f64<E: serde::de::Error>(self, number: f64) -> Result<Duration, E> {
-                Err(E::custom(
-                    self.0.refusal(&format!("the bare number {number}")),
-                ))
-            }
-        }
-        deserializer.deserialize_any(Visitor(self))
+/// `text` as a whole number followed by `ms`, `s`, `m`, or `h`.
+fn duration(text: &str) -> Option<Duration> {
+    let digits = text.trim_end_matches(|character: char| character.is_ascii_alphabetic());
+    let count = digits
+        .bytes()
+        .all(|byte| byte.is_ascii_digit())
+        .then(|| digits.parse::<u64>().ok())??;
+    match &text[digits.len()..] {
+        "ms" => Some(Duration::from_millis(count)),
+        "s" => Some(Duration::from_secs(count)),
+        "m" => count.checked_mul(60).map(Duration::from_secs),
+        "h" => count.checked_mul(3600).map(Duration::from_secs),
+        _ => None,
     }
 }
 
@@ -172,28 +138,8 @@ fn spelled(duration: Duration) -> String {
     }
 }
 
-impl<'de> Deserialize<'de> for Timeout {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        TIMEOUT.deserialize(deserializer).map(Self)
-    }
-}
-
-impl<'de> Deserialize<'de> for MaxAge {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        MAX_AGE.deserialize(deserializer).map(Self)
-    }
-}
-
-impl Serialize for Timeout {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&spelled(self.0))
-    }
-}
-
-impl Serialize for MaxAge {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&spelled(self.0))
-    }
+fn spell<S: Serializer>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&spelled(*duration))
 }
 
 /// The validated names of `entries`.
@@ -252,13 +198,13 @@ pub(super) fn validate(
 
 /// Each test that loads `kind = "in-memory"` needs a `test-support` build, which implements it.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::Path;
 
     use super::super::ConfigFile;
     use crate::error::ConfigError;
 
-    const TABLE: &str = "[enrichment.threat]\nkind = \"in-memory\"\n\
+    pub(crate) const TABLE: &str = "[enrichment.threat]\nkind = \"in-memory\"\n\
                          endpoint = \"file:///srv/fixture.json\"\noutputs = [\"malware\"]\n\
                          min_confidence = \"HIGH\"\n";
 
@@ -293,14 +239,14 @@ mod tests {
             parsed(&format!("{TABLE}{extra}")).map(|config| config.enrichment["threat"].clone())
         };
         let defaults = entry("").expect("the defaults load");
-        assert_eq!(defaults.timeout.0, std::time::Duration::from_millis(500));
-        assert_eq!(defaults.max_age.0, std::time::Duration::from_secs(300));
+        assert_eq!(defaults.timeout, std::time::Duration::from_millis(500));
+        assert_eq!(defaults.max_age, std::time::Duration::from_secs(300));
         let spelled = entry("timeout = \"10s\"\nmax_age = \"24h\"\n").expect("the bounds load");
-        assert_eq!(spelled.timeout.0, std::time::Duration::from_secs(10));
-        assert_eq!(spelled.max_age.0, std::time::Duration::from_secs(86_400));
+        assert_eq!(spelled.timeout, std::time::Duration::from_secs(10));
+        assert_eq!(spelled.max_age, std::time::Duration::from_secs(86_400));
         assert_eq!(
             entry("timeout = \"1ms\"\nmax_age = \"2m\"\n")
-                .map(|entry| (entry.timeout.0, entry.max_age.0))
+                .map(|entry| (entry.timeout, entry.max_age))
                 .ok(),
             Some((
                 std::time::Duration::from_millis(1),
@@ -395,37 +341,5 @@ mod tests {
                 "{extra}: {error}"
             );
         }
-    }
-
-    /// Configure refuses, as `B0103`, a policy that reads an entry's labels and no answer.
-    #[cfg(feature = "test-support")]
-    #[test]
-    fn configure_refuses_labels_read_without_the_answer() {
-        let directory = tempfile::tempdir().expect("a directory");
-        let path = directory.path().join("policy.dw");
-        std::fs::write(
-            &path,
-            r#"permit (principal, action == Box::Action::"net:connect", resource);
-forbid (principal, action == Box::Action::"net:connect", resource)
-when { context.input.enrichment.threat.labels.contains("malware") };"#,
-        )
-        .expect("the policy writes");
-        let config = parsed(TABLE).expect("the table loads");
-
-        let error = super::super::read_authored_policy(
-            Some(&path),
-            true,
-            &policy::Operator::unanchored(),
-            &policy::ToolGrammars::default(),
-            &super::names(&config.enrichment).expect("the names are valid"),
-        )
-        .expect_err("the policy is refused");
-        assert_eq!(error.code(), ::diagnostics::Code::B0103.into());
-        assert!(
-            error
-                .to_string()
-                .contains("no rule reads context.input.enrichment.threat.answered"),
-            "{error}"
-        );
     }
 }

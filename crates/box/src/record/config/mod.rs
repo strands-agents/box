@@ -2520,9 +2520,7 @@ native-filesystem-policy = false
     #[cfg(feature = "test-support")]
     #[test]
     fn configure_refuses_the_enrichment_reads_run_refuses_with_an_mcp_server_too() {
-        const TABLE: &str = "[enrichment.threat]\nkind = \"in-memory\"\n\
-            endpoint = \"file:///srv/fixture.json\"\noutputs = [\"malware\"]\n\
-            min_confidence = \"HIGH\"\n";
+        use enrichment::tests::TABLE;
         const LABELS_ONLY: &str = "permit (principal, action == Box::Action::\"net:connect\", \
             resource);\nforbid (principal, action == Box::Action::\"net:connect\", resource)\n\
             when { context.input.enrichment.threat.labels.contains(\"malware\") };\n";
@@ -2582,10 +2580,7 @@ native-filesystem-policy = false
     #[cfg(feature = "test-support")]
     #[test]
     fn an_enrichment_table_requires_its_record_version() {
-        let mut stored = pinned_record(
-            "[enrichment.threat]\nkind = \"in-memory\"\nendpoint = \"file:///srv/fixture.json\"\n\
-             outputs = [\"malware\"]\nmin_confidence = \"HIGH\"\n",
-        );
+        let mut stored = pinned_record(enrichment::tests::TABLE);
         assert_eq!(stored.version, ENRICHMENT_RECORD_VERSION);
         assert_eq!(ENRICHMENT_RECORD_VERSION, 44);
         assert_eq!(

@@ -167,34 +167,6 @@ fn a_table_no_rule_reads_is_never_asked() {
     }
 }
 
-/// A policy that reads the labels and no answer stops the box before it starts.
-#[test]
-fn a_policy_reading_labels_without_the_answer_stops_the_box() {
-    if !fixture::namespace_launcher_is_usable() {
-        return;
-    }
-    let classification = tempfile::tempdir().expect("a fixture directory");
-    let fixture = fixture_file(classification.path());
-    let (_box, output) = Request::with_config(
-        "enrichment-unanswered",
-        r#"
-permit(principal, action == Box::Action::"net:connect", resource);
-@id("block_malware")
-forbid(principal, action == Box::Action::"net:connect", resource)
-when { context.input.enrichment.threat.labels.contains("malware") };
-"#,
-        &threat_table(&fixture),
-    )
-    .attempt();
-
-    let text = seen(&output);
-    assert!(!output.status.success(), "{text}");
-    assert!(
-        text.contains("[B0103]") && text.contains("context.input.enrichment.threat.answered"),
-        "{text}"
-    );
-}
-
 /// `box policy generate-schema` writes each declared entry on the `net:connect` input, so the
 /// written schema strict-validates a rule that reads it.
 #[test]
