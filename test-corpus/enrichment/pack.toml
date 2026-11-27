@@ -20,6 +20,6 @@ PATH = "/usr/bin:/bin"
 kind = "in-memory"
 # The in-memory kind reads its answers from a JSON file at an absolute path, and an endpoint takes
 # no placeholder, so copy classification.json here before a run, or set `endpoint` in the profile.
-endpoint = "file:///tmp/box-enrichment/classification.json"
+endpoint = "file:///tmp/box-classification/classification.json"
 outputs = ["malware"]
 min_confidence = "HIGH"
