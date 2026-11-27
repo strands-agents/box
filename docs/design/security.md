@@ -145,6 +145,8 @@ This example assumes the platform provides isolation between tenant environments
 specify a deployment technology or extend Box's guarantees. The
 [editable diagram](images/security-platform.drawio) shows the same arrangement for both tenants.
 
+For who must authenticate an ingress caller, see [what the host must provide](ingress.md#what-the-host-must-provide).
+
 The operator must obtain required resource controls from the surrounding environment. The
 [limitations page](limitations.md#protections-box-doesnt-provide) states the other protections
 to assess for that deployment.
