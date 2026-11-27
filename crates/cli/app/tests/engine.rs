@@ -19,6 +19,21 @@ const SCOPED_STARTER: &str = include_str!("../../../../resources/policies/scoped
 /// The `@box/locked` policy starter, which `box profile create --policy locked` copies.
 const LOCKED_STARTER: &str = include_str!("../../../../resources/policies/locked/policy.dw");
 
+/// The test pack `enrichment`, whose `[enrichment.threat]` Box Core's `in-memory` kind answers.
+const ENRICHMENT_PACK: &str = include_str!("../../../../test-corpus/enrichment/pack.toml");
+
+/// The test policy starter `enrichment`, which holds the rules that read `[enrichment.threat]`.
+const ENRICHMENT_POLICY: [(&str, &str); 2] = [
+    (
+        "policy.toml",
+        include_str!("../../../../test-corpus/enrichment/policy/policy.toml"),
+    ),
+    (
+        "policy.dw",
+        include_str!("../../../../test-corpus/enrichment/policy/policy.dw"),
+    ),
+];
+
 /// A home, a workspace below it, and a directory outside it.
 struct Scene {
     _root: tempfile::TempDir,
@@ -1251,6 +1266,79 @@ fn a_run_without_a_profile_asks_the_starter_and_without_a_terminal_creates_nothi
     assert!(stderr.contains("--with bedrock"), "{stderr}");
     assert!(!scene.home().join(".strands/box/profiles/claude").exists());
     assert!(scene.runs().is_empty());
+}
+
+/// **A profile made with the enrichment test pack and policy refuses a host its classification
+/// source labels**: the run prints Box Core's `B0215` line, and `block_malware` refuses the
+/// workload's `curl` before any DNS query, with no other rule.
+#[test]
+fn a_profile_from_the_enrichment_pack_refuses_a_labelled_host() {
+    let scene = Scene::new();
+    scene.pack("enrichment", ENRICHMENT_PACK);
+    let starter = scene.home().join(".strands/box/policies/enrichment");
+    std::fs::create_dir_all(&starter).expect("a policy starter folder");
+    for (name, text) in ENRICHMENT_POLICY {
+        std::fs::write(starter.join(name), text).expect("a policy starter file");
+    }
+    let created = scene
+        .process(Path::new(env!("CARGO_BIN_EXE_box")))
+        .args([
+            "profile",
+            "create",
+            "threat",
+            "--with",
+            "enrichment",
+            "--policy",
+            "enrichment",
+            "--tools",
+            "git",
+        ])
+        .current_dir(scene.workspace())
+        .output()
+        .expect("box runs");
+    succeeded(&created);
+    let classification = scene.root.join("classification.json");
+    std::fs::write(
+        &classification,
+        include_str!("../../../../test-corpus/enrichment/classification.json"),
+    )
+    .expect("a classification fixture");
+    let file = scene
+        .home()
+        .join(".strands/box/profiles/threat/profile.toml");
+    let mut profile = std::fs::read_to_string(&file).expect("the profile");
+    profile.push_str(&format!(
+        "\n[enrichment.threat]\nendpoint = \"file://{}\"\n",
+        classification.display()
+    ));
+    std::fs::write(&file, profile).expect("the profile");
+
+    let output = scene
+        .command(
+            &scene.workspace(),
+            "threat",
+            &["-c", "bash -c 'curl -sS https://evil.invalid/'"],
+        )
+        .output()
+        .expect("box runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(
+            "strands-box: note[B0215]: [enrichment.threat] sends its classification source (kind \
+             \"in-memory\") the DNS name of each host the workload connects to"
+        ),
+        "{stderr}"
+    );
+    let refusals: Vec<String> = decisions(&new_run(&[], &scene.runs()))
+        .into_iter()
+        .filter(|(action, _, _)| action.contains("net:connect"))
+        .map(|(_, _, rule)| rule)
+        .collect();
+    assert!(
+        !refusals.is_empty() && refusals.iter().all(|rule| rule == "block_malware"),
+        "{refusals:?}\n{stderr}"
+    );
 }
 
 #[test]

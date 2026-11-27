@@ -1,0 +1,25 @@
+# A test pack for Box Core's DNS-name enrichment, which crates/cli/app/tests/engine.rs runs. bash
+# is the agent, and `[enrichment.threat]` names one classification source of Box Core's
+# `in-memory` kind. Only a box built with `test-support` implements that kind: a release build
+# refuses the table when the profile loads. It lives outside test-corpus/packs/, which holds the
+# corpus's toolchain packs. The rules that read the table are in the test policy starter in
+# policy/, because a pack adds no authored policy
+# (docs/design/cli/decisions.md#a-pack-adds-no-policy).
+[pack]
+name = "enrichment"
+version = 1
+kind = "agent"
+
+[run]
+command = ["/bin/bash", "--noprofile", "--norc", { slot = "agent-args" }]
+
+[env]
+PATH = "/usr/bin:/bin"
+
+[enrichment.threat]
+kind = "in-memory"
+# The in-memory kind reads its answers from a JSON file at an absolute path, and an endpoint takes
+# no placeholder, so copy classification.json here before a run, or set `endpoint` in the profile.
+endpoint = "file:///tmp/box-enrichment/classification.json"
+outputs = ["malware"]
+min_confidence = "HIGH"
