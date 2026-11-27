@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
+use std::thread::ThreadId;
 
 use egress_gateway::{
     EffectAttempt as EgressEffectAttempt, EffectInterceptor as EgressEffectInterceptor,
@@ -37,7 +38,7 @@ pub struct EgressPolicyInterceptor {
     on_remote_finished: Arc<dyn Fn() + Send + Sync>,
     /// What each declared enrichment entry says about a destination host.
     enricher: Arc<dyn HostEnricher>,
-    /// The facts each recent host decision read, which that connection's address decisions read.
+    /// The facts each recent connection's host decision read, which its address decisions read.
     decided: Mutex<DecidedHosts>,
 }
 
@@ -53,18 +54,22 @@ impl HostEnricher for NoEnrichment {
 /// How many host decisions the adapter keeps the facts of, because the workload chooses the hosts.
 const DECIDED_HOSTS: usize = 1024;
 
-/// The enrichment facts of the latest host decision on each host and port, oldest first.
+/// One connection, by the thread, host, and port of its decisions, since the gateway makes a
+/// connection's host decision and its address decisions on one thread.
+type Connection = (ThreadId, String, u16);
+
+/// The enrichment facts of the latest host decision of each connection, oldest first.
 #[derive(Default)]
 struct DecidedHosts {
-    order: VecDeque<(String, u16)>,
-    facts: HashMap<(String, u16), EnrichmentFacts>,
+    order: VecDeque<Connection>,
+    facts: HashMap<Connection, EnrichmentFacts>,
 }
 
 impl DecidedHosts {
-    /// Keep `facts` as what the host decision on `host` and `port` read, dropping the oldest host
-    /// when full.
+    /// Keep `facts` as what this thread's host decision on `host` and `port` read, dropping the
+    /// oldest connection when full.
     fn keep(&mut self, host: &str, port: u16, facts: EnrichmentFacts) {
-        let key = (host.to_string(), port);
+        let key = (std::thread::current().id(), host.to_string(), port);
         if !self.facts.contains_key(&key) {
             if self.order.len() >= DECIDED_HOSTS
                 && let Some(oldest) = self.order.pop_front()
@@ -76,9 +81,11 @@ impl DecidedHosts {
         self.facts.insert(key, facts);
     }
 
-    /// What the latest host decision on `host` and `port` read, while it is kept.
+    /// What this thread's latest host decision on `host` and `port` read, while it is kept.
     fn read(&self, host: &str, port: u16) -> Option<EnrichmentFacts> {
-        self.facts.get(&(host.to_string(), port)).cloned()
+        self.facts
+            .get(&(std::thread::current().id(), host.to_string(), port))
+            .cloned()
     }
 }
 
@@ -146,8 +153,8 @@ impl EgressPolicyInterceptor {
     }
 
     /// What the declared entries say about a `net:connect` attempt's host. The host decision asks,
-    /// and each address decision after it reads what the host decision read, asking again only
-    /// when no host decision on that host and port is kept.
+    /// and each address decision of its connection reads what it read, asking again only when no
+    /// host decision of that connection is kept.
     fn enrichment(&self, effect: &EgressEffectAttempt<'_>) -> EnrichmentFacts {
         let (host, port, address) = match effect {
             EgressEffectAttempt::Resolve { host, port } => (*host, *port, None),

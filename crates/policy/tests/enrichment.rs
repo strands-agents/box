@@ -667,6 +667,64 @@ when {{ !(context.input has enrichment) || context.input.host == "blocked.exampl
         assert_eq!(enricher.asked(), 1, "only the host decision asks");
     }
 
+    /// An enricher whose source gives no answer to its first question and answers every later one.
+    #[derive(Default)]
+    struct Recovering(AtomicUsize);
+
+    impl HostEnricher for Recovering {
+        fn enrich(&self, _host: &str) -> EnrichmentFacts {
+            threat(if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                EnrichmentAnswer::unanswered()
+            } else {
+                EnrichmentAnswer::answered([])
+            })
+        }
+    }
+
+    /// An address decision reads the answer of its own connection's host decision, not the answer
+    /// a later connection to the same host and port got in between.
+    #[test]
+    fn an_address_decision_reads_its_own_connections_answer() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let policy = Arc::new(
+            open(
+                r#"
+permit (principal, action == Box::Action::"net:connect", resource);
+@id("address_needs_answer")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when { context.input has ip4 && !context.input.enrichment.threat.answered };
+"#,
+                &names(&["threat"]),
+                directory.path(),
+            )
+            .expect("the policy opens"),
+        );
+        let interceptor = interceptor(&policy, Arc::new(Recovering::default()));
+        let (resolved, first_resolved) = std::sync::mpsc::channel();
+        let (go, second_resolved) = std::sync::mpsc::channel();
+
+        let refused = std::thread::scope(|scope| {
+            let interceptor = &interceptor;
+            let first = scope.spawn(move || {
+                interceptor
+                    .intercept(&resolve("flaky.example"))
+                    .expect("the first host decision, unanswered, is admitted");
+                resolved.send(()).expect("the test waits");
+                second_resolved
+                    .recv()
+                    .expect("the second host decision runs");
+                refusal(interceptor.as_ref(), &connect("flaky.example"))
+            });
+            first_resolved.recv().expect("the first host decision runs");
+            interceptor
+                .intercept(&resolve("flaky.example"))
+                .expect("the second host decision, answered, is admitted");
+            go.send(()).expect("the first connection waits");
+            first.join().expect("the first connection finishes")
+        });
+        assert!(refused.contains("address_needs_answer"), "{refused}");
+    }
+
     /// An address decision with no host decision before it asks, and decides on that answer.
     #[test]
     fn an_address_decision_with_no_host_decision_asks() {
