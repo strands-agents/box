@@ -356,11 +356,8 @@ pub(crate) fn read_entries(
         PolicySchema::from_cedarschema_str(&composed_action_schema(base, &[])?.source)
             .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
     let service = crate::dogwood::service_schema()?;
-    let mut undeclared: BTreeMap<Option<String>, Vec<usize>> = BTreeMap::new();
-    let mut labels: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut answered: BTreeSet<String> = BTreeSet::new();
+    let mut paths: Vec<Vec<Vec<String>>> = vec![Vec::new(); expanded.len()];
     for (ordinal, rule) in expanded.iter().enumerate() {
-        let mut paths = Vec::new();
         if let Ok(parsed) = dogwood_language::ParsedPolicySet::parse(rule, &service) {
             for policy in parsed.policies() {
                 for condition in policy.temporal_conditions() {
@@ -368,7 +365,7 @@ pub(crate) fn read_entries(
                         if predicate.namespace == ["Box", "Action"]
                             && predicate.action == action::NET_CONNECT
                         {
-                            paths.extend(
+                            paths[ordinal].extend(
                                 predicate.args.iter().map(|argument| argument.field_path()),
                             );
                         }
@@ -376,24 +373,21 @@ pub(crate) fn read_entries(
                 }
             }
         }
-        // A rule that does not lower against `base`, such as one waiting for a tool schema, cannot
-        // read the `net:connect` context, so only its history is read.
-        let stateless = crate::dogwood::without_temporal(rule);
-        if let Some(lowered) = dogwood_language::ParsedPolicySet::parse(&stateless, &service)
-            .ok()
-            .and_then(|parsed| parsed.lower(&policy_schema).ok())
-        {
-            for policy in lowered.as_cedar().policies().filter(decides_connect) {
-                let est = policy.to_json().map_err(|error| {
-                    PolicyError::Schema(format!(
-                        "rule {} cannot be inspected at load: {error}",
-                        ordinal + 1
-                    ))
-                })?;
-                context_paths(&est["conditions"], &mut paths);
-            }
-        }
-        for path in &paths {
+    }
+    for (ordinal, policy) in connect_policies(expanded, &service, &policy_schema) {
+        let est = policy.to_json().map_err(|error| {
+            PolicyError::Schema(format!(
+                "rule {} cannot be inspected at load: {error}",
+                ordinal + 1
+            ))
+        })?;
+        context_paths(&est["conditions"], &mut paths[ordinal]);
+    }
+    let mut undeclared: BTreeMap<Option<String>, Vec<usize>> = BTreeMap::new();
+    let mut labels: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut answered: BTreeSet<String> = BTreeSet::new();
+    for (ordinal, rule_paths) in paths.iter().enumerate() {
+        for path in rule_paths {
             let parts = match parts_read(path, &base.enrichment) {
                 Ok(parts) => parts,
                 Err(name) => {
@@ -430,6 +424,52 @@ pub(crate) fn read_entries(
         return Err(Refused::new(PolicyError::Schema(text), findings));
     }
     Ok(labels.into_keys().chain(answered).collect())
+}
+
+/// Each stateless policy of `expanded` that decides `net:connect`, with its rule's position: lowered
+/// together, since one lowering costs far more than the rules it lowers, or one rule at a time when
+/// one of them does not lower, as a rule waiting for a tool schema does.
+fn connect_policies(
+    expanded: &[String],
+    service: &dogwood_language::ServiceSchema,
+    policy_schema: &PolicySchema,
+) -> Vec<(usize, cedar_policy::Policy)> {
+    let stateless: Vec<String> = expanded
+        .iter()
+        .map(|rule| crate::dogwood::without_temporal(rule))
+        .collect();
+    let lower = |text: &str| {
+        dogwood_language::ParsedPolicySet::parse(text, service)
+            .ok()
+            .and_then(|parsed| parsed.lower(policy_schema).ok())
+    };
+    let together = lower(&stateless.join("\n")).and_then(|lowered| {
+        lowered
+            .as_cedar()
+            .policies()
+            .filter(decides_connect)
+            .map(|policy| {
+                let rule = lowered.rule_ref(policy.id().as_ref())?;
+                Some((rule.rule_index, policy.clone()))
+            })
+            .collect::<Option<Vec<_>>>()
+    });
+    together.unwrap_or_else(|| {
+        stateless
+            .iter()
+            .enumerate()
+            .flat_map(|(ordinal, rule)| {
+                lower(rule).into_iter().flat_map(move |lowered| {
+                    lowered
+                        .as_cedar()
+                        .policies()
+                        .filter(decides_connect)
+                        .map(|policy| (ordinal, policy.clone()))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect()
+    })
 }
 
 /// Add the rule `ordinal` to `rules` once.
