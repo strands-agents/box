@@ -474,6 +474,15 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "getegid",
         number: libc::SYS_getegid,
     },
+    // These read only the caller's real, effective, and saved ids in its user namespace.
+    PermittedSyscall {
+        name: "getresuid",
+        number: libc::SYS_getresuid,
+    },
+    PermittedSyscall {
+        name: "getresgid",
+        number: libc::SYS_getresgid,
+    },
     PermittedSyscall {
         name: "getgroups",
         number: libc::SYS_getgroups,
@@ -1475,10 +1484,10 @@ mod tests {
     #[test]
     fn permit_filter_has_the_expected_workload_and_installer_entries() {
         let x86_entries = usize::from(cfg!(target_arch = "x86_64"));
-        assert_eq!(WORKLOAD_PERMITTED.len(), 121 + 19 * x86_entries);
+        assert_eq!(WORKLOAD_PERMITTED.len(), 123 + 19 * x86_entries);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 125 + 20 * x86_entries);
+        assert_eq!(rules.len(), 127 + 20 * x86_entries);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         // `0` or `-1` in each of three positions.
         assert_eq!(rules[&libc::SYS_setresuid].len(), 8);
@@ -1696,6 +1705,8 @@ mod tests {
             "geteuid",
             "getgid",
             "getegid",
+            "getresuid",
+            "getresgid",
             "getgroups",
             "faccessat2",
         ] {

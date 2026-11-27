@@ -203,6 +203,9 @@ The permit set includes `copy_file_range` and `sendfile`, which Node uses to cop
 Both calls move data from a file that the workload already has open, to a file, pipe, or connected socket that it already has open.
 So they reach only what the filesystem grants and the network restrictions already allow.
 
+The permit set includes `getresuid` and `getresgid`.
+Linux reports the caller's real, effective, and saved ids in its own user namespace.
+
 The permit set includes `setresuid` and `setresgid` when each of their three ids is `0` or `-1`.
 The user namespace maps one user and one group, both `0`, so these calls leave every id as it is.
 glibc's `posix_spawn` makes them to reset a child's ids, as GNU make does for each recipe.

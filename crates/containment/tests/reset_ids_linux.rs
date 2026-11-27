@@ -1,5 +1,5 @@
-//! A workload resets its ids to the ones it has, as `posix_spawn` with `POSIX_SPAWN_RESETIDS` does,
-//! and cannot change them.
+//! A workload can query its ids and reset them to the ones it has, as `posix_spawn` with
+//! `POSIX_SPAWN_RESETIDS` does, and cannot change them.
 #![cfg(target_os = "linux")]
 
 use std::ffi::CString;
@@ -68,8 +68,32 @@ fn spawn_self(flags: libc::c_int) -> serde_json::Value {
     }
 }
 
-/// The `Uid:` and `Gid:` lines of `/proc/self/status`: the real, effective, saved, and filesystem
-/// ids. The filter refuses `getresuid`, so this is how a workload reads its saved ids.
+/// Query the real, effective, and saved ids through libc, reporting both calls' results.
+fn queried_ids() -> serde_json::Value {
+    let [mut real_uid, mut effective_uid, mut saved_uid] = [libc::uid_t::MAX; 3];
+    let [mut real_gid, mut effective_gid, mut saved_gid] = [libc::gid_t::MAX; 3];
+    // SAFETY: each output points to a distinct, writable id.
+    let (uid_errno, gid_errno) = unsafe {
+        (
+            refusal(libc::getresuid(
+                &mut real_uid,
+                &mut effective_uid,
+                &mut saved_uid,
+            )),
+            refusal(libc::getresgid(
+                &mut real_gid,
+                &mut effective_gid,
+                &mut saved_gid,
+            )),
+        )
+    };
+    serde_json::json!({
+        "getresuid": { "errno": uid_errno, "ids": [real_uid, effective_uid, saved_uid] },
+        "getresgid": { "errno": gid_errno, "ids": [real_gid, effective_gid, saved_gid] },
+    })
+}
+
+/// The `Uid:` and `Gid:` lines of `/proc/self/status` also include the filesystem ids.
 fn status_ids() -> Vec<String> {
     std::fs::read_to_string("/proc/self/status")
         .unwrap()
@@ -126,6 +150,7 @@ fn reset_ids_probe() {
             "spawn": spawn_self(0),
             "spawn_resetting_ids": spawn_self(libc::POSIX_SPAWN_RESETIDS),
             "identity_calls": identity_calls(),
+            "queried_ids": queried_ids(),
             "ids_after": status_ids(),
         })
     };
@@ -213,5 +238,13 @@ fn a_workload_resets_its_own_ids_and_cannot_change_them() {
         report["ids_after"],
         serde_json::json!(["Uid: 0 0 0 0", "Gid: 0 0 0 0"]),
         "every id, the saved ones included, is unchanged after the admitted calls: {report}"
+    );
+    assert_eq!(
+        report["queried_ids"],
+        serde_json::json!({
+            "getresuid": { "errno": null, "ids": [0, 0, 0] },
+            "getresgid": { "errno": null, "ids": [0, 0, 0] },
+        }),
+        "both getters return the workload's mapped real, effective, and saved ids"
     );
 }
