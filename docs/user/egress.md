@@ -216,7 +216,7 @@ Box checks expiry when it attaches a token. It keeps the workload's placeholder 
 the daemon for a token during the last fifth of the remaining lifetime measured at acquisition,
 up to 60 seconds before expiry. Before the token expires, the read runs in the background, and no
 request waits for it. After the token expires, a request waits for the read, and concurrent
-requests share it. After a failed read, Box waits 1 second before it reads again, and doubles the
+requests share it. A request that has waited 15 seconds is refused. After a failed read, Box waits 1 second before it reads again, and doubles the
 wait after each further failure, up to 10 seconds. During the wait, a request that has no valid
 token is refused without asking the daemon. Box counts time on both the system clock and a clock
 that a clock change can't move, and treats a token as expired when either clock says so. Once a

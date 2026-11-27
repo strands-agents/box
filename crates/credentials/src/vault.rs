@@ -499,6 +499,7 @@ impl Vault {
                             tenant: self.tenant.clone(),
                             emitter: Arc::clone(&self.emitter),
                             clock: Clock::current(),
+                            read_wait: crate::rotating::read_wait_limit(),
                         };
                         let first = CachedToken::new(secret, &expiry, source.clock.now()).map_err(
                             |failure| CredentialError::Credential(failure.message(credential)),
@@ -1622,6 +1623,68 @@ mod tests {
                 .collect::<Vec<_>>(),
             [true, false, true]
         );
+        drop(clock);
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    /// A request with no valid token waits for a running read only up to its limit, then is refused,
+    /// so a daemon that never answers cannot hang every request for the token.
+    #[test]
+    fn a_request_waiting_on_a_stuck_read_is_refused_at_its_limit() {
+        use std::sync::mpsc::channel;
+
+        let timeout = Duration::from_secs(5);
+        let (read_started, read_seen) = channel();
+        let (release_read, await_release) = channel::<()>();
+        let socket = credsd_answering_with(
+            "stuck-read",
+            [
+                token_reply(r#""1970-01-01T00:01:40Z""#),
+                token_reply(r#""2099-01-01T00:00:00Z""#).replace("ghp_vault_example", "late-token"),
+            ],
+            move |index| {
+                if index == 1 {
+                    read_started.send(()).unwrap();
+                    let _ = await_release.recv_timeout(timeout);
+                }
+            },
+        );
+        let clock = crate::rotating::tests::ManualClock::install();
+        crate::rotating::tests::TEST_READ_WAIT.set(Some(Duration::from_millis(200)));
+        let opened = Vault::open(
+            VaultConfig::new(Backend::local(), "t")
+                .credsd_socket(socket.clone())
+                .route(credsd_token_route("first.example.com")),
+        )
+        .unwrap();
+        crate::rotating::tests::TEST_READ_WAIT.set(None);
+        let headers = [(
+            "authorization".into(),
+            format!("Bearer {}", opened.phantoms()[0].token()),
+        )];
+        let vault = opened.into_vault();
+        let request = token_request(&headers);
+        clock.set(100);
+        let shared = &vault;
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(move || attached(shared, request));
+            read_seen
+                .recv_timeout(timeout)
+                .expect("the read reaches credsd");
+            let (answered, answer) = channel();
+            scope.spawn(move || {
+                let _ = answered.send(shared.attach_with_redactor(request).map(|_| ()));
+            });
+            let refusal = answer
+                .recv_timeout(timeout)
+                .expect("a waiting request is answered at its limit")
+                .unwrap_err()
+                .to_string();
+            assert!(refusal.contains("did not answer"), "{refusal}");
+            release_read.send(()).unwrap();
+            assert_eq!(reader.join().unwrap(), "Bearer late-token");
+        });
+        assert_eq!(attached(&vault, request), "Bearer late-token");
         drop(clock);
         let _ = std::fs::remove_file(&socket);
     }

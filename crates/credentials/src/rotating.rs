@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::sources::{CREDSD_SCHEME, CredsdClient, GetFailure, credsd_access_token_class};
+use crate::sources::{
+    CREDSD_SCHEME, CredsdClient, GetFailure, LONGEST_READ, credsd_access_token_class,
+};
 use crate::{CredentialError, RequestId, Secret};
 
 /// The wait after a first failed read before the next one; each further failure doubles it.
@@ -163,6 +165,19 @@ pub(crate) struct TokenSource {
     pub(crate) tenant: String,
     pub(crate) emitter: Arc<dyn crate::Emitter>,
     pub(crate) clock: Clock,
+    /// How long a request with no valid token waits for a running read before it is refused.
+    pub(crate) read_wait: Duration,
+}
+
+/// How long a request waits for a running read: as long as one connected read can take, so a slow
+/// daemon that still answers is never refused. A read stuck connecting is not bounded by its own
+/// deadline, so this bound turns it into a refusal.
+pub(crate) fn read_wait_limit() -> Duration {
+    #[cfg(test)]
+    if let Some(limit) = tests::TEST_READ_WAIT.get() {
+        return limit;
+    }
+    LONGEST_READ
 }
 
 impl TokenSource {
@@ -280,10 +295,20 @@ impl RotatingToken {
         if state.refreshing {
             // Share the running read's outcome, whichever request started it.
             let attempt = state.attempts;
-            state = self
+            let (waited, timeout) = self
                 .settled
-                .wait_while(state, |state| state.attempts == attempt)
+                .wait_timeout_while(state, self.source.read_wait, |state| {
+                    state.attempts == attempt
+                })
                 .unwrap_or_else(PoisonError::into_inner);
+            state = waited;
+            if timeout.timed_out() {
+                return Err(CredentialError::Credential(format!(
+                    "credsd did not answer within {seconds}s for credential {credential:?}",
+                    seconds = self.source.read_wait.as_secs(),
+                    credential = self.source.credential
+                )));
+            }
         } else if state.may_read(now) {
             state.refreshing = true;
             drop(state);
@@ -390,6 +415,9 @@ pub(crate) mod tests {
     thread_local! {
         pub(super) static TEST_CLOCK: RefCell<Option<Arc<Mutex<Moment>>>> =
             const { RefCell::new(None) };
+        /// The read wait for every token opened on this thread.
+        pub(crate) static TEST_READ_WAIT: std::cell::Cell<Option<Duration>> =
+            const { std::cell::Cell::new(None) };
         /// Run on this thread before a token reports to the operator.
         pub(crate) static BEFORE_REPORT: RefCell<Option<Box<dyn FnOnce()>>> =
             const { RefCell::new(None) };

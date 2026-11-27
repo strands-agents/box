@@ -43,6 +43,10 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// request hot path across many under-timeout reads.
 const RESPONSE_DEADLINE: Duration = Duration::from_secs(10);
 
+/// The longest one read can take once it is connected: the overall deadline plus one last blocked
+/// socket read.
+pub(crate) const LONGEST_READ: Duration = RESPONSE_DEADLINE.saturating_add(RESPONSE_TIMEOUT);
+
 /// The URI scheme a `credsd://<credential>` reference carries.
 pub(crate) const CREDSD_SCHEME: &str = "credsd";
 
@@ -258,8 +262,13 @@ fn build_request(method: &str, params: serde_json::Value) -> String {
 /// caps the total at `MAX_RESPONSE_BYTES`; the read stops at the first newline, and an EOF before a
 /// newline is a dropped line rather than a complete response, so it is refused.
 fn read_response(stream: &UnixStream, context: &str) -> Result<Zeroizing<Vec<u8>>> {
+    read_line(stream, context)
+}
+
+/// [`read_response`] over any reader, so a test can drive an interrupted read.
+fn read_line(source: impl Read, context: &str) -> Result<Zeroizing<Vec<u8>>> {
     let deadline = Instant::now() + RESPONSE_DEADLINE;
-    let mut reader = stream.take(MAX_RESPONSE_BYTES);
+    let mut reader = source.take(MAX_RESPONSE_BYTES);
     // Reserve the whole cap up front so the buffer never reallocates, whatever the response size:
     // a grown `Vec` frees its old allocation — holding credential bytes — without wiping it.
     // The 1 MiB reservation is lazily paged, so only the bytes actually read become resident.
@@ -273,11 +282,15 @@ fn read_response(stream: &UnixStream, context: &str) -> Result<Zeroizing<Vec<u8>
                 seconds = RESPONSE_DEADLINE.as_secs()
             )));
         }
-        let read = reader.read(&mut chunk[..]).map_err(|source| {
-            CredentialError::KeystoreAccess(format!(
-                "the credsd daemon did not answer for {context}: {source}"
-            ))
-        })?;
+        let read = match reader.read(&mut chunk[..]) {
+            // A signal interrupted the read before any byte arrived; the deadline still bounds it.
+            Err(source) if source.kind() == std::io::ErrorKind::Interrupted => continue,
+            read => read.map_err(|source| {
+                CredentialError::KeystoreAccess(format!(
+                    "the credsd daemon did not answer for {context}: {source}"
+                ))
+            })?,
+        };
         if read == 0 {
             // `take` returns 0 once the byte cap is exhausted, the same signal as EOF. A buffer at
             // the cap with no newline is a truncated line: refuse it rather than parse a partial
@@ -670,6 +683,27 @@ struct RpcErrorData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A signal that interrupts a read before any byte arrives is retried, not reported as a
+    /// daemon that did not answer.
+    #[test]
+    fn an_interrupted_read_is_retried() {
+        struct InterruptedOnce(bool, &'static [u8]);
+        impl Read for InterruptedOnce {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                if std::mem::replace(&mut self.0, false) {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                let n = self.1.len().min(out.len());
+                out[..n].copy_from_slice(&self.1[..n]);
+                self.1 = &self.1[n..];
+                Ok(n)
+            }
+        }
+        let line = read_line(InterruptedOnce(true, b"{}\n"), "credential \"t\"")
+            .expect("the interrupted read is retried");
+        assert_eq!(line.as_slice(), b"{}\n");
+    }
     use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixListener;
     use std::sync::atomic::{AtomicU32, Ordering};
