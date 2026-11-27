@@ -542,6 +542,42 @@ unless { context.input.enrichment.threat.answered };
         assert_eq!(enricher.asked(), 1);
     }
 
+    /// A `forbid` that joins a rule on the name and a rule on the answer with `||` refuses a host
+    /// its name rule matches whatever the source says, so no source learns that name; a host the
+    /// name rule does not match is still asked about.
+    #[test]
+    fn a_name_branch_of_a_forbid_on_the_answer_is_never_asked_about() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let policy = Arc::new(
+            open(
+                r#"
+permit (principal, action == Box::Action::"net:connect", resource);
+@id("no_exfil_or_malware")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when { context.input.host like "*.exfil.example" || context.input.enrichment.threat.labels.contains("malware") };
+forbid (principal, action == Box::Action::"net:connect", resource)
+unless { context.input.enrichment.threat.answered };
+"#,
+                &names(&["threat"]),
+                directory.path(),
+            )
+            .expect("the policy opens"),
+        );
+        let enricher = Arc::new(Table::new(BTreeMap::from([(
+            "api.example",
+            EnrichmentAnswer::answered([]),
+        )])));
+        let interceptor = interceptor(&policy, Arc::clone(&enricher) as Arc<dyn HostEnricher>);
+
+        let forbidden = refusal(interceptor.as_ref(), &resolve("secret.exfil.example"));
+        assert!(forbidden.contains("no_exfil_or_malware"), "{forbidden}");
+        assert_eq!(enricher.asked(), 0, "the refused name reaches no source");
+        interceptor
+            .intercept(&resolve("api.example"))
+            .expect("a host the name branch does not match is asked about and admitted");
+        assert_eq!(enricher.asked(), 1);
+    }
+
     /// A reload changes which hosts are refused whatever the source says along with the rules.
     #[test]
     fn a_reload_changes_which_hosts_are_asked_about() {

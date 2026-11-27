@@ -176,12 +176,9 @@ pub trait HostEnricher: Send + Sync {
     fn enrich(&self, host: &str) -> EnrichmentFacts;
 }
 
-/// What the installed rules decide about a `net:connect` before any entry answers, so the egress
-/// adapter asks a source only when its answer can change the decision.
-///
-/// The stateless rules that read no entry decide alike whatever an entry answers, so plain Cedar
-/// decides them here, with no history event. A rule with a temporal clause, or one that reads an
-/// entry, is left out, and only whether it may permit `net:connect` counts.
+/// What the stateless rules that read no entry, and each `||` branch of a stateless `forbid` that
+/// reads none, decide about a `net:connect` before any entry answers, so the egress adapter asks a
+/// source only when its answer can change the decision.
 #[derive(Default)]
 #[cfg_attr(
     not(feature = "egress-adapter"),
@@ -191,19 +188,31 @@ pub(crate) struct ConnectScreen {
     /// The stateless rules that read no entry, with the entities a decision reads, or `None` when
     /// the installed rules could not be sorted, so that every answer can matter.
     fixed: Option<(cedar_policy::PolicySet, cedar_policy::Entities)>,
-    /// Whether a rule left out of `fixed` may permit `net:connect`.
+    /// Whether a rule left out of `fixed`, such as one with a temporal clause, may permit
+    /// `net:connect`.
     other_permit: bool,
 }
 
 impl ConnectScreen {
     /// Sort the installed rules `installed`, lowered against `installed_schema` as the engine
-    /// installs them, with the action entities of the `served` schema.
+    /// installs them, with the action entities of the `served` schema, and tell `output` when they
+    /// cannot be sorted, because every name then reaches each read entry's source.
     pub(crate) fn of(
         installed: &[String],
         installed_schema: &str,
         served: &cedar_policy::Schema,
+        mut output: impl std::io::Write,
     ) -> Self {
-        Self::sorted(installed, installed_schema, served).unwrap_or_default()
+        Self::sorted(installed, installed_schema, served).unwrap_or_else(|| {
+            let _ = diagnostics::diag!(
+                into output,
+                B0215,
+                "Box cannot tell which hosts the installed rules refuse whatever a classification \
+                 source answers, so it asks each source a rule reads about every DNS name the \
+                 workload connects to."
+            );
+            Self::default()
+        })
     }
 
     fn sorted(
@@ -228,10 +237,18 @@ impl ConnectScreen {
                 .rule_ref(policy.id().as_ref())
                 .and_then(|rule| temporal.get(rule.rule_index))
                 .is_some_and(|uses_temporal| !uses_temporal);
-            if stateless && !reads_enrichment(&policy.to_json().ok()?["conditions"]) {
+            let est = policy.to_json().ok()?;
+            if stateless && !reads_enrichment(&est["conditions"]) {
                 fixed.add(policy.clone()).ok()?;
-            } else if policy.effect() == cedar_policy::Effect::Permit && decides_connect(&policy) {
-                other_permit = true;
+            } else if policy.effect() == cedar_policy::Effect::Permit {
+                other_permit |= decides_connect(&policy);
+            } else if stateless {
+                for (ordinal, branch) in unread_branches(&est).into_iter().enumerate() {
+                    let id = cedar_policy::PolicyId::new(format!("{}#{ordinal}", policy.id()));
+                    fixed
+                        .add(cedar_policy::Policy::from_json(Some(id), branch).ok()?)
+                        .ok()?;
+                }
             }
         }
         let entities = served
@@ -256,6 +273,37 @@ impl ConnectScreen {
         response.decision() == cedar_policy::Decision::Deny
             && (response.diagnostics().reason().next().is_some() || !self.other_permit)
     }
+}
+
+/// Each top-level `||` branch that reads no entry of the lone `when` condition of the lowered
+/// `forbid` `est`, as a `forbid` of its own, which holds only where `est` holds whatever any entry
+/// answers.
+fn unread_branches(est: &Value) -> Vec<Value> {
+    fn branches<'a>(node: &'a Value, out: &mut Vec<&'a Value>) {
+        match node.get("||") {
+            Some(either) => {
+                branches(&either["left"], out);
+                branches(&either["right"], out);
+            }
+            None => out.push(node),
+        }
+    }
+    let Some([condition]) = est["conditions"].as_array().map(Vec::as_slice) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    if condition["kind"] == "when" {
+        branches(&condition["body"], &mut found);
+    }
+    found
+        .into_iter()
+        .filter(|branch| !reads_enrichment(branch))
+        .map(|branch| {
+            let mut own = est.clone();
+            own["conditions"] = serde_json::json!([{ "kind": "when", "body": branch }]);
+            own
+        })
+        .collect()
 }
 
 /// Whether a Cedar condition could see an entry: it reads `context`, `context.input`, or a path
@@ -586,5 +634,32 @@ fn history_paths(condition: &Condition, out: &mut Vec<Vec<String>>) {
             term_paths(right, out);
         }
         ConditionKind::Tp { .. } | ConditionKind::Call(_) | ConditionKind::SigilRef { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConnectScreen;
+    use crate::schema::{SchemaBase, composed_action_schema};
+
+    /// Rules the screen cannot sort leave every name to the sources, and the box says so.
+    #[test]
+    fn rules_the_screen_cannot_sort_are_disclosed() {
+        let served = composed_action_schema(&SchemaBase::default(), &[])
+            .expect("the schema composes")
+            .cedar;
+        let mut output = Vec::new();
+        ConnectScreen::of(
+            &[r#"permit (principal, action, resource);"#.to_string()],
+            "not a schema",
+            &served,
+            &mut output,
+        );
+        let text = String::from_utf8(output).expect("UTF-8");
+        assert!(
+            text.starts_with("strands-box: note[B0215]: Box cannot tell which hosts")
+                && text.contains("about every DNS name the workload connects to."),
+            "{text}"
+        );
     }
 }

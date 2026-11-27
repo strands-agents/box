@@ -409,10 +409,15 @@ What Box asks, and when:
   table that no rule reads gets no name, and its entry reads `answered: false`. The startup line for
   each table says which it is.
 - **Box asks only when the answer can change the decision.** It first decides the connection on
-  the rules that read no entry and have no `when temporal` clause. When one of them forbids it, or
+  the rules that read no entry and have no `when temporal` clause. A `forbid` with no such clause
+  that reads an entry takes part through each `||` branch of its `when` that reads none, so
+  `when { context.input.host like "*.exfil.example" || context.input.enrichment.threat.labels.contains("malware") }`
+  refuses `secret.exfil.example` with no question. When one of these forbids the connection, or
   none of them permits it and no other rule permits `net:connect`, the policy refuses the host
   whatever a source answers. Box then asks no source, and every entry reads `answered: false`, so a
-  name the policy refuses anyway never leaves the box.
+  name the policy refuses anyway never leaves the box. A `forbid` with a `when temporal` clause
+  takes no part, so Box asks about a name that only such a rule refuses. When Box cannot make this
+  check, a `B0215` line says so, and Box asks about every name.
 - **Box asks only on the decision before DNS.** The gateway decides `net:connect` on the host, then
   again on each address it resolved. The decisions on the addresses read the answer that the first
   decision got and ask nothing.

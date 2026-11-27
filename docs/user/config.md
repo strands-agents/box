@@ -1649,6 +1649,13 @@ For a table that no rule reads:
 strands-box: note[B0215]: [enrichment.threat] is unused: no rule reads it, so Box sends it no DNS name.
 ```
 
+When Box cannot tell which hosts the rules refuse whatever a source answers, it prints this line as
+it installs the policy, and sends every DNS name to each source a rule reads:
+
+```text
+strands-box: note[B0215]: Box cannot tell which hosts the installed rules refuse whatever a classification source answers, so it asks each source a rule reads about every DNS name the workload connects to.
+```
+
 ### What is refused
 
 The file refuses each of these when it loads, before any box state exists. The refusal names the

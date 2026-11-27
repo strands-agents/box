@@ -521,6 +521,7 @@ impl DogwoodEngine {
                 canonical_policies,
                 installed_schema,
                 &request_schema.cedar,
+                diagnostics::stderr(),
             ));
         }
         self.request_schema = request_schema.cedar;

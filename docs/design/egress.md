@@ -158,17 +158,24 @@ question to a source about such a name would carry those labels out anyway. So e
 installs rules, it also sets apart the stateless rules that read no entry, which decide alike
 whatever a source answers. A rule that could see an entry is not among them: one that reads
 `context`, `context.input`, or anything under `context.input.enrichment`, or tests one of them with
-`has`. Before it asks, the adapter decides the request on those rules alone, in plain Cedar, with no
-history event. When one of their `forbid`s holds, or none of their `permit`s does and no other rule
+`has`. A stateless `forbid` that reads an entry adds each top-level `||` branch of its lone `when`
+condition that reads none, as a `forbid` of its own, because that branch alone makes the whole
+`forbid` hold. Dogwood lowers `unless { X }` to `when { !(X) }`, which has no such branch. A rule with
+a temporal clause stays out, because history the screen does not read can change its result. Before
+it asks, the adapter decides the request on those rules alone, in plain Cedar, with no history
+event. When one of their `forbid`s holds, or none of their `permit`s does and no other rule
 can permit `net:connect`, the host is refused whatever the source says. The adapter then asks
 nothing, and the engine decides and records the request as usual, with every entry unanswered, so
-log-only mode still lets the denial through.
+log-only mode still lets the denial through. When the engine cannot sort the rules, it prints a
+`B0215` note, and the adapter asks about every name.
 
 Each per-address decision reads the answers its host decision read and asks nothing, so the
-decisions of one connection agree even when the answer expires between them. The adapter keeps those
-answers by host and port, for the latest 1024 host decisions, and a per-address decision that finds
-none asks as a host decision would. No decision depends on which thread makes it, so a change in how
-the gateway schedules connections changes no decision. Box also bounds how long a question waits,
+decisions of one connection agree even when the answer expires between them. The gateway makes one
+connection's host decision and its per-address decisions on one thread, so the adapter keeps those
+answers by thread, host, and port, for the latest 1024 host decisions, and no decision reads another
+connection's answer. A per-address decision that finds none asks as a host decision would, so a
+change in how the gateway schedules connections can cost a question, never a decision on another
+connection's answer. Box also bounds how long a question waits,
 how many wait at once, and how many answers each table keeps, because a source can stall and the
 workload chooses the names.
 
