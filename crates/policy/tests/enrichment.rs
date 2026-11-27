@@ -462,6 +462,28 @@ mod adapter {
         )
     }
 
+    /// A box whose policy is `text` and whose `threat` entry `enricher` answers: its engine, its
+    /// egress interceptor, and the directory that holds its history.
+    fn threat_box(
+        text: &str,
+        enricher: Arc<dyn HostEnricher>,
+    ) -> (
+        Arc<PolicyEngine>,
+        Arc<dyn EffectInterceptor>,
+        tempfile::TempDir,
+    ) {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let policy =
+            Arc::new(open(text, &names(&["threat"]), directory.path()).expect("the policy opens"));
+        let interceptor = interceptor(&policy, enricher);
+        (policy, interceptor, directory)
+    }
+
+    /// An enricher that answers from `answers`.
+    fn table<const N: usize>(answers: [(&'static str, EnrichmentAnswer); N]) -> Arc<Table> {
+        Arc::new(Table::new(BTreeMap::from(answers)))
+    }
+
     fn refusal(interceptor: &dyn EffectInterceptor, attempt: &EffectAttempt<'_>) -> String {
         match interceptor.intercept(attempt) {
             Ok(_) => panic!("{attempt:?} was admitted"),
@@ -512,15 +534,8 @@ unless { context.input.enrichment.threat.answered };
     /// policy could admit is asked about.
     #[test]
     fn a_host_refused_whatever_the_source_says_is_never_asked_about() {
-        let directory = tempfile::tempdir().expect("a temporary directory");
-        let policy = Arc::new(
-            open(SCREENED, &names(&["threat"]), directory.path()).expect("the policy opens"),
-        );
-        let enricher = Arc::new(Table::new(BTreeMap::from([(
-            "api.example",
-            EnrichmentAnswer::answered([]),
-        )])));
-        let interceptor = interceptor(&policy, Arc::clone(&enricher) as Arc<dyn HostEnricher>);
+        let enricher = table([("api.example", EnrichmentAnswer::answered([]))]);
+        let (_policy, interceptor, _history) = threat_box(SCREENED, enricher.clone());
 
         for (attempt, rule) in [
             (connect("c2vjcmv0.exfil.example"), "no_exfil"),
@@ -547,10 +562,9 @@ unless { context.input.enrichment.threat.answered };
     /// name rule does not match is still asked about.
     #[test]
     fn a_name_branch_of_a_forbid_on_the_answer_is_never_asked_about() {
-        let directory = tempfile::tempdir().expect("a temporary directory");
-        let policy = Arc::new(
-            open(
-                r#"
+        let enricher = table([("api.example", EnrichmentAnswer::answered([]))]);
+        let (_policy, interceptor, _history) = threat_box(
+            r#"
 permit (principal, action == Box::Action::"net:connect", resource);
 @id("no_exfil_or_malware")
 forbid (principal, action == Box::Action::"net:connect", resource)
@@ -558,16 +572,8 @@ when { context.input.host like "*.exfil.example" || context.input.enrichment.thr
 forbid (principal, action == Box::Action::"net:connect", resource)
 unless { context.input.enrichment.threat.answered };
 "#,
-                &names(&["threat"]),
-                directory.path(),
-            )
-            .expect("the policy opens"),
+            enricher.clone(),
         );
-        let enricher = Arc::new(Table::new(BTreeMap::from([(
-            "api.example",
-            EnrichmentAnswer::answered([]),
-        )])));
-        let interceptor = interceptor(&policy, Arc::clone(&enricher) as Arc<dyn HostEnricher>);
 
         let forbidden = refusal(interceptor.as_ref(), &resolve("secret.exfil.example"));
         assert!(forbidden.contains("no_exfil_or_malware"), "{forbidden}");
@@ -581,15 +587,8 @@ unless { context.input.enrichment.threat.answered };
     /// A reload changes which hosts are refused whatever the source says along with the rules.
     #[test]
     fn a_reload_changes_which_hosts_are_asked_about() {
-        let directory = tempfile::tempdir().expect("a temporary directory");
-        let policy = Arc::new(
-            open(SCREENED, &names(&["threat"]), directory.path()).expect("the policy opens"),
-        );
-        let enricher = Arc::new(Table::new(BTreeMap::from([(
-            "c2vjcmv0.exfil.example",
-            EnrichmentAnswer::answered([]),
-        )])));
-        let interceptor = interceptor(&policy, Arc::clone(&enricher) as Arc<dyn HostEnricher>);
+        let enricher = table([("c2vjcmv0.exfil.example", EnrichmentAnswer::answered([]))]);
+        let (policy, interceptor, _history) = threat_box(SCREENED, enricher.clone());
 
         refusal(interceptor.as_ref(), &resolve("c2vjcmv0.exfil.example"));
         assert_eq!(enricher.asked(), 0);
@@ -610,11 +609,16 @@ unless { context.input.enrichment.threat.answered };
     /// which no screen without the record can judge.
     #[test]
     fn a_host_whose_answer_could_change_the_decision_is_asked_about() {
-        let directory = tempfile::tempdir().expect("a temporary directory");
-        let policy = Arc::new(
-            open(
-                &format!(
-                    r#"{SCREENED}
+        let enricher = table([
+            (
+                "trusted.example",
+                EnrichmentAnswer::answered(["trusted".to_string()]),
+            ),
+            ("api.example", EnrichmentAnswer::answered([])),
+        ]);
+        let (_policy, interceptor, _history) = threat_box(
+            &format!(
+                r#"{SCREENED}
 @id("allow_trusted")
 permit (principal, action == Box::Action::"net:connect", resource)
 when {{ context.input.enrichment.threat.labels.contains("trusted") }};
@@ -622,20 +626,9 @@ when {{ context.input.enrichment.threat.labels.contains("trusted") }};
 forbid (principal, action == Box::Action::"net:connect", resource)
 when {{ !(context.input has enrichment) || context.input.host == "blocked.example" }};
 "#
-                ),
-                &names(&["threat"]),
-                directory.path(),
-            )
-            .expect("the policy opens"),
-        );
-        let enricher = Arc::new(Table::new(BTreeMap::from([
-            (
-                "trusted.example",
-                EnrichmentAnswer::answered(["trusted".to_string()]),
             ),
-            ("api.example", EnrichmentAnswer::answered([])),
-        ])));
-        let interceptor = interceptor(&policy, Arc::clone(&enricher) as Arc<dyn HostEnricher>);
+            enricher.clone(),
+        );
 
         interceptor
             .intercept(&resolve("trusted.example"))
@@ -656,8 +649,8 @@ when {{ !(context.input has enrichment) || context.input.host == "blocked.exampl
                 .expect("the policy opens")
                 .log_only(),
         );
-        let enricher = Arc::new(Table::new(BTreeMap::new()));
-        let interceptor = interceptor(&policy, Arc::clone(&enricher) as Arc<dyn HostEnricher>);
+        let enricher = table([]);
+        let interceptor = interceptor(&policy, enricher.clone());
 
         for attempt in [
             resolve("c2vjcmv0.exfil.example"),
@@ -674,10 +667,6 @@ when {{ !(context.input has enrichment) || context.input.host == "blocked.exampl
     /// source would answer differently by then, and asks nothing more.
     #[test]
     fn each_address_decision_reads_the_answer_its_host_decision_read() {
-        let directory = tempfile::tempdir().expect("a temporary directory");
-        let policy = Arc::new(
-            open(THREAT_POLICY, &names(&["threat"]), directory.path()).expect("the policy opens"),
-        );
         let enricher = Arc::new(Table {
             once: true,
             ..Table::new(BTreeMap::from([(
@@ -685,19 +674,14 @@ when {{ !(context.input has enrichment) || context.input.host == "blocked.exampl
                 EnrichmentAnswer::answered([]),
             )]))
         });
-        let interceptor = interceptor(&policy, Arc::clone(&enricher) as Arc<dyn HostEnricher>);
+        let (_policy, interceptor, _history) = threat_box(THREAT_POLICY, enricher.clone());
 
         interceptor
             .intercept(&resolve("clean.example"))
             .expect("the answered host is admitted");
         for address in ["192.0.2.1:443", "[2001:db8::1]:443"] {
             interceptor
-                .intercept(&EffectAttempt::Connect {
-                    host: "clean.example",
-                    port: 443,
-                    address: address.parse().expect("an address"),
-                    http_visibility: false,
-                })
+                .intercept(&connect_to("clean.example", address))
                 .expect("each address reads the answer the host decision read");
         }
         assert_eq!(enricher.asked(), 1, "only the host decision asks");
@@ -721,21 +705,15 @@ when {{ !(context.input has enrichment) || context.input.host == "blocked.exampl
     /// a later connection to the same host and port got in between.
     #[test]
     fn an_address_decision_reads_its_own_connections_answer() {
-        let directory = tempfile::tempdir().expect("a temporary directory");
-        let policy = Arc::new(
-            open(
-                r#"
+        let (_policy, interceptor, _history) = threat_box(
+            r#"
 permit (principal, action == Box::Action::"net:connect", resource);
 @id("address_needs_answer")
 forbid (principal, action == Box::Action::"net:connect", resource)
 when { context.input has ip4 && !context.input.enrichment.threat.answered };
 "#,
-                &names(&["threat"]),
-                directory.path(),
-            )
-            .expect("the policy opens"),
+            Arc::new(Recovering::default()),
         );
-        let interceptor = interceptor(&policy, Arc::new(Recovering::default()));
         let (resolved, first_resolved) = std::sync::mpsc::channel();
         let (go, second_resolved) = std::sync::mpsc::channel();
 
@@ -761,21 +739,22 @@ when { context.input has ip4 && !context.input.enrichment.threat.answered };
         assert!(refused.contains("address_needs_answer"), "{refused}");
     }
 
-    /// An address decision with no host decision before it asks, and decides on that answer.
-    #[test]
-    fn an_address_decision_with_no_host_decision_asks() {
-        let directory = tempfile::tempdir().expect("a temporary directory");
-        let policy = Arc::new(
-            open(THREAT_POLICY, &names(&["threat"]), directory.path()).expect("the policy opens"),
-        );
-        let enricher = Arc::new(Table::new(BTreeMap::from([
+    /// An enricher that labels `evil.example` malware and answers `clean.example` with no label.
+    fn labelled_and_clean() -> Arc<Table> {
+        table([
             (
                 "evil.example",
                 EnrichmentAnswer::answered(["malware".to_string()]),
             ),
             ("clean.example", EnrichmentAnswer::answered([])),
-        ])));
-        let interceptor = interceptor(&policy, Arc::clone(&enricher) as Arc<dyn HostEnricher>);
+        ])
+    }
+
+    /// An address decision with no host decision before it asks, and decides on that answer.
+    #[test]
+    fn an_address_decision_with_no_host_decision_asks() {
+        let enricher = labelled_and_clean();
+        let (_policy, interceptor, _history) = threat_box(THREAT_POLICY, enricher.clone());
 
         interceptor
             .intercept(&connect("clean.example"))
@@ -790,18 +769,8 @@ when { context.input has ip4 && !context.input.enrichment.threat.answered };
     /// host goes ahead; a host the source did not answer about is refused.
     #[test]
     fn the_adapter_decides_each_connect_on_what_the_source_answered() {
-        let directory = tempfile::tempdir().expect("a temporary directory");
-        let policy = Arc::new(
-            open(THREAT_POLICY, &names(&["threat"]), directory.path()).expect("the policy opens"),
-        );
-        let enricher = Arc::new(Table::new(BTreeMap::from([
-            (
-                "evil.example",
-                EnrichmentAnswer::answered(["malware".to_string()]),
-            ),
-            ("clean.example", EnrichmentAnswer::answered([])),
-        ])));
-        let interceptor = interceptor(&policy, Arc::clone(&enricher) as Arc<dyn HostEnricher>);
+        let enricher = labelled_and_clean();
+        let (_policy, interceptor, _history) = threat_box(THREAT_POLICY, enricher.clone());
 
         let labelled = refusal(interceptor.as_ref(), &resolve("evil.example"));
         assert!(labelled.contains("block_malware"), "{labelled}");
@@ -840,37 +809,20 @@ forbid (principal, action == Box::Action::"net:connect", resource)
 when temporal {{ formerly within 3600s (Box::Action::"net:connect"::{kind}{{ input.enrichment.threat.answered: true }}) }};
 "#
             );
-            let directory = tempfile::tempdir().expect("a temporary directory");
-            let policy = Arc::new(
-                open(&text, &names(&["threat"]), directory.path()).expect("the policy opens"),
+            let (_policy, interceptor, _history) = threat_box(
+                &text,
+                table([("clean.example", EnrichmentAnswer::answered([]))]),
             );
-            let interceptor = interceptor(
-                &policy,
-                Arc::new(Table::new(BTreeMap::from([(
-                    "clean.example",
-                    EnrichmentAnswer::answered([]),
-                )]))),
-            );
-            let resolve = EffectAttempt::Resolve {
-                host: "clean.example",
-                port: 443,
-            };
-            let connect = EffectAttempt::Connect {
-                host: "clean.example",
-                port: 443,
-                address,
-                http_visibility: false,
-            };
 
             interceptor
-                .intercept(&resolve)
+                .intercept(&resolve("clean.example"))
                 .expect("the first answered host is admitted");
             interceptor
-                .intercept(&connect)
+                .intercept(&connect("clean.example"))
                 .expect("and so is its address")
                 .record_outcome(outcome)
                 .expect("the outcome records");
-            let after = refusal(interceptor.as_ref(), &connect);
+            let after = refusal(interceptor.as_ref(), &connect("clean.example"));
             assert!(
                 after.contains("after_an_answered_connect"),
                 "the recorded {kind} carries the answer: {after}"
