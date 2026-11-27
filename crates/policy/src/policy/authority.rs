@@ -605,9 +605,26 @@ impl Authority {
             .flush_history_for_timer()
     }
 
-    /// Records one outcome, with the enrichment facts its decision read. The live authority always
-    /// serves decisions (`Discovering` or `Ready`), so no readiness state refuses a record.
+    /// Records one outcome. The live authority always serves decisions (`Discovering` or `Ready`),
+    /// so no readiness state refuses a record.
     pub(super) fn record(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request_id: &RequestId,
+        outcome: &Outcome<'_>,
+    ) -> Result<(), PolicyError> {
+        let live = self
+            .live
+            .lock()
+            .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?;
+        live.engine
+            .observe_outcome(governed, principal, request_id, outcome)
+    }
+
+    /// Records one outcome with the enrichment facts a `net:connect` decision read.
+    #[cfg(feature = "egress-adapter")]
+    pub(super) fn record_connect(
         &self,
         governed: &GovernedBox,
         principal: &Principal,
@@ -620,7 +637,7 @@ impl Authority {
             .lock()
             .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?;
         live.engine
-            .observe_outcome(governed, principal, request_id, outcome, enrichment)
+            .observe_connect_outcome(governed, principal, request_id, outcome, enrichment)
     }
 
     /// Records the `::response` of one completed action whose `input` is a JSON record.
@@ -1744,7 +1761,6 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
                 &Principal::agent(),
                 &request_id,
                 &http_outcome(),
-                &EnrichmentFacts::NONE,
             )
             .expect_err("a poisoned live-authority lock must refuse records");
         assert!(error.to_string().contains("authority lock poisoned"));
@@ -1773,7 +1789,6 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
                 &Principal::agent(),
                 &request_id,
                 &http_outcome(),
-                &EnrichmentFacts::NONE,
             )
             .expect_err("a poisoned Dogwood scope must refuse records");
         assert!(
@@ -2355,7 +2370,6 @@ permit(principal, action == alpha::Action::"read", resource);"#,
                 &Principal::agent(),
                 &request_id,
                 &http_outcome(),
-                &EnrichmentFacts::NONE,
             );
             let _ = recorded.send(result);
         });

@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use dogwood_language::PolicySchema;
-use dogwood_language::temporal_ast::{AggExprKind, Condition, ConditionKind, Term};
 use serde_json::Value;
 
 use crate::check::{Finding, Refused, RuleRef, annotated_id};
@@ -364,7 +363,15 @@ pub(crate) fn read_entries(
         if let Ok(parsed) = dogwood_language::ParsedPolicySet::parse(rule, &service) {
             for policy in parsed.policies() {
                 for condition in policy.temporal_conditions() {
-                    history_paths(condition, &mut paths);
+                    crate::dogwood::visit_predicates(condition, &mut |predicate| {
+                        if predicate.namespace == ["Box", "Action"]
+                            && predicate.action == action::NET_CONNECT
+                        {
+                            paths.extend(
+                                predicate.args.iter().map(|argument| argument.field_path()),
+                            );
+                        }
+                    });
                 }
             }
         }
@@ -592,48 +599,6 @@ fn context_paths(node: &Value, out: &mut Vec<Vec<String>>) {
             fields.values().for_each(|value| context_paths(value, out));
         }
         _ => {}
-    }
-}
-
-/// Every field a `net:connect` predicate names in one temporal condition, from `context`.
-fn history_paths(condition: &Condition, out: &mut Vec<Vec<String>>) {
-    fn term_paths(term: &Term, out: &mut Vec<Vec<String>>) {
-        match term {
-            Term::Agg(aggregate) => match &aggregate.kind {
-                AggExprKind::Sum { body, .. } | AggExprKind::Count { body, .. } => {
-                    history_paths(body, out);
-                }
-                AggExprKind::Call(_) => {}
-            },
-            Term::Array(items) => items.iter().for_each(|item| term_paths(item, out)),
-            _ => {}
-        }
-    }
-    match &condition.kind {
-        ConditionKind::And { left, right }
-        | ConditionKind::Or { left, right }
-        | ConditionKind::Since { left, right, .. } => {
-            history_paths(left, out);
-            history_paths(right, out);
-        }
-        ConditionKind::Not { inner: body }
-        | ConditionKind::Formerly { body, .. }
-        | ConditionKind::Previous { body, .. }
-        | ConditionKind::Exists { body, .. }
-        | ConditionKind::Refine { base: body, .. } => history_paths(body, out),
-        ConditionKind::Predicate(predicate) => {
-            if predicate.namespace == ["Box", "Action"] && predicate.action == action::NET_CONNECT {
-                out.extend(predicate.args.iter().map(|argument| argument.field_path()));
-            }
-            for argument in &predicate.args {
-                term_paths(&argument.value, out);
-            }
-        }
-        ConditionKind::Comparison { left, right, .. } => {
-            term_paths(left, out);
-            term_paths(right, out);
-        }
-        ConditionKind::Tp { .. } | ConditionKind::Call(_) | ConditionKind::SigilRef { .. } => {}
     }
 }
 

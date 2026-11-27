@@ -789,8 +789,26 @@ impl DogwoodEngine {
         }
     }
 
-    /// Submit one completed effect as history, with the enrichment facts its decision read.
+    /// Submit one completed effect as history.
     pub(crate) fn observe_outcome(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request_id: &RequestId,
+        outcome: &Outcome<'_>,
+    ) -> Result<(), PolicyError> {
+        self.observe_connect_outcome(
+            governed,
+            principal,
+            request_id,
+            outcome,
+            &crate::EnrichmentFacts::NONE,
+        )
+    }
+
+    /// Submit one completed effect as history, with the enrichment facts a `net:connect` decision
+    /// read.
+    pub(crate) fn observe_connect_outcome(
         &self,
         governed: &GovernedBox,
         principal: &Principal,
@@ -1563,19 +1581,16 @@ fn refuse_unrecorded_mcp_errors(
 ) -> Result<(), Refused> {
     let mut findings = Vec::new();
     for policy in parsed.policies() {
-        let mut predicates = Vec::new();
+        let mut named: Vec<String> = Vec::new();
         for condition in policy.temporal_conditions() {
-            predicate_events(condition, &mut predicates);
+            visit_predicates(condition, &mut |predicate| {
+                let (namespace, action, kind) =
+                    (&predicate.namespace, &predicate.action, &predicate.kind);
+                if kind == KIND_ERROR && is_mcp_event(namespace, action) {
+                    named.push(format!("{}::{action:?}::{kind}", namespace.join("::")));
+                }
+            });
         }
-        let mut named: Vec<String> = predicates
-            .into_iter()
-            .filter(|(namespace, action, kind)| {
-                kind == KIND_ERROR && is_mcp_event(namespace, action)
-            })
-            .map(|(namespace, action, kind)| {
-                format!("{}::{action:?}::{kind}", namespace.join("::"))
-            })
-            .collect();
         named.dedup();
         if named.is_empty() {
             continue;
@@ -1733,21 +1748,25 @@ fn is_mcp_event(namespace: &[String], action: &str) -> bool {
     }
 }
 
-/// Collect the namespace, action, and kind of every predicate in a temporal condition.
-fn predicate_events(
+/// Call `visit` with every predicate in a temporal condition, including each one inside an
+/// aggregate.
+pub(crate) fn visit_predicates<Visit: FnMut(&dogwood_language::temporal_ast::Predicate)>(
     condition: &dogwood_language::temporal_ast::Condition,
-    out: &mut Vec<(Vec<String>, String, String)>,
+    visit: &mut Visit,
 ) {
     use dogwood_language::temporal_ast::{AggExprKind, ConditionKind, Term};
-    fn term_events(term: &Term, out: &mut Vec<(Vec<String>, String, String)>) {
+    fn term_events<Visit: FnMut(&dogwood_language::temporal_ast::Predicate)>(
+        term: &Term,
+        visit: &mut Visit,
+    ) {
         match term {
             Term::Agg(aggregate) => match &aggregate.kind {
                 AggExprKind::Sum { body, .. } | AggExprKind::Count { body, .. } => {
-                    predicate_events(body, out);
+                    visit_predicates(body, visit);
                 }
                 AggExprKind::Call(_) => {}
             },
-            Term::Array(items) => items.iter().for_each(|item| term_events(item, out)),
+            Term::Array(items) => items.iter().for_each(|item| term_events(item, visit)),
             _ => {}
         }
     }
@@ -1755,27 +1774,23 @@ fn predicate_events(
         ConditionKind::And { left, right }
         | ConditionKind::Or { left, right }
         | ConditionKind::Since { left, right, .. } => {
-            predicate_events(left, out);
-            predicate_events(right, out);
+            visit_predicates(left, visit);
+            visit_predicates(right, visit);
         }
         ConditionKind::Not { inner: body }
         | ConditionKind::Formerly { body, .. }
         | ConditionKind::Previous { body, .. }
         | ConditionKind::Exists { body, .. }
-        | ConditionKind::Refine { base: body, .. } => predicate_events(body, out),
+        | ConditionKind::Refine { base: body, .. } => visit_predicates(body, visit),
         ConditionKind::Predicate(predicate) => {
-            out.push((
-                predicate.namespace.clone(),
-                predicate.action.clone(),
-                predicate.kind.clone(),
-            ));
+            visit(predicate);
             for argument in &predicate.args {
-                term_events(&argument.value, out);
+                term_events(&argument.value, visit);
             }
         }
         ConditionKind::Comparison { left, right, .. } => {
-            term_events(left, out);
-            term_events(right, out);
+            term_events(left, visit);
+            term_events(right, visit);
         }
         ConditionKind::Tp { .. } | ConditionKind::Call(_) | ConditionKind::SigilRef { .. } => {}
     }
@@ -2948,7 +2963,6 @@ when temporal {
                 &Principal::agent(),
                 &request_id,
                 &delivered(150),
-                &crate::EnrichmentFacts::NONE,
             )
             .expect("activity records");
         drop(engine);
@@ -3164,13 +3178,7 @@ when temporal {
         }
         for request_id in identifiers.iter().rev() {
             engine
-                .observe_outcome(
-                    &governed(),
-                    &Principal::agent(),
-                    request_id,
-                    &delivered(1),
-                    &crate::EnrichmentFacts::NONE,
-                )
+                .observe_outcome(&governed(), &Principal::agent(), request_id, &delivered(1))
                 .expect("reverse-order completion records");
         }
         drop(engine);
@@ -3427,7 +3435,6 @@ when temporal {
                 &Principal::agent(),
                 &request_id,
                 &delivered(101),
-                &crate::EnrichmentFacts::NONE,
             )
             .expect("budget consumption records");
     }
@@ -3566,7 +3573,6 @@ when temporal {
             &Principal::agent(),
             &request_id,
             &delivered(101),
-            &crate::EnrichmentFacts::NONE,
         );
         assert!(
             recorded.is_err(),
@@ -3660,7 +3666,6 @@ when temporal { formerly within 1h ( desk::Action::"reset"::response{ input.user
                 prompt: None,
                 uri: None,
             },
-            &crate::EnrichmentFacts::NONE,
         );
         assert!(
             matches!(coarse, Err(PolicyError::OutcomeKept(_))),
@@ -3729,7 +3734,6 @@ when temporal { formerly within 1h ( desk::Action::"reset"::response{ input.user
             &Principal::agent(),
             &request_id,
             &delivered(101),
-            &crate::EnrichmentFacts::NONE,
         );
         assert!(
             matches!(outcome, Err(PolicyError::OutcomeKept(_))),
@@ -3755,13 +3759,7 @@ when temporal { formerly within 1h ( desk::Action::"reset"::response{ input.user
         let accepted = engine.engine.lock().expect("engine lock").log_offset();
         engine.advance_clock(-400);
         assert!(matches!(
-            engine.observe_outcome(
-                &governed(),
-                &Principal::agent(),
-                &request_id,
-                &delivered(1),
-                &crate::EnrichmentFacts::NONE
-            ),
+            engine.observe_outcome(&governed(), &Principal::agent(), &request_id, &delivered(1)),
             Err(PolicyError::OutcomeKept(_))
         ));
         let copied_offset = |name: &str| {
@@ -3876,7 +3874,6 @@ when temporal { formerly within 1h ( desk::Action::"reset"::response{ input.user
                     &Principal::agent(),
                     &request_id,
                     &delivered(101),
-                    &crate::EnrichmentFacts::NONE,
                 )
                 .is_err(),
             "an outcome 400 s behind history is refused"
@@ -3917,7 +3914,6 @@ when temporal { formerly within 1h ( desk::Action::"reset"::response{ input.user
                     &Principal::agent(),
                     &request_id,
                     &delivered(10),
-                    &crate::EnrichmentFacts::NONE,
                 )
                 .expect("history records");
         }
@@ -4150,8 +4146,7 @@ when temporal {
                         status: Some(200),
                         intercepted: true,
                         websocket: false,
-                    },
-                    &crate::EnrichmentFacts::NONE
+                    }
                 )
                 .is_err(),
             "recording into a poisoned engine must fail loudly"
@@ -4171,13 +4166,7 @@ when temporal {
         for _ in 0..2 {
             let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(
-                    &governed(),
-                    &egress,
-                    &request_id,
-                    &delivered(60),
-                    &crate::EnrichmentFacts::NONE,
-                )
+                .observe_outcome(&governed(), &egress, &request_id, &delivered(60))
                 .expect("records");
         }
         assert!(
@@ -4210,13 +4199,7 @@ when temporal {
         for _ in 0..2 {
             let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(
-                    &governed(),
-                    &egress,
-                    &request_id,
-                    &delivered(60),
-                    &crate::EnrichmentFacts::NONE,
-                )
+                .observe_outcome(&governed(), &egress, &request_id, &delivered(60))
                 .expect("records");
         }
         assert!(
@@ -4268,13 +4251,7 @@ when temporal {
         };
         let request_id = permitted_http_request(&engine);
         engine
-            .observe_outcome(
-                &governed(),
-                &Principal::agent(),
-                &request_id,
-                &outcome,
-                &crate::EnrichmentFacts::NONE,
-            )
+            .observe_outcome(&governed(), &Principal::agent(), &request_id, &outcome)
             .expect("records");
         assert!(
             !engine
@@ -4452,13 +4429,7 @@ when temporal {{
             let engine = DogwoodEngine::open(BUDGET, &path).expect("policy loads");
             let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(
-                    &governed(),
-                    &egress,
-                    &request_id,
-                    &delivered(150),
-                    &crate::EnrichmentFacts::NONE,
-                )
+                .observe_outcome(&governed(), &egress, &request_id, &delivered(150))
                 .expect("history records");
             engine.log_offset()
         };
@@ -4651,13 +4622,7 @@ when temporal {
             let engine = DogwoodEngine::open(MACRO_BUDGET, &path).expect("policy loads");
             let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(
-                    &governed(),
-                    &egress,
-                    &request_id,
-                    &delivered(150),
-                    &crate::EnrichmentFacts::NONE,
-                )
+                .observe_outcome(&governed(), &egress, &request_id, &delivered(150))
                 .expect("history records");
             assert!(
                 !engine
@@ -4690,13 +4655,7 @@ when temporal {
             let engine = DogwoodEngine::open(BUDGET, &path).expect("policy loads");
             let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(
-                    &governed(),
-                    &egress,
-                    &request_id,
-                    &delivered(150),
-                    &crate::EnrichmentFacts::NONE,
-                )
+                .observe_outcome(&governed(), &egress, &request_id, &delivered(150))
                 .expect("history records");
         }
 

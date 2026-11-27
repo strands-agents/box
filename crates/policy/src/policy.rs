@@ -657,13 +657,8 @@ impl PolicyEngine {
         request_id: &RequestId,
         outcome: &Outcome<'_>,
     ) -> Result<(), PolicyError> {
-        self.authority.record(
-            governed,
-            principal,
-            request_id,
-            outcome,
-            &crate::EnrichmentFacts::NONE,
-        )
+        self.authority
+            .record(governed, principal, request_id, outcome)
     }
 
     /// Record one `net:connect` outcome with the enrichment facts its decision read.
@@ -677,7 +672,7 @@ impl PolicyEngine {
         enrichment: &crate::EnrichmentFacts,
     ) -> Result<(), PolicyError> {
         self.authority
-            .record(governed, principal, request_id, outcome, enrichment)
+            .record_connect(governed, principal, request_id, outcome, enrichment)
     }
 
     /// Return the loaded engine and source identity.
