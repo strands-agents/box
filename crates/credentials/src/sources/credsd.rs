@@ -145,12 +145,21 @@ impl CredsdClient {
     ///
     /// Sends only the `credential` field. Every error names the credential and never the material.
     pub(crate) fn get(&self, credential: &str) -> Result<CredentialResult> {
+        self.get_classified(credential).map_err(|(_, error)| error)
+    }
+
+    /// [`get`](Self::get), with the [`GetFailure`] class of a failure beside its error.
+    fn get_classified(
+        &self,
+        credential: &str,
+    ) -> std::result::Result<CredentialResult, (GetFailure, CredentialError)> {
         let subject = Subject::Credential(credential);
         let context = subject.to_string();
         let request = build_credential_request(GET_METHOD, credential);
-        let stream = self.send(&request, &context)?;
-        let line = read_response(&stream, &context)?;
-        parse_response(&line, subject)
+        let unavailable = |error| (GetFailure::Unavailable, error);
+        let stream = self.send(&request, &context).map_err(unavailable)?;
+        let line = read_response(&stream, &context).map_err(unavailable)?;
+        parse_classified(&line, subject)
     }
 
     /// Send `system/health` and return the daemon's protocol version.
@@ -316,27 +325,64 @@ fn parse_response<R: serde::de::DeserializeOwned>(
     buffer: &[u8],
     subject: Subject<'_>,
 ) -> Result<R> {
+    parse_classified(buffer, subject).map_err(|(_, error)| error)
+}
+
+/// [`parse_response`], with the [`GetFailure`] class of a failure beside its error.
+fn parse_classified<R: serde::de::DeserializeOwned>(
+    buffer: &[u8],
+    subject: Subject<'_>,
+) -> std::result::Result<R, (GetFailure, CredentialError)> {
+    let refused = |message: String| (GetFailure::Refused, CredentialError::Credential(message));
     let response: RpcResponse<R> =
         serde_json::from_slice(first_line(buffer)).map_err(|_source| {
-            CredentialError::Credential(format!(
+            refused(format!(
                 "credsd returned a malformed response for {subject}"
             ))
         })?;
     if let Some(error) = response.error {
-        return Err(map_error(&error, subject));
+        return Err((failure_class(&error), map_error(&error, subject)));
     }
     // A result carries credentials, so its id must match the request we sent. A crossed or
     // mismatched response must never sign with another credential's material.
     if response.id != Some(REQUEST_ID) {
-        return Err(CredentialError::Credential(format!(
+        return Err(refused(format!(
             "credsd returned a response with an unexpected id for {subject}"
         )));
     }
     response.result.ok_or_else(|| {
-        CredentialError::Credential(format!(
+        refused(format!(
             "credsd returned neither a result nor an error for {subject}"
         ))
     })
+}
+
+/// Why a `credential/get` failed, as a class that carries no daemon-supplied text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GetFailure {
+    /// The daemon needs the operator to sign in to the credential again.
+    ReauthRequired,
+    /// The daemon has no such credential, or this caller may not read it.
+    NotFound,
+    /// The daemon could not be reached, did not answer in time, or reported its provider down.
+    Unavailable,
+    /// The daemon's configuration or integrity record needs the operator's attention.
+    NeedsRepair,
+    /// The daemon refused the request or answered with no usable bearer token.
+    Refused,
+}
+
+/// The [`GetFailure`] class of a JSON-RPC error, by its `error.data.code`.
+fn failure_class(error: &RpcError) -> GetFailure {
+    match error.data.as_ref().and_then(|data| data.code.as_deref()) {
+        Some("REAUTH_REQUIRED") => GetFailure::ReauthRequired,
+        Some("CREDENTIAL_NOT_FOUND") => GetFailure::NotFound,
+        Some("PROVIDER_UNAVAILABLE" | "INTERNAL") => GetFailure::Unavailable,
+        Some("CONFIG_DRIFTED" | "CONFIG_INVALID" | "INTEGRITY_UNVERIFIABLE" | "CUSTODY_BROKEN") => {
+            GetFailure::NeedsRepair
+        }
+        _ => GetFailure::Refused,
+    }
 }
 
 /// Parse one `system/health` line into the reported protocol version. Every failure is a
@@ -461,6 +507,18 @@ impl std::fmt::Debug for AccessToken {
 /// credential failure that names the credential and never the material.
 pub(crate) fn credsd_access_token(client: &CredsdClient, credential: &str) -> Result<AccessToken> {
     access_token_from(client.get(credential)?, credential)
+}
+
+/// [`credsd_access_token`], reporting a failure only by its [`GetFailure`] class, so a refresh
+/// error carries no daemon-supplied label.
+pub(crate) fn credsd_access_token_class(
+    client: &CredsdClient,
+    credential: &str,
+) -> std::result::Result<AccessToken, GetFailure> {
+    let result = client
+        .get_classified(credential)
+        .map_err(|(class, _)| class)?;
+    access_token_from(result, credential).map_err(|_| GetFailure::Refused)
 }
 
 /// Map a `credsd` result onto an [`AccessToken`], asserting the material tag and the token type.

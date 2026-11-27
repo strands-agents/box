@@ -77,7 +77,7 @@ impl Vault {
         }
 
         let mut attachment = Attachment::new();
-        let redactor = binding.attach(self, &mut attachment, paired)?;
+        let redactor = binding.attach(&mut attachment, paired)?;
         // The harness may have placed the phantom at a *different* location than the one the secret
         // attaches to. `attach_secret` clears the attach location; when the harness location differs,
         // clear that one too so the phantom never rides upstream.

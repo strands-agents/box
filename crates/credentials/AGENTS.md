@@ -48,12 +48,18 @@ request edits, never a credential accessor or an authorization. Keep backend pro
 
 - The route kind is the credsd type: `RouteSpec::signed_aws` over `credsd://` resolves session
   credentials per request; `RouteSpec::opaque` reads one `access_token` at open and reads it
-  again on the first request near or past the daemon's `expires_at`. Every read refuses any other
-  material type and any `token_type` but `Bearer`, compared without case. Routes of one vault that
+  again on the first request near or past the daemon's `expires_at`. Before expiry that read runs
+  on its own thread so no request waits on the daemon; never hold the token lock across a read.
+  Every read refuses any other material type and any `token_type` but `Bearer`, compared without
+  case. Routes of one vault that
   name one token share one read and one refresh. A route with an expiring token attaches only
   through `Vault::attach_with_redactor`, which keeps the token the request carried to scrub its
   response.
   `credsd_preflight` checks each listed credential's kind against the list it gets.
+- A token's deadlines sit on both `Instant` and `SystemTime`, and pass when either clock reaches
+  them. `Instant` alone ignores wall-clock steps but stops while the host sleeps on macOS and Linux,
+  so it would keep an expired token after a laptop wakes. A refresh error keeps only its
+  `GetFailure` class: credsd material and type labels never reach a gateway refusal.
 
 ## Declared source programs
 
