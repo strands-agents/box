@@ -33,8 +33,8 @@ each file holds and refuses is in
 `[run]`, `[agent]`, each `[tool.<name>]`, their `filesystem` tables, and each `[tool.<name>.network]`, which only a profile writes and which takes no `when`. A refusal of a key names the file
 and the key's line, from the `toml_edit` spans. It suggests the one known key closest to it, when
 that key is at most one edit away for each three characters (and at least one edit). A swap of two
-neighbors is one edit, and a tie suggests nothing. `[egress]`, `[mcp]`, and `[telemetry]` keys go to Box Core as
-written, and Box Core checks them.
+neighbors is one edit, and a tie suggests nothing. `[egress]`, `[mcp]`, `[telemetry]`, and `[enrichment]` keys go to
+Box Core as written, and Box Core checks them.
 
 The profile's `[limits.shell]` table reaches Box Core with the keys the profile sets, and with
 `timeout = false` when the profile sets no `timeout`. Outside a box a shell has no per-command limit,
@@ -518,6 +518,7 @@ extend = ["@box/base"]
 | Copies | Two `[[storage.files]]` rows without a `when`, with one `target` or with one target inside the other, stop the load, and the error names both files. Two rows that both apply, where one has a `when`, stop the run, and the error names both targets and the input that turns the row off. So a profile cannot replace or remove a pack's copy while it applies. A pack that lets an operator turn a copy off gives it a `when` on a `bool` input, and a profile that turns it off can copy to that target itself. |
 | MCP sources | `[[mcp-servers]]` rows join. A later row replaces a server of the same name from an earlier row. An `[mcp.<name>]` table with a `type`, which only the profile holds, wins over a detected server of that name. A table with no `type`, in a pack (grants only) or the profile, merges over it in merge order, so the packs' tables apply first and the profile wins on a key. Its `destinations` join the detected list, and it gives the server no key ([MCP servers](profiles.md#mcp-servers)). A table with no `type` that no detected server takes is dropped and reported, with the pack that holds it as its source, or the profile when the profile holds it too. |
 | Routes | Two packs that declare one `[egress.<name>]` stop the load, and the error names both packs. Two packs whose routes read one `env://` variable also stop the load, and the error names both routes. One pack can read one variable from several routes. The operator's own profile can change a key of an inherited route, such as `secret.ref`, and can declare a route that reads a pack's variable. |
+| Classification sources | Two packs that declare one `[enrichment.<name>]` stop the load, as two routes do, because a key by key merge would give one pack's `secret.ref` or `kind` to the other's `endpoint`, or let one pack's `outputs` drop the labels a rule reads. A source's `secret.ref` counts with the routes' variables, so a source and another pack's route cannot read one `env://` variable. The operator's own profile can change a key of an inherited source. |
 | Agents | The profile names one agent pack, and each other agent pack in it is one that this pack extends, directly or not (`lang::refuse_two_agents`, [decision](decisions.md#a-profile-runs-one-agent)). Two packs that declare `[agent] command` where neither extends the other, or two agent packs that no agent pack of the profile extends, stop the merge, and the error names two of them. A pack that extends an agent pack and declares its own `command` replaces it, by the list rule. The profile's own `[agent] command` is not counted. |
 | `pack` | Bound to each file's own real folder before the merge. |
 | Policy | Only files in the profile's `policies`. Box Core refuses two rules with one `@id` when it checks the run's policy. |
@@ -1577,7 +1578,7 @@ wins over a `permit`. Box Core rejects duplicate `@id` values across authored an
 | --- | --- |
 | A value breaks out of its quotes | Each destination encodes the value. No placeholder in `policy.dw`, in a key, or in an `[options]` value, and no shell text. |
 | A value changes what a program parses, or a route's host | The input needs `pattern` or `values` ([Bounds](#bounds)). |
-| A credential reaches another provider's host | Two packs cannot declare one route, and two packs cannot read one `env://` variable. Box Core gives one stand-in value to each variable, and that value works at each host of each route that reads it. |
+| A credential reaches another provider's host | Two packs cannot declare one route or one classification source, and two packs cannot read one `env://` variable, from a route or a classification source. Box Core gives one stand-in value to each variable, and that value works at each host of each route that reads it, and a classification source sends its secret to its own endpoint. |
 | A pack reads a secret into the box | No `from = "env:<NAME>"`, on an input or an `env` entry, for a variable that an `env://` credential reads, a `secret.env` names, or a secret source passes to its program as a credential. A downloaded pack needs more limits, listed under [Not built](#not-built). |
 | A pack widens the policy | A pack holds no `policies`, even an empty list. |
 | A pack opens a host | A route with only `destinations` permits only lowercase host names with an optional port, and only `net:connect` and `http:request` ([routes with only `destinations`](#routes-with-only-destinations)). |

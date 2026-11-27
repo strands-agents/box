@@ -92,6 +92,8 @@ struct EngineConfig<'a> {
     #[serde(skip_serializing_if = "toml::Table::is_empty")]
     gateway: toml::Table,
     telemetry: toml::Table,
+    #[serde(skip_serializing_if = "toml::Table::is_empty")]
+    enrichment: toml::Table,
     #[serde(
         rename = "secret-source",
         skip_serializing_if = "toml::Table::is_empty"
@@ -378,6 +380,7 @@ pub fn compile(run: &Run<'_>) -> Result<Compiled, Error> {
         mcp: profile.mcp,
         gateway,
         telemetry,
+        enrichment: profile.enrichment,
         secret_source: profile.secret_source,
         experimental_features,
     };

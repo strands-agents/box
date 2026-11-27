@@ -318,7 +318,8 @@ by its `@id`, action, or field.
 | `is not one of` | The `[options]` value is not in the input's `values` list. The message lists the values. |
 | ``no `<program>` that the box can run`` | The agent's program is not on this host, so the check cannot finish. Tell the operator. Do not edit the profile to remove the message. |
 | `two packs cannot declare one route` | Two packs declare a route with the same name. Remove the pack that was not intended. |
-| `two packs cannot read one key` | Two routes read the same credential. Remove the pack that was not intended. |
+| `two packs cannot declare one classification source` | Two packs declare one `[enrichment.<name>]`. Remove the pack that was not intended, or set the key in the profile. |
+| `two packs cannot read one key` | Two routes, or a route and a classification source, read the same credential. Remove the pack that was not intended. |
 | `does not exist` after a pack name | Correct the name in `packs`: `@box/<name>` ships with `box`, a plain name is a folder in `~/.strands/box/packs/`, and `@<scope>/<name>` is a folder in `~/.strands/box/external/<scope>/packs/`. |
 | `this pack needs box` | The pack needs a newer `box`. Remove the pack, or tell the operator to upgrade. |
 | ``a profile holds no `box_dir` ``, or `name`, or `workspace` | Delete the line. `box run` sets these values. |
@@ -339,9 +340,9 @@ has no top-level keys: every key is in a table, and the file starts with `[pack]
 
 | File | Accepted contents |
 | --- | --- |
-| Profile | `packs`, `plugins`, `policies`, `agent-args`, `file-attributes`; `[profile]`, `[requires]`, `[options]`, `[limits]`, `[project]`, `[filesystem]` with only `deny` and `deny_write`, `[banner]`, `[experimental-features]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[mcp.<name>]`, `[storage]`, `[telemetry]`, `[secret-source.<scheme>]` |
-| Agent pack | `[pack]`, `[requires]`, `[inputs.<name>]`, `[run]` with `command`, `dependency`, `file-watching`, and `when`, then `[env]` and `[filesystem]` for the agent, which `box` reads as `[agent]`, plus `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, and `[[mcp-servers]]`. It writes no `[agent]` table. |
-| Support pack | `[pack]`, `[requires]`, `[inputs.<name>]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, `[[mcp-servers]]`; `[mcp.<name>]` may add only `filesystem` and `network` grants. No `[run]`, `[env]`, or `[filesystem]`. |
+| Profile | `packs`, `plugins`, `policies`, `agent-args`, `file-attributes`; `[profile]`, `[requires]`, `[options]`, `[limits]`, `[project]`, `[filesystem]` with only `deny` and `deny_write`, `[banner]`, `[experimental-features]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[mcp.<name>]`, `[storage]`, `[telemetry]`, `[enrichment.<name>]`, `[secret-source.<scheme>]` |
+| Agent pack | `[pack]`, `[requires]`, `[inputs.<name>]`, `[run]` with `command`, `dependency`, `file-watching`, and `when`, then `[env]` and `[filesystem]` for the agent, which `box` reads as `[agent]`, plus `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, `[enrichment.<name>]`, and `[[mcp-servers]]`. It writes no `[agent]` table. |
+| Support pack | `[pack]`, `[requires]`, `[inputs.<name>]`, `[agent]`, `[[agent.ingress]]`, `[tool.<name>]`, `[egress.<name>]`, `[storage]`, `[telemetry]`, `[enrichment.<name>]`, `[[mcp-servers]]`; `[mcp.<name>]` may add only `filesystem` and `network` grants. No `[run]`, `[env]`, or `[filesystem]`. |
 | Tool pack | `[pack]`, `[requires]`, `[inputs.<name>]` with the program input, `[run]` with `command` and the tool's other keys, then the tool's tables, such as `[env]` and `[filesystem]`. See [Tools](#tools-and-program-trust). |
 | Plugin | `[plugin]` with `name`, `version`, `kind = "secret-source"`, and `scheme`; optional `[requires]`; `[inputs.<name>]`; `[run]` with `command` and optional `output`; `[env]`, where each entry is `NAME = { from = "env:NAME" }` and nothing else; `[protect]` with only `env`, a list of names of `[env]`, and `paths`, a list of path strings. Nothing else: no `[filesystem]` and no `[secret-source.<scheme>]` table. |
 
@@ -886,7 +887,7 @@ A layout adds nothing when it does not match. An omitted or empty list selects n
 the tool's own program. A custom tool pack can still declare runtime paths in `[filesystem]`.
 
 A tool pack cannot declare `workspace`, `[agent]`, `[tool]`, `[egress]`,
-`[mcp]`, or `[telemetry]`. Its `[storage]` is the tool's own (see `storage` above).
+`[mcp]`, `[telemetry]`, or `[enrichment]`. Its `[storage]` is the tool's own (see `storage` above).
 Put cross-tool settings in the profile or an ordinary pack.
 No pack can declare `[experimental-features]`; write that table in `profile.toml`.
 In an ordinary pack's explicit tool table, use `tool.<name>.root` rather than bare `root`.

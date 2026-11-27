@@ -19,6 +19,21 @@ const SCOPED_STARTER: &str = include_str!("../../../../resources/policies/scoped
 /// The `@box/locked` policy starter, which `box profile create --policy locked` copies.
 const LOCKED_STARTER: &str = include_str!("../../../../resources/policies/locked/policy.dw");
 
+/// The test pack `enrichment`, whose `[enrichment.threat]` Box Core's `in-memory` kind answers.
+const ENRICHMENT_PACK: &str = include_str!("../../../../test-corpus/enrichment/pack.toml");
+
+/// The test policy starter `enrichment`, which holds the rules that read `[enrichment.threat]`.
+const ENRICHMENT_POLICY: [(&str, &str); 2] = [
+    (
+        "policy.toml",
+        include_str!("../../../../test-corpus/enrichment/policy/policy.toml"),
+    ),
+    (
+        "policy.dw",
+        include_str!("../../../../test-corpus/enrichment/policy/policy.dw"),
+    ),
+];
+
 /// A home, a workspace below it, and a directory outside it.
 struct Scene {
     _root: tempfile::TempDir,
@@ -1253,6 +1268,132 @@ fn a_run_without_a_profile_asks_the_starter_and_without_a_terminal_creates_nothi
     assert!(scene.runs().is_empty());
 }
 
+/// A scene with the enrichment test pack and policy starter installed, and the profile `threat`
+/// that `box profile create` makes from them, whose table answers from a fixture of the scene.
+fn enrichment_scene() -> Scene {
+    let scene = Scene::new();
+    scene.pack("enrichment", ENRICHMENT_PACK);
+    let starter = scene.home().join(".strands/box/policies/enrichment");
+    std::fs::create_dir_all(&starter).expect("a policy starter folder");
+    for (name, text) in ENRICHMENT_POLICY {
+        std::fs::write(starter.join(name), text).expect("a policy starter file");
+    }
+    std::fs::write(
+        scene.home().join(".strands/box/config.toml"),
+        "[policy-starters]\nadd = [\"enrichment\"]\n",
+    )
+    .expect("config.toml");
+    let created = scene
+        .process(Path::new(env!("CARGO_BIN_EXE_box")))
+        .args([
+            "profile",
+            "create",
+            "threat",
+            "--with",
+            "enrichment",
+            "--policy",
+            "enrichment",
+            "--tools",
+            "git",
+        ])
+        .current_dir(scene.workspace())
+        .output()
+        .expect("box runs");
+    succeeded(&created);
+    let classification = scene.root.join("classification.json");
+    std::fs::write(
+        &classification,
+        include_str!("../../../../test-corpus/enrichment/classification.json"),
+    )
+    .expect("a classification fixture");
+    let file = scene
+        .home()
+        .join(".strands/box/profiles/threat/profile.toml");
+    let mut profile = std::fs::read_to_string(&file).expect("the profile");
+    profile.push_str(&format!(
+        "\n[enrichment.threat]\nendpoint = \"file://{}\"\n",
+        classification.display()
+    ));
+    std::fs::write(&file, profile).expect("the profile");
+
+    scene
+}
+
+/// **`box profile show` lines the `enrichment` line up with the others**, though its label is
+/// longer than the rest.
+#[test]
+fn profile_show_lines_up_the_enrichment_line_with_the_others() {
+    let scene = enrichment_scene();
+    let output = scene
+        .process(Path::new(env!("CARGO_BIN_EXE_box")))
+        .args(["profile", "show", "threat"])
+        .current_dir(scene.workspace())
+        .output()
+        .expect("box runs");
+    succeeded(&output);
+    let show = stdout(&output);
+    let value_column = |label: &str| {
+        let line = show
+            .lines()
+            .find(|line| line.starts_with(&format!("  {label} ")))
+            .unwrap_or_else(|| panic!("no {label} line\n{show}"));
+        let rest = &line[2 + label.len()..];
+        2 + label.len() + rest.len() - rest.trim_start().len()
+    };
+    assert!(
+        show.contains("enrichment  threat (kind \"in-memory\")"),
+        "{show}"
+    );
+    for label in ["packs", "policies", "storage", "project"] {
+        assert_eq!(
+            value_column(label),
+            value_column("enrichment"),
+            "{label}\n{show}"
+        );
+    }
+}
+
+/// **A profile made with the enrichment test pack and policy refuses a host its classification
+/// source labels**: the run prints Box Core's `B0215` line, and `block_malware` alone refuses the
+/// workload's `curl` of the host. A `.invalid` name never resolves, so a policy refusal of it was
+/// decided before any DNS query.
+#[test]
+fn a_profile_from_the_enrichment_pack_refuses_a_labelled_host() {
+    let scene = enrichment_scene();
+    let output = scene
+        .command(
+            &scene.workspace(),
+            "threat",
+            &["-c", "bash -c 'curl -sS https://evil.invalid/'"],
+        )
+        .output()
+        .expect("box runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(
+            "curl: policy denied this operation on 'evil.invalid:443' [policy: block_malware]"
+        ),
+        "the policy refuses the host: {stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "strands-box: note[B0215]: [enrichment.threat] sends its classification source (kind \
+             \"in-memory\") the DNS name of each host the workload connects to"
+        ),
+        "{stderr}"
+    );
+    let refusals: Vec<String> = decisions(&new_run(&[], &scene.runs()))
+        .into_iter()
+        .filter(|(action, _, _)| action.contains("net:connect"))
+        .map(|(_, _, rule)| rule)
+        .collect();
+    assert!(
+        !refusals.is_empty() && refusals.iter().all(|rule| rule == "block_malware"),
+        "{refusals:?}\n{stderr}"
+    );
+}
+
 #[test]
 fn a_placeholder_resolves_when_the_run_starts() {
     let scene = Scene::new();
@@ -1755,6 +1896,7 @@ fn show_format_json_prints_one_document_with_what_the_text_and_full_print() {
         "packs",
         "plugins",
         "sources",
+        "enrichment",
         "policies",
         "storage",
         "project",

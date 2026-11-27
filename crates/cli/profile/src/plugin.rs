@@ -1118,11 +1118,11 @@ pub(crate) fn refuse_pack_references(
 }
 
 /// Each credential reference in `table`, as `(its key path, its key as written, the reference)`:
-/// the `secret` of each egress route, MCP server, and telemetry target, and the `auth` of each
-/// backend of a route.
+/// the `secret` of each egress route, MCP server, telemetry target, and classification source,
+/// and the `auth` of each backend of a route.
 fn references(table: &toml::Table) -> Vec<(Vec<String>, String, String)> {
     let mut found = Vec::new();
-    for section in ["egress", "mcp", "telemetry"] {
+    for section in ["egress", "mcp", "telemetry", "enrichment"] {
         let entries = table
             .get(section)
             .map(lang::unwrapped)
@@ -2497,6 +2497,12 @@ mod tests {
                 "[telemetry.otlp]\nkind = \"otlp\"\ndestination = \"https://otel.example.com\"\n\
                  secret.ref = \"op://Private/GitHub/token\"\nsecret.header = \"x-api-key\"",
                 "[telemetry.otlp] secret.ref",
+            ),
+            (
+                "[enrichment.threat]\nkind = \"in-memory\"\nendpoint = \"file:///srv/a.json\"\n\
+                 outputs = [\"malware\"]\nmin_confidence = \"HIGH\"\n\
+                 secret.ref = \"op://Private/GitHub/token\"",
+                "[enrichment.threat] secret.ref",
             ),
         ] {
             shelf.pack("p", body);

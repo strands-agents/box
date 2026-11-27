@@ -336,6 +336,17 @@ pull request. `--no-skip` fails a run that cannot start, which the job uses when
 vary between runs, so run a guide change three times before you trust a PASS.
 `test_run_guide.py` tests the runner with a stub `box` and a stub agent.
 
+## The enrichment test pack
+
+`enrichment/` is not part of the grid. It holds what `crates/cli/app/tests/engine.rs` needs to run
+Box Core's DNS-name enrichment through `box`: `pack.toml`, an agent pack that runs bash and declares
+`[enrichment.threat]`, the test policy starter in `policy/`, whose `block_malware` and
+`require_answer` rules read that table, and `classification.json`, which labels `evil.invalid`.
+They stay out of `packs/`, which holds only toolchain packs. Only a `box` built with
+`--features strands-box-cli/test-support` implements the table's `in-memory` kind, and the pack's
+own `endpoint` names a folder that doesn't exist, so a profile made from it sets `endpoint` to its
+own copy of `classification.json`.
+
 ## The feature checks
 
 `features.toml` holds one `[[feature]]` for each row of the per-agent feature checklist (`CHECKLIST`

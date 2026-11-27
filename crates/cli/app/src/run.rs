@@ -1650,6 +1650,8 @@ pub struct Preview {
     pub warnings: Vec<String>,
     /// Each route with no secret, which only opens its hosts, as `(route, destinations)`.
     pub open_routes: Vec<(String, Vec<String>)>,
+    /// Each `[enrichment.<name>]` classification source, as `(name, kind)`.
+    pub enrichment: Vec<(String, String)>,
 }
 
 impl Preview {
@@ -1705,6 +1707,9 @@ impl Preview {
             "sources": rows(&self.sources, |(scheme, program, plugin)| {
                 json!({"scheme": scheme, "program": program, "plugin": plugin})
             }),
+            "enrichment": rows(&self.enrichment, |(name, kind)| {
+                json!({"name": name, "kind": kind})
+            }),
             "policies": self.policies,
             "storage": self.storage.display().to_string(),
             "project": self.project,
@@ -1758,8 +1763,8 @@ impl Preview {
     }
 
     /// The lines that `box profile show` prints first, as `(label, text)`: the packs, the
-    /// plugins, each declared secret source and the program it runs, the policies, storage, and
-    /// project access.
+    /// plugins, each declared secret source and the program it runs, each classification source
+    /// and its kind, the policies, storage, and project access.
     pub fn overview(&self) -> Vec<(&'static str, String)> {
         let mut lines = vec![("packs", self.pack_list())];
         if !self.plugins.is_empty() {
@@ -1768,6 +1773,9 @@ impl Preview {
         for (scheme, program, plugin) in &self.sources {
             let owner = plugin.as_deref().unwrap_or("your profile");
             lines.push(("source", format!("{scheme}:// runs {program} ({owner})")));
+        }
+        for (name, kind) in &self.enrichment {
+            lines.push(("enrichment", format!("{name} (kind {kind:?})")));
         }
         if !self.policies.is_empty() {
             lines.push(("policies", self.policies.join(", ")));
@@ -1884,6 +1892,14 @@ impl Launcher {
         Ok(Preview {
             warnings,
             open_routes: crate::compile::open_routes(&resolved.egress),
+            enrichment: resolved
+                .enrichment
+                .iter()
+                .map(|(name, table)| {
+                    let kind = table.get("kind").and_then(toml::Value::as_str);
+                    (name.clone(), kind.unwrap_or_default().to_string())
+                })
+                .collect(),
             mcp_unstarted: compiled.unstarted.clone(),
             packs,
             plugins,
@@ -2960,6 +2976,7 @@ mod tests {
                 text("login"),
                 vec![text("login.example.com"), text("auth.example.com:8443")],
             )],
+            enrichment: vec![(text("threat"), text("in-memory"))],
         }
     }
 
@@ -2989,6 +3006,7 @@ mod tests {
                 {"scheme": "op", "program": "/usr/local/bin/op", "plugin": "@box/1password"},
                 {"scheme": "vault", "program": "/opt/vault/bin/read", "plugin": null},
             ],
+            "enrichment": [{"name": "threat", "kind": "in-memory"}],
             "policies": ["policy.dw"],
             "storage": "/home/.strands/box/storage/probe/default",
             "project": {"access": "read"},

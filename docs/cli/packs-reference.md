@@ -26,6 +26,7 @@ of a pack is in a table, and the file starts with `[pack]`.
 | `[agent]` | Support packs. | Agent settings, as in [The `[agent]` table](profiles-reference.md#the-agent-table). |
 | `[tool.<name>]` | Agent and support packs. | A [tool table](profiles-reference.md#a-tool-table-in-the-full-form), or additions to a tool. |
 | `[egress.<name>]`, `[telemetry]` | Agent and support packs. | [Routes](profiles-reference.md#routes-and-other-hosts) and telemetry, with [placeholders](profiles-reference.md#placeholders) where a value depends on your machine. |
+| `[enrichment.<name>]` | Agent and support packs. | A [classification source](profiles-reference.md#what-a-profile-holds). A pack holds no `policies`, so the rules that read its answer go in the profile's `policy.dw`. |
 
 `[pack] kind` decides the rest:
 
@@ -506,7 +507,7 @@ name and the box finds it on the agent's `PATH`. Leave out `search`, or write ex
 `[options]`. Another pack that needs the program's folder uses `${{ tool.git.root }}`.
 
 A tool pack writes one tool, so `box` refuses `program` in `[run]`, `workspace`, and the
-`[agent]`, `[tool]`, `[egress]`, `[mcp]`, `[telemetry]`, and `[experimental-features]` tables. Put
+`[agent]`, `[tool]`, `[egress]`, `[mcp]`, `[telemetry]`, `[enrichment]`, and `[experimental-features]` tables. Put
 those in another pack. No pack can change how a tool connects: only a profile holds
 `[tool.<name>.network]`.
 

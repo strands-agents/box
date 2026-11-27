@@ -52,6 +52,9 @@ pub struct Resolved {
     pub mcp: toml::Table,
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
     pub(crate) telemetry: toml::Table,
+    /// Each `[enrichment.<name>]` classification source, as Box Core reads it.
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    pub enrichment: toml::Table,
     #[serde(
         default,
         rename = "experimental-features",
