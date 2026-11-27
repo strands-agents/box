@@ -1627,8 +1627,8 @@ mod tests {
         let _ = std::fs::remove_file(&socket);
     }
 
-    /// A request with no valid token waits for a running read only up to its limit, then is refused,
-    /// so a daemon that never answers cannot hang every request for the token.
+    /// Every request with no valid token, including the one that starts the read, waits for it only
+    /// up to its limit, so a daemon that never answers hangs no request.
     #[test]
     fn a_request_waiting_on_a_stuck_read_is_refused_at_its_limit() {
         use std::sync::mpsc::channel;
@@ -1666,24 +1666,31 @@ mod tests {
         let request = token_request(&headers);
         clock.set(100);
         let shared = &vault;
+        let rotating = rotating_token(&vault, "first.example.com");
         std::thread::scope(|scope| {
-            let reader = scope.spawn(move || attached(shared, request));
+            let (answered, answer) = channel();
+            // The first request after expiry starts the read; it and a second request that joins it
+            // are both refused at the limit while credsd holds the read.
+            for _ in 0..2 {
+                let answered = answered.clone();
+                scope.spawn(move || {
+                    let _ = answered.send(shared.attach_with_redactor(request).map(|_| ()));
+                });
+            }
             read_seen
                 .recv_timeout(timeout)
                 .expect("the read reaches credsd");
-            let (answered, answer) = channel();
-            scope.spawn(move || {
-                let _ = answered.send(shared.attach_with_redactor(request).map(|_| ()));
-            });
-            let refusal = answer
-                .recv_timeout(timeout)
-                .expect("a waiting request is answered at its limit")
-                .unwrap_err()
-                .to_string();
-            assert!(refusal.contains("did not answer"), "{refusal}");
+            for _ in 0..2 {
+                let refusal = answer
+                    .recv_timeout(timeout)
+                    .expect("each request is answered at its limit")
+                    .unwrap_err()
+                    .to_string();
+                assert!(refusal.contains("did not answer"), "{refusal}");
+            }
             release_read.send(()).unwrap();
-            assert_eq!(reader.join().unwrap(), "Bearer late-token");
         });
+        rotating.wait_settled();
         assert_eq!(attached(&vault, request), "Bearer late-token");
         drop(clock);
         let _ = std::fs::remove_file(&socket);
@@ -1773,6 +1780,7 @@ mod tests {
             format!("Bearer {}", opened.phantoms()[0].token()),
         )];
         let vault = opened.into_vault();
+        let rotating = rotating_token(&vault, "first.example.com");
         let request = token_request(&headers);
         let reports = || {
             CAPTURED_OPERATOR_WARNINGS
@@ -1788,14 +1796,15 @@ mod tests {
         let (report_started, report_seen) = std::sync::mpsc::channel();
         let (release_report, await_release) = std::sync::mpsc::channel::<()>();
         let shared = &vault;
+        *crate::rotating::tests::BEFORE_REPORT.lock().unwrap() = Some((
+            tenant.to_string(),
+            Box::new(move || {
+                report_started.send(()).unwrap();
+                let _ = await_release.recv_timeout(Duration::from_secs(5));
+            }),
+        ));
         std::thread::scope(|scope| {
-            let reporting = scope.spawn(move || {
-                crate::rotating::tests::BEFORE_REPORT.set(Some(Box::new(move || {
-                    report_started.send(()).unwrap();
-                    let _ = await_release.recv_timeout(Duration::from_secs(5));
-                })));
-                shared.attach_with_redactor(request).map(|_| ())
-            });
+            let reporting = scope.spawn(move || shared.attach_with_redactor(request).map(|_| ()));
             report_seen
                 .recv_timeout(Duration::from_secs(5))
                 .expect("the re-authentication report starts");
@@ -1816,6 +1825,7 @@ mod tests {
                 refusal.contains("`creds login --credential github`"),
                 "{refusal}"
             );
+            rotating.wait_settled();
             assert_eq!(reports(), reported, "at {at}");
         }
         clock.set(115);
@@ -1823,6 +1833,7 @@ mod tests {
         // A success ends the run, so the next failure is reported again.
         clock.set(1000);
         assert!(vault.attach_with_redactor(request).is_err());
+        rotating.wait_settled();
         assert_eq!(reports(), 2);
         drop(clock);
         let _ = std::fs::remove_file(&socket);

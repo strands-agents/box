@@ -225,8 +225,14 @@ impl TokenSource {
 
     fn report(&self, message: &str) {
         #[cfg(test)]
-        if let Some(before) = tests::BEFORE_REPORT.take() {
-            before();
+        {
+            let hook = tests::BEFORE_REPORT
+                .lock()
+                .unwrap()
+                .take_if(|(tenant, _)| *tenant == self.tenant);
+            if let Some((_, before)) = hook {
+                before();
+            }
         }
         crate::vault::warn_operator(&self.tenant, message);
     }
@@ -248,6 +254,8 @@ struct TokenState {
     retry: Option<Deadline>,
     backoff: Duration,
     reauth_reported: bool,
+    /// Whether a settled read is still writing its operator report, outside the lock.
+    reporting: bool,
 }
 
 impl TokenState {
@@ -274,6 +282,7 @@ impl RotatingToken {
                 retry: None,
                 backoff: REFRESH_RETRY,
                 reauth_reported: false,
+                reporting: false,
             }),
             settled: Condvar::new(),
         })
@@ -292,9 +301,16 @@ impl RotatingToken {
             }
             return Ok(secret);
         }
-        if state.refreshing {
-            // Share the running read's outcome, whichever request started it.
-            let attempt = state.attempts;
+        // With no valid token, every request waits for one background read, up to the same limit,
+        // so a read stuck connecting holds no request past it.
+        let attempt = state.attempts;
+        if !state.refreshing && state.may_read(now) {
+            state.refreshing = true;
+            drop(state);
+            self.refresh_in_background();
+            state = self.lock();
+        }
+        if state.refreshing || state.attempts != attempt {
             let (waited, timeout) = self
                 .settled
                 .wait_timeout_while(state, self.source.read_wait, |state| {
@@ -309,11 +325,6 @@ impl RotatingToken {
                     credential = self.source.credential
                 )));
             }
-        } else if state.may_read(now) {
-            state.refreshing = true;
-            drop(state);
-            let read = self.source.read_guarded();
-            state = self.settle(read);
         }
         match state.valid(self.source.clock.now()) {
             Some(token) => Ok(Arc::clone(&token.secret)),
@@ -372,15 +383,18 @@ impl RotatingToken {
                 state.failure = Some(failure);
             }
         }
+        let Some(message) = report else {
+            self.settled.notify_all();
+            return state;
+        };
+        state.reporting = true;
         self.settled.notify_all();
-        match report {
-            Some(message) => {
-                drop(state);
-                self.source.report(&message);
-                self.lock()
-            }
-            None => state,
-        }
+        drop(state);
+        self.source.report(&message);
+        let mut state = self.lock();
+        state.reporting = false;
+        self.settled.notify_all();
+        state
     }
 
     fn refusal(&self, state: &TokenState) -> CredentialError {
@@ -395,12 +409,12 @@ impl RotatingToken {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Wait until no read is running.
+    /// Wait until no read is running and no settled read is still reporting.
     #[cfg(test)]
     pub(crate) fn wait_settled(&self) {
         drop(
             self.settled
-                .wait_while(self.lock(), |state| state.refreshing)
+                .wait_while(self.lock(), |state| state.refreshing || state.reporting)
                 .unwrap_or_else(PoisonError::into_inner),
         );
     }
@@ -418,10 +432,13 @@ pub(crate) mod tests {
         /// The read wait for every token opened on this thread.
         pub(crate) static TEST_READ_WAIT: std::cell::Cell<Option<Duration>> =
             const { std::cell::Cell::new(None) };
-        /// Run on this thread before a token reports to the operator.
-        pub(crate) static BEFORE_REPORT: RefCell<Option<Box<dyn FnOnce()>>> =
-            const { RefCell::new(None) };
     }
+
+    /// A hook that runs before a token of the named tenant reports to the operator.
+    type ReportHook = (String, Box<dyn FnOnce() + Send>);
+
+    /// The hook for the next report, run on whichever thread reports.
+    pub(crate) static BEFORE_REPORT: Mutex<Option<ReportHook>> = Mutex::new(None);
 
     /// A clock a test moves by hand, installed for every token opened on this thread.
     pub(crate) struct ManualClock {

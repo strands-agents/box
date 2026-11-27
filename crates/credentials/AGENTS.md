@@ -48,9 +48,9 @@ request edits, never a credential accessor or an authorization. Keep backend pro
 
 - The route kind is the credsd type: `RouteSpec::signed_aws` over `credsd://` resolves session
   credentials per request; `RouteSpec::opaque` reads one `access_token` at open and reads it
-  again on the first request near or past the daemon's `expires_at`. Before expiry that read runs
-  on its own thread so no request waits on the daemon; never hold the token lock across a read.
-  A request that waits for a read is refused after `LONGEST_READ`. The connect to the socket has
+  again on the first request near or past the daemon's `expires_at`. That read always runs on its
+  own thread; never hold the token lock across a read, and never read on a request's thread.
+  Before expiry no request waits for it; after expiry each waits at most `LONGEST_READ`. The connect to the socket has
   no timeout: on Linux it blocks while credsd's accept queue is full, so only that wait bounds it.
   Every read refuses any other material type and any `token_type` but `Bearer`, compared without
   case. Routes of one vault that
