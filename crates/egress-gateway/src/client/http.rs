@@ -228,12 +228,14 @@ where
     status.set(Some(response.status().as_u16()));
     let upgrade = (response.status() == hyper::StatusCode::SWITCHING_PROTOCOLS)
         .then(|| hyper::upgrade::on(&mut response));
-    let (head, body) = http1::read_response_head(response, handshake.as_ref().map(Upgrade::key))
-        .map_err(|error| (io::ErrorKind::InvalidData, error))?;
-    // `read_response_head` refuses a `101` to a request without a handshake.
-    let relay = match upgrade.zip(handshake) {
-        Some((mut upgrade, handshake)) => Some(
+    let (head, body, switched) =
+        http1::read_response_head(response, handshake.as_ref().map(Upgrade::key))
+            .map_err(|error| (io::ErrorKind::InvalidData, error))?;
+    // Only a checked `101` gives `switched`, and only a request with a handshake can pass the check.
+    let relay = match switched.zip(handshake).zip(upgrade) {
+        Some(((switched, handshake), mut upgrade)) => Some(
             handshake.relay(
+                switched,
                 std::future::poll_fn(|cx| {
                     driver.poll(cx);
                     Pin::new(&mut upgrade).poll(cx)

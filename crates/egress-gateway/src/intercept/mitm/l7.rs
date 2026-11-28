@@ -30,7 +30,7 @@ use crate::proxy::websocket::{self, Handshake};
 /// client leg's binding is still checked against the original CONNECT authority, so a workload
 /// cannot pivot.
 pub(crate) async fn forward_tls(
-    (mut parsed, handshake): (http1::ParsedRequest, Handshake),
+    (mut parsed, handshake): (http1::ParsedRequest, Handshake<websocket::Upgrade>),
     upstream: TcpStream,
     backend: Option<&BackendDial>,
     connect: &ConnectRequest,
@@ -126,7 +126,7 @@ async fn run_l7_legs(
     intercepted: bool,
     state: &SharedState,
     correlation: RequestId,
-    handshake: Handshake,
+    handshake: Handshake<websocket::Upgrade>,
     revalidate: impl FnOnce(&str, &str, &HeaderMap) -> Result<()>,
 ) -> Result<WorkloadResponse> {
     let correlation = correlation.with_headers(&req.headers);
@@ -189,7 +189,7 @@ async fn run_l7_legs(
         }
         Handshake::WebSocket(upgrade) => Some(upgrade),
     };
-    let key = handshake.as_ref().map(websocket::Upgrade::key);
+    let websocket = handshake.is_some();
 
     // A secret rides only TLS: refuse on the same canonical target the credential match below sees.
     // The one exception is the reserved loopback name, when it is mapped to loopback, not
@@ -337,7 +337,7 @@ async fn run_l7_legs(
         &fwd_target,
         &req.headers,
         forwarded_body.len(),
-        key,
+        websocket,
     )?;
     let request_attempt = EffectAttempt::HttpRequest {
         host: &connect.host,
@@ -346,7 +346,7 @@ async fn run_l7_legs(
         path: &workload_path,
         body_bytes: forwarded_body.len(),
         intercepted,
-        websocket: key.is_some(),
+        websocket,
         mcp: mcp_target.as_ref().map(|(server, target)| {
             let server = *server;
             match &target.identity {

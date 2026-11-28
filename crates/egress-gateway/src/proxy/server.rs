@@ -110,8 +110,8 @@ async fn first_request(
     }
 
     // A plain `http://` request: the same decisions, with no TLS and no CONNECT ack.
-    let handshake = (!matches!(websocket::classify(&mut request), Handshake::None))
-        .then(|| request.method().clone());
+    let handshake =
+        (websocket::classify(&request) != Handshake::None).then(|| request.method().clone());
     let max_body = state.config.response_limits.max_body_bytes;
     let Ok(parsed) = http1::read_request(&head, request.into_body(), max_body).await else {
         return Ok(WorkloadResponse::bare(400));
@@ -213,7 +213,8 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
     let completion = ResponseCompletion::default();
     let (completion, pending) = (&completion, &Cell::new(None));
     serve(client, completion, |mut request, head| async move {
-        let handshake = websocket::classify(&mut request);
+        let handshake = websocket::classify(&request)
+            .map(|key| websocket::Upgrade::new(key, hyper::upgrade::on(&mut request)));
         let max_body = state.config.response_limits.max_body_bytes;
         let parsed = match http1::read_request(&head, request.into_body(), max_body).await {
             Ok(parsed) => parsed,
