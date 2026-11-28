@@ -58,6 +58,10 @@ pub(crate) struct OptionSpec {
     pub(crate) repeated: bool,
     #[serde(default, deserialize_with = "one_or_many")]
     pub(crate) like: Vec<String>,
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub(crate) not_like: Vec<String>,
+    #[serde(default)]
+    pub(crate) case: Option<CaseSpec>,
     #[serde(default)]
     pub(crate) adds: Vec<String>,
     #[serde(default)]
@@ -76,6 +80,10 @@ pub(crate) struct OptionSpec {
 pub(crate) struct OperandSpec {
     #[serde(default, deserialize_with = "one_or_many")]
     pub(crate) like: Vec<String>,
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub(crate) not_like: Vec<String>,
+    #[serde(default)]
+    pub(crate) case: Option<CaseSpec>,
     #[serde(default)]
     pub(crate) adds: Vec<String>,
     #[serde(default)]
@@ -90,8 +98,10 @@ pub(crate) struct OperandSpec {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WhenSpec {
-    #[serde(deserialize_with = "one_or_many")]
+    #[serde(default, deserialize_with = "one_or_many")]
     pub(crate) like: Vec<String>,
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub(crate) not_like: Vec<String>,
     #[serde(default)]
     pub(crate) adds: Vec<String>,
     #[serde(default)]
@@ -121,4 +131,12 @@ pub(crate) enum ValueSpec {
     Required,
     Optional,
     Many,
+}
+
+/// Whether the patterns of an option or an operand match a value in any letter case.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum CaseSpec {
+    Sensitive,
+    Insensitive,
 }
