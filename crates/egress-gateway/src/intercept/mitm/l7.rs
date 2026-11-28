@@ -21,23 +21,22 @@ use crate::error::{ProxyError, Result};
 use crate::mcp::{
     McpTarget, McpTargetIdentity, canonicalize_mcp_frame, mcp_denial_response, normalize_path,
 };
-use crate::proxy::websocket::{Handshake, accepts};
+use crate::proxy::websocket::{self, Handshake};
 
 /// Check the CONNECT binding of a request read in a TLS tunnel, then run [`run_l7_legs`].
 ///
-/// When `backend` re-routes the destination, the upstream leg presents the backend host (SNI,
-/// certificate, and `Host`); the client leg's binding is still checked against the original CONNECT
-/// authority, so a workload cannot pivot.
-#[allow(clippy::too_many_arguments)]
+/// `request` is the parsed request and its WebSocket handshake. When `backend` re-routes the
+/// destination, the upstream leg presents the backend host (SNI, certificate, and `Host`); the
+/// client leg's binding is still checked against the original CONNECT authority, so a workload
+/// cannot pivot.
 pub(crate) async fn forward_tls(
-    mut parsed: http1::ParsedRequest,
+    (mut parsed, handshake): (http1::ParsedRequest, Handshake<websocket::Upgrade>),
     upstream: TcpStream,
     backend: Option<&BackendDial>,
     connect: &ConnectRequest,
     state: &SharedState,
     correlation: RequestId,
     completion: &ResponseCompletion,
-    handshake: Handshake,
 ) -> Result<WorkloadResponse> {
     // The upstream leg presents the backend host when a backend re-routes, else the original
     // destination. A TLS backend terminates a fresh handshake to the backend's own certificate; a
@@ -127,7 +126,7 @@ async fn run_l7_legs(
     intercepted: bool,
     state: &SharedState,
     correlation: RequestId,
-    handshake: Handshake,
+    handshake: Handshake<websocket::Upgrade>,
     revalidate: impl FnOnce(&str, &str, &HeaderMap) -> Result<()>,
 ) -> Result<WorkloadResponse> {
     let correlation = correlation.with_headers(&req.headers);
@@ -173,21 +172,22 @@ async fn run_l7_legs(
         )
     };
 
-    let websocket = match handshake {
-        Handshake::None => false,
+    let handshake = match handshake {
+        Handshake::None => None,
         Handshake::Malformed(why) => {
             let refusal = WorkloadResponse::refusal(400, b"malformed WebSocket handshake");
             return Ok(refuse(why, refusal));
         }
-        Handshake::WebSocket if mcp => {
+        Handshake::WebSocket(_) if mcp => {
             let refusal = WorkloadResponse::refusal(403, b"WebSocket refused for an MCP server");
             return Ok(refuse(
                 "websocket: handshake to a remote MCP server",
                 refusal,
             ));
         }
-        Handshake::WebSocket => true,
+        Handshake::WebSocket(upgrade) => Some(upgrade),
     };
+    let websocket = handshake.is_some();
 
     // A secret rides only TLS: refuse on the same canonical target the credential match below sees.
     // The one exception is the reserved loopback name, when it is mapped to loopback, not
@@ -407,16 +407,9 @@ async fn run_l7_legs(
             &method,
             prepared_request,
             Zeroizing::new(forwarded_body),
-            websocket,
+            handshake,
         )
         .await;
-    let key = req.headers.get("sec-websocket-key").unwrap_or_default();
-    let response = response.and_then(|response| match response.upgraded {
-        Some(_) if !accepts(key, &response.head.headers) => Err(ProxyError::Intercept(
-            "a 101 reply to a WebSocket handshake has the wrong Sec-WebSocket-Accept".to_string(),
-        )),
-        _ => Ok(response),
-    });
     let response = match response {
         Ok(response) => response,
         Err(error) => {
@@ -426,7 +419,7 @@ async fn run_l7_legs(
             return Err(error);
         }
     };
-    let upgraded = response.upgraded;
+    let relay = response.relay;
     let mut head = response.head;
     let mut body = response.body;
     body.track_request(request_permit, outcome)
@@ -503,7 +496,7 @@ async fn run_l7_legs(
         Ok(permit) => permit,
         Err(error) => return Ok(interceptor_error(&error, None)),
     };
-    if upgraded.is_some() {
+    if relay.is_some() {
         head.headers.set("Upgrade", "websocket");
         head.headers.set("Connection", "Upgrade");
     }
@@ -516,7 +509,7 @@ async fn run_l7_legs(
         release: Some(response_permit),
         header_case: head.header_case,
         progress,
-        relay: upgraded,
+        relay,
     })
 }
 
@@ -632,7 +625,7 @@ pub(crate) struct WorkloadResponse {
     /// The upstream's header case. Without it, hyper writes header names in lowercase.
     pub(crate) header_case: hyper::http::Extensions,
     pub(crate) progress: Option<ResponseProgress>,
-    pub(crate) relay: Option<hyper::upgrade::Upgraded>,
+    pub(crate) relay: Option<websocket::Relay>,
 }
 
 impl WorkloadResponse {

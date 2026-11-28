@@ -22,6 +22,7 @@ use crate::effect::{ClaimedEffectPermit, EffectOutcome};
 use crate::error::{ProxyError, Result};
 use crate::intercept::mitm::SharedState;
 use crate::intercept::mitm::http1::{self, ResponseHead};
+use crate::proxy::websocket::{Relay, Upgrade};
 use crate::transport::socket::{self, Counted, MAX_HEAD_BYTES, Socket, WriteCount};
 
 /// The pinned upstream socket, and the deadline of the one exchange on it.
@@ -59,7 +60,7 @@ impl<'a> Upstream<'a> {
         method: &str,
         head: Zeroizing<String>,
         body: Zeroizing<Vec<u8>>,
-        websocket: bool,
+        handshake: Option<Upgrade>,
     ) -> (EffectOutcome, Result<UpstreamResponse>) {
         let Self {
             socket,
@@ -76,7 +77,7 @@ impl<'a> Upstream<'a> {
             let tcp = socket
                 .into_async()
                 .map_err(|e| lost("upstream socket", e))?;
-            let request = (method, head, body, websocket);
+            let request = (method, head, body, handshake);
             match tls {
                 None => round_trip(tcp, &writes, request, &status, deadline).await,
                 Some(name) => {
@@ -114,7 +115,7 @@ impl<'a> Upstream<'a> {
 pub(crate) struct UpstreamResponse {
     pub(crate) head: ResponseHead,
     pub(crate) body: UpstreamBody,
-    pub(crate) upgraded: Option<hyper::upgrade::Upgraded>,
+    pub(crate) relay: Option<Relay>,
 }
 
 /// The connection's upstream response, retained until receipt ends even if delivery stops.
@@ -185,7 +186,7 @@ impl ResponseProgress {
 async fn round_trip<S>(
     upstream: S,
     writes: &WriteCount,
-    (method, head, body, websocket): (&str, Zeroizing<String>, Zeroizing<Vec<u8>>, bool),
+    (method, head, body, handshake): (&str, Zeroizing<String>, Zeroizing<Vec<u8>>, Option<Upgrade>),
     status: &Cell<Option<u16>>,
     deadline: Instant,
 ) -> std::result::Result<UpstreamResponse, NoResponse>
@@ -227,16 +228,21 @@ where
     status.set(Some(response.status().as_u16()));
     let upgrade = (response.status() == hyper::StatusCode::SWITCHING_PROTOCOLS)
         .then(|| hyper::upgrade::on(&mut response));
-    let (head, body) = http1::read_response_head(response, websocket)
-        .map_err(|error| (io::ErrorKind::InvalidData, error))?;
-    let upgraded = match upgrade {
-        Some(mut upgrade) => Some(
-            std::future::poll_fn(|cx| {
-                driver.poll(cx);
-                Pin::new(&mut upgrade).poll(cx)
-            })
-            .await
-            .map_err(lost)?,
+    let (head, body, switched) =
+        http1::read_response_head(response, handshake.as_ref().map(Upgrade::key))
+            .map_err(|error| (io::ErrorKind::InvalidData, error))?;
+    // Only a checked `101` gives `switched`, and only a request with a handshake can pass the check.
+    let relay = match switched.zip(handshake).zip(upgrade) {
+        Some(((switched, handshake), mut upgrade)) => Some(
+            handshake.relay(
+                switched,
+                std::future::poll_fn(|cx| {
+                    driver.poll(cx);
+                    Pin::new(&mut upgrade).poll(cx)
+                })
+                .await
+                .map_err(lost)?,
+            ),
         ),
         None => None,
     };
@@ -251,7 +257,7 @@ where
             deadline: Box::pin(tokio::time::sleep_until(deadline)),
             request: None,
         }))),
-        upgraded,
+        relay,
     })
 }
 
@@ -539,7 +545,7 @@ mod tests {
                         "POST",
                         Zeroizing::new(std::str::from_utf8(HEAD).unwrap().to_string()),
                         Zeroizing::new(b"ok".to_vec()),
-                        false,
+                        None,
                     ),
                     &status,
                     Instant::now() + std::time::Duration::from_secs(5),

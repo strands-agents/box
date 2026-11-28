@@ -5,6 +5,7 @@ use zeroize::Zeroizing;
 
 use crate::boundary::HeaderMap;
 use crate::error::{ProxyError, Result};
+use crate::proxy::websocket::{self, Key, Switched};
 
 /// A parsed HTTP/1.1 request read off the wire.
 #[derive(Debug)]
@@ -274,23 +275,15 @@ where
     })
 }
 
-/// Check the upstream's final response head and return its body without collecting it.
+/// Check the upstream's final response head and return its body without collecting it, and the
+/// proof of a checked `101`. `handshake` is the key of the request's WebSocket handshake.
 pub(crate) fn read_response_head<B>(
     response: hyper::Response<B>,
-    websocket: bool,
-) -> Result<(ResponseHead, B)> {
+    handshake: Option<&Key>,
+) -> Result<(ResponseHead, B, Option<Switched>)> {
     let (mut head, body) = response.into_parts();
     let status = head.status.as_u16();
-    if status == 101 && !websocket {
-        return Err(ProxyError::Intercept(
-            "HTTP protocol upgrades are not supported".to_string(),
-        ));
-    }
-    if status == 101 && !switches_to_websocket(&head.headers) {
-        return Err(ProxyError::Intercept(
-            "a 101 reply to a WebSocket handshake did not switch to WebSocket".to_string(),
-        ));
-    }
+    let accepting = websocket::check_reply(handshake, status, &head.headers)?;
     let mut headers = HeaderMap::from_pairs(head.headers.iter().map(|(name, value)| {
         (
             name.as_str().to_string(),
@@ -298,7 +291,7 @@ pub(crate) fn read_response_head<B>(
         )
     }));
     let framing = explicit_body_framing(&headers)?;
-    if websocket && framing.is_none() && !matches!(status, 101 | 204 | 304) {
+    if handshake.is_some() && framing.is_none() && !matches!(status, 101 | 204 | 304) {
         return Err(ProxyError::Intercept(
             "a reply to a WebSocket handshake has no body framing".to_string(),
         ));
@@ -308,6 +301,9 @@ pub(crate) fn read_response_head<B>(
         framing,
     )?;
     strip_hop_by_hop_headers(&mut headers)?;
+    let switched = accepting
+        .map(|accepting| accepting.check(&headers))
+        .transpose()?;
     // Pass on the header case, not the upstream's reason phrase.
     head.extensions.remove::<hyper::ext::ReasonPhrase>();
     Ok((
@@ -317,15 +313,8 @@ pub(crate) fn read_response_head<B>(
             header_case: head.extensions,
         },
         body,
+        switched,
     ))
-}
-
-fn switches_to_websocket(headers: &hyper::HeaderMap) -> bool {
-    let mut upgrades = headers.get_all(hyper::header::UPGRADE).iter();
-    matches!(
-        (upgrades.next().map(|value| value.to_str().map(str::trim)), upgrades.next()),
-        (Some(Ok(protocol)), None) if protocol.eq_ignore_ascii_case("websocket")
-    )
 }
 
 /// Build a [`HeaderMap`] from parsed httparse headers (preserving order + casing).

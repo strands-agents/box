@@ -510,6 +510,20 @@ fn a_101_with_the_wrong_accept_is_refused() {
     }
 }
 
+/// `Connection` can name the accept, and the gateway strips each field that it names.
+#[test]
+fn a_101_whose_connection_names_the_accept_is_refused() {
+    let mut session = Session::start(false, LIMIT, |tls, _| {
+        let head = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade, Sec-WebSocket-Accept\r\nSec-WebSocket-Accept: {ACCEPT}\r\n\r\n"
+        );
+        tls.write_all(head.as_bytes()).unwrap();
+    });
+    let head = session.handshake("");
+    assert!(head.starts_with("HTTP/1.1 502"), "{head}");
+}
+
 #[test]
 fn a_reply_to_a_handshake_with_no_body_framing_is_refused() {
     let mut session = Session::start(false, LIMIT, |tls, _| {
