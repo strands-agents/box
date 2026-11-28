@@ -50,6 +50,7 @@ fn terminal_error(source: io::Error) -> Error {
 
 pub(super) fn run(
     launch: &Launch,
+    events: Option<strands_box::RunEventSender>,
     execute: impl for<'a> FnOnce(strands_box::RunOptions<'a>) -> ExitCode,
 ) -> Result<ExitCode, Error> {
     let mut terminal = Terminal::new().map_err(terminal_error)?;
@@ -168,6 +169,7 @@ pub(super) fn run(
             Ok(())
         })),
         policy_decisions: with_banner.then_some(sender),
+        events,
         ..launch.run_options()
     });
     drop(restore);

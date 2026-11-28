@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-04/schema#",
-  "title": "BoxyTelemetryPing",
-  "description": "One Boxy telemetry event or an array of events. Every event records a persistent installation ID, a generated invocation ID, the invocation's context snapshot (repeated unchanged on every event of the invocation), and event data. Payload strings are fixed enums, a normalized numeric version, generated UUIDs, a profile hash, or built-in pack IDs verified by the client against its bundled catalog.",
+  "title": "BoxTelemetryPing",
+  "description": "One Box telemetry event or an array of events. Every event records a persistent installation ID, a generated invocation ID, the invocation's context snapshot (repeated unchanged on every event of the invocation), and event data. Payload strings are fixed enums, a normalized numeric version, generated UUIDs, a profile hash, or built-in pack IDs verified by the client against its bundled catalog.",
   "oneOf": [
     {
       "$ref": "#/definitions/event"
@@ -75,7 +75,6 @@
       "required": [
         "box_version",
         "os_family",
-        "os_version",
         "build_arch",
         "builtin_packs",
         "mcp_configured",
@@ -96,23 +95,23 @@
           "enum": ["macos", "linux", "windows", "other"]
         },
         "os_version": {
-          "description": "Operating system version reported by the host, such as 14.5. Null means unavailable.",
+          "description": "Operating system version as reported by the OS (e.g. \"14.5\", \"22.04\"), trimmed. Null or omitted means unavailable; the client sends null. Must not include hostnames, usernames or paths.",
           "type": ["string", "null"],
           "minLength": 1,
           "maxLength": 64
         },
         "build_arch": {
-          "description": "Architecture targeted by the running Boxy binary.",
+          "description": "Architecture targeted by the running box binary.",
           "type": "string",
           "enum": ["aarch64", "x86_64", "other"]
         },
         "builtin_packs": {
-          "description": "IDs of all packs that Boxy vends and the resolved dependency graph includes. The client must verify bundled provenance and exclude all custom pack names. The service schema leaves the identifier vocabulary open so the bundled catalog can evolve independently, but bounds its shape (lowercase id, at most 32 characters, at most 64 entries) so the field cannot carry free text. Null means unavailable; an empty array means none. Membership does not identify the executable that runs or establish provider traffic.",
+          "description": "IDs of all packs that the box CLI vends and the resolved dependency graph includes. The client must verify bundled provenance and exclude all custom pack names. The service schema leaves the identifier vocabulary open so the bundled catalog can evolve independently, but bounds its shape (lowercase letters, digits, '-', '/' and '@', not starting with '/', at most 64 characters, at most 64 entries) so the field cannot carry free text or an absolute path. Null means unavailable; an empty array means none. Membership does not identify the executable that runs or establish provider traffic.",
           "type": ["array", "null"],
           "uniqueItems": true,
           "items": {
             "type": "string",
-            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+            "pattern": "^[a-z0-9@][a-z0-9@/-]{0,63}$"
           },
           "maxItems": 64
         },
@@ -242,17 +241,17 @@
       }
     },
     "run": {
-      "description": "Observed launch status and Boxy preparation failures. A confirmed successful launch reports box_launched as true and failure_reason as null.",
+      "description": "Observed launch status and CLI preparation failures. A confirmed successful launch reports box_launched as true and failure_reason as null.",
       "type": "object",
       "additionalProperties": false,
       "required": ["box_launched", "failure_reason", "startup_latency_ms"],
       "properties": {
         "box_launched": {
-          "description": "True when launch is confirmed, false when it is known that no launch occurred, and null only when launch status is unknown.",
+          "description": "True when Core's workload_started record confirms the workload started, false when it is known that no launch occurred, and null when launch status is unknown, including when Core refused the run before its workload started.",
           "type": ["boolean", "null"]
         },
         "failure_reason": {
-          "description": "A Boxy preparation failure mapped from an error variant. Null means no preparation failure is reported. Core startup errors and later workload failures are not classified here.",
+          "description": "A CLI preparation failure mapped from an error variant. Null means no preparation failure is reported. Core startup errors and later workload failures are not classified here.",
           "oneOf": [
             {
               "type": "null"
@@ -264,7 +263,7 @@
           ]
         },
         "startup_latency_ms": {
-          "description": "Milliseconds from this invocation's start to the source timestamp of Core's box_started record, rounded down. Null when Core did not report box_started.",
+          "description": "Milliseconds from this invocation's start to the source timestamp of Core's workload_started record, rounded down. Null when Core did not report workload_started or the record had no usable timestamp.",
           "type": ["integer", "null"],
           "minimum": 0,
           "maximum": 9007199254740991
@@ -311,7 +310,7 @@
       }
     },
     "shutdown": {
-      "description": "A best-effort event on controlled completion. Absence does not establish a crash. Duration covers the Boxy invocation, and exit status does not establish task completion.",
+      "description": "A best-effort event on controlled completion. Absence does not establish a crash. Duration covers the box invocation, and exit status does not establish task completion.",
       "type": "object",
       "additionalProperties": false,
       "required": ["invocation_duration_ms", "exit_outcome", "core_outcome"],
@@ -332,6 +331,18 @@
             {
               "type": "string",
               "enum": ["ok", "refused"]
+            }
+          ]
+        },
+        "core_failure_code": {
+          "description": "The message code of the failure that ended Box Core's run, as its stderr line prints it: a catalogue code such as B0114 (one capital letter, the Core subsystem, and four digits), or uncoded for a Box defect. Never message text. Null means Core reported no failure: the run succeeded, or the failure was the CLI's own. Optional, so shutdown events from CLIs that predate it still validate.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^([A-Z][0-9]{4}|uncoded)$"
             }
           ]
         }

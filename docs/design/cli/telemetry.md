@@ -6,7 +6,10 @@ The snapshot keeps what was collected before success or failure and stays unchan
 `strands-box-cli-telemetry` [owns collection and serialization](decisions.md#telemetry-owns-observation-and-payload-construction). The CLI passes loaded sources
 and resolved targets at the preparation steps. The fields follow the pinned schema, which the repository holds as
 [`crates/cli/telemetry/tests/fixtures/box.schema.json`](../../../crates/cli/telemetry/tests/fixtures/box.schema.json),
-copied from the telemetry service's `schema/box.schema.json` at revision `f8b2541`, and the telemetry
+copied from the telemetry service's `schema/box.schema.json` as of
+[telemetry-service#29](https://github.com/strands-agents/telemetry-service/pull/29) at `c950b808`, which adds the
+optional `shutdown` field `core_failure_code`, with its descriptions reworded to name Box and the CLI.
+The service must accept that field before a release sends it. The telemetry
 tests check each payload against it.
 The schema describes startup latency from invocation start. The CLI uses the narrower
 launch-preparation boundary below; the schema's validation rules are unchanged.
@@ -205,8 +208,17 @@ The event contains no raw refusal reason.
 | `zero` or `nonzero` | `null` | The CLI result is known; Core's stop outcome is unavailable. |
 
 The schema permits `zero` with `refused`, but the current Core error path produces a
-nonzero CLI result. These fields do not expose a workload exit code, signal, or specific Core
-error category.
+nonzero CLI result. These fields do not expose a workload exit code or signal.
+
+`core_failure_code` names the failure that ended Core's run, by its
+[message code](../../user/message-codes.md), such as `B0114`, or `uncoded` for a Box defect.
+`Launch::run_with_telemetry` passes a `strands_box::run_events` sender to Core, reads the one
+`RunEvent::Refused` after Core returns, and hands its code to `Session::core_failure_code` before
+`finish`. The code is the one Core's stderr line prints. It arrives even when Core fails before it
+opens telemetry, where `core_outcome` is `null`. It is `null` when Core reports no failure: the
+run succeeded, the workload exited nonzero, or the CLI failed before Core ran.
+The CLI always sends the field, but the schema does not require it, so shutdown events from
+released CLIs that lack it still validate.
 
 The shutdown event retains the invocation's IDs and context. A crash or force-kill can prevent
 it. Its absence does not establish a crash, and its exit outcome does not establish that the

@@ -24,6 +24,7 @@ pub struct Session {
 
 enum Command {
     Observe(Box<Observation>),
+    CoreFailureCode(&'static str),
     Finish(Instant, ExitOutcome, Option<Instant>),
 }
 
@@ -103,6 +104,12 @@ impl Session {
         }
     }
 
+    /// Report the message code of the failure that ended Core's run, such as `B0114`, or
+    /// `uncoded` for a Box defect. The shutdown event carries it; call it before `finish`.
+    pub fn core_failure_code(&self, code: &'static str) {
+        let _ = self.commands.send(Command::CoreFailureCode(code));
+    }
+
     /// Observe the journal while the caller retains the box's instance lock.
     pub fn observe(&mut self, journal: Journal, catalog: ActionCatalog) {
         self.observe_from(journal, catalog, Instant::now());
@@ -154,10 +161,12 @@ fn capture(
     emit: &dyn Fn(Vec<Event>, Option<Instant>),
 ) {
     let mut run_sent = false;
+    let mut core_failure_code = None;
     let mut observation: Option<Box<Observation>> = None;
     loop {
         match commands.recv_timeout(Duration::from_secs(1)) {
             Ok(Command::Observe(observed)) => observation = Some(observed),
+            Ok(Command::CoreFailureCode(code)) => core_failure_code = Some(code),
             Ok(Command::Finish(completed, exit, deadline)) => {
                 let expired = || deadline.is_some_and(|deadline| Instant::now() >= deadline);
                 if expired() {
@@ -179,7 +188,12 @@ fn capture(
                 if let Some(interval) = final_interval {
                     events.push(invocation.polling_event(interval));
                 }
-                events.push(invocation.shutdown_event(completed, exit, core_outcome));
+                events.push(invocation.shutdown_event(
+                    completed,
+                    exit,
+                    core_outcome,
+                    core_failure_code,
+                ));
                 emit(events, deadline);
                 return;
             }

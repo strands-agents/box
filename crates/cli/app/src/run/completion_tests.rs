@@ -61,7 +61,7 @@ fn launch_observation_preserves_results_and_finishes_under_the_instance_lock() {
             })
         });
         let mut completion_floor_ms = 0_u64;
-        let result = launch.run_observed(session, |launch| {
+        let result = launch.run_observed(session, |launch, _| {
             assert!(events.lock().unwrap().is_empty());
             let mut records = Vec::new();
             if observed {
@@ -221,7 +221,7 @@ fn polling_counts_only_decisions_written_during_the_run() {
         },
     );
     launch
-        .run_observed(Some(session), |launch| {
+        .run_observed(Some(session), |launch, _| {
             let mut journal = std::fs::OpenOptions::new()
                 .append(true)
                 .open(launch.journal())

@@ -61,6 +61,7 @@ struct ShutdownData {
     invocation_duration_ms: u64,
     exit_outcome: ExitOutcome,
     core_outcome: Option<CoreOutcome>,
+    core_failure_code: Option<&'static str>,
 }
 
 /// The process result on controlled completion.
@@ -154,17 +155,20 @@ impl Invocation {
         }))
     }
 
-    /// Construct the completion event at the supplied monotonic instant.
+    /// Construct the completion event at the supplied monotonic instant. `core_failure_code` is the
+    /// message code of the failure that ended Core's run, such as `B0114`, or `uncoded`.
     pub fn shutdown_event(
         &self,
         completed: Instant,
         outcome: ExitOutcome,
         core_outcome: Option<CoreOutcome>,
+        core_failure_code: Option<&'static str>,
     ) -> Event {
         self.event(Message::Shutdown(ShutdownData {
             invocation_duration_ms: elapsed_ms(completed.saturating_duration_since(self.started)),
             exit_outcome: outcome,
             core_outcome,
+            core_failure_code,
         }))
     }
 
@@ -388,7 +392,7 @@ mod tests {
                 (Some(CoreOutcome::Refused), json!("refused")),
             ] {
                 let shutdown =
-                    validate(&invocation.shutdown_event(completed, outcome, core_outcome));
+                    validate(&invocation.shutdown_event(completed, outcome, core_outcome, None));
                 assert_eq!(shutdown["event"], "shutdown/1");
                 assert_eq!(
                     shutdown["data"],
@@ -396,6 +400,7 @@ mod tests {
                         "invocation_duration_ms": 1234,
                         "exit_outcome": expected,
                         "core_outcome": expected_core,
+                        "core_failure_code": null,
                     })
                 );
                 for key in ["v", "installation_id", "run_id", "context"] {
@@ -407,8 +412,35 @@ mod tests {
             invocation.started() - Duration::from_secs(1),
             ExitOutcome::Nonzero,
             None,
+            None,
         ));
         assert_eq!(early["data"]["invocation_duration_ms"], 0);
+        // A released CLI sends no `core_failure_code`; the schema must still accept its shutdown event.
+        let mut released = refused_without_code(&invocation, completed);
+        released["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("core_failure_code");
+        let schema: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/box.schema.json")).unwrap();
+        assert!(
+            jsonschema::validator_for(&schema)
+                .unwrap()
+                .is_valid(&released)
+        );
+        for code in ["B0114", "P0303", "uncoded"] {
+            let refused = validate(&invocation.shutdown_event(
+                completed,
+                ExitOutcome::Nonzero,
+                None,
+                Some(code),
+            ));
+            assert_eq!(refused["data"]["core_failure_code"], code);
+        }
+    }
+
+    fn refused_without_code(invocation: &Invocation, completed: Instant) -> Value {
+        validate(&invocation.shutdown_event(completed, ExitOutcome::Nonzero, None, None))
     }
 
     #[test]
