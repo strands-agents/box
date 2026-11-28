@@ -38,6 +38,10 @@ writes it, and after that both of its files are yours to edit. The next run uses
 - `policy.dw` holds the profile's rules, a copy of the policy picked when the profile was made. An
   edit to it changes what the profile allows ([Write custom rules](policies.md#write-custom-rules)).
   More rule files go beside it, each listed in `policies` in `profile.toml`.
+- `policy.generated.dw` shows the rules `box` adds from the profile and its packs, each with a
+  comment that names the table or pack it comes from. `box` writes it, and rewrites it on each
+  `box profile create`, `box profile show`, and `box run`, so don't edit it. It names the project
+  folder as `${{ workspace }}`, so it reads the same in every project.
 
 ## Files in the project
 
@@ -218,7 +222,8 @@ The whole of `~/.strands/box`, with one of each item:
 |-- profiles/
 |   `-- claude/                     one user profile
 |       |-- profile.toml
-|       `-- policy.dw
+|       |-- policy.dw
+|       `-- policy.generated.dw     the rules box adds, rewritten on each run
 |-- packs/
 |   `-- my-team/                    a custom pack
 |       `-- pack.toml
