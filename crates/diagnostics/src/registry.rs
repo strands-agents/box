@@ -114,6 +114,7 @@ codes! {
     B0120 => strands_box error, "workloads that could not be executed", "The sandbox was applied, but executing the workload's program failed, so the workload did not start.";
     B0121 => strands_box error, "hosts without native filesystem policy", "Native filesystem policy needs macOS 27 or later and a build with the macOS 27 SDK, so the box did not start.";
     B0122 => strands_box error, "unusable box directories", "The box directory cannot be created, read, or used safely, or `HOME` is not set, so the box did not start.";
+    B0123 => strands_box error, "resource limits this host cannot enforce", "`[limits]` sets `processes` or `memory`, and this host cannot give the box a cgroup with that cap, so the box did not start.";
     // Box: startup disclosures.
     B0201 => strands_box note, "filesystem grant disclosures", "A process reaches these paths directly, with no policy decision.";
     B0202 => strands_box note, "exposed credential stores", "A process's filesystem grant reaches a credential store.";
@@ -129,6 +130,7 @@ codes! {
     B0212 => strands_box warning, "replaceable programs", "A process's write grant reaches the program it runs, so the process can replace that program.";
     B0213 => strands_box note, "log-only mode disclosures", "The policy runs in log-only mode, so each denial is recorded and the action goes ahead.";
     B0214 => strands_box warning, "untyped credsd routes", "A credsd route names no secret.type, so it signs with AWS credentials.";
+    B0215 => strands_box note, "resource limit disclosures", "The box's workload runs under the process and memory caps that `[limits]` sets.";
     // Box: lifecycle.
     B0301 => strands_box note, "box state changes", "The box was created, opened, or refreshed.";
     B0302 => strands_box note, "workload starts", "The box starts its workload.";
@@ -156,6 +158,8 @@ codes! {
     B1001 => strands_box warning, "shutdown failures", "Part of the box's shutdown failed.";
     B1002 => strands_box warning, "discarded messages", "Box held its messages while the workload drew on the terminal, and discarded those past its limit.";
     B1003 => strands_box error, "native enforcement failures during a run", "Native filesystem policy failed after the workload started, or did not stop cleanly, so the box stopped.";
+    B1004 => strands_box error, "workloads ended at their memory limit", "The workload reached `limits.memory`, so the kernel ended every process the box started.";
+    B1005 => strands_box warning, "process starts refused at the process limit", "The workload reached `limits.processes`, so some of its process or thread starts failed.";
     // Box: broker connections.
     B1101 => strands_box warning, "rejected broker clients", "The broker rejected a client of its socket.";
     B1102 => strands_box warning, "failed broker clients", "Serving a client of the broker's socket failed.";

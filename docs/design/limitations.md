@@ -99,8 +99,11 @@ the table, and gives your values of the `pass-secret-env` variables to that prog
 
 Box does not provide the following protections:
 
-- A box does not limit process creation, CPU, or disk use. A program can exhaust those resources
-  while staying inside its grants. See [children inherit the boundary](decisions.md#children-inherit-the-boundary).
+- A box does not limit CPU or disk use. It limits process creation and memory only on Linux, and only
+  when `[limits]` sets `processes` or `memory`; macOS has no such cap. A program can exhaust an
+  unlimited resource while staying inside its grants. See [process and memory
+  limits](containment.md#process-and-memory-limits) and [children inherit the
+  boundary](decisions.md#children-inherit-the-boundary).
 - The hosting platform must isolate tenants on a shared machine. See [non-goals](tenets.md#non-goals).
 - Box relies on the kernel to enforce the sandbox. An exploit that defeats the kernel defeats the box. The same tenets exclude kernel exploits.
 - Box decides the requests it forwards to a remote MCP server. It can't contain the server or

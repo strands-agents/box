@@ -321,7 +321,11 @@ interpreters are part of the code the operator must trust.
    [configuration reference](../user/config.md#agentfilesystem-and-toolnamefilesystem) shows the output.
    Each disclosure line starts with `strands-box: note[<code>]:`, and
    [Message codes](../user/message-codes.md) explains each code.
-7. It starts the trampoline, which becomes the agent, and waits for the workload to end.
+   On Linux, when `[limits]` sets `processes` or `memory`, Box creates the box's cgroup before it
+   builds these grants and prints `note[B0215]` with the caps it applied. A cap the host can't
+   enforce stops startup. See [process and memory limits](containment.md#process-and-memory-limits).
+7. It starts the trampoline, which becomes the agent, and waits for the workload to end. When a cap
+   ended the workload or refused its starts, Box says which one, then removes the cgroup.
 
 Before a selected Linux workload starts, native filesystem setup probes whether the kernel can transfer path-only file handles.
 When that optional transfer is unsupported, Box reports the limit on stderr and refuses those opens.

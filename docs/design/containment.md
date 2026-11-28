@@ -800,6 +800,41 @@ a harness does need part of that wider reach to start, moving it to the agent ne
 entry: what the harness needs, what else the grant allows, and which tests pin the rest of the
 boundary.
 
+<a id="process-and-memory-limits"></a>
+## Process and memory limits on Linux
+
+`[limits]` `processes` and `memory` cap how much the box's workload uses, where every other part of
+containment limits what it reaches. Box creates one cgroup v2 for the box before anything contained
+starts, and every contained launch joins it: the agent, each tool, and each local MCP server. The
+trampoline's launch joins in the child, before `exec`, so the program's first instruction already
+runs inside the cap. Descendants land in the same cgroup, and the workload can't move itself out:
+in a box with a cap, Box refuses a `write` grant on `/sys/fs/cgroup` and a `connect` grant on the
+user's service manager, which could start a process elsewhere, and a sandbox can't mount a cgroup
+file system.
+
+| Kernel setting | Set from | What it does |
+|---|---|---|
+| `pids.max` | `processes` | At the cap, the next process or thread start fails. Nothing is killed. |
+| `memory.max` | `memory` | At the cap, the kernel ends the workload. |
+| `memory.swap.max = 0` | Box | The workload can't pass the cap through swap. |
+| `memory.oom.group = 1` | Box | The kernel ends the whole workload together, not one process it picks. |
+
+The trusted process stays outside the cgroup, so a workload at its cap can't stop the process that
+decides policy and reports what happened. After the workload ends, Box reads the cgroup's events and
+says which cap it reached, then removes the cgroup. The trusted process holds Strands Shell and
+Monty, so these caps don't bound them. See [Strands Shell and Monty](#strands-shell-and-monty).
+
+Box creates the cgroup as `strands-box-<pid>` directly under the `user@<uid>.service` cgroup that
+systemd delegates to the user, and it requires its own process to sit below that cgroup. Writing a
+process into a cgroup needs write access to the common ancestor of where it is and where it goes,
+so a session outside the delegated subtree can't use it. An SSH or service session therefore starts
+the box with `systemd-run --user --scope`. When a cap is set and none of this holds, the box
+refuses to start, because a cap the operator wrote and the host silently dropped would protect
+nothing. A container usually mounts the cgroup file system read-only and refuses too; its platform
+caps it instead.
+
+macOS can't cap a whole process tree, so it refuses both keys.
+
 ## What's outside operating system enforcement
 
 ### Strands Shell and Monty
@@ -835,7 +870,7 @@ is outside Box's reach, so decide whether to trust it with what that call expose
 ## Residual risk
 
 A box limits process access but cannot remove every risk. Allowed writes change real files. Box sets
-no resource limits. Tools and local MCP servers have additional access that produces no policy
+no resource limits unless `[limits]` sets `processes` or `memory`, and then only on Linux. Tools and local MCP servers have additional access that produces no policy
 decisions. [Limits of Box's protection](limitations.md) lists each risk and the decision that
 accepts it.
 

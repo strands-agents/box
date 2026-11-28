@@ -87,7 +87,7 @@ The file carries fourteen keys. `name` and `box_dir` are required.
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
 | `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, ingress, and secret sources. Each is disabled by default. |
-| `[limits]` | table | Execution limits for Strands Shell. |
+| `[limits]` | table | Execution limits for Strands Shell, and on Linux the process and memory caps of the box's workload. |
 | `monty` | boolean | Whether a bare `python3` or `python` in the Shell runs Monty, Box's built-in Python subset. `true` by default. With `false`, both names resolve like any other program: a `[tool.python3]` or `[tool.python]`, else the host's `PATH`. |
 | `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
 
@@ -200,6 +200,8 @@ Linux prints no line.
 | `shell.max_input` | nonnegative integer | `262144` | Bytes of command text submitted to Strands Shell. `0` disables this limit. |
 | `shell.max_output` | nonnegative integer | `1048576` | Bytes in each Shell output buffer, including command substitution. Shell also applies it to each input that a command reads whole, such as a script loaded with `source`, a `python3` or `lua` script, the standard input of `xargs`, the standard input or each file that `jq` reads, each file that `sed -i` edits, and the file of `curl --json @file`. `jq` applies the limit to each file separately, so it can hold more than `max_output` in total. Box applies it to each `curl` response body. `0` disables this limit. |
 | `shell.max_stdin` | positive integer | `1048576` | Bytes of standard input that one command run through the `zsh`, `bash`, or `sh` alias receives from outside the Shell. Past it, the rest is discarded and the command gets no end of input, so a command that reads past it fails at the Shell timeout; a command that acts as its input arrives has acted on the first part by then. `0` is a load error. |
+| `processes` | positive integer, at most 4194304 | none | Linux only. The most processes and threads the box's workload holds at once. See [Process and memory limits](#process-and-memory-limits). |
+| `memory` | positive integer, or string | none | Linux only. The most memory the box's workload uses, in bytes, or as a string such as `"512M"` or `"8G"`. See [Process and memory limits](#process-and-memory-limits). |
 
 To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
 `[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
@@ -240,6 +242,53 @@ including Python called inside the Shell. Python's [own limits](monty.md#limits-
 with `shell.timeout = false`. Synchronous Python execution can delay timeout reporting.
 See [Shell timeouts](shell.md#limitsshelltimeout) for the call scope and
 [stored configuration](native-filesystem-policy.md#stored-configuration-and-rollback) for rollback.
+
+### Process and memory limits
+
+`processes` and `memory` cap the box's workload: the agent, its tools, and its MCP servers,
+counted together. They stop a workload from taking down the machine it runs on. With neither key,
+the box runs as it would without them.
+
+```toml
+[limits]
+processes = 4096
+memory = "8G"
+```
+
+- **`processes`** counts processes and threads. At the cap, the workload's next process or thread
+  start fails with `Resource temporarily unavailable` (`EAGAIN`), and nothing is killed. A fork bomb
+  stops there, and the rest of the machine keeps working. When the run ends, Box prints
+  `warning[B1005]` with the cap and how many starts failed.
+- **`memory`** takes a number of bytes, or a string of digits followed by `K`, `M`, `G`, or `T`,
+  each a power of 1024. Swap does not count as room: the workload can't use swap to pass the cap.
+  At the cap, the kernel ends the whole workload together, rather than one process it picks. Box
+  then prints `error[B1004]` with the cap, and the run's exit status is not success.
+
+Set each cap well above what a normal run uses, so only a runaway reaches it. A coding agent with a
+parallel build and a test runner can hold a few thousand threads, and memory the workload caches
+from files counts toward `memory`. The trusted process, which runs Strands Shell, Monty, the egress
+gateway, and policy, is outside both caps.
+
+Box puts the workload in its own cgroup, a kernel group of processes capped as one. The host needs
+cgroup v2, and systemd must delegate a cgroup subtree to the user that runs the box. A desktop
+session has one. An SSH session and a service usually don't, so start the box in a delegated scope:
+
+```sh
+systemd-run --user --scope -- strands-box run --config box.toml
+```
+
+At startup the box prints the caps it applied, as
+`strands-box: note[B0215]: resource limits for the agent, its tools, and its MCP servers together: processes 4096, memory 8G (cgroup <path>); the trusted process is outside them`.
+
+When a cap is set and the host can't enforce it, the box doesn't start, and `error[B0123]` names the
+reason and its fix: no cgroup v2, no delegated subtree, a delegated subtree without the `pids` or
+`memory` controller, a read-only cgroup file system as in most containers, or active swap without
+swap accounting. A box with a cap also refuses a `write` grant that reaches `/sys/fs/cgroup`, and a
+`connect` grant that reaches the user's service manager, because the workload could move itself out
+of its cgroup through either.
+
+On macOS, either key refuses the box at load, because macOS can't cap a whole process tree. A box
+that sets either key stores its record at version 44, and an older build refuses it.
 
 ## `[gateway]`
 
@@ -880,6 +929,7 @@ happen after the box directory is created and before the workload starts.
 | A writable grant that reaches a file or directory that `SSL_CERT_FILE` or `SSL_CERT_DIR` names for `box run` | ``` `write` reaches <path>, which `SSL_CERT_FILE` or `SSL_CERT_DIR` names, and the egress gateway trusts every root certificate there. Remove the write, subtract the path with `deny`, or run without that variable``` See [networks that re-sign TLS](./egress.md#networks-that-re-sign-tls). |
 | A writable grant at or above a directory on the operator's `PATH` | `<path> is at or above <path>, which is on the search path this box resolves a bare-name MCP program against` (excerpt). Keep the directory and its parents outside write grants. |
 | A writable grant can change an installed Box program, a hard-link name, or an enclosing directory | `this write grant can change trusted Box executable <path> or its path. Keep the Box installation outside every process's write grants` |
+| With `[limits]` `processes` or `memory` set, on Linux: a `write` grant that reaches `/sys/fs/cgroup`, or a `connect` grant that reaches the user's service manager under `/run/user/<uid>/` (`systemd/` or `bus`) | ``` it can write the cgroup file system at /sys/fs/cgroup, so the workload could move itself out of the cgroup that `[limits]` caps. Remove the grant, or remove `limits.processes` and `limits.memory` ``` (excerpt). See [process and memory limits](#process-and-memory-limits). |
 | A system directory or a credential store the box always refuses | `<path> is refused beneath every grant: <reason>` |
 | A path that a [`[secret-source.<scheme>]`](#what-box-protects) table lists in `reads` or `deny`, a path inside it, or a folder that holds it | ``this grant reaches <path>, which the secret source `<scheme>` keeps from each workload (its `reads` entry "<entry>"). Keep each grant outside the paths that a secret source names in `reads` and `deny` `` |
 
@@ -1636,7 +1686,7 @@ each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal, an `ingress` outside `
 five `[[agent.ingress]]` entries, an `[[agent.ingress]] listen` that is not an IP address and port, a
 port of 0, two entries with one `listen` port or one `workload_port`, and on macOS a `listen` port
 equal to any entry's `workload_port`.
-An invalid `limits.shell.timeout`, `limits.shell.max_input`, `limits.shell.max_output`, or `limits.shell.max_stdin` is also a parse error.
+An invalid `limits.shell.timeout`, `limits.shell.max_input`, `limits.shell.max_output`, `limits.shell.max_stdin`, `limits.processes`, or `limits.memory` is also a parse error, and so is `limits.processes` or `limits.memory` on macOS.
 
 [Incoming mount declarations](#incoming-mount-declarations) also fail before Box creates state:
 invalid or overlapping `receive_mounts` paths, or a nonempty array combined with native filesystem
@@ -1650,7 +1700,8 @@ that needs the surrounding OS happens after `run` has created `box_dir`, and bef
 starts: a `workspace` that does not exist, an `env.HOME` inside or enclosing `box_dir`, a telemetry
 file destination inside the box directory and outside `private/`, a `filesystem` entry whose path
 does not exist or is a symbolic link, a `deny_write` entry that is not a directory inside a `write`
-directory, an `[[agent.ingress]] listen` address that cannot be bound, and on macOS a
+directory, an `[[agent.ingress]] listen` address that cannot be bound, a `[limits]` cap the host
+cannot enforce, and on macOS a
 `workload_port` that another process already listens on. A `[tool.<name>]` whose program is not
 installed is [left out](#a-tool-whose-program-is-not-installed) rather than refused. The
 box directory stays behind. It is empty when the refusal came before the record was written, and it

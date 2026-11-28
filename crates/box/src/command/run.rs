@@ -513,6 +513,23 @@ async fn hosted(
         stored: &locked.record,
         protected_sources: &locked.sources,
     };
+    // Created before anything contained starts, so the agent, each tool, and each MCP server join it.
+    #[cfg(target_os = "linux")]
+    let workload_cgroup = match locked.record.limits.resources() {
+        Some(limits) => {
+            crate::run::resource_limits::refuse_escaping_grants(hosted.approved().grants())?;
+            let cgroup =
+                crate::run::resource_limits::WorkloadCgroup::create(limits).map_err(|reason| {
+                    crate::error::Internal::ResourceLimits {
+                        keys: limits.keys(),
+                        reason,
+                    }
+                })?;
+            ::diagnostics::diag!(B0215, "{}", cgroup.disclosure());
+            Some(cgroup)
+        }
+        None => None,
+    };
     for (label, spec) in &locked.record.tool {
         let table = format!("[tool.{label}]");
         let boundary = Boundary::translate(
@@ -606,7 +623,14 @@ async fn hosted(
         },
     )
     .await?;
-    contained.wait().await
+    let outcome = contained.wait().await;
+    #[cfg(target_os = "linux")]
+    if let Some(cgroup) = workload_cgroup {
+        cgroup.report();
+        // Removing the cgroup waits for its last members to leave, which blocks.
+        let _ = tokio::task::spawn_blocking(move || drop(cgroup)).await;
+    }
+    outcome
 }
 
 /// The agent's `HOME`: its `env.HOME`, else the operator's own home.

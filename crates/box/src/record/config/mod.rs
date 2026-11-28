@@ -857,6 +857,9 @@ const MOUNTS_RECORD_VERSION: u32 = 42;
 /// The record version of a record whose egress or remote MCP secret names a `secret.type`, so an
 /// older build refuses the box rather than signing a token route's reference as AWS.
 const SECRET_TYPE_RECORD_VERSION: u32 = 43;
+/// The record version of a record that sets `limits.processes` or `limits.memory`, so an older build
+/// refuses the box rather than resuming it with its workload uncapped.
+const RESOURCE_LIMITS_RECORD_VERSION: u32 = 44;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -926,7 +929,9 @@ fn record_version<'a>(
     secret_type: bool,
 ) -> u32 {
     let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
-    if secret_type {
+    if limits.has_resource_limits() {
+        RESOURCE_LIMITS_RECORD_VERSION
+    } else if secret_type {
         SECRET_TYPE_RECORD_VERSION
     } else if specs
         .clone()
@@ -1278,6 +1283,7 @@ impl Record {
             LOG_ONLY_RECORD_VERSION,
             MOUNTS_RECORD_VERSION,
             SECRET_TYPE_RECORD_VERSION,
+            RESOURCE_LIMITS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1324,6 +1330,7 @@ impl Record {
         }
         BoxName::parse(&record.name)?;
         record.gateway.validate()?;
+        record.limits.validate_platform()?;
         record.validate_processes()?;
         record.declared_sources()?;
         Ok(record)
@@ -1886,6 +1893,7 @@ impl ConfigFile {
         self.experimental_features.validate()?;
         BoxName::parse(&self.name)?;
         self.gateway.validate()?;
+        self.limits.validate_platform()?;
         if let Some(agent) = &self.agent {
             agent.validate("[agent]")?;
             mounts::validate_selection(agent, "[agent]", &self.experimental_features)?;
@@ -3716,7 +3724,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, SECRET_TYPE_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, RESOURCE_LIMITS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -5571,6 +5579,41 @@ command = ["mcp-server-fetch"]
                 ..
             })
         ));
+    }
+
+    /// **A resource cap needs record version 44**, so an older build refuses the box rather than
+    /// resuming it with its workload uncapped.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resource_limit_stores_its_own_record_version() {
+        for limits in [
+            "[limits]\nprocesses = 64\n",
+            "[limits]\nmemory = \"1G\"\n",
+            "[limits]\nprocesses = 64\nmemory = 1073741824\nshell.timeout = 60\n",
+        ] {
+            let stored = pinned_record(limits);
+            assert_eq!(stored.version, RESOURCE_LIMITS_RECORD_VERSION, "{limits}");
+            assert_eq!(RESOURCE_LIMITS_RECORD_VERSION, 44);
+            let text = stored.to_toml().unwrap();
+            assert_eq!(
+                Record::parse(&text, Path::new("record.toml"))
+                    .expect("this build reads its own record"),
+                stored,
+                "{limits}"
+            );
+            let mut forged = stored.clone();
+            forged.version = SECRET_TYPE_RECORD_VERSION;
+            assert!(
+                matches!(
+                    Record::parse(&forged.to_toml().unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion {
+                        expected: RESOURCE_LIMITS_RECORD_VERSION,
+                        ..
+                    })
+                ),
+                "{limits}"
+            );
+        }
     }
 
     /// **A `secret.env` key alone needs the secret source record version**, and a configuration

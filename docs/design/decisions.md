@@ -186,8 +186,9 @@ reaches them all. The caller supplies the absolute `box_dir`, and the `run` proc
 exclusive lock on `private/.lock` inside it for its whole life. The caller ends the process to stop
 a box and removes the directory to delete one, so Box needs no lifecycle verbs.
 
-Two residual risks remain. On both platforms, killing the trusted process leaves the contained
-workload without a parent because Box does not set `PR_SET_PDEATHSIG`. The deny floor also covers
+Two residual risks remain. On macOS, killing the trusted process leaves the contained workload
+without a parent, because macOS has no `PR_SET_PDEATHSIG`; on Linux, Box sets it on each contained
+launch, so the kernel ends that launch's tree with the trusted process. The deny floor also covers
 only this box's directory. A `permit fs:read` can therefore reach a sibling box's stored policy when
 both directories sit under one parent.
 
@@ -1465,7 +1466,24 @@ Every descendant of a process with a successfully applied sandbox inherits at le
 restrictions. Replacing the program preserves them. No call elevates a child. A process that needs
 different reach needs a different configuration and a fresh contained process, and applying twice
 widens nothing. Process creation is granted with no limit, so the sandbox does not bound fork bombs,
-disk fill, or CPU consumption.
+disk fill, or CPU consumption. On Linux, `[limits]` can cap processes and memory; see [one cgroup caps
+the box's whole workload](#one-cgroup-caps-the-whole-workload).
+
+<a id="one-cgroup-caps-the-whole-workload"></a>
+### One cgroup caps the box's whole workload, and a cap the host cannot enforce refuses the run
+
+On Linux, `[limits]` `processes` and `memory` put the agent, every tool, and every local MCP server
+in one cgroup v2, outside the trusted process. A cap the host cannot enforce refuses the run, as a
+failed apply does, because an operator who wrote a cap relies on it. With neither key, Box creates
+no cgroup. macOS has no per-tree cap, so it refuses both keys.
+
+**Rejected.** A cgroup for each sandbox: no measured case shows one sandbox starving another, and
+it adds a cgroup to every tool launch. Running without the cap and saying so: the operator's ceiling
+would silently not exist.
+
+**Cost.** An SSH or service session has no delegated cgroup subtree, so a box with a cap starts there
+under `systemd-run --user --scope`. The caps don't bound Strands Shell or Monty, which run in the
+trusted process.
 
 <a id="one-private-backend-enforces-the-whole-configuration"></a>
 ### One private backend enforces the whole configuration

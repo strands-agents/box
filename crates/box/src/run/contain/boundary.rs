@@ -142,6 +142,17 @@ impl ApprovedReach {
     pub(crate) fn table(&self, table: &str) -> Option<&DirectReach> {
         self.tables.get(table)
     }
+
+    /// Every approved direct grant, beside the table that states it.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn grants(&self) -> impl Iterator<Item = (&str, &DirectGrant)> {
+        self.tables.iter().flat_map(|(table, reach)| {
+            reach
+                .grants
+                .iter()
+                .map(move |grant| (table.as_str(), grant))
+        })
+    }
 }
 
 /// Judge one spec's eight lists against this run's operator home, authority, and program search path.
