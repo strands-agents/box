@@ -120,5 +120,8 @@ pub(crate) enum ValueSpec {
     None,
     Required,
     Optional,
+    #[serde(rename = "optional-next")]
+    OptionalNext,
+    Boolean,
     Many,
 }

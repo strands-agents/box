@@ -1,0 +1,184 @@
+# value-modes grammar corpus
+#
+# Each case is one argv, and what the shell grammar of `value-modes.grammar.toml` reads
+# it as. `fields` lists each field that does not hold its default: a Bool `false`, an
+# empty set, or an absent string. An `unmodeled` case has no fields and no effects.
+
+# A boolean flag alone is true, and its removes apply
+[[case]]
+argv = ["tool", "publish", "--dry-run"]
+action = "publish"
+fields = { dry_run = true }
+
+# A boolean flag takes a following `false`: the flag is false and its removes do not apply (npm, nopt)
+[[case]]
+argv = ["tool", "publish", "--dry-run", "false"]
+action = "publish"
+effects = ["publish"]
+
+# A boolean flag takes a following `true`, so `true` is not the operand
+[[case]]
+argv = ["tool", "publish", "--dry-run", "true"]
+action = "publish"
+fields = { dry_run = true }
+
+# A boolean flag takes an attached `false`
+[[case]]
+argv = ["tool", "publish", "--dry-run=false", "pkg"]
+action = "publish"
+fields = { package = "pkg" }
+effects = ["publish"]
+
+# A boolean flag takes an attached `true`
+[[case]]
+argv = ["tool", "publish", "--dry-run=true", "pkg"]
+action = "publish"
+fields = { dry_run = true, package = "pkg" }
+
+# A boolean flag with `false` does not add its effect
+[[case]]
+argv = ["tool", "publish", "--force", "false", "pkg"]
+action = "publish"
+fields = { package = "pkg" }
+effects = ["publish"]
+
+# A boolean flag leaves a word that is not a boolean value as an operand
+[[case]]
+argv = ["tool", "publish", "--dry-run", "pkg"]
+action = "publish"
+fields = { dry_run = true, package = "pkg" }
+
+# An attached value that is not `true` or `false` is unmodeled
+[[case]]
+argv = ["tool", "publish", "--dry-run=maybe"]
+action = "unmodeled"
+
+# A following word that another parser reads as false is unmodeled
+[[case]]
+argv = ["tool", "publish", "--dry-run", "no"]
+action = "unmodeled"
+
+# Another casing of `false` is unmodeled
+[[case]]
+argv = ["tool", "publish", "--dry-run", "False"]
+action = "unmodeled"
+
+# An attached `0` is unmodeled
+[[case]]
+argv = ["tool", "publish", "--dry-run=0"]
+action = "unmodeled"
+
+# Two occurrences that agree read as one
+[[case]]
+argv = ["tool", "publish", "--dry-run", "-n", "true"]
+action = "publish"
+fields = { dry_run = true }
+
+# Two occurrences that disagree are unmodeled, because parsers do not agree on which one wins
+[[case]]
+argv = ["tool", "publish", "--dry-run", "--dry-run=false"]
+action = "unmodeled"
+
+# A short boolean flag takes a following `false`
+[[case]]
+argv = ["tool", "publish", "-n", "false"]
+action = "publish"
+effects = ["publish"]
+
+# A short boolean flag in the middle of a cluster is true, and the next word is an operand
+[[case]]
+argv = ["tool", "publish", "-nq", "false"]
+action = "publish"
+fields = { dry_run = true, quiet = true, package = "false" }
+
+# A short boolean flag at the end of a cluster takes a following `false`
+[[case]]
+argv = ["tool", "publish", "-qn", "false"]
+action = "publish"
+fields = { quiet = true }
+effects = ["publish"]
+
+# A global boolean flag takes a following `false` (supabase, effect/cli)
+[[case]]
+argv = ["tool", "publish", "--debug", "false", "pkg"]
+action = "publish"
+fields = { package = "pkg" }
+effects = ["publish"]
+
+# A global boolean flag alone is true
+[[case]]
+argv = ["tool", "--debug", "publish"]
+action = "publish"
+fields = { debug = true }
+effects = ["publish"]
+
+# An optional-next option takes the next word
+[[case]]
+argv = ["tool", "publish", "--tag", "beta", "pkg"]
+action = "publish"
+fields = { tag = "beta", package = "pkg" }
+effects = ["publish"]
+
+# An optional-next option does not take a following option (npm, nopt)
+[[case]]
+argv = ["tool", "publish", "--tag", "--access=public"]
+action = "publish"
+fields = { tag = "", access = "public" }
+effects = ["publish", "make_public"]
+
+# An optional-next option does not take `--`
+[[case]]
+argv = ["tool", "install", "--bin", "--", "x"]
+action = "install"
+fields = { bin = "", target = ["x"] }
+effects = ["all"]
+
+# An optional-next option at the end of the line takes an empty value
+[[case]]
+argv = ["tool", "publish", "--tag"]
+action = "publish"
+fields = { tag = "" }
+effects = ["publish"]
+
+# An optional-next option takes an attached value
+[[case]]
+argv = ["tool", "publish", "--tag=-x"]
+action = "publish"
+fields = { tag = "-x" }
+effects = ["publish"]
+
+# An optional-next option takes `-`, which is not an option
+[[case]]
+argv = ["tool", "publish", "--tag", "-"]
+action = "publish"
+fields = { tag = "-" }
+effects = ["publish"]
+
+# An optional-next option does not take a following option, which then applies (cargo, clap)
+[[case]]
+argv = ["tool", "install", "--bin", "--root", "/r", "foo"]
+action = "install"
+fields = { bin = "", root = "/r", target = ["foo"] }
+effects = ["all"]
+
+# A short optional-next option takes the next word
+[[case]]
+argv = ["tool", "install", "-b", "x", "foo"]
+action = "install"
+fields = { bin = "x", target = ["foo"] }
+
+# A short optional-next option takes an attached value
+[[case]]
+argv = ["tool", "install", "-bx", "foo"]
+action = "install"
+fields = { bin = "x", target = ["foo"] }
+
+# A short optional-next option does not take a following undeclared option
+[[case]]
+argv = ["tool", "install", "-b", "--zz"]
+action = "unmodeled"
+
+# A following `f`, which click reads as false, is unmodeled
+[[case]]
+argv = ["tool", "publish", "--dry-run", "f"]
+action = "unmodeled"

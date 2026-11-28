@@ -15,6 +15,11 @@ invariants:
 - The same is true when you put an undeclared letter in a short cluster, after letters that take
   no value in any option table of the grammar. After a flag that takes a value, the letters are that
   value, so the check does not apply there.
+- A long `boolean` flag reads the same as `--x=true` and as `--x true`, and `--x false` reads the
+  same as `--x=false`, with the flag's field `false`. The check skips a flag that another word of
+  the argv also sets, and a flag that is followed by a boolean word.
+- A long `optional-next` option followed by a word that does not start with `-` reads the same as
+  that word attached with `=`.
 
 ## The bounded run
 
