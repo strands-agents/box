@@ -132,6 +132,12 @@ name = "box-close-range-probe"
 path = "tests/support/close_range_probe.rs"
 required-features = ["test-support"]
 
+# The workload the `[limits]` process and memory tests run: it reports its cgroup, forks, or takes memory.
+[[bin]]
+name = "box-resource-probe"
+path = "tests/support/resource_probe.rs"
+required-features = ["test-support"]
+
 # A stdio MCP server (`reach` tool; proxy-unaware direct + proxy-aware $HTTPS_PROXY modes) and the
 # transport client that drives it. Test-only fixtures for the native-egress / gateway MCP tests, so
 # they carry the same gate and never ship as product binaries.
@@ -164,6 +170,11 @@ required-features = ["native-filesystem-policy", "test-support"]
 [[test]]
 name = "box_credentials"
 path = "tests/box_credentials.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "box_resource_limits"
+path = "tests/box_resource_limits.rs"
 required-features = ["test-support"]
 
 [[test]]

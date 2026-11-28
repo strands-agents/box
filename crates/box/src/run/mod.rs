@@ -16,6 +16,7 @@
 //! | `descriptor_limit` | the box's raised open-file limit, and the limit each child starts with |
 //! | [`telemetry`] | this box's own collector and effective decision recorder |
 //! | `netns_relay` | splicing the workload's namespace-bound listeners to their sinks (Linux) |
+//! | `resource_limits` | the workload's cgroup, which `[limits]` `processes` and `memory` cap (Linux) |
 
 pub(crate) mod broker;
 pub(crate) mod commands;
@@ -40,5 +41,7 @@ pub(crate) use macos_enforcement as native_enforcement;
 pub(crate) mod native_enforcement;
 #[cfg(target_os = "linux")]
 pub(crate) mod netns_relay;
+#[cfg(target_os = "linux")]
+pub(crate) mod resource_limits;
 pub(crate) mod secret_sources;
 pub(crate) mod telemetry;

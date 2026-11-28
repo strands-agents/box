@@ -141,6 +141,7 @@ Each of these stops the box, almost always before the workload starts. `strands-
 | `B0120` | error | The sandbox was applied, but executing the workload's program failed, so the workload did not start. | Check that the program and its interpreter or loader are installed and readable inside the box. The text names the error. |
 | `B0121` | error | Native filesystem policy needs macOS 27 or later and a build with the macOS 27 SDK, so the box did not start. | Run on macOS 27 or later with a Box build made with its SDK, or turn native filesystem policy off. See [macOS requirements](macos-requirements.md#requirements). |
 | `B0122` | error | The box directory cannot be created, read, or used safely, or `HOME` is not set, so the box did not start. | Read the path and reason the text names. Set `HOME`, or give `box_dir` a directory you own that no other user can write. |
+| `B0123` | error | `[limits]` sets `processes` or `memory`, and this host cannot give the box a cgroup with that cap, so the box did not start. | Read the reason in the text. In an SSH or service session, start the box with `systemd-run --user --scope -- strands-box run ...`. Otherwise remove the key. See [process and memory limits](config.md#process-and-memory-limits). |
 
 <a id="b02"></a>
 
@@ -165,6 +166,7 @@ is what you intended.
 | `B0212` | warning | A process's write grant reaches the program it runs, so the process can replace that program. | Move the program out of the writable grant, or narrow the grant. See [what is refused](config.md#what-is-refused). |
 | `B0213` | note | The policy runs in log-only mode, so each denial is recorded and the action goes ahead. | Use log-only mode only to trial a policy where it is acceptable that the policy protects nothing. See [log-only mode](policy.md#log-only-mode). |
 | `B0214` | warning | A credsd route names no secret.type, so it signs with AWS credentials. | Set `secret.type = "aws"`, or `"token"` for a token. A later release requires the key. See [credential sources](egress.md#credential-sources). |
+| `B0215` | note | The box's workload runs under the process and memory caps that `[limits]` sets. | No action. The trusted process is outside the caps. See [process and memory limits](config.md#process-and-memory-limits). |
 
 <a id="b03"></a>
 
@@ -237,6 +239,8 @@ These apply only when native filesystem policy is on. See
 | `B1001` | warning | Part of the box's shutdown failed. | Read the part that the text names. A failed final history flush can lose pending history, as [history persistence and process crashes](policy.md#history-persistence-and-process-crashes) describes. |
 | `B1002` | warning | Box held its messages while the workload drew on the terminal, and discarded those past its limit. | Run the box with stderr sent to a file or a pipe to read every message as it is written. |
 | `B1003` | error | Native filesystem policy failed after the workload started, or did not stop cleanly, so the box stopped. | The workload ran. Read the reason in the text. See [experimental native filesystem policy](native-filesystem-policy.md). If it repeats, report it with the full stderr of the run. |
+| `B1004` | error | The workload reached `limits.memory`, so the kernel ended every process the box started. | Raise `limits.memory` if the work needs more memory, or find what in the workload ran away. |
+| `B1005` | warning | The workload reached `limits.processes`, so some of its process or thread starts failed. | Raise `limits.processes` if the work needs more processes, or find what in the workload kept starting them. |
 
 <a id="b11"></a>
 

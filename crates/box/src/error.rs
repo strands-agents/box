@@ -130,6 +130,8 @@ impl Internal {
                 | containment::ContainmentError::ExpectedFile(_),
             ) => Code::B0115.into(),
             Self::Containment(_) => Code::B0108.into(),
+            #[cfg(target_os = "linux")]
+            Self::ResourceLimits { .. } => Code::B0123.into(),
             Self::Telemetry(_) => Code::T0103.into(),
             #[cfg(target_os = "linux")]
             Self::Relay(error) => match error {
@@ -172,6 +174,7 @@ impl ConfigError {
         use ::diagnostics::Code;
         match self {
             Self::ExperimentalFeatureUnavailable { .. }
+            | Self::ResourceLimitsUnsupported { .. }
             | Self::Contract { .. }
             | Self::Process { .. }
             | Self::ToolGrammar { .. }
@@ -299,6 +302,14 @@ pub(crate) enum Internal {
     #[error(transparent)]
     Relay(#[from] RelayError),
 
+    /// `[limits]` sets a resource cap this host cannot enforce.
+    #[cfg(target_os = "linux")]
+    #[error("this host cannot enforce {keys}, so the box did not start: {reason}")]
+    ResourceLimits {
+        keys: &'static str,
+        reason: crate::run::resource_limits::Unenforceable,
+    },
+
     #[error(transparent)]
     McpDiscovery(#[from] McpDiscoveryError),
 
@@ -424,6 +435,12 @@ pub(crate) enum ConfigError {
         "experimental feature `{feature}` requires a supported macOS or Linux ARM64 build with `native-filesystem-policy`"
     )]
     ExperimentalFeatureUnavailable { feature: &'static str },
+
+    #[error(
+        "{keys} is Linux only: macOS has no way to cap a whole process tree's processes or \
+         memory, so the box did not start. Remove the key, or run the box on Linux"
+    )]
+    ResourceLimitsUnsupported { keys: &'static str },
 
     #[error("invalid Box configuration: {reason}")]
     Contract { reason: String },

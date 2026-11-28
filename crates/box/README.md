@@ -98,6 +98,10 @@ Set either size to `0` to disable that Shell limit, or omit it to keep its defau
 `shell.max_stdin` is a positive byte count, 1048576 by default, of the standard input one command
 receives through a Shell alias; it cannot be disabled.
 Invalid or unrepresentable durations and sizes are load errors. Python retains its existing limits.
+On Linux, `[limits]` also accepts `processes`, a positive count of processes and threads, and
+`memory`, a positive byte count or a string such as `"8G"`. Either puts the agent, its tools, and its
+MCP servers in one cgroup v2 with that cap, outside the trusted process; the box refuses to start
+when the host cannot enforce the cap. macOS refuses both keys.
 See [execution limits](../../docs/user/config.md#limits).
 
 `[gateway]` accepts `upgrade_http`, a list of host names whose plain `http://` request to port 80

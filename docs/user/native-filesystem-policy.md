@@ -259,6 +259,7 @@ when any such array is nonempty; empty or omitted arrays do not require it. Reco
 does not enable mount forwarding. This build rejects nonempty arrays in Linux run configurations
 and any `receive_mounts` key in macOS run configurations before creating Box state.
 A `secret.type` key on a route or a remote MCP server requires record version 43.
+A `[limits]` table that sets `processes` or `memory` requires record version 44.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 
