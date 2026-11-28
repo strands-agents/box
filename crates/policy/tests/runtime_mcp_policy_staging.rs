@@ -409,6 +409,86 @@ when { context.input has account };
     );
 }
 
+/// A rule that reads a tool without a schema only from history cannot stage either, so that tool is
+/// held and then refused, rather than letting the agent call it with the rule's guard unloaded.
+#[test]
+fn a_rule_that_reads_a_tool_without_a_schema_from_history_refuses_that_tool() {
+    let (schema, omitted) = policy::generate_mcp_schema_with_omissions(
+        "repro",
+        r##"{"result":{"tools":[
+            {"name":"get_zone","inputSchema":{"type":"object",
+                "properties":{"zone_id":{"type":"string"}}}},
+            {"name":"create_account","inputSchema":{"type":"object",
+                "properties":{"account":{"$ref":"#/$defs/create-account"}},
+                "$defs":{"create-account":{"type":"object"}}}}
+        ]}}"##,
+    )
+    .expect("the server generates without its bad tool");
+    assert_eq!(omitted.len(), 1, "{omitted:?}");
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "history.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "repro" };
+permit(principal, action == Box::Action::"http:request", resource);
+@id("no-egress-after-create")
+forbid(principal, action == Box::Action::"http:request", resource)
+when temporal { formerly within 1h ( repro::Action::"create_account"::response{ output.reply: "result" } ) };
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+    let call = |tool: &str| {
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "repro",
+                tool,
+                &json!({}),
+            )
+            .0
+    };
+    authority
+        .stage_mcp_schema("repro", schema)
+        .expect("the schema is not a terminal fault");
+    let held = call("create_account");
+    assert!(
+        matches!(
+            held,
+            Decision::Deny {
+                reason: DenyReason::PolicyPending,
+                ..
+            }
+        ),
+        "while discovering, the tool the unloaded guard reads is held: {held:?}"
+    );
+    assert_eq!(
+        authority
+            .finish_mcp_discovery()
+            .expect("completion degrades rather than fataling"),
+        vec!["repro".to_string()]
+    );
+    let refused = call("create_account");
+    assert!(
+        matches!(
+            refused,
+            Decision::Deny {
+                reason: DenyReason::NoMatch,
+                ..
+            }
+        ),
+        "once discovery finishes, the tool stays refused: {refused:?}"
+    );
+    let other = call("get_zone");
+    assert!(
+        matches!(other, Decision::Allow { .. }),
+        "a tool the rule does not read is decided as usual: {other:?}"
+    );
+}
+
 /// A server that declares a tool but names its arguments differently from the operator's rule
 /// leaves that rule unable to stage, so the tool degrades while the committed schema still
 /// declares its action. The refinement must still deny the call. The coarse `mcp:call` permit

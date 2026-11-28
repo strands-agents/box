@@ -183,7 +183,7 @@ is what you intended.
 |---|---|---|---|
 | `B0401` | warning | A server's tool catalog could not be read, so its calls are decided without per-tool actions. | Read the reason in the text. See [when a rule cannot load](mcp-policy.md#when-a-rule-cannot-load). |
 | `B0402` | warning | A server's per-tool policy rules did not load, so they decide none of its calls. | Check the rule's tool and argument names against the server's catalog. See [when a rule cannot load](mcp-policy.md#when-a-rule-cannot-load) and [which rules Box can refuse for](mcp-policy.md#which-rules-box-can-refuse-for). |
-| `B0403` | warning | A tool's schema could not be read, so Box left the tool out of its server's catalog and refuses its calls. | The server's other tools work. A rule that names the tool does not load. See [find the tool and argument names](mcp-policy.md#step-3-find-the-tool-and-argument-names). |
+| `B0403` | warning | A tool's schema could not be read, so the tool has no per-tool action and only `mcp:call` rules decide its calls. | The tool still works under the server's `mcp:call` permit, and a rule on `mcp:call` that names the tool still applies. A rule that names the tool's own action, in its head or in a `when temporal` clause, doesn't load, and Box refuses that tool while the rule is there. See [find the tool and argument names](mcp-policy.md#step-3-find-the-tool-and-argument-names). |
 
 <a id="b05"></a>
 

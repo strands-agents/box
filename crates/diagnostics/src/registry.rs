@@ -135,7 +135,7 @@ codes! {
     // Box: MCP at run time.
     B0401 => strands_box warning, "unread MCP catalogs", "A server's tool catalog could not be read, so its calls are decided without per-tool actions.";
     B0402 => strands_box warning, "unloaded MCP tool rules", "A server's per-tool policy rules did not load, so they decide none of its calls.";
-    B0403 => strands_box warning, "left-out MCP tools", "A tool's schema could not be read, so Box left the tool out of its server's catalog and refuses its calls.";
+    B0403 => strands_box warning, "MCP tools without a schema", "A tool's schema could not be read, so the tool has no per-tool action and only `mcp:call` rules decide its calls.";
     // Box: egress and fetch.
     B0501 => strands_box warning, "failed upstream requests", "A request through the egress gateway to an upstream failed.";
     B0502 => strands_box warning, "fetches with no egress route", "A Monty fetch was refused because no egress route reaches it.";

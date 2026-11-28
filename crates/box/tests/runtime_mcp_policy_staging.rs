@@ -856,10 +856,10 @@ fn an_absent_catalog_tool_reaches_neither_policy_observer_nor_server() {
     assert_eq!(ended, ["read"], "{tools:#?}");
 }
 
-/// A running box warns about a tool whose schema it cannot read, refuses its calls before policy,
-/// and serves the server's other tool.
+/// A running box warns about a tool whose schema it cannot read, and the server's `mcp:call`
+/// permit decides that tool's calls as it decides the server's other tool.
 #[test]
-fn a_tool_whose_schema_does_not_generate_is_left_out_of_a_running_box() {
+fn a_tool_whose_schema_does_not_generate_runs_under_the_servers_permit() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
@@ -887,16 +887,12 @@ fn a_tool_whose_schema_does_not_generate_is_left_out_of_a_running_box() {
         "the list reaches the client as the server sent it: {list}"
     );
 
-    let left_out = client.call(json!(3), "create_account", STARTUP);
-    assert_eq!(error_code(&left_out), Some(-32003), "{left_out}");
-    assert_eq!(
-        box_.call_count("alpha-mcp"),
-        0,
-        "the refused call never runs"
-    );
+    let unread = client.call(json!(3), "create_account", STARTUP);
+    assert!(unread.get("result").is_some(), "{unread}");
+    assert_eq!(box_.call_count("alpha-mcp"), 1, "the permitted call runs");
     let read = client.call(json!(4), "read", STARTUP);
     assert!(read.get("result").is_some(), "{read}");
-    assert_eq!(box_.call_count("alpha-mcp"), 1);
+    assert_eq!(box_.call_count("alpha-mcp"), 2);
 
     drop(client);
     box_.release_workload();
@@ -906,19 +902,19 @@ fn a_tool_whose_schema_does_not_generate_is_left_out_of_a_running_box() {
     assert_eq!(
         stderr
             .lines()
-            .filter(|line| line.contains("is left out"))
+            .filter(|line| line.contains("[B0403]"))
             .collect::<Vec<_>>(),
         [
-            "strands-box: warning[B0403]: MCP server \"alpha\" tool \"create_account\" is left \
-             out, and its calls are refused: unexpected token `-`"
+            "strands-box: warning[B0403]: MCP server \"alpha\" tool \"create_account\" has no \
+             per-tool action, so only `mcp:call` rules decide its calls: unexpected token `-`"
         ],
         "{stderr}"
     );
     assert!(!stderr.contains("schema generation failed"), "{stderr}");
     assert_eq!(
         control_detail(&records_path(&box_), "schema_installed", "alpha").as_deref(),
-        Some("1 tools, 1 left out"),
-        "the installed schema counts the accepted tools and the left-out ones"
+        Some("2 tools, 1 without a schema"),
+        "the installed schema counts every tool and those without a schema"
     );
 }
 

@@ -107,7 +107,7 @@ pub(crate) async fn generate_schema(
     Ok(ExitCode::SUCCESS)
 }
 
-/// The schema of `server`, after a warning for each tool it leaves out.
+/// The schema of `server`, after a warning for each tool it writes no action for.
 fn generate_left_out_warned(server: &str, tools_list: &str) -> Result<String, McpSchemaError> {
     let (schema, omitted) =
         generate_mcp_schema_with_omissions(server, tools_list).map_err(McpSchemaError::from)?;

@@ -474,7 +474,7 @@ pub(crate) struct EgressDecisionInterceptor {
 }
 
 impl EgressDecisionInterceptor {
-    /// Wrap the policy adapter without changing its public seam, reporting no left-out tools.
+    /// Wrap the policy adapter without changing its public seam, reporting no tool without a schema.
     #[cfg(test)]
     pub(crate) fn over(
         inner: Arc<dyn EgressEffectInterceptor>,
@@ -487,8 +487,8 @@ impl EgressDecisionInterceptor {
         })
     }
 
-    /// [`Self::over`], also warning about each tool that staging a remote catalog leaves out of
-    /// `catalogs`.
+    /// [`Self::over`], also warning about each tool whose schema staging a remote catalog leaves out
+    /// of `catalogs`.
     pub(crate) fn over_reporting(
         inner: Arc<dyn EgressEffectInterceptor>,
         recorder: Arc<DecisionRecorder>,
@@ -1290,8 +1290,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    /// A remote catalog that leaves a tool out is reported by the box, which takes the left-out
-    /// tools from the catalogs as it stages the list.
+    /// A remote catalog with a tool whose schema does not generate is reported by the box, which
+    /// takes those tools from the catalogs as it stages the list.
     #[test]
     fn a_remote_catalog_reports_the_tools_it_leaves_out() {
         let history = tempfile::tempdir().expect("history directory");
@@ -1340,12 +1340,9 @@ mod tests {
                     body: body.as_bytes(),
                 },
             )
-            .expect("the list stages without its unreadable tool");
+            .expect("the list stages without its unreadable tool's schema");
         assert_eq!(catalogs.require_listed("demo", "read"), Ok(()));
-        assert_eq!(
-            catalogs.require_listed("demo", "create_account"),
-            Err(policy::CatalogRefusal::NotListed)
-        );
+        assert_eq!(catalogs.require_listed("demo", "create_account"), Ok(()));
         assert!(
             catalogs.take_omitted("demo").is_empty(),
             "the box took the left-out tool to report it"

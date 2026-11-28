@@ -1034,7 +1034,57 @@ fn pending_typed_tools(proposal: &ProposalState) -> BTreeSet<(String, String)> {
             out.extend(pinned_tool_action(candidate));
         }
     }
+    out.extend(history_tools_their_schema_lacks(proposal));
     out
+}
+
+/// Each `(namespace, tool)` that a pending rule reads only from history and that its server's staged
+/// schema declares no action for, such as a tool whose own schema did not generate. That rule can
+/// never load while the tool lacks an action, so the tool is held rather than let a guard it
+/// triggers go unenforced.
+fn history_tools_their_schema_lacks(proposal: &ProposalState) -> BTreeSet<(String, String)> {
+    let mut read = BTreeSet::new();
+    for &ordinal in proposal.pending.keys() {
+        if let Some(candidate) = proposal.candidates.get(ordinal) {
+            collect_typed_actions(
+                &candidate.expanded_source,
+                HistoryReferences::Named,
+                &mut read,
+            );
+        }
+    }
+    if read.is_empty() {
+        return read;
+    }
+    let mut declared: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
+    read.into_iter()
+        .filter(|(namespace, tool)| {
+            let actions = declared.entry(namespace.clone()).or_insert_with(|| {
+                proposal
+                    .schemas
+                    .iter()
+                    .find(|(server, _)| mcp_action_namespace(server) == *namespace)
+                    .map(|(_, fragment)| declared_actions(fragment, namespace))
+            });
+            actions
+                .as_ref()
+                .is_some_and(|actions| !actions.contains(tool))
+        })
+        .collect()
+}
+
+/// The action names that a staged MCP fragment declares in `namespace`; empty when it does not parse.
+fn declared_actions(fragment: &str, namespace: &str) -> BTreeSet<String> {
+    cedar_policy::SchemaFragment::from_cedarschema_str(fragment)
+        .ok()
+        .and_then(|(fragment, _)| fragment.to_json_value().ok())
+        .and_then(|json| {
+            json.get(namespace)?
+                .get("actions")?
+                .as_object()
+                .map(|actions| actions.keys().cloned().collect())
+        })
+        .unwrap_or_default()
 }
 
 /// The one `(namespace, tool)` a rule's conditions pin to literals, through `context.input.server`

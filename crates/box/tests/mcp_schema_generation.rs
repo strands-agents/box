@@ -486,7 +486,7 @@ fn generate_schema_uses_the_selected_config_outside_the_operator_home() {
 }
 
 #[test]
-fn generate_schema_leaves_out_a_tool_whose_schema_does_not_generate() {
+fn generate_schema_writes_no_action_for_a_tool_whose_schema_does_not_generate() {
     let home = tempfile::tempdir().expect("an operator home");
     let root = tempfile::tempdir().expect("a configuration tree");
     let bin = root.path().join("bin");
@@ -531,8 +531,8 @@ fn generate_schema_leaves_out_a_tool_whose_schema_does_not_generate() {
     assert!(output.status.success(), "{stderr}");
     assert_eq!(
         stderr.trim(),
-        "strands-box: warning[B0403]: MCP server \"repro\" tool \"create_account\" is left out, \
-         and its calls are refused: unexpected token `-`"
+        "strands-box: warning[B0403]: MCP server \"repro\" tool \"create_account\" has no \
+         per-tool action, so only `mcp:call` rules decide its calls: unexpected token `-`"
     );
     let actions = std::fs::read_to_string(root.path().join("schemas/actions.cedarschema"))
         .expect("read actions");
