@@ -44,6 +44,8 @@ pub(crate) struct ShellActionSpec {
     pub(crate) options: BTreeMap<String, OptionSpec>,
     #[serde(default)]
     pub(crate) operands: BTreeMap<String, OperandSpec>,
+    #[serde(default)]
+    pub(crate) options_first: bool,
 }
 
 /// One `options.<name>` entry.

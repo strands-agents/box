@@ -119,6 +119,12 @@ pub(crate) enum GrammarRefusal {
         "{place}: sets `overrides`, but the usage has no `[global options]` with an `anywhere` option of this name"
     )]
     NothingToOverride { place: Place },
+    #[error("{place}: `options_first` cannot go with a `--` in the usage")]
+    OptionsFirstWithSeparator { place: Place },
+    #[error(
+        "{place}: `options_first` cannot go with `[global options]` that hold an `anywhere` option"
+    )]
+    OptionsFirstWithAnywhere { place: Place },
     #[error("{place}: two fields have the name {field:?}")]
     FieldTaken { place: Place, field: String },
     #[error("{place}: the name is reserved for a command that no action matches")]
@@ -257,6 +263,8 @@ impl GrammarRefusal {
             | Self::OperandNotInUsage { place }
             | Self::BadRest { place }
             | Self::ToolchainPattern { place, .. }
+            | Self::OptionsFirstWithSeparator { place }
+            | Self::OptionsFirstWithAnywhere { place }
             | Self::FieldTaken { place, .. }
             | Self::ReservedAction { place }
             | Self::ReservedField { place, .. }
